@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776019249197,
+  "lastUpdate": 1776354454767,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2419,6 +2419,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "218660c8da93a416a599cecd476473e7a95f323e",
+          "message": "feat: gate ingress proofs on submit ledger confirmation (#1390)\n\n* feat: gate ingress proof generation on submit ledger confirmation\n\nIngress proofs were being generated for unconfirmed/unfunded mempool-only\ntransactions. This change gates proof generation on block_set being non-empty\n(populated when a block confirming the tx in the submit ledger is processed),\nadds a TryGenerateProofsForConfirmedRoots trigger after block confirmation,\nand removes single-block promotion from block production. Block validation\nis unchanged so nodes still accept single-block promotions from peers.\n\n* test: reorder mine-before-proof-wait for submit confirmation\n\nIngress proofs now require submit ledger confirmation, so mine_block()\nmust precede wait_for_ingress_proofs_no_mining. Some tests switch to\nwait_for_ingress_proofs (with mining) when async timing is tight.\n\n- perm_ledger_expiry/mod.rs — heavy_perm_ledger_expiry_basic,\n  heavy_perm_exact_boundary_expiry, heavy_perm_last_slot_never_expires,\n  heavy_perm_and_term_expiry_same_epoch, heavy_perm_partition_recycle_and_reuse,\n  heavy_perm_expiry_disabled_nothing_expires\n- promotion/data_promotion_double.rs — spiky_heavy_double_root_data_promotion_test\n- validation/ingress_proof_validation.rs — block_with_unstaked_ingress_proof_signer_rejected,\n  mempool_filters_unstaked_ingress_proofs\n\n* test: split single-block promotion into two-block flow\n\nTests that asserted Submit+Publish in the same block now mine a submit\nblock, wait for proofs, then mine a promotion block. Balance assertions,\nmempool shape expectations, reorg block delivery, promoted_height checks,\nand wait_for_tx_confirmed_in_raw_mempool calls updated accordingly.\n\n- api/client.rs — api_client_wait_for_promotion_happy_path,\n  api_double_promotion_after_restart\n- multi_node/mempool_tests.rs — heavy3_mempool_publish_fork_recovery_test,\n  promoted_tx_is_not_reselected_for_submit_after_confirmation,\n  pending_chunks_test\n- multi_node/fork_recovery.rs — heavy4_reorg_tip_moves_across_nodes_publish_txs\n\n* test: fix edge-case anchor calculations and evil block strategies\n\nAnchor height formulas adjusted for the extra submit-confirmation block.\nTests with deliberately underfunded txs use manually crafted ingress proofs\nsince those txs can't enter the submit ledger. Evil block strategies updated\nto avoid duplicate-tx validation errors for already-confirmed txs.\n\n- promotion/data_promotion_basic.rs — promotion_validates_submit_inclusion_test,\n  promotion_validates_ingress_proof_anchor_edge_doesnt_promote,\n  promotion_validates_ingress_proof_anchor_edge_does_promote\n- validation/data_tx_pricing.rs —\n  same_block_promoted_tx_with_ema_price_change_gets_rejected\n\n* fix: collapse nested if per clippy\n\n* test: fix stale_txid_in_cached_data_root for submit confirmation gate\n\nThe tx uses a genesis anchor that expires quickly and can never enter the\nsubmit ledger. Use a manually crafted ingress proof instead of relying on\nauto-generation which now requires submit confirmation.\n\n* test: add same-block promotion validation test\n\nVerifies that a block promoting a tx in the same block it enters the\nsubmit ledger passes full validation on a peer node. Our node no longer\nproduces this pattern (ingress proofs require submit confirmation), but\nthe validation rules still permit it.\n\n* fmt: rustfmt same_block_promotion test\n\n* fix: only trigger proof generation for successfully cached data roots",
+          "timestamp": "2026-04-16T08:27:32-07:00",
+          "tree_id": "26accc759daefbcfcdddeab638a55998f1131acc",
+          "url": "https://github.com/Irys-xyz/irys/commit/218660c8da93a416a599cecd476473e7a95f323e"
+        },
+        "date": 1776354452909,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074878,
+            "range": "± 0.000573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.012937,
+            "range": "± 1.987994",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 976.881152,
+            "range": "± 8.718266",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.124561,
+            "range": "± 0.003826",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1189.653957,
+            "range": "± 35.494251",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1523.622428,
+            "range": "± 1.258542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.476482,
+            "range": "± 0.021507",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.788816,
+            "range": "± 1.330029",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.490885,
+            "range": "± 1.988238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
