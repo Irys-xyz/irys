@@ -150,6 +150,17 @@ impl Config {
             "mempool.max_concurrent_chunk_ingress_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall the chunk ingress service)"
         );
         ensure!(
+            self.mempool.max_control_plane_concurrent_tasks > 0,
+            "mempool.max_control_plane_concurrent_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall control-plane messages)"
+        );
+        ensure!(
+            self.mempool.max_control_plane_concurrent_tasks
+                < self.mempool.max_concurrent_chunk_ingress_tasks,
+            "mempool.max_control_plane_concurrent_tasks ({}) must be strictly less than max_concurrent_chunk_ingress_tasks ({}) (the control-plane lane is carved out of the total budget and must leave at least one permit for chunk handlers)",
+            self.mempool.max_control_plane_concurrent_tasks,
+            self.mempool.max_concurrent_chunk_ingress_tasks
+        );
+        ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
@@ -229,6 +240,7 @@ impl From<&NodeConfig> for MempoolConfig {
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
             max_concurrent_chunk_ingress_tasks: value.mempool.max_concurrent_chunk_ingress_tasks,
+            max_control_plane_concurrent_tasks: value.mempool.max_control_plane_concurrent_tasks,
             chunk_writer_buffer_size: value.mempool.chunk_writer_buffer_size,
         }
     }
@@ -344,6 +356,12 @@ pub struct MempoolConfig {
     /// Maximum number of concurrent handlers for chunk ingress messages
     pub max_concurrent_chunk_ingress_tasks: usize,
 
+    /// Reserved concurrency for control-plane messages (`IngestIngressProof`,
+    /// `ProcessPendingChunks`) on the chunk ingress service. Carved out of
+    /// `max_concurrent_chunk_ingress_tasks` so total peak concurrency is
+    /// unchanged; chunk floods still cannot starve control-plane work.
+    pub max_control_plane_concurrent_tasks: usize,
+
     /// Backpressure channel capacity for the async chunk write-behind buffer
     pub chunk_writer_buffer_size: usize,
 }
@@ -371,6 +389,7 @@ impl MempoolConfig {
             max_commitments_per_address: 10,
             max_concurrent_mempool_tasks: 10,
             max_concurrent_chunk_ingress_tasks: 10,
+            max_control_plane_concurrent_tasks: 4,
             chunk_writer_buffer_size: 4096,
         }
     }
@@ -1099,6 +1118,10 @@ mod validate_tests {
         |nc: &mut NodeConfig| { nc.mempool.max_concurrent_chunk_ingress_tasks = 0; },
         "max_concurrent_chunk_ingress_tasks"
     )]
+    #[case::max_control_plane_concurrent_tasks(
+        |nc: &mut NodeConfig| { nc.mempool.max_control_plane_concurrent_tasks = 0; },
+        "max_control_plane_concurrent_tasks"
+    )]
     #[case::max_pending_chunk_items(
         |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
         "max_pending_chunk_items"
@@ -1113,6 +1136,30 @@ mod validate_tests {
         assert!(
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
+        );
+    }
+
+    /// `max_control_plane_concurrent_tasks` is carved out of
+    /// `max_concurrent_chunk_ingress_tasks`, so it must be strictly less to
+    /// leave at least one permit for chunk handlers. Validate fails fast
+    /// rather than letting `spawn_service()` silently clamp.
+    #[rstest]
+    #[case::equal(30, 30)]
+    #[case::greater(40, 30)]
+    fn validate_rejects_control_plane_not_less_than_total(
+        #[case] control_plane: usize,
+        #[case] total: usize,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.mempool.max_concurrent_chunk_ingress_tasks = total;
+            nc.mempool.max_control_plane_concurrent_tasks = control_plane;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_control_plane_concurrent_tasks")
+                && msg.contains("max_concurrent_chunk_ingress_tasks"),
+            "expected error referencing both fields, got: {msg}"
         );
     }
 }

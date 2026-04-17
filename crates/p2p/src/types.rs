@@ -51,6 +51,10 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::DatabaseError(err) => {
                 Self::Internal(InternalGossipError::Database(err))
             }
+            // Overloaded is a retryable backpressure signal — use the
+            // dedicated `RateLimited` variant so metrics/dashboards classify
+            // it correctly instead of polluting `Internal` error counts.
+            IngressProofError::Overloaded => Self::RateLimited,
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))

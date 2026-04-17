@@ -7,7 +7,7 @@ use crate::types::GossipRoutes;
 use crate::wire_types::{self, GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
-    types::{GossipError, GossipResult, InternalGossipError},
+    types::{GossipError, GossipResult, InternalGossipError, InvalidDataError},
 };
 use actix_web::dev::HttpServiceFactory;
 use actix_web::{
@@ -129,7 +129,12 @@ where
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -302,7 +307,12 @@ where
                     .in_current_span()
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        server.data_handler.sync_state.is_syncing(),
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process the block {} height {}: {:?}",
@@ -371,7 +381,12 @@ where
                     .handle_block_body(v2_request, source_socket_addr)
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &e,
+                        &server.peer_list,
+                        server.data_handler.sync_state.is_syncing(),
+                    );
                     error!(
                         "Node {:?}: Failed to process the block body {}: {:?}",
                         this_node_id, block_hash, e
@@ -425,7 +440,12 @@ where
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send transaction: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -466,7 +486,12 @@ where
         let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send transaction: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -506,7 +531,12 @@ where
         let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send transaction: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -544,7 +574,12 @@ where
         let v2_request = v1_request.into_v2(peer.peer_id);
 
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send ingress proof: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -601,7 +636,12 @@ where
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -662,7 +702,12 @@ where
                     .handle_block_header(v2_request, source_socket_addr)
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        server.data_handler.sync_state.is_syncing(),
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process the block {} height {}: {:?}",
@@ -727,7 +772,12 @@ where
                     .handle_block_body(v2_request, source_socket_addr)
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        server.data_handler.sync_state.is_syncing(),
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process block body {}: {:?}",
@@ -778,7 +828,12 @@ where
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send execution payload: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -823,7 +878,12 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send data transaction header: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -867,7 +927,12 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send commitment transaction: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -909,7 +974,12 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+            Self::handle_invalid_data(
+                &source_miner_address,
+                &error,
+                &server.peer_list,
+                server.data_handler.sync_state.is_syncing(),
+            );
             error!("Failed to send ingress proof: {}", error);
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
@@ -1310,9 +1380,26 @@ where
         peer_miner_address: &IrysAddress,
         error: &GossipError,
         peer_list: &PeerList,
+        is_syncing: bool,
     ) {
         match error {
             GossipError::InvalidData(invalid_data_error) => {
+                // Anchor errors during sync are caused by the receiver being behind,
+                // not by sender misbehavior — suppress the penalty in that window.
+                if is_syncing
+                    && matches!(
+                        invalid_data_error,
+                        InvalidDataError::TransactionAnchor(_)
+                            | InvalidDataError::IngressProofAnchor(_)
+                    )
+                {
+                    debug!(
+                        ?peer_miner_address,
+                        ?invalid_data_error,
+                        "Skipping anchor penalty while syncing",
+                    );
+                    return;
+                }
                 peer_list.decrease_peer_score(
                     peer_miner_address,
                     ScoreDecreaseReason::BogusData(format!(
@@ -1697,9 +1784,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    #[tokio::test]
-    // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
-    async fn handle_invalid_block_penalizes_peer() {
+    fn setup_peer_list() -> (IrysAddress, PeerList, tempfile::TempDir) {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -1736,12 +1821,70 @@ mod tests {
             protocol_version: ProtocolVersion::default(),
         };
         peer_list.add_or_update_peer(test_peer, true);
+        (miner, peer_list, temp_dir)
+    }
 
+    #[test]
+    // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
+    fn handle_invalid_block_penalizes_peer() {
+        let (miner, peer_list, _dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
-            &miner, &error, &peer_list,
+            &miner, &error, &peer_list, false,
         );
 
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
+    }
+
+    #[test]
+    fn syncing_node_skips_penalty_for_tx_anchor() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let error = GossipError::InvalidData(crate::types::InvalidDataError::TransactionAnchor(
+            irys_types::H256::zero(),
+        ));
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner, &error, &peer_list, true,
+        );
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL);
+    }
+
+    #[test]
+    fn syncing_node_skips_penalty_for_ingress_proof_anchor() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let error = GossipError::InvalidData(crate::types::InvalidDataError::IngressProofAnchor(
+            irys_types::BlockHash::default(),
+        ));
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner, &error, &peer_list, true,
+        );
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL);
+    }
+
+    #[test]
+    fn syncing_node_still_penalizes_non_anchor_invalid_data() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let error = GossipError::InvalidData(crate::types::InvalidDataError::TransactionSignature(
+            IrysAddress::new([2_u8; 20]),
+        ));
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner, &error, &peer_list, true,
+        );
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
+    }
+
+    #[test]
+    fn synced_node_penalizes_tx_anchor() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let error = GossipError::InvalidData(crate::types::InvalidDataError::TransactionAnchor(
+            irys_types::H256::zero(),
+        ));
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner, &error, &peer_list, false,
+        );
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
         assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
     }

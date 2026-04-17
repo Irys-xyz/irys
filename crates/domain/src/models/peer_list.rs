@@ -898,7 +898,7 @@ impl PeerListDataInner {
                     peer_item.reputation_score.decrease_slow();
                 }
                 ScoreDecreaseReason::NetworkError(message) => {
-                    peer_item.reputation_score.decrease_offline(&message);
+                    peer_item.reputation_score.decrease_network_error(&message);
                 }
             }
 
@@ -1351,7 +1351,10 @@ mod tests {
         #[case(ScoreDecreaseReason::BogusData(String::from("test")), 45)]
         #[case(ScoreDecreaseReason::Offline(String::from("test")), 47)]
         #[case(ScoreDecreaseReason::SlowResponse, 49)]
-        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 47)]
+        // NetworkError is -1 (distinct from Offline -3) because a network
+        // timeout against an overloaded-but-honest peer is not the same
+        // signal as a peer being deliberately unreachable.
+        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 49)]
         fn test_decrease_peer_score_persistent_cache(
             #[case] reason: ScoreDecreaseReason,
             #[case] expected_score: u16,
@@ -1403,9 +1406,10 @@ mod tests {
                 &peer_id,
                 ScoreDecreaseReason::NetworkError("network_error".into()),
             );
+            // 41 - 1 = 40 (NetworkError penalty is -1, not -3)
             assert_eq!(
                 peer_list.get_peer(&peer_id).unwrap().reputation_score.get(),
-                38
+                40
             );
         }
 
@@ -1414,8 +1418,8 @@ mod tests {
             let peer_list =
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
-            // BogusData penalty is 5, ACTIVE_THRESHOLD is 20: 24 - 5 = 19 < 20 (inactive)
-            peer.reputation_score = PeerScore::new(24);
+            // BogusData penalty is 5, ACTIVE_THRESHOLD is 10: 14 - 5 = 9 < 10 (inactive)
+            peer.reputation_score = PeerScore::new(14);
 
             peer_list.add_or_update_peer(peer.clone(), true);
             assert!(peer_list.all_known_peers().contains(&peer.address));
@@ -1475,6 +1479,8 @@ mod tests {
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
+            // Start just above the threshold so Offline (-3) pushes below,
+            // and Online (+1) pulls back to exactly the threshold.
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
             peer_list.add_or_update_peer(peer, true);
 
@@ -1484,12 +1490,18 @@ mod tests {
             );
             let updated_peer = peer_list.get_peer(&peer_id).unwrap();
 
-            assert_eq!(updated_peer.reputation_score.get(), 19);
+            assert_eq!(
+                updated_peer.reputation_score.get(),
+                PeerScore::ACTIVE_THRESHOLD - 1
+            );
             assert!(!updated_peer.reputation_score.is_active());
 
             peer_list.increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::Online);
             let final_peer = peer_list.get_peer(&peer_id).unwrap();
-            assert_eq!(final_peer.reputation_score.get(), 20);
+            assert_eq!(
+                final_peer.reputation_score.get(),
+                PeerScore::ACTIVE_THRESHOLD
+            );
             assert!(final_peer.reputation_score.is_active());
         }
 
@@ -1679,8 +1691,8 @@ mod tests {
             create_test_peer(3);
         let (_inactive_unstaked_mining_addr, inactive_unstaked_peer_id, mut inactive_unstaked_peer) =
             create_test_peer(4);
-        inactive_staked_peer.reputation_score = PeerScore::new(10); // Below active threshold
-        inactive_unstaked_peer.reputation_score = PeerScore::new(10); // Below active threshold
+        inactive_staked_peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD - 1); // Below active threshold
+        inactive_unstaked_peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD - 1); // Below active threshold
         peer_list.add_or_update_peer(inactive_staked_peer, true);
         peer_list.add_or_update_peer(inactive_unstaked_peer, false);
 
@@ -1874,7 +1886,7 @@ mod tests {
         let (_staked_mining_addr, _staked_peer_id, mut staked_peer) = create_test_peer(1);
         let (_unstaked_mining_addr, _unstaked_peer_id, mut unstaked_peer) = create_test_peer(2);
 
-        // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 20)
+        // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 10)
         // Start with INITIAL = 50, so they should already be active
         staked_peer.reputation_score = PeerScore::new(80); // Well above active threshold
         unstaked_peer.reputation_score = PeerScore::new(80); // Well above active threshold

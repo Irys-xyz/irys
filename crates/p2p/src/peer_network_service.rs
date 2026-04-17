@@ -384,10 +384,12 @@ impl PeerNetworkService {
                     {
                         Ok(true) => {
                             debug!("Peer {:?} is online", peer_id);
+                            peer_list.set_is_online_by_peer_id(&peer_id, true);
                             inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                         }
                         Ok(false) => {
                             debug!("Peer {:?} is offline", peer_id);
+                            peer_list.set_is_online_by_peer_id(&peer_id, false);
                             inner_clone.decrease_peer_score(
                                 &peer_id,
                                 ScoreDecreaseReason::Offline(
@@ -401,6 +403,7 @@ impl PeerNetworkService {
                                 peer_id, url, status
                             );
                             debug!("{message}");
+                            peer_list.set_is_online_by_peer_id(&peer_id, false);
                             inner_clone.decrease_peer_score(
                                 &peer_id,
                                 ScoreDecreaseReason::NetworkError(message),
