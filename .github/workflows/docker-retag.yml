@@ -1,0 +1,107 @@
+name: Docker Retag
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'Existing image tag to promote (e.g., 1.0.1, rc-1.0.2)'
+        required: true
+        type: string
+      target_tag:
+        description: 'Tag to point at it (e.g., latest, rc-latest)'
+        required: true
+        type: string
+      move_git_tag:
+        description: 'Also move the corresponding git tag to the same commit'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  retag:
+    name: retag docker image
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      packages: write
+      contents: write
+    steps:
+      - name: Validate inputs
+        env:
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          if ! [[ "$INPUT_SOURCE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error::Invalid source_tag format: $INPUT_SOURCE_TAG"
+            exit 1
+          fi
+          if [[ "$INPUT_TARGET_TAG" != "latest" && "$INPUT_TARGET_TAG" != "rc-latest" ]]; then
+            echo "::error::target_tag must be 'latest' or 'rc-latest', got: $INPUT_TARGET_TAG"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> "$GITHUB_OUTPUT"
+
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless.sh &
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+            || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Pull, retag, and push
+        env:
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          IMAGE="${{ steps.image.outputs.name }}"
+          echo "Pulling ${IMAGE}:${INPUT_SOURCE_TAG}"
+          docker pull "${IMAGE}:${INPUT_SOURCE_TAG}"
+
+          echo "Retagging as ${IMAGE}:${INPUT_TARGET_TAG}"
+          docker tag "${IMAGE}:${INPUT_SOURCE_TAG}" "${IMAGE}:${INPUT_TARGET_TAG}"
+
+          echo "Pushing ${IMAGE}:${INPUT_TARGET_TAG}"
+          docker push "${IMAGE}:${INPUT_TARGET_TAG}"
+
+      - name: Move git tag
+        if: ${{ inputs.move_git_tag }}
+        env:
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          # Find the commit that source_tag points to
+          SOURCE_TAG="${INPUT_SOURCE_TAG}"
+          if ! git rev-parse "${SOURCE_TAG}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Git tag ${SOURCE_TAG} does not exist — cannot move git tag"
+            exit 1
+          fi
+          COMMIT=$(git rev-parse "${SOURCE_TAG}^{commit}")
+
+          echo "Moving git tag ${INPUT_TARGET_TAG} to commit ${COMMIT} (from ${SOURCE_TAG})"
+          git tag -f "${INPUT_TARGET_TAG}" "${COMMIT}"
+          git push -f origin "${INPUT_TARGET_TAG}"
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker system prune -a -f --volumes || true
+          pkill -f dockerd-rootless.sh || true
+          sleep 2
+          rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
+          rm -rf ~/.local/share/docker/* || true
