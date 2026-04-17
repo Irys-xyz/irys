@@ -57,6 +57,18 @@ impl ChunkIngressMessage {
             Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
         }
     }
+
+    /// Returns true when the message carries a oneshot reply channel the caller
+    /// is awaiting. Fire-and-forget variants (internal work with no caller)
+    /// must not be silently dropped under backpressure — there is nobody to
+    /// retry them.
+    pub fn has_reply_channel(&self) -> bool {
+        match self {
+            Self::IngestChunk(_, reply) => reply.is_some(),
+            Self::IngestIngressProof(_, _) => true,
+            Self::ProcessPendingChunks(_) => false,
+        }
+    }
 }
 
 /// Shared read handle for chunk ingress state.
@@ -309,37 +321,63 @@ impl ChunkIngressService {
                         Some(traced) => {
                             let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
+                            let has_reply = msg.has_reply_channel();
                             let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
                             // Pick the right lane: chunk ingress goes through
                             // the main semaphore; control-plane messages get
                             // the reserved lane that chunk floods cannot starve.
                             let semaphore = self.inner.semaphore_for(&msg);
-                            match semaphore.try_acquire_owned() {
-                                Ok(permit) => {
-                                    let inner = Arc::clone(&self.inner);
-                                    runtime_handle.spawn(async move {
-                                        let _permit = permit;
-                                        let task_info = format!("Chunk ingress message handler for {}", msg_type);
-                                        wait_with_progress(
-                                            inner.handle_message(msg),
-                                            20,
-                                            &task_info,
-                                        ).await;
-                                    }.instrument(span));
-                                }
+                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                                Ok(permit) => permit,
                                 Err(tokio::sync::TryAcquireError::Closed) => {
                                     error!("Chunk ingress message handler semaphore closed");
                                     break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    if has_reply {
+                                        // Caller is awaiting a reply — hand back
+                                        // a fast advisory so they can retry
+                                        // upstream rather than waiting on us.
+                                        warn!(
+                                            msg_type = %msg_type,
+                                            "Chunk ingress service lane saturated, returning Overloaded"
+                                        );
+                                        Self::send_overloaded_errors(msg);
+                                        continue 'service;
+                                    }
+                                    // No reply channel means internal work
+                                    // with no caller to retry. Wait for a
+                                    // permit rather than silently drop it.
                                     warn!(
                                         msg_type = %msg_type,
-                                        "Chunk ingress service lane saturated, returning Overloaded"
+                                        "Chunk ingress service lane saturated, awaiting permit for fire-and-forget message"
                                     );
-                                    Self::send_overloaded_errors(msg);
+                                    tokio::select! {
+                                        _ = &mut shutdown_future => {
+                                            info!("ChunkIngressService received shutdown signal while awaiting permit");
+                                            break 'service;
+                                        }
+                                        res = semaphore.acquire_owned() => match res {
+                                            Ok(permit) => permit,
+                                            Err(_) => {
+                                                error!("Chunk ingress message handler semaphore closed while awaiting permit");
+                                                break 'service;
+                                            }
+                                        }
+                                    }
                                 }
-                            }
+                            };
+                            let inner = Arc::clone(&self.inner);
+                            runtime_handle.spawn(async move {
+                                let _permit = permit;
+                                let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                wait_with_progress(
+                                    inner.handle_message(msg),
+                                    20,
+                                    &task_info,
+                                ).await;
+                            }.instrument(span));
                         }
                         None => {
                             warn!("ChunkIngressService receiver channel closed");
@@ -554,6 +592,32 @@ mod overload_helpers_tests {
         assert_eq!(
             AdvisoryChunkIngressError::Overloaded.error_type(),
             "overloaded"
+        );
+    }
+
+    /// `has_reply_channel` must classify variants correctly so the service
+    /// loop can decide between fast-fail (caller-retryable) and block-on-permit
+    /// (fire-and-forget) under saturation. Reply-less variants must return
+    /// `false` — dropping them silently under `NoPermits` would lose internal
+    /// work (`ProcessPendingChunks` from the mempool, sync-path fallback
+    /// `IngestChunk(_, None)`) with nothing to trigger a retry.
+    #[test]
+    fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx)).has_reply_channel()
+        );
+        assert!(!ChunkIngressMessage::IngestChunk(dummy_chunk(), None).has_reply_channel());
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx)
+                .has_reply_channel()
+        );
+
+        assert!(
+            !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+                .has_reply_channel()
         );
     }
 }
