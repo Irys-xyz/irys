@@ -280,25 +280,32 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let v2_request = v1_request.into_v2(peer.peer_id);
+        let source_peer_id = v2_request.peer_id;
+        let block_header = v2_request.data;
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = v2_request.data.block_hash;
-        let block_height = v2_request.data.height;
-        if v2_request.data.poa.chunk.is_none() {
+        let block_hash = block_header.block_hash;
+        let block_height = block_header.height;
+        if block_header.poa.chunk.is_none() {
             error!(
                 target = "p2p::server",
-                block.hash = ?v2_request.data.block_hash,
+                block.hash = ?block_hash,
                 "received a block without a POA chunk"
             );
         }
 
+        let block_header = Arc::new(block_header);
         let runtime_handle = server.data_handler.runtime_handle.clone();
         runtime_handle.spawn(
             async move {
-                let block_hash_string = v2_request.data.block_hash;
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(v2_request, source_socket_addr)
+                    .handle_block_header(
+                        source_peer_id,
+                        source_miner_address,
+                        block_header,
+                        source_socket_addr,
+                    )
                     .in_current_span()
                     .await
                 {
@@ -306,13 +313,13 @@ where
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process the block {} height {}: {:?}",
-                            this_node_id, block_hash_string, block_height, error
+                            this_node_id, block_hash, block_height, error
                         );
                     }
                 } else {
                     info!(
                         "Node {:?}: Server handler handled block {} height {}",
-                        this_node_id, block_hash_string, block_height
+                        this_node_id, block_hash, block_height
                     );
                 }
             }
@@ -634,6 +641,7 @@ where
         }
         let source_peer_id = v2_request.peer_id;
         let source_miner_address = v2_request.miner_address;
+        let block_header = v2_request.data;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
@@ -651,15 +659,21 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = v2_request.data.block_hash;
-        let block_height = v2_request.data.height;
+        let block_hash = block_header.block_hash;
+        let block_height = block_header.height;
+        let block_header = Arc::new(block_header);
 
         let runtime_handle = server.data_handler.runtime_handle.clone();
         runtime_handle.spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(v2_request, source_socket_addr)
+                    .handle_block_header(
+                        source_peer_id,
+                        source_miner_address,
+                        block_header,
+                        source_socket_addr,
+                    )
                     .await
                 {
                     Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);

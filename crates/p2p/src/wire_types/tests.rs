@@ -459,3 +459,63 @@ fn test_irys_transaction_response_roundtrip(#[case] canonical: IrysTransactionRe
     let roundtrip: IrysTransactionResponse = deserialized.into();
     assert_eq!(canonical, roundtrip);
 }
+
+/// Asserts that a canonical type and its wire counterpart produce identical JSON (#1208).
+macro_rules! assert_serde_parity {
+    ($name:ident, $canonical_fn:ident, $wire_ty:ty) => {
+        #[test]
+        fn $name() {
+            let canonical = $canonical_fn();
+            let wire: $wire_ty = canonical.clone().into();
+            assert_eq!(
+                serde_json::to_value(&canonical).unwrap(),
+                serde_json::to_value(&wire).unwrap(),
+            );
+        }
+    };
+}
+
+assert_serde_parity!(
+    canonical_and_wire_serde_match_for_unpacked_chunk,
+    canonical_unpacked_chunk,
+    wire::UnpackedChunk
+);
+assert_serde_parity!(
+    canonical_and_wire_serde_match_for_block_header,
+    canonical_block_header,
+    wire::IrysBlockHeader
+);
+assert_serde_parity!(
+    canonical_and_wire_serde_match_for_block_body,
+    canonical_block_body,
+    wire::BlockBody
+);
+assert_serde_parity!(
+    canonical_and_wire_serde_match_for_data_tx_header,
+    canonical_data_tx_header,
+    wire::DataTransactionHeader
+);
+assert_serde_parity!(
+    canonical_and_wire_serde_match_for_ingress_proof,
+    canonical_ingress_proof,
+    wire::IngressProof
+);
+
+#[rstest::rstest]
+#[case::v1_stake(canonical_commitment_v1_stake())]
+#[case::v1_pledge(canonical_commitment_v1_pledge())]
+#[case::v1_unpledge(canonical_commitment_v1_unpledge())]
+#[case::v1_unstake(canonical_commitment_v1_unstake())]
+#[case::v2_stake(canonical_commitment_v2_stake())]
+#[case::v2_pledge(canonical_commitment_v2_pledge())]
+#[case::v2_unpledge(canonical_commitment_v2_unpledge())]
+#[case::v2_unstake(canonical_commitment_v2_unstake())]
+#[case::v2_update_reward_address(canonical_commitment_v2_update_reward_address())]
+fn canonical_and_wire_serde_match_for_commitment_transaction(
+    #[case] canonical: CommitmentTransaction,
+) {
+    let wire: wire::CommitmentTransaction = canonical.clone().into();
+    let canonical_json = serde_json::to_value(&canonical).unwrap();
+    let wire_json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(canonical_json, wire_json);
+}
