@@ -1824,9 +1824,9 @@ mod tests {
         (miner, peer_list, temp_dir)
     }
 
-    #[tokio::test]
+    #[test]
     // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
-    async fn handle_invalid_block_penalizes_peer() {
+    fn handle_invalid_block_penalizes_peer() {
         let (miner, peer_list, _dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
