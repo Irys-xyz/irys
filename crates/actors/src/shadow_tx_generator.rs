@@ -39,6 +39,8 @@ pub struct ShadowTxGenerator<'a> {
     // Transaction slices
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
+    one_year_txs: &'a [DataTransactionHeader],
+    thirty_day_txs: &'a [DataTransactionHeader],
 
     // Iterator state
     treasury_balance: U256,
@@ -93,6 +95,24 @@ impl Iterator for ShadowTxGenerator<'_> {
                         return Some(result);
                     }
                     // Move to next phase
+                    self.phase = Phase::TermLedger;
+                    self.index = 0;
+                }
+
+                Phase::TermLedger => {
+                    // Process OneYear txs first, then ThirtyDay txs
+                    let combined_len = self.one_year_txs.len() + self.thirty_day_txs.len();
+                    if self.index < combined_len {
+                        let tx = if self.index < self.one_year_txs.len() {
+                            &self.one_year_txs[self.index]
+                        } else {
+                            &self.thirty_day_txs[self.index - self.one_year_txs.len()]
+                        };
+                        let result = self.try_process_term_only(tx);
+                        self.index += 1;
+                        return Some(result);
+                    }
+                    // Move to next phase
                     self.phase = Phase::ExpiredLedgerFees;
                     self.index = 0;
                 }
@@ -140,6 +160,8 @@ impl<'a> ShadowTxGenerator<'a> {
         config: &'a ConsensusConfig,
         commitment_txs: &'a [CommitmentTransaction],
         submit_txs: &'a [DataTransactionHeader],
+        one_year_txs: &'a [DataTransactionHeader],
+        thirty_day_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
@@ -177,6 +199,8 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            one_year_txs,
+            thirty_day_txs,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -239,6 +263,8 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            one_year_txs,
+            thirty_day_txs,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -558,6 +584,24 @@ impl<'a> ShadowTxGenerator<'a> {
         Ok(shadow_metadata)
     }
 
+    /// Process a term-only ledger transaction (OneYear/ThirtyDay).
+    /// These have term_fee only (no perm_fee), so no PublishFeeCharges needed.
+    #[tracing::instrument(skip_all, err)]
+    fn try_process_term_only(&mut self, tx: &DataTransactionHeader) -> Result<ShadowMetadata> {
+        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
+
+        // Reuse the same shadow tx creation — perm_fee is None for term-only txs
+        let shadow_metadata = self.create_submit_shadow_tx(tx, &term_charges)?;
+
+        // Update treasury with term fee (no perm_fee for term-only txs)
+        self.treasury_balance = self
+            .treasury_balance
+            .checked_add(term_charges.term_fee_treasury)
+            .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
+
+        Ok(shadow_metadata)
+    }
+
     /// Process a commitment transaction at a specific index
     #[tracing::instrument(skip_all, err)]
     fn try_process_commitment_at_index(&mut self, index: usize) -> Result<ShadowMetadata> {
@@ -566,26 +610,14 @@ impl<'a> ShadowTxGenerator<'a> {
         // Process commitment transaction
         let shadow_metadata = self.process_commitment_transaction(tx)?;
 
-        // Update treasury based on commitment type
-        match tx.commitment_type() {
-            irys_types::CommitmentTypeV2::Stake | irys_types::CommitmentTypeV2::Pledge { .. } => {
-                // Stake and Pledge lock funds in the treasury
-                self.treasury_balance =
-                    self.treasury_balance
-                        .checked_add(tx.value())
-                        .ok_or_else(|| {
-                            eyre!("Treasury balance overflow when adding commitment value")
-                        })?;
-            }
-            irys_types::CommitmentTypeV2::Unstake => {
-                // Unstake handled on epoch boundary
-            }
-            irys_types::CommitmentTypeV2::Unpledge { .. } => {
-                // Unpledge handled on epoch boundary
-            }
-            irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {
-                // No treasury movement - fee only
-            }
+        // Update treasury — treasury_delta() returns the canonical amount that
+        // this commitment type adds to the treasury (non-zero only for Stake/Pledge).
+        let delta = tx.treasury_delta();
+        if !delta.is_zero() {
+            self.treasury_balance = self
+                .treasury_balance
+                .checked_add(delta)
+                .ok_or_else(|| eyre!("Treasury balance overflow when adding commitment value"))?;
         }
 
         Ok(shadow_metadata)
@@ -734,6 +766,7 @@ enum Phase {
     Header,
     Commitments,
     SubmitLedger,
+    TermLedger,
     ExpiredLedgerFees,
     PublishLedger,
     CommitmentRefunds,
@@ -929,6 +962,8 @@ mod tests {
             &config,
             &[],
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1062,6 +1097,8 @@ mod tests {
             &config,
             &commitments,
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1146,6 +1183,8 @@ mod tests {
             &config,
             &[],
             &submit_txs,
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1354,6 +1393,8 @@ mod tests {
             &config,
             &[],
             &submit_txs,
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &empty_fees,
@@ -1449,6 +1490,8 @@ mod tests {
             &parent_block,
             &solution_hash,
             &config,
+            &[],
+            &[],
             &[],
             &[],
             &publish_ledger,
@@ -1554,6 +1597,8 @@ mod tests {
             &config,
             &[],
             &[],
+            &[],
+            &[],
             &publish_ledger,
             initial_treasury,
             &expired_fees,
@@ -1575,5 +1620,71 @@ mod tests {
         // Treasury should decrease by total refunds
         let expected_treasury = initial_treasury - total_refunds;
         assert_eq!(generator.treasury_balance(), expected_treasury);
+    }
+
+    #[test]
+    fn test_empty_expired_ledger_fees() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_height = 101;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(10_000_000);
+
+        // Empty expired fees
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![],
+            proofs: None,
+        };
+
+        // Only expect block reward
+        let expected_shadow_txs = vec![ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement {
+                    amount: reward_amount.into(),
+                }),
+                H256::zero().into(),
+            ),
+            transaction_fee: 0,
+        }];
+
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &expired_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("Should create generator");
+
+        // Compare actual with expected
+        generator
+            .by_ref()
+            .zip_eq(expected_shadow_txs)
+            .for_each(|(actual, expected)| {
+                let actual = actual.expect("Should be Ok");
+                assert_eq!(actual, expected);
+            });
+
+        // Treasury should remain unchanged (no expired fees to pay)
+        assert_eq!(generator.treasury_balance(), initial_treasury);
     }
 }

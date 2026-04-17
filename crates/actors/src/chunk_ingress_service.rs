@@ -42,6 +42,9 @@ pub enum ChunkIngressMessage {
     /// Process pending chunks for a data root after its TX header was ingested.
     /// Sent by the mempool when a data TX is successfully validated.
     ProcessPendingChunks(DataRoot),
+    /// Try to generate ingress proofs for data roots just confirmed in a block's
+    /// submit ledger. Sent by the mempool service after block confirmation.
+    TryGenerateProofsForConfirmedRoots(Vec<DataRoot>),
 }
 
 impl ChunkIngressMessage {
@@ -51,6 +54,7 @@ impl ChunkIngressMessage {
             Self::IngestChunk(_, _) => "IngestChunk",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
             Self::ProcessPendingChunks(_) => "ProcessPendingChunks",
+            Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
         }
     }
 }
@@ -113,6 +117,25 @@ impl ChunkIngressServiceInner {
             }
             ChunkIngressMessage::ProcessPendingChunks(data_root) => {
                 self.process_pending_chunks_for_root(data_root).await;
+            }
+            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(data_roots) => {
+                // Flush to ensure any buffered chunk writes are visible before reading.
+                if let Err(e) = self.chunk_data_writer.flush().await {
+                    error!(
+                        "Failed to flush chunk data writer before post-confirmation proof check: {:?}",
+                        e
+                    );
+                }
+                let chunk_size = self.config.consensus.chunk_size;
+                for data_root in data_roots {
+                    if let Err(e) = self.try_generate_ingress_proof_for_root(data_root, chunk_size)
+                    {
+                        warn!(
+                            ?data_root,
+                            "Failed to generate ingress proof after block confirmation: {:?}", e
+                        );
+                    }
+                }
             }
         }
     }
@@ -389,7 +412,8 @@ impl ChunkIngressService {
             }
             // No response channel — nothing to notify.
             ChunkIngressMessage::IngestChunk(_, None)
-            | ChunkIngressMessage::ProcessPendingChunks(_) => {}
+            | ChunkIngressMessage::ProcessPendingChunks(_)
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
         }
     }
 }

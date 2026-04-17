@@ -883,6 +883,16 @@ pub async fn get_commitment_tx_in_parallel(
     merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
 }
 
+/// Result of a parallel tx lookup across mempool and DB.
+#[derive(Debug)]
+pub struct TxLookupResult {
+    /// Tx headers found in the mempool or DB, in the same order as the input ids
+    /// (missing ids are absent, not represented as gaps).
+    pub found: Vec<DataTransactionHeader>,
+    /// Ids that were absent from both the mempool and the DB.
+    pub missing: Vec<IrysTransactionId>,
+}
+
 /// Get all data transactions from the mempool and database using direct read guard access.
 pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
@@ -906,7 +916,12 @@ pub async fn get_data_tx_in_parallel(
         })
     };
 
-    get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
+    let TxLookupResult { found, missing } =
+        get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await?;
+    if !missing.is_empty() {
+        return Err(eyre::eyre!("Missing transactions: {:?}", missing));
+    }
+    Ok(found)
 }
 
 pub async fn build_block_body_for_processed_block_header(
@@ -945,12 +960,18 @@ pub async fn build_block_body_for_processed_block_header(
 
 /// Get all data transactions from the mempool and database
 /// with a custom get_data_txs function (this is used by the mempool)
+///
+/// Returns a [`TxLookupResult`] containing:
+/// - `found`: tx headers located in either the mempool or the DB
+/// - `missing`: ids absent from both sources
+///
+/// Callers own the policy for missing txids (e.g. warn-and-skip or hard error).
 #[tracing::instrument(level = "trace", skip_all, fields(tx.count = data_tx_ids.len()))]
 pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
     db: &DatabaseProvider,
-) -> eyre::Result<Vec<DataTransactionHeader>>
+) -> eyre::Result<TxLookupResult>
 where
     F: Fn(
         Vec<IrysTransactionId>,
@@ -1029,9 +1050,8 @@ where
         }
     }
 
-    if missing.is_empty() {
-        Ok(headers)
-    } else {
-        Err(eyre::eyre!("Missing transactions: {:?}", missing))
-    }
+    Ok(TxLookupResult {
+        found: headers,
+        missing,
+    })
 }

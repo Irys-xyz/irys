@@ -1,7 +1,7 @@
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    CommitmentTransaction, Config, H256, H256List, IrysBlockHeader, SystemLedger,
-    SystemTransactionLedger, U256, irys::IrysSigner, transaction::PledgeDataProvider,
+    CommitmentTransaction, Config, H256, IrysBlockHeader, U256, irys::IrysSigner,
+    transaction::PledgeDataProvider,
 };
 
 /// Creates a signed pledge commitment transaction
@@ -60,12 +60,11 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     let base_dir = config.node_config.base_directory.clone();
 
     // Load the submodule paths from the storage_submodules.toml config
-    let storage_submodule_config = StorageSubmodulesConfig::load(base_dir).unwrap();
+    // Genesis mode: StorageSubmodulesConfig::load enforces the >= 3 minimum.
+    let storage_submodule_config =
+        StorageSubmodulesConfig::load(base_dir, irys_types::NodeMode::Genesis)
+            .unwrap_or_else(|e| panic!("failed to load storage submodules configuration: {e}"));
     let num_submodules = storage_submodule_config.submodule_paths.len();
-
-    if num_submodules < 3 {
-        panic!("There must be at least 3 submodules paths to initiate network genesis");
-    }
 
     let signer = config.irys_signer();
 
@@ -100,31 +99,6 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     commitments
 }
 
-fn get_or_create_commitment_ledger(
-    genesis_block: &mut IrysBlockHeader,
-) -> &mut SystemTransactionLedger {
-    // Find the commitment ledger or create it if it doesn't exist
-    let commitment_ledger_index = genesis_block
-        .system_ledgers
-        .iter()
-        .position(|e| e.ledger_id == SystemLedger::Commitment);
-
-    // If the commitment ledger doesn't exist, create it
-    if commitment_ledger_index.is_none() {
-        genesis_block.system_ledgers.push(SystemTransactionLedger {
-            ledger_id: SystemLedger::Commitment.into(),
-            tx_ids: H256List::new(),
-        });
-    }
-
-    // Get a mutable reference to the commitment ledger
-    genesis_block
-        .system_ledgers
-        .iter_mut()
-        .find(|e| e.ledger_id == SystemLedger::Commitment)
-        .expect("Commitment ledger should exist at this point")
-}
-
 /// Adds genesis commitment transaction IDs to the block header
 ///
 /// Mutates the provided genesis_block by adding commitment IDs
@@ -134,21 +108,10 @@ fn get_or_create_commitment_ledger(
 pub async fn add_genesis_commitments(
     genesis_block: &mut IrysBlockHeader,
     config: &Config,
-) -> (Vec<CommitmentTransaction>, U256) {
+) -> eyre::Result<(Vec<CommitmentTransaction>, U256)> {
     let commitments = get_genesis_commitments(config).await;
-    let commitment_ledger = get_or_create_commitment_ledger(genesis_block);
-
-    // Calculate total value of all commitments (initial treasury)
-    let mut total_value = U256::zero();
-
-    // Add the commitment txids to the commitment ledger one by one
-    for commitment in commitments.iter() {
-        commitment_ledger.tx_ids.push(commitment.id());
-        // Add commitment value to total (this represents locked funds)
-        total_value = total_value.saturating_add(commitment.value());
-    }
-
-    (commitments, total_value)
+    let total_value = genesis_block.append_commitments(&commitments)?;
+    Ok((commitments, total_value))
 }
 
 /// Adds test pledge commitments to the genesis block for testing purposes
@@ -178,7 +141,7 @@ pub async fn add_test_commitments(
     block_header: &mut IrysBlockHeader,
     pledge_count: u8,
     config: &Config,
-) -> (Vec<CommitmentTransaction>, U256) {
+) -> eyre::Result<(Vec<CommitmentTransaction>, U256)> {
     let signer = config.irys_signer();
     add_test_commitments_for_signer(block_header, &signer, pledge_count, config).await
 }
@@ -189,7 +152,7 @@ pub async fn add_test_commitments_for_signer(
     signer: &IrysSigner,
     pledge_count: u8,
     config: &Config,
-) -> (Vec<CommitmentTransaction>, U256) {
+) -> eyre::Result<(Vec<CommitmentTransaction>, U256)> {
     let mut commitments: Vec<CommitmentTransaction> = Vec::new();
     let mut anchor = H256::random();
     if block_header.is_genesis() {
@@ -214,17 +177,6 @@ pub async fn add_test_commitments_for_signer(
         commitments.push(pledge_tx);
     }
 
-    // Get a reference to the Commitment Ledger
-    let commitment_ledger = get_or_create_commitment_ledger(block_header);
-
-    // Calculate total value of all commitments
-    let mut total_value = U256::zero();
-
-    // Add the pledge commitment txids to the system ledger one by one
-    for commitment in commitments.iter() {
-        commitment_ledger.tx_ids.push(commitment.id());
-        total_value = total_value.saturating_add(commitment.value());
-    }
-
-    (commitments, total_value)
+    let total_value = block_header.append_commitments(&commitments)?;
+    Ok((commitments, total_value))
 }

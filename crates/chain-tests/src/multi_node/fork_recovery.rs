@@ -1567,7 +1567,8 @@ async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
             // Expect txs that were mined in both c2 (non canonical) and c4 (now canonical)
             // The reason for them being in the 4th block, is that peer C sees them as non canon when it re-orgs after receiving B2 and B3. Therefore then returns as eligible txs
             // To reiterate. These were previously mined in non canon block C2. They were then mined again in canon block C4
-            // As they arrive with proofs in block 4, they appear in both the submit and publish ledgers.
+            // The tx appears in the submit ledger of block 4. Promotion to publish requires
+            // a subsequent block (single-block promotion is not supported).
             assert_eq!(
                 sorted_data_txs_at(node, block4_height, DataLedger::Submit).await?,
                 peer_c_submit_txs
@@ -1575,7 +1576,7 @@ async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
 
             assert_eq!(
                 sorted_data_txs_at(node, block4_height, DataLedger::Publish).await?,
-                peer_c_submit_txs
+                vec![]
             );
         }
 
@@ -1601,22 +1602,6 @@ async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
         // assert final balances
         // Calculate fee components for peer C's transaction
 
-        // Calculate publish fee rewards for peer C's transaction if it has perm_fee
-        let perm_fee = peer_c_b2_submit_tx.header.perm_fee.unwrap();
-        let number_of_ingress_proofs_total = node_c
-            .node_ctx
-            .config
-            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
-        let peer_c_publish_charges =
-            irys_types::transaction::fee_distribution::PublishFeeCharges::new(
-                perm_fee,
-                peer_c_b2_submit_tx.header.term_fee,
-                &node_c.node_ctx.config.consensus,
-                number_of_ingress_proofs_total,
-            )?;
-        // c_signer gets the ingress proof reward as they posted the chunk
-        let peer_c_publish_rewards = peer_c_publish_charges.ingress_proof_reward;
-
         // Calculate block producer reward for peer C's transaction
         let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
             peer_c_b2_submit_tx.header.term_fee,
@@ -1633,14 +1618,15 @@ async fn heavy4_reorg_tip_moves_across_nodes_publish_txs(
                 + block_producer_reward
                 + publish_rewards, // Include the publish rewards from b_block3
         );
+        // Publish promotion does not happen in block c4 (single-block promotion removed),
+        // so peer_c_publish_rewards are not included. The tx is only in the submit ledger.
         assert_eq!(
             node_a
                 .get_balance(c_signer.address(), c_block4.evm_block_hash)
                 .await,
             signer_c_starting_balance + c_block4.reward_amount
                 - peer_c_b2_submit_tx.header.total_cost()
-                + peer_c_block_producer_reward
-                + peer_c_publish_rewards,
+                + peer_c_block_producer_reward,
         );
     }
 

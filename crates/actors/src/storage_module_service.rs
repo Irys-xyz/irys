@@ -73,11 +73,13 @@ impl StorageModuleServiceInner {
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
-        let submodules_config =
-            match StorageSubmodulesConfig::load(config.node_config.base_directory.clone()) {
-                Ok(sm_config) => sm_config,
-                Err(err) => panic!("{}", err),
-            };
+        let submodules_config = match StorageSubmodulesConfig::load(
+            config.node_config.base_directory.clone(),
+            config.node_config.node_mode,
+        ) {
+            Ok(sm_config) => sm_config,
+            Err(err) => panic!("{}", err),
+        };
 
         Self {
             storage_modules,

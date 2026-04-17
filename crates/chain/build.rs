@@ -1,6 +1,39 @@
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GIT_HAS_TAG");
+    println!("cargo:rerun-if-env-changed=GIT_DIRTY");
+
+    // When building outside a git repo (e.g. Docker), accept git metadata via env
+    // vars and skip all git detection. build_image.sh captures these from the host.
+    if let (Ok(sha), Ok(has_tag), Ok(dirty)) = (
+        std::env::var("GIT_SHA"),
+        std::env::var("GIT_HAS_TAG"),
+        std::env::var("GIT_DIRTY"),
+    ) {
+        let has_tag: bool = has_tag
+            .parse()
+            .expect("GIT_HAS_TAG must be 'true' or 'false'");
+        let dirty: bool = dirty.parse().expect("GIT_DIRTY must be 'true' or 'false'");
+        let sha = sha.trim();
+        if !has_tag && sha.is_empty() {
+            panic!("GIT_SHA must be non-empty when GIT_HAS_TAG is false");
+        }
+        println!("cargo:rustc-env=GIT_SHA={sha}");
+        println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
+        println!("cargo:rustc-env=GIT_DIRTY={dirty}");
+        return;
+    } else if std::env::var("GIT_SHA").is_ok()
+        || std::env::var("GIT_HAS_TAG").is_ok()
+        || std::env::var("GIT_DIRTY").is_ok()
+    {
+        panic!(
+            "GIT_SHA, GIT_HAS_TAG, and GIT_DIRTY must all be set together; \
+             found only a subset — check your Docker build args"
+        );
+    }
+
     // In worktrees, HEAD lives in the worktree's own git dir, but refs/tags and
     // packed-refs live in the common (main repo) git dir. Track both.
 

@@ -15,6 +15,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy the full workspace (simpler and more robust than fine-grained caching here)
 COPY . .
 
+# Git metadata — .git is excluded from context, so pass via build args
+ARG GIT_SHA=unknown
+ARG GIT_HAS_TAG=false
+ARG GIT_DIRTY=false
+ENV GIT_SHA=${GIT_SHA}
+ENV GIT_HAS_TAG=${GIT_HAS_TAG}
+ENV GIT_DIRTY=${GIT_DIRTY}
+
 # Build the binary defined in crates/chain [[bin]] name = "irys"
 # Use the existing debug-release profile to match compose expectations
 # Reduce memory usage: single job, no incremental, minimal debuginfo, fewer codegen units

@@ -1,11 +1,12 @@
 use crate::block_tree_service::ReorgEvent;
+use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
     CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
-    SystemLedger, get_ingress_proofs,
+    SendTraced as _, SystemLedger, get_ingress_proofs,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -28,23 +29,40 @@ impl Inner {
         let block = sealed_block.header();
         let submit_txids = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
         let publish_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+        let one_year_txids = block
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::OneYear as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+            .unwrap_or(&[]);
+        let thirty_day_txids = block
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::ThirtyDay as u32)
+            .map(|l| l.tx_ids.0.as_slice())
+            .unwrap_or(&[]);
         let commitment_txids = block.commitment_tx_ids();
 
-        let submit_and_publish: Vec<H256> = submit_txids
+        let all_data_txids: Vec<H256> = submit_txids
             .iter()
             .chain(publish_txids.iter())
+            .chain(one_year_txids.iter())
+            .chain(thirty_day_txids.iter())
             .copied()
             .collect();
         self.mempool_state
             .apply_block_confirmed_updates(
-                &submit_and_publish,
+                &all_data_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
             )
             .await;
 
-        // Update `CachedDataRoots` so that this block_hash is cached for each data_root
+        // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
+        // Track which roots were successfully cached so we only trigger proof generation
+        // for roots whose block_set was actually updated.
+        let mut confirmed_data_roots = Vec::new();
         for submit_tx in sealed_block
             .transactions()
             .get_ledger_txs(DataLedger::Submit)
@@ -59,6 +77,7 @@ impl Inner {
                         "Successfully cached data_root {:?} for tx {:?}",
                         data_root, submit_tx.id
                     );
+                    confirmed_data_roots.push(data_root);
                 }
                 Err(db_error) => {
                     error!(
@@ -67,6 +86,17 @@ impl Inner {
                     );
                 }
             };
+        }
+
+        // After block_set is populated for each confirmed data_root, notify the
+        // chunk ingress service to try generating ingress proofs. These will now
+        // pass the block_set gate since the block hash was just recorded above.
+        if !confirmed_data_roots.is_empty()
+            && let Err(e) = self.service_senders.chunk_ingress.send_traced(
+                ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
+            )
+        {
+            warn!("Failed to send TryGenerateProofsForConfirmedRoots: {:?}", e);
         }
 
         self.prune_pending_txs().await;
@@ -119,18 +149,40 @@ impl Inner {
             )
         };
 
-        // Hold write lock for the entire revalidation
-        let mut state = self.mempool_state.write_for_reorg().await;
+        // Hold write lock only for the revalidation itself, then release before
+        // sending the cache-service message (avoids holding the lock across a channel send).
+        let expired_by_data_root = {
+            let mut state = self.mempool_state.write_for_reorg().await;
 
-        // Revalidate data txs — uses same prune method as prune_pending_txs
-        state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+            // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
+            let expired_by_data_root =
+                state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
 
-        // Revalidate commitment txs — uses same prune + cache methods as ingress
-        state.revalidate_commitment_txs(
-            |tx| self.should_prune_tx(current_height, tx),
-            |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
-            self.config.node_config.mempool.max_pending_pledge_items,
-        );
+            // Revalidate commitment txs — uses same prune + cache methods as ingress
+            state.revalidate_commitment_txs(
+                |tx| self.should_prune_tx(current_height, tx),
+                |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
+                self.config.node_config.mempool.max_pending_pledge_items,
+            );
+
+            expired_by_data_root
+            // write lock (`state`) is released here
+        };
+
+        // Ask the cache service to remove reorg-pruned txids from CachedDataRoot.txid_set.
+        // Same cleanup as prune_pending_txs Phase 4, covering the reorg-driven removal path.
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots after reorg: {}",
+                e
+            );
+        }
 
         Ok(())
     }
@@ -213,9 +265,14 @@ impl Inner {
 
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
+        let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));
+                expired_by_data_root
+                    .entry(tx.data_root)
+                    .or_default()
+                    .push(tx.id);
             }
         }
 
@@ -236,6 +293,21 @@ impl Inner {
             self.mempool_state
                 .batch_prune_commitment_txs(&expired_commits)
                 .await;
+        }
+
+        // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
+        // This prevents stale txid references from blocking publish candidate selection.
+        if !expired_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    expired_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots to cache service: {}",
+                e
+            );
         }
     }
 
@@ -477,35 +549,48 @@ impl Inner {
                 .extend(orphaned_txs);
         }
 
-        // if a SUBMIT a tx is CONFIRMED in the old fork, but orphaned in the new - resubmit it to the mempool
-        let submit_txs = orphaned_confirmed_ledger_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
+        // Term ledger txs (Submit, OneYear, ThirtyDay) confirmed in the old fork but orphaned
+        // in the new should be re-submitted to the mempool.
+        let term_ledgers = [
+            DataLedger::Submit,
+            DataLedger::OneYear,
+            DataLedger::ThirtyDay,
+        ];
+        let mut orphaned_term_txs: Vec<IrysTransactionId> = Vec::new();
+        for ledger in term_ledgers {
+            orphaned_term_txs.extend(
+                orphaned_confirmed_ledger_txs
+                    .get(&ledger)
+                    .into_iter()
+                    .flatten(),
+            );
+        }
 
-        // Clear included_height for orphaned submit transactions
-        for tx_id in submit_txs.iter().copied() {
+        // Clear included_height for orphaned term transactions
+        for tx_id in orphaned_term_txs.iter().copied() {
             if self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned submit tx");
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
             }
         }
 
-        // Extract full orphaned submit transactions
-        let mut orphaned_submit_tx_map = HashMap::new();
+        // Extract full orphaned term transactions from old fork blocks
+        let mut orphaned_term_tx_map = HashMap::new();
         for block in old_fork_confirmed.iter() {
-            for tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                orphaned_submit_tx_map.insert(tx.id, tx.clone());
+            for ledger in term_ledgers {
+                for tx in block.transactions().get_ledger_txs(ledger) {
+                    orphaned_term_tx_map.insert(tx.id, tx.clone());
+                }
             }
         }
 
-        // 2. Re-post any reorged submit ledger transactions though handle_tx_ingress_message so account balances and anchors are checked
+        // 2. Re-post any reorged term ledger transactions through handle_tx_ingress_message so account balances and anchors are checked
         // 3. Filter out any invalidated transactions
-        for tx_id in submit_txs.iter() {
-            if let Some(tx) = orphaned_submit_tx_map.remove(tx_id) {
+        for tx_id in orphaned_term_txs.iter() {
+            if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
                 // TODO: handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
                 if let Err(e) = self

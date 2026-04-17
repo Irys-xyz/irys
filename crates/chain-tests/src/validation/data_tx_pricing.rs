@@ -9,8 +9,6 @@ use irys_actors::{
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
 };
-use irys_database::tables::IngressProofs as IngressProofsTable;
-use irys_database::walk_all;
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::IngressProofsList;
 use irys_types::storage_pricing::{
@@ -20,7 +18,6 @@ use irys_types::{
     Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256,
     UnixTimestamp,
 };
-use reth_db::Database as _;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 
@@ -50,6 +47,8 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -172,6 +171,8 @@ async fn block_insufficient_term_fee_gets_rejected() -> eyre::Result<()> {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
@@ -392,6 +393,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
+        UnixTimestamp::from_secs(0),
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
@@ -400,6 +402,7 @@ async fn block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(
@@ -517,6 +520,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         &genesis_node.node_ctx.config.consensus,
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
+        UnixTimestamp::from_secs(0),
     )?
     .checked_div(U256::from(2))
     .unwrap();
@@ -527,6 +531,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
+        UnixTimestamp::from_secs(0),
     )?;
 
     let tx = test_signer.create_transaction_with_fees(
@@ -541,29 +546,24 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
     // Gossip ONLY the transaction header (no chunks yet) via mempool service
     gossip_data_tx_to_node(&genesis_node, &tx.header).await?;
 
-    // Upload chunks via public API and wait for ingress proofs to be generated
+    // Upload chunks via public API
     genesis_node.upload_chunks(&tx).await?;
-    genesis_node
-        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
-        .await?;
 
-    // Build an EvilBlockProducer that force-includes the tx in both ledgers
-    // Collect proofs for this tx from the DB
-    let proofs_list = {
-        let ro_tx = genesis_node
-            .node_ctx
-            .db
-            .as_ref()
-            .tx()
-            .expect("create mdbx read tx");
-        let mut proofs = Vec::new();
-        for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
-            if root == tx.header.data_root {
-                proofs.push(cached.proof.clone());
-            }
-        }
-        IngressProofsList(proofs)
-    };
+    // The tx has deliberately insufficient fees, so the tx_selector will reject it
+    // for submit ledger inclusion. We manually generate an ingress proof instead of
+    // relying on auto-generation (which requires submit confirmation).
+    let genesis_signer = genesis_config.signer();
+    let chunk_size = genesis_config.consensus_config().chunk_size as usize;
+    let data_for_proof = tx.data.as_ref().expect("tx should have data").0.clone();
+    let chunks_for_proof: Vec<Vec<u8>> = data_for_proof.chunks(chunk_size).map(Vec::from).collect();
+    let manual_proof = irys_types::ingress::generate_ingress_proof(
+        &genesis_signer,
+        tx.header.data_root,
+        chunks_for_proof.iter().map(|c| Ok(c.as_slice())),
+        genesis_config.consensus_config().chain_id,
+        genesis_node.get_anchor().await?,
+    )?;
+    let proofs_list = IngressProofsList(vec![manual_proof]);
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -586,10 +586,14 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
             irys_actors::block_producer::MempoolTxsBundle,
             irys_actors::tx_selector::TxSelectorError,
         > {
+            // The tx was never confirmed in a block (insufficient fees), so
+            // the evil block includes it in both submit and publish ledgers.
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
                 commitment_txs_to_bill: vec![],
                 submit_txs: vec![self.data_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
                 publish_txs: PublishLedgerWithTxs {
                     txs: vec![self.data_tx.clone()],
                     proofs: Some(self.proofs.clone()),

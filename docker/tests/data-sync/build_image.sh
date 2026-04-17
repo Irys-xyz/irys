@@ -17,7 +17,20 @@ echo ""
 
 cd "$REPO_ROOT"
 
-BUILD_ARGS=()
+# Capture git metadata from the host — .git is excluded from Docker context
+GIT_SHA="$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
+GIT_HAS_TAG="$(git describe --exact-match --tags HEAD >/dev/null 2>&1 && echo true || echo false)"
+GIT_DIRTY="$(git diff-index --quiet HEAD -- 2>/dev/null && echo false || echo true)"
+GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+
+echo "Git SHA: $GIT_SHA (dirty=$GIT_DIRTY, tagged=$GIT_HAS_TAG)"
+
+BUILD_ARGS=(
+    --build-arg "GIT_SHA=$GIT_SHA"
+    --build-arg "GIT_HAS_TAG=$GIT_HAS_TAG"
+    --build-arg "GIT_DIRTY=$GIT_DIRTY"
+    --build-arg "GIT_COMMIT=$GIT_COMMIT"
+)
 if [ "$ENABLE_TELEMETRY" = "true" ] || [ "$ENABLE_TELEMETRY" = "1" ]; then
     BUILD_ARGS+=(--build-arg CARGO_FEATURES=telemetry)
     echo "Building with telemetry support..."

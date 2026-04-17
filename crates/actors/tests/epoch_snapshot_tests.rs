@@ -40,12 +40,16 @@ async fn genesis_test() {
     // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let (commitments, initial_treasury) =
-        add_genesis_commitments(&mut genesis_block, &config).await;
+    let (commitments, initial_treasury) = add_genesis_commitments(&mut genesis_block, &config)
+        .await
+        .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -59,7 +63,7 @@ async fn genesis_test() {
     // This allows us to inspect the actor's state after processing
     {
         // Verify the correct number of ledgers have been added
-        let expected_ledger_count = DataLedger::ALL.len();
+        let expected_ledger_count = epoch_snapshot.ledgers.active_ledgers().len();
         assert_eq!(epoch_snapshot.ledgers.len(), expected_ledger_count);
 
         // Verify each ledger has one slot and the correct number of partitions
@@ -134,7 +138,11 @@ async fn genesis_test() {
         let pa = &epoch_snapshot.partition_assignments;
         let data_partition_count = pa.data_partitions.len() as u64;
         let expected_partitions = data_partition_count
-            + EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config.consensus);
+            + EpochSnapshot::get_num_capacity_partitions(
+                data_partition_count,
+                &config.consensus,
+                epoch_snapshot.ledgers.active_ledgers().len() as u64,
+            );
         assert_eq!(
             epoch_snapshot.all_active_partitions.len(),
             expected_partitions as usize
@@ -196,12 +204,16 @@ async fn add_slots_test() {
     genesis_block.height = 0;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-    let (commitments, initial_treasury) =
-        add_genesis_commitments(&mut genesis_block, &config).await;
+    let (commitments, initial_treasury) = add_genesis_commitments(&mut genesis_block, &config)
+        .await
+        .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -292,23 +304,30 @@ async fn unique_addresses_per_slot_test() {
     let config = Config::new_with_random_peer_id(testing_config);
     let genesis_signer = config.irys_signer();
     genesis_block.height = 0;
-    let (mut commitments, _) = add_genesis_commitments(&mut genesis_block, &config).await;
+    let (mut commitments, _) = add_genesis_commitments(&mut genesis_block, &config)
+        .await
+        .unwrap();
 
     // Create some other signers to simulate other pledged and staked addresses
     let signer1 = IrysSigner::random_signer(&config.consensus);
     let signer2 = IrysSigner::random_signer(&config.consensus);
 
     // Give them both 10 pledged partitions
-    let (mut comm1, _) =
-        add_test_commitments_for_signer(&mut genesis_block, &signer1, 10, &config).await;
-    let (mut comm2, _) =
-        add_test_commitments_for_signer(&mut genesis_block, &signer2, 10, &config).await;
+    let (mut comm1, _) = add_test_commitments_for_signer(&mut genesis_block, &signer1, 10, &config)
+        .await
+        .unwrap();
+    let (mut comm2, _) = add_test_commitments_for_signer(&mut genesis_block, &signer2, 10, &config)
+        .await
+        .unwrap();
 
     commitments.append(&mut comm1);
     commitments.append(&mut comm2);
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -366,6 +385,22 @@ async fn unique_addresses_per_slot_test() {
     assert!(submit_addresses_set.contains(&genesis_signer.address()));
     assert!(submit_addresses_set.contains(&signer1.address()));
     assert!(submit_addresses_set.contains(&signer2.address()));
+}
+
+#[tokio::test]
+async fn capacity_projection_tests() {
+    let max_data_parts = 1000;
+    let config = ConsensusConfig::testing();
+    for i in (0..max_data_parts).step_by(10) {
+        let data_partition_count = i;
+        let capacity_count =
+            EpochSnapshot::get_num_capacity_partitions(data_partition_count, &config, 4);
+        let total = data_partition_count + capacity_count;
+        println!(
+            "data:{}, capacity:{}, total:{}",
+            data_partition_count, capacity_count, total
+        );
+    }
 }
 
 #[tokio::test]
@@ -427,8 +462,9 @@ async fn partition_expiration_and_repacking_test() {
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
-    let (commitments, initial_treasury) =
-        add_test_commitments(&mut genesis_block, 5, &config).await;
+    let (commitments, initial_treasury) = add_test_commitments(&mut genesis_block, 5, &config)
+        .await
+        .unwrap();
     genesis_block.treasury = initial_treasury;
 
     // Create a storage config for testing
@@ -436,7 +472,8 @@ async fn partition_expiration_and_repacking_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
 
     // Create epoch service
-    let storage_submodules_config = StorageSubmodulesConfig::load(base_path.clone()).unwrap();
+    let storage_submodules_config =
+        StorageSubmodulesConfig::load(base_path.clone(), config.node_config.node_mode).unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -776,11 +813,16 @@ async fn epoch_blocks_reinitialization_test() {
     genesis_block.height = 0;
     let pledge_count = config.consensus.epoch.num_capacity_partitions.unwrap_or(31) as u8;
     let (commitments, initial_treasury) =
-        add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+        add_test_commitments(&mut genesis_block, pledge_count, &config)
+            .await
+            .unwrap();
     genesis_block.treasury = initial_treasury;
 
-    let storage_submodules_config =
-        StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
 
     let mut epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
@@ -969,7 +1011,9 @@ async fn partitions_assignment_determinism_test() {
     genesis_block.height = 0;
     let pledge_count = 20;
     let (commitments, initial_treasury) =
-        add_test_commitments(&mut genesis_block, pledge_count, &config).await;
+        add_test_commitments(&mut genesis_block, pledge_count, &config)
+            .await
+            .unwrap();
     genesis_block.treasury = initial_treasury;
 
     let storage_submodules_config = StorageSubmodulesConfig::load_for_test(base_path, 40).unwrap();
