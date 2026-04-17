@@ -66,7 +66,7 @@ impl ChunkIngressMessage {
         match self {
             Self::IngestChunk(_, reply) => reply.is_some(),
             Self::IngestIngressProof(_, _) => true,
-            Self::ProcessPendingChunks(_) => false,
+            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
         }
     }
 }
@@ -110,7 +110,10 @@ impl ChunkIngressServiceInner {
         match msg {
             ChunkIngressMessage::IngestChunk(..) => self.message_handler_semaphore.clone(),
             ChunkIngressMessage::IngestIngressProof(..)
-            | ChunkIngressMessage::ProcessPendingChunks(..) => self.control_plane_semaphore.clone(),
+            | ChunkIngressMessage::ProcessPendingChunks(..)
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..) => {
+                self.control_plane_semaphore.clone()
+            }
         }
     }
 }
@@ -506,7 +509,8 @@ impl ChunkIngressService {
             }
             // No response channel — nothing to notify.
             ChunkIngressMessage::IngestChunk(_, None)
-            | ChunkIngressMessage::ProcessPendingChunks(_) => {}
+            | ChunkIngressMessage::ProcessPendingChunks(_)
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
         }
     }
 }
