@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776354454767,
+  "lastUpdate": 1776435493483,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2503,6 +2503,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3c0ce58ebbd085254b82d7611b1ee195ad36da81",
+          "message": "refactor(p2p): reduce data cloning in gossip subsystem (#1249)\n\n* refactor(p2p): reduce data cloning in gossip subsystem\n\n* test(p2p): expand commitment serde parity test to all variants\n\n* refactor(p2p): address review findings for gossip clone reduction",
+          "timestamp": "2026-04-17T15:03:29+01:00",
+          "tree_id": "3251401e27b770ad75f6d76162380830ef0267e4",
+          "url": "https://github.com/Irys-xyz/irys/commit/3c0ce58ebbd085254b82d7611b1ee195ad36da81"
+        },
+        "date": 1776435491701,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083581,
+            "range": "± 0.001147",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 793.298484,
+            "range": "± 29.920566",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 970.028801,
+            "range": "± 17.754981",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.146404,
+            "range": "± 0.002114",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1282.162768,
+            "range": "± 146.035533",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1529.549553,
+            "range": "± 13.654501",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.457819,
+            "range": "± 0.016283",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 215.623744,
+            "range": "± 1.782929",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.586549,
+            "range": "± 1.275163",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
