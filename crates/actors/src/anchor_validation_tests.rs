@@ -6,10 +6,18 @@ use irys_database::{
 };
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
-use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::ingress::IngressProofV1;
+use irys_types::{
+    ConsensusConfig, DataTransactionHeader, DatabaseProvider, H256, IngressProof, IrysBlockHeader,
+};
+use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use reth_db::mdbx::DatabaseArguments;
 
-use super::get_anchor_height;
+use super::{
+    get_anchor_height, validate_anchor_for_inclusion, validate_ingress_proof_anchor_for_inclusion,
+};
+use crate::mempool_service::TxIngressError;
 
 fn signed_genesis() -> IrysBlockHeader {
     let mut header = IrysBlockHeader::new_mock_header();
@@ -60,62 +68,80 @@ fn write_canonical_entry(db: &DatabaseProvider, height: u64, block_hash: H256) {
     .unwrap();
 }
 
-#[test]
-fn canonical_block_in_tree_returns_height() {
+fn write_canonical_block(db: &DatabaseProvider, height: u64) -> H256 {
+    let block_hash = H256::random();
+    write_header_to_db(db, &mock_header(height, block_hash));
+    write_canonical_entry(db, height, block_hash);
+    block_hash
+}
+
+struct TestEnv {
+    genesis: IrysBlockHeader,
+    block_tree: BlockTreeReadGuard,
+    db: DatabaseProvider,
+    _tmp: irys_testing_utils::tempfile::TempDir,
+}
+
+fn test_env() -> TestEnv {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
     let (_tmp, db) = test_db();
+    TestEnv {
+        genesis,
+        block_tree,
+        db,
+        _tmp,
+    }
+}
 
-    let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), true).unwrap();
+#[test]
+fn canonical_block_in_tree_returns_height() {
+    let env = test_env();
+
+    let result =
+        get_anchor_height(&env.block_tree, &env.db, env.genesis.block_hash(), true).unwrap();
     assert_eq!(result, Some(0));
 }
 
 #[test]
 fn non_canonical_block_in_tree_returns_height_when_canonical_false() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
-    let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), false).unwrap();
+    let result =
+        get_anchor_height(&env.block_tree, &env.db, env.genesis.block_hash(), false).unwrap();
     assert_eq!(result, Some(0));
 }
 
 #[test]
 fn unknown_block_returns_none() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
-    let result = get_anchor_height(&block_tree, &db, H256::random(), true).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, H256::random(), true).unwrap();
     assert_eq!(result, None);
 }
 
 #[test]
 fn canonical_block_in_db_with_migrated_entry_returns_height() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
     let old_block_hash = H256::random();
     let old_block = mock_header(5, old_block_hash);
-    write_header_to_db(&db, &old_block);
-    write_canonical_entry(&db, 5, old_block_hash);
+    write_header_to_db(&env.db, &old_block);
+    write_canonical_entry(&env.db, 5, old_block_hash);
 
-    let result = get_anchor_height(&block_tree, &db, old_block_hash, true).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, old_block_hash, true).unwrap();
     assert_eq!(result, Some(5));
 }
 
 #[test]
 fn orphan_block_in_db_without_migrated_entry_returns_none_when_canonical() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
     let orphan_hash = H256::random();
     let orphan_block = mock_header(5, orphan_hash);
-    write_header_to_db(&db, &orphan_block);
+    write_header_to_db(&env.db, &orphan_block);
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, true).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, orphan_hash, true).unwrap();
     assert_eq!(
         result, None,
         "orphan block should not be accepted as canonical"
@@ -124,34 +150,148 @@ fn orphan_block_in_db_without_migrated_entry_returns_none_when_canonical() {
 
 #[test]
 fn orphan_block_at_height_with_different_canonical_returns_none() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
     let orphan_hash = H256::random();
     let canonical_hash = H256::random();
 
-    write_header_to_db(&db, &mock_header(5, orphan_hash));
-    write_header_to_db(&db, &mock_header(5, canonical_hash));
+    write_header_to_db(&env.db, &mock_header(5, orphan_hash));
+    write_header_to_db(&env.db, &mock_header(5, canonical_hash));
 
-    write_canonical_entry(&db, 5, canonical_hash);
+    write_canonical_entry(&env.db, 5, canonical_hash);
 
-    let result = get_anchor_height(&block_tree, &db, canonical_hash, true).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, canonical_hash, true).unwrap();
     assert_eq!(result, Some(5));
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, true).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, orphan_hash, true).unwrap();
     assert_eq!(result, None, "orphan should be rejected after reorg");
 }
 
 #[test]
 fn orphan_block_in_db_returns_height_when_canonical_false() {
-    let genesis = signed_genesis();
-    let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let env = test_env();
 
     let orphan_hash = H256::random();
-    write_header_to_db(&db, &mock_header(5, orphan_hash));
+    write_header_to_db(&env.db, &mock_header(5, orphan_hash));
 
-    let result = get_anchor_height(&block_tree, &db, orphan_hash, false).unwrap();
+    let result = get_anchor_height(&env.block_tree, &env.db, orphan_hash, false).unwrap();
     assert_eq!(result, Some(5));
+}
+
+#[test]
+fn serial_prop_validate_anchor_for_inclusion_boundary() {
+    let env = test_env();
+    let block_hash = write_canonical_block(&env.db, 10);
+
+    let mut tx = DataTransactionHeader::default();
+    tx.anchor = block_hash;
+
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..100, 0_u64..100), |(min, max)| {
+            let result =
+                validate_anchor_for_inclusion(&env.block_tree, &env.db, min, max, &tx).unwrap();
+            prop_assert_eq!(result, 10 >= min && 10 <= max);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn serial_prop_validate_anchor_for_inclusion_height_zero() {
+    let env = test_env();
+
+    let mut tx = DataTransactionHeader::default();
+    tx.anchor = env.genesis.block_hash;
+
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..100, 0_u64..100), |(min, max)| {
+            let result =
+                validate_anchor_for_inclusion(&env.block_tree, &env.db, min, max, &tx).unwrap();
+            prop_assert_eq!(result, min == 0);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn validate_anchor_for_inclusion_unresolvable_anchor_returns_error() {
+    let env = test_env();
+
+    let unknown_anchor = H256::random();
+    let mut tx = DataTransactionHeader::default();
+    tx.anchor = unknown_anchor;
+
+    let err = validate_anchor_for_inclusion(&env.block_tree, &env.db, 5, 20, &tx).unwrap_err();
+    let ingress_err = err
+        .downcast_ref::<TxIngressError>()
+        .expect("expected TxIngressError");
+    assert!(matches!(ingress_err, TxIngressError::InvalidAnchor(a) if *a == unknown_anchor),);
+}
+
+#[test]
+fn serial_prop_validate_ingress_proof_anchor_boundary() {
+    let env = test_env();
+    let block_hash = write_canonical_block(&env.db, 10);
+
+    let ingress_proof = IngressProof::V1(IngressProofV1 {
+        anchor: block_hash,
+        ..Default::default()
+    });
+
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..100), |min| {
+            let result = validate_ingress_proof_anchor_for_inclusion(
+                &env.block_tree,
+                &env.db,
+                min,
+                &ingress_proof,
+            )
+            .unwrap();
+            prop_assert_eq!(result, 10 >= min);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn serial_prop_validate_ingress_proof_anchor_height_zero() {
+    let env = test_env();
+
+    let ingress_proof = IngressProof::V1(IngressProofV1 {
+        anchor: env.genesis.block_hash,
+        ..Default::default()
+    });
+
+    let mut runner = TestRunner::default();
+    runner
+        .run(&(0_u64..100), |min| {
+            let result = validate_ingress_proof_anchor_for_inclusion(
+                &env.block_tree,
+                &env.db,
+                min,
+                &ingress_proof,
+            )
+            .unwrap();
+            prop_assert_eq!(result, min == 0);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn validate_ingress_proof_unresolvable_anchor_returns_false() {
+    let env = test_env();
+
+    let ingress_proof = IngressProof::V1(IngressProofV1 {
+        anchor: H256::random(),
+        ..Default::default()
+    });
+
+    let result =
+        validate_ingress_proof_anchor_for_inclusion(&env.block_tree, &env.db, 5, &ingress_proof)
+            .unwrap();
+    assert!(!result);
 }
