@@ -371,13 +371,10 @@ impl Inner {
                 TxIngressError::Other("empty canonical chain in block tree".to_owned())
             })?;
 
-        // let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
-
         let anchor_height = match crate::anchor_validation::get_anchor_height(
             &self.block_tree_read_guard,
             &self.irys_db,
             anchor,
-            false, /* does not need to be canonical */
         )
         .map_err(|e| {
             TxIngressError::DatabaseError(format!(
