@@ -464,23 +464,23 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
     ) -> ParentCheckResult {
         let tree = self.inner().block_tree_guard.read();
-        let (_max_difficulty, current_best) = tree.get_max_cumulative_difficulty_block();
+        let max_diff = tree.get_max_cumulative_difficulty_block();
 
         // Check if parent is still the best
-        if current_best == *parent_hash {
+        if max_diff.block_hash == *parent_hash {
             return ParentCheckResult::ParentStillBest;
         }
 
         // Parent changed - get new parent's VDF step
         let new_parent_vdf_step = tree
-            .get_block(&current_best)
+            .get_block(&max_diff.block_hash)
             .map(|b| b.vdf_limiter_info.global_step_number)
             .unwrap_or(0);
 
         // Check if solution is too old (at or before new parent's VDF step)
         if solution.vdf_step <= new_parent_vdf_step {
             return ParentCheckResult::SolutionInvalid {
-                new_parent: current_best,
+                new_parent: max_diff.block_hash,
                 reason: InvalidReason::VdfTooOld {
                     parent_vdf_step: new_parent_vdf_step,
                     solution_vdf_step: solution.vdf_step,
@@ -490,7 +490,7 @@ pub trait BlockProdStrategy {
 
         // Parent changed but solution is valid - must rebuild on new parent
         ParentCheckResult::MustRebuild {
-            new_parent: current_best,
+            new_parent: max_diff.block_hash,
         }
     }
 

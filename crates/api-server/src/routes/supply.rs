@@ -48,7 +48,7 @@ pub async fn supply(state: web::Data<ApiState>) -> impl Responder {
 
 fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
     let tree = state.block_tree.read();
-    let (canonical, _) = tree.get_canonical_chain();
+    let canonical = tree.get_canonical_chain().entries;
 
     let last_entry = canonical
         .last()
