@@ -81,10 +81,13 @@ impl Ranges {
             );
             let mut rng = SimpleRNG::new(rng_seed);
 
-            let last_range_pos_u32 = u32::try_from(self.last_range_pos).map_err(|_| {
-                eyre::eyre!("last_range_pos {} exceeds u32::MAX", self.last_range_pos)
+            let choice_count = u32::try_from(self.last_range_pos + 1).map_err(|_| {
+                eyre::eyre!(
+                    "last_range_pos + 1 ({}) exceeds u32::MAX",
+                    self.last_range_pos + 1
+                )
             })?;
-            let next_range_pos = usize::try_from(rng.next() % last_range_pos_u32)
+            let next_range_pos = usize::try_from(rng.next() % choice_count)
                 .map_err(|_| eyre::eyre!("range position exceeds usize"))?;
             let range = self.ranges[next_range_pos];
             self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
@@ -249,6 +252,30 @@ mod tests {
         }
 
         assert_eq!(num_recall_ranges, ranges.last_range_pos + 1);
+    }
+
+    #[test]
+    fn test_two_range_sampling_not_biased() {
+        let partition_hash = H256([7_u8; 32]);
+        let mut first_draws = HashSet::new();
+
+        for seed_byte in 0..=255_u8 {
+            let mut ranges = Ranges::new(2).unwrap();
+            let mut seed = H256::zero();
+            seed.0[0] = seed_byte;
+            let range = ranges.get_recall_range(1, &seed, &partition_hash).unwrap();
+            first_draws.insert(range);
+            if first_draws.len() > 1 {
+                break;
+            }
+        }
+
+        assert!(
+            first_draws.len() > 1,
+            "With 2 ranges, different seeds should produce different first draws. \
+             Got only {:?} across 256 seeds — sampling is biased.",
+            first_draws
+        );
     }
 
     #[test]
