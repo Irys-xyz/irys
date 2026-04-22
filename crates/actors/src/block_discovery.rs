@@ -334,8 +334,6 @@ impl BlockDiscoveryServiceInner {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        let mempool_config = self.config.consensus.mempool.clone();
-
         let previous_block_header = crate::block_tree_service::get_block_header(
             &block_tree_guard,
             &db,
@@ -433,10 +431,13 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
-        let min_tx_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+        let min_tx_anchor_height =
+            crate::anchor_validation::min_tx_anchor_height(&config.consensus, block_height);
         let min_ingress_proof_anchor_height =
-            block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
+            crate::anchor_validation::min_ingress_proof_anchor_height(
+                &config.consensus,
+                block_height,
+            );
 
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
