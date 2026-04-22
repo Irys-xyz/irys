@@ -667,9 +667,7 @@ impl BlockTreeServiceInner {
                         arc_block.height, arc_block.block_hash
                     );
                     metrics::record_reorg();
-                    metrics::record_reorg_depth(
-                        u64::try_from(old_fork_blocks.len()).unwrap_or(u64::MAX),
-                    );
+                    metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
 
                     // Create reorg event with all necessary data for downstream processing
                     let event = ReorgEvent {

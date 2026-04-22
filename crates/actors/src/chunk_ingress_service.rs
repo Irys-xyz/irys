@@ -334,7 +334,10 @@ impl ChunkIngressService {
                             let permit = match Arc::clone(&semaphore).try_acquire_owned() {
                                 Ok(permit) => permit,
                                 Err(tokio::sync::TryAcquireError::Closed) => {
-                                    error!("Chunk ingress message handler semaphore closed");
+                                    error!(
+                                        msg_type = %msg_type,
+                                        "Chunk ingress semaphore closed during try_acquire; terminating service"
+                                    );
                                     break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
@@ -352,9 +355,13 @@ impl ChunkIngressService {
                                     // No reply channel means internal work
                                     // with no caller to retry. Wait for a
                                     // permit rather than silently drop it.
+                                    // While parked here the recv loop is not
+                                    // polled, so new IngestChunk messages
+                                    // queue in msg_rx until a permit frees —
+                                    // the whole service blocks on this wait.
                                     warn!(
                                         msg_type = %msg_type,
-                                        "Chunk ingress service lane saturated, awaiting permit for fire-and-forget message"
+                                        "Chunk ingress service blocked: awaiting control-plane permit for fire-and-forget message; recv loop parked until permit frees"
                                     );
                                     tokio::select! {
                                         _ = &mut shutdown_future => {
@@ -364,7 +371,10 @@ impl ChunkIngressService {
                                         res = semaphore.acquire_owned() => match res {
                                             Ok(permit) => permit,
                                             Err(_) => {
-                                                error!("Chunk ingress message handler semaphore closed while awaiting permit");
+                                                error!(
+                                                    msg_type = %msg_type,
+                                                    "Chunk ingress semaphore closed while awaiting permit; terminating service"
+                                                );
                                                 break 'service;
                                             }
                                         }
@@ -428,31 +438,25 @@ impl ChunkIngressService {
 
         // Phase 2: acquire all permits from both lanes to wait for in-flight
         // and drain-spawned handlers. Use `acquire_many_owned` so the permits
-        // are not lifetime-tied to the semaphore arcs.
+        // are not lifetime-tied to the semaphore arcs. The flush only needs
+        // chunk-lane quiescence, so we gate it on the chunk drain alone and
+        // best-effort drain the control lane within the remaining budget —
+        // a stuck proof-generation handler on the control lane must not
+        // skip the durability flush for completed chunk writes.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let chunk_acquire = self
             .inner
             .message_handler_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_concurrent_tasks);
-        let control_acquire = self
-            .inner
-            .control_plane_semaphore
-            .clone()
-            .acquire_many_owned(self.inner.max_control_plane_tasks);
-        let drain_fut = async move {
-            let chunk_permits = chunk_acquire.await?;
-            let control_permits = control_acquire.await?;
-            Ok::<_, tokio::sync::AcquireError>((chunk_permits, control_permits))
-        };
-        let handlers_quiesced = match tokio::time::timeout(Duration::from_secs(30), drain_fut).await
-        {
-            Ok(Ok(all_permits)) => {
+        let handlers_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
+            Ok(Ok(permits)) => {
                 tracing::debug!("All chunk ingress handlers completed");
-                let _all_permits = all_permits;
+                let _permits = permits;
                 true
             }
             Ok(Err(_)) => {
-                error!("Semaphore closed during chunk ingress shutdown drain");
+                error!("Chunk-lane semaphore closed during chunk ingress shutdown drain");
                 false
             }
             Err(_) => {
@@ -460,6 +464,24 @@ impl ChunkIngressService {
                 false
             }
         };
+
+        let control_acquire = self
+            .inner
+            .control_plane_semaphore
+            .clone()
+            .acquire_many_owned(self.inner.max_control_plane_tasks);
+        match tokio::time::timeout_at(drain_deadline, control_acquire).await {
+            Ok(Ok(permits)) => {
+                tracing::debug!("All control-plane handlers completed");
+                let _permits = permits;
+            }
+            Ok(Err(_)) => {
+                error!("Control-plane semaphore closed during chunk ingress shutdown drain");
+            }
+            Err(_) => {
+                warn!("Timed out waiting for in-flight control-plane handlers");
+            }
+        }
 
         if handlers_quiesced && let Err(e) = self.inner.chunk_data_writer.flush().await {
             warn!("Failed to flush chunk writer on shutdown: {:?}", e);
@@ -622,6 +644,13 @@ mod overload_helpers_tests {
         assert!(
             !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
                 .has_reply_channel()
+        );
+
+        assert!(
+            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
+                [2_u8; 32]
+            )])
+            .has_reply_channel()
         );
     }
 }
