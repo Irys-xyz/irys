@@ -172,7 +172,7 @@ fn test_data_tx_header_with_none_optional_fields() {
     let canonical = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: DataTransactionHeaderV1 {
             perm_fee: None,
-            bundle_format: None,
+            metadata_format: 0,
             ..canonical_data_tx_header_v1_inner()
         },
         metadata: DataTransactionMetadata::new(),

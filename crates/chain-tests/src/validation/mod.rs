@@ -948,7 +948,7 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             term_fee: U256::from(1000).into(),
             perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
             ledger_id: DataLedger::Publish.into(),
-            bundle_format: Some(0),
+            metadata_format: 0,
             chain_id: 1,
             signature: Default::default(),
         },

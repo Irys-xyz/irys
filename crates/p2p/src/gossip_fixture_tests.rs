@@ -97,10 +97,10 @@ fn fixture_block_body() -> wire::BlockBody {
 
 // --- None-variant helpers (optional fields cleared) ---
 
-/// DataTransactionHeader with bundle_format and perm_fee set to None.
+/// DataTransactionHeader with metadata_format zeroed and perm_fee set to None.
 fn fixture_data_tx_header_none() -> wire::DataTransactionHeader {
     let mut inner = canonical_data_tx_header_v1_inner();
-    inner.bundle_format = None;
+    inner.metadata_format = 0;
     inner.perm_fee = None;
     let canonical =
         irys_types::DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {

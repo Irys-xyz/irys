@@ -175,7 +175,10 @@ mod v1_to_v2 {
                 ledger_id: old_header.ledger_id,
                 chain_id: old_header.chain_id,
                 signature: old_header.signature,
-                bundle_format: old_header.bundle_format,
+                // bundle_format was Option<u64> but values were always small (0 or 1
+                // in practice). The new u8 field uses 0 for "None / no/custom format",
+                // matching the documented "None == Some(0) for RLP" equivalence.
+                metadata_format: old_header.bundle_format.unwrap_or(0) as u8,
                 perm_fee: old_header.perm_fee,
             };
 
