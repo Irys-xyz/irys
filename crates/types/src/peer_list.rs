@@ -24,7 +24,12 @@ impl PeerScore {
     pub const MIN: u16 = 0;
     pub const MAX: u16 = 100;
     pub const INITIAL: u16 = 50;
-    pub const ACTIVE_THRESHOLD: u16 = 20;
+    /// Active threshold: below this the peer is excluded from gossip
+    /// propagation. Lowered from 20 to 10 during the 2026-04-15 devnet
+    /// divergence post-mortem: the cascade pushed peers below 20 within
+    /// seconds under honest overload, and the old threshold left no
+    /// headroom before eviction.
+    pub const ACTIVE_THRESHOLD: u16 = 10;
     /// Score threshold for unstaked peers to be persisted to the database
     pub const PERSISTENCE_THRESHOLD: u16 = 80;
 
@@ -49,6 +54,16 @@ impl PeerScore {
     pub fn decrease_offline(&mut self, msg: &str) {
         debug!("Decreasing peer score due to offline status: {}", msg);
         self.decrease_by(3);
+    }
+
+    /// Decrease for a transient network error (timeout, connection refused).
+    /// Distinct from `decrease_offline` because a network error against an
+    /// overloaded-but-honest peer is not the same signal as a peer being
+    /// deliberately unreachable. Smaller penalty (-1) avoids the cascading
+    /// eviction observed during the 2026-04-15 devnet divergence.
+    pub fn decrease_network_error(&mut self, msg: &str) {
+        debug!("Decreasing peer score due to network error: {}", msg);
+        self.decrease_by(1);
     }
 
     pub fn decrease_bogus_data(&mut self, msg: &str) {
@@ -763,6 +778,20 @@ mod tests {
         ) {
             let mut score = PeerScore::new(initial);
             score.decrease_slow();
+            assert_eq!(score.get(), expected);
+        }
+
+        /// Network error penalty is -1, same magnitude as SlowResponse but a
+        /// distinct method so we can log and reason about it separately from
+        /// deliberate-offline evidence.
+        #[rstest]
+        #[case(50, 49)]
+        #[case(0, 0)]
+        #[case(1, 0)]
+        #[case(100, 99)]
+        fn test_decrease_network_error(#[case] initial: u16, #[case] expected: u16) {
+            let mut score = PeerScore::new(initial);
+            score.decrease_network_error("test");
             assert_eq!(score.get(), expected);
         }
 
