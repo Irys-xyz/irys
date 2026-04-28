@@ -163,6 +163,19 @@ mod v1_to_v2 {
         TX: DbTxMut + DbTx + Debug,
     {
         for (tx_id, old_header) in entries {
+            // bundle_format was Option<u64> but values were always small (0 or 1
+            // in practice). The new u8 field uses 0 for "None / no/custom format",
+            // matching the documented "None == Some(0) for RLP" equivalence.
+            // Use checked conversion so an out-of-range legacy value fails the
+            // migration instead of silently truncating into metadata_format.
+            let bundle_format_u64 = old_header.bundle_format.unwrap_or(0);
+            let metadata_format = u8::try_from(bundle_format_u64).map_err(|_| {
+                DatabaseError::Other(format!(
+                    "bundle_format value {bundle_format_u64} for tx {tx_id:?} \
+                     does not fit in u8 metadata_format"
+                ))
+            })?;
+
             // Create a new header without promoted_height
             let new_header_v1 = DataTransactionHeaderV1 {
                 id: old_header.id,
@@ -175,10 +188,7 @@ mod v1_to_v2 {
                 ledger_id: old_header.ledger_id,
                 chain_id: old_header.chain_id,
                 signature: old_header.signature,
-                // bundle_format was Option<u64> but values were always small (0 or 1
-                // in practice). The new u8 field uses 0 for "None / no/custom format",
-                // matching the documented "None == Some(0) for RLP" equivalence.
-                metadata_format: old_header.bundle_format.unwrap_or(0) as u8,
+                metadata_format,
                 perm_fee: old_header.perm_fee,
             };
 
