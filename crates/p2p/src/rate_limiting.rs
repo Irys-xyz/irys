@@ -124,7 +124,10 @@ impl DataRequestTracker {
         // Perform cleanup if needed
         self.cleanup_if_needed();
 
-        let duplicate_request_window = Duration::from_millis(duplicate_request_milliseconds as u64);
+        let duplicate_request_window = Duration::from_millis(
+            u64::try_from(duplicate_request_milliseconds)
+                .expect("duplicate_request_milliseconds out of range for u64"),
+        );
 
         // Get or create record for this peer
         let mut entry = self
