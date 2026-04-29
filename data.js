@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776435493483,
+  "lastUpdate": 1777463832665,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2581,6 +2581,90 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.586549,
             "range": "± 1.275163",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fd107a5e9280498ae84fcccc784ffceeeb6f8fa8",
+          "message": "feat: bundle_format -> metadata_format (#1401)\n\n* feat: bundle_format -> metadata_format\n\n* feat: change gossip fixtures\n\n* fix: migration\n\n* feat: add database migration",
+          "timestamp": "2026-04-29T12:35:06+01:00",
+          "tree_id": "1fc30e14e89aa9037e8648c0906b4090902db103",
+          "url": "https://github.com/Irys-xyz/irys/commit/fd107a5e9280498ae84fcccc784ffceeeb6f8fa8"
+        },
+        "date": 1777463830822,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074747,
+            "range": "± 0.000438",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 746.426336,
+            "range": "± 2.784814",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.107165,
+            "range": "± 5.980124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121256,
+            "range": "± 0.003108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1191.644349,
+            "range": "± 27.558072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1523.663602,
+            "range": "± 1.888214",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.46573,
+            "range": "± 0.02177",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.108317,
+            "range": "± 2.268649",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.530517,
+            "range": "± 0.889853",
             "unit": "ms/iter"
           },
           {
