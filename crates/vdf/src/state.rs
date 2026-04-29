@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::time::{Duration, sleep};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -73,17 +73,31 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        let vdf_depth = global_step.saturating_sub(self.minimum_step_to_keep) as usize;
+        // saturating fallback: vdf_depth is bounded by seeds.len() comparisons below,
+        // so a u64 step count outside usize is bounded to "always pop_front".
+        let vdf_depth = usize::try_from(global_step.saturating_sub(self.minimum_step_to_keep))
+            .unwrap_or(usize::MAX);
         if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
         if self.global_step + 1 == global_step {
             self.seeds.push_back(seed);
             self.global_step += 1;
+            global_step
         } else {
-            panic!("VDF steps can't have gaps and have to be inserted in sequence");
+            // A gap means we'd insert a non-sequential step; previously this
+            // panicked which aborted the VDF thread (and via the panic hook,
+            // the whole node). Log and no-op so the VDF loop catches up via
+            // normal stepping. Callers that need to detect the no-op observe
+            // the returned step == self.global_step.
+            error!(
+                current = self.global_step,
+                proposed = global_step,
+                gap = global_step.saturating_sub(self.global_step + 1),
+                "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
+            );
+            self.global_step
         }
-        global_step
     }
 
     /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
@@ -591,5 +605,61 @@ mod tests {
             "Cancellation took too long: {:?}",
             elapsed
         );
+    }
+
+    fn vdf_state_at(current_step: u64) -> VdfState {
+        let capacity: usize = 64;
+        VdfState {
+            global_step: current_step,
+            global_step_from_the_latest_canonical_block: current_step,
+            minimum_step_to_keep: current_step.saturating_sub(capacity as u64),
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            is_vdf_mining_enabled: None,
+        }
+    }
+
+    proptest::proptest! {
+        /// Invariants of `store_step`:
+        ///   1. returned step is either `current` (no progress) or `current + 1` (advance),
+        ///   2. advance happens iff `proposed == current + 1`,
+        ///   3. it never panics — including for backwards/equal/large-gap proposals.
+        #[test]
+        fn store_step_advances_by_at_most_one_or_no_op(
+            current in 0_u64..1_000_000,
+            proposed in 0_u64..1_000_000,
+        ) {
+            let mut state = vdf_state_at(current);
+            let returned = state.store_step(Seed(H256::zero()), proposed);
+
+            proptest::prop_assert!(
+                returned == current || returned == current + 1,
+                "returned ({}) must be current ({}) or current+1",
+                returned, current
+            );
+            if returned == current + 1 {
+                proptest::prop_assert_eq!(
+                    proposed, current + 1,
+                    "advance only when proposed == current + 1"
+                );
+            } else {
+                proptest::prop_assert_eq!(
+                    returned, current,
+                    "no-op must leave step unchanged"
+                );
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::same_step(100, 100, 100)]
+    #[case::backward(100, 99, 100)]
+    #[case::sequential(100, 101, 101)]
+    #[case::small_gap(100, 102, 100)]
+    #[case::large_gap(100, 200, 100)]
+    fn store_step_gap_handling(#[case] current: u64, #[case] proposed: u64, #[case] expected: u64) {
+        let mut state = vdf_state_at(current);
+        let returned = state.store_step(Seed(H256::zero()), proposed);
+        assert_eq!(returned, expected);
     }
 }

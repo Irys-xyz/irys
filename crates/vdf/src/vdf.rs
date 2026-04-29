@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
@@ -65,7 +65,16 @@ pub fn run_vdf<B: BlockProvider>(
 ) {
     let _span = tracing::info_span!("vdf_loop").entered();
     let mut next_reset_seed = initial_reset_seed;
-    let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
+    let mut canonical_global_step_number = match vdf_state.read() {
+        Ok(guard) => guard.canonical_step(),
+        Err(_) => {
+            // A prior panic in another caller poisoned the lock. Bail rather
+            // than re-panic; the lifecycle's vdf_done channel surfaces this
+            // as a controlled exit.
+            error!("VDF state read lock poisoned at startup; exiting VDF thread");
+            return;
+        }
+    };
 
     let mut hash: H256 = current_vdf_hash;
     let mut checkpoints: Vec<H256> = vec![H256::default(); config.num_checkpoints_in_vdf_step];
@@ -99,13 +108,24 @@ pub fn run_vdf<B: BlockProvider>(
                     canonical_global_step_number = vdf_info.global_step_number;
                 }
 
-                global_step_number = store_step(
+                let prev_step = global_step_number;
+                let Some(returned) = store_step(
                     hash,
                     &atomic_vdf_global_step,
                     &vdf_state,
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
-                );
+                ) else {
+                    return;
+                };
+                global_step_number = returned;
+                if global_step_number == prev_step {
+                    warn!(
+                        prev = prev_step,
+                        proposed = proposed_ff_step.global_step_number,
+                        "Fast-forward step had a gap; VDF will catch up via normal stepping"
+                    );
+                }
                 chain_sync_state.record_vdf_step(global_step_number);
                 hash = process_reset(
                     global_step_number,
@@ -177,13 +197,16 @@ pub fn run_vdf<B: BlockProvider>(
             }
         }
 
-        global_step_number = store_step(
+        let Some(returned) = store_step(
             hash,
             &atomic_vdf_global_step,
             &vdf_state,
             global_step_number + 1,
             canonical_global_step_number,
-        );
+        ) else {
+            return;
+        };
+        global_step_number = returned;
         chain_sync_state.record_vdf_step(global_step_number);
         info!("Seed created {} step number {}", hash, global_step_number);
 
@@ -221,6 +244,10 @@ pub fn process_reset(
     }
 }
 
+/// Returns `None` if the VDF state write lock is poisoned, so the VDF loop can
+/// exit gracefully rather than re-panic on `expect`/`unwrap`. On `Some(step)`,
+/// `step` is the new global step (which may equal `new_global_step_number - 1`
+/// if a gap was detected and ignored — see `VdfState::store_step`).
 #[must_use]
 fn store_step(
     hash: H256,
@@ -228,13 +255,19 @@ fn store_step(
     vdf_state: &AtomicVdfState,
     new_global_step_number: u64,
     canonical_global_step_number: u64,
-) -> u64 {
-    let mut vdf_guard = vdf_state.write().expect("to write to VDF");
+) -> Option<u64> {
+    let mut vdf_guard = match vdf_state.write() {
+        Ok(guard) => guard,
+        Err(_) => {
+            error!("VDF state write lock poisoned; exiting VDF thread");
+            return None;
+        }
+    };
 
     vdf_guard.set_canonical_step(canonical_global_step_number);
-    let global_step_number = { vdf_guard.store_step(Seed(hash), new_global_step_number) };
+    let global_step_number = vdf_guard.store_step(Seed(hash), new_global_step_number);
     atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
-    global_step_number
+    Some(global_step_number)
 }
 
 #[cfg(test)]
@@ -544,6 +577,58 @@ mod tests {
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
+    }
+
+    /// Poisons the `vdf_state` RwLock, then drives `run_vdf`. Before F3 the
+    /// thread re-panicked at `vdf_state.read().unwrap()` (line 68). After F3
+    /// the entry-time read returns a graceful `return`, so `run_vdf` exits
+    /// without panicking and the thread join is `Ok(())`.
+    #[test]
+    fn run_vdf_returns_gracefully_on_poisoned_state_lock() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let vdf_state = mocked_vdf_service(&config);
+
+        // Poison the lock by panicking inside a write guard from another thread.
+        let poisoner_state = vdf_state.clone(); // clone: Arc handle for poisoner thread
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner_state.write().unwrap();
+            panic!("deliberate poison");
+        })
+        .join();
+        assert!(
+            vdf_state.is_poisoned(),
+            "lock must be poisoned to exercise the path"
+        );
+
+        let (_ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
+        let atomic_step = Arc::new(AtomicU64::new(0));
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown_token = CancellationToken::new();
+
+        let join_result = std::thread::spawn(move || {
+            run_vdf(
+                &config.vdf,
+                0,
+                H256::zero(),
+                H256::zero(),
+                ff_rx,
+                is_mining_enabled,
+                MockMining,
+                vdf_state,
+                atomic_step,
+                MockBlockProvider::new(),
+                chain_sync_state,
+                shutdown_token,
+            )
+        })
+        .join();
+
+        assert!(
+            join_result.is_ok(),
+            "run_vdf must not panic on poisoned state lock; got: {:?}",
+            join_result.err()
+        );
     }
 
     mod process_reset_props {
