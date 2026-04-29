@@ -702,6 +702,8 @@ struct SyncParams {
     wait_queue_slot_timeout_secs: u64,
     wait_queue_slot_max_attempts: usize,
     genesis_peer_discovery_timeout_millis: u64,
+    min_active_peers: usize,
+    peer_wait_timeout_millis: u64,
 }
 
 impl SyncParams {
@@ -722,6 +724,8 @@ impl SyncParams {
             genesis_peer_discovery_timeout_millis: config
                 .node_config
                 .genesis_peer_discovery_timeout_millis,
+            min_active_peers: config.node_config.sync.min_active_peers,
+            peer_wait_timeout_millis: config.node_config.sync.peer_wait_timeout_millis,
         }
     }
 }
@@ -841,7 +845,7 @@ async fn initialize_sync_mode(
         );
         let count = peer_list
             .wait_for_active_peers(
-                config.node_config.sync.min_active_peers,
+                params.min_active_peers,
                 Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
             )
             .await;
@@ -855,19 +859,20 @@ async fn initialize_sync_mode(
         }
         info!(
             "Genesis node has {} active peer(s) (wanted {})",
-            count, config.node_config.sync.min_active_peers
+            count, params.min_active_peers
         );
     } else {
         sync_state.set_is_syncing(true);
-        let min_count = config.node_config.sync.min_active_peers;
-        let timeout_ms = config.node_config.sync.peer_wait_timeout_millis;
         let count = peer_list
-            .wait_for_active_peers(min_count, Duration::from_millis(timeout_ms))
+            .wait_for_active_peers(
+                params.min_active_peers,
+                Duration::from_millis(params.peer_wait_timeout_millis),
+            )
             .await;
-        if count < min_count {
+        if count < params.min_active_peers {
             warn!(
                 "Sync task: proceeding with {} active peer(s) (wanted {}) after {}ms timeout",
-                count, min_count, timeout_ms
+                count, params.min_active_peers, params.peer_wait_timeout_millis
             );
         }
     }
