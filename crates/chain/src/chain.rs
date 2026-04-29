@@ -1583,6 +1583,7 @@ impl IrysNode {
             &service_senders,
             runtime_handle.clone(),
             chunk_ingress_state.clone(),
+            shutdown_token.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 

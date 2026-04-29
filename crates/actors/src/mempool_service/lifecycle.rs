@@ -152,7 +152,11 @@ impl Inner {
         // Hold write lock only for the revalidation itself, then release before
         // sending the cache-service message (avoids holding the lock across a channel send).
         let expired_by_data_root = {
-            let mut state = self.mempool_state.write_for_reorg().await;
+            let mut state = self
+                .mempool_state
+                .write_for_reorg()
+                .await
+                .map_err(|e| eyre::eyre!("mempool reorg write lock contention: {e}"))?;
 
             // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
             let expired_by_data_root =
