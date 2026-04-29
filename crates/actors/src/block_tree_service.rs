@@ -663,9 +663,30 @@ impl BlockTreeServiceInner {
                     let blocks_to_confirm = new_fork_blocks.clone();
 
                     debug!(
-                        "Reorg at block height {} with {}",
-                        arc_block.height, arc_block.block_hash
+                        "Reorg at block height {} with {}, old fork is {} blocks long, new one is {} blocks",
+                        arc_block.height,
+                        arc_block.block_hash,
+                        old_fork_blocks.len(),
+                        new_fork_blocks.len()
                     );
+
+                    // Migration for the current tick hasn't run yet (it happens after
+                    // this reorg path, in migrate_block()). The highest migrated block is
+                    // at old_tip - migration_depth, from the previous tick's migration.
+                    // old_fork_blocks excludes the fork point (common ancestor), so a
+                    // migrated block is orphaned only when the fork is strictly deeper
+                    // than migration_depth.
+                    if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
+                        error!(
+                            reorg_depth = old_fork_blocks.len(),
+                            migration_depth = self.config.consensus.block_migration_depth,
+                            fork_height,
+                            fork_hash = %fork_hash,
+                            new_tip = %block_hash,
+                            "reorg depth exceeds migration depth — already-migrated block would be reverted",
+                        );
+                    }
+
                     metrics::record_reorg();
                     metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
 
