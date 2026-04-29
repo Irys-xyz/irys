@@ -128,6 +128,7 @@ sudo chmod 644 /Library/LaunchDaemons/limit.maxfiles.plist
 
 sudo launchctl load -w /Library/LaunchDaemons/limit.maxfiles.plist
 ```
+
 ## WSL2 clock instability
 
 If you're running tests under WSL2, you may see intermittent failures around
