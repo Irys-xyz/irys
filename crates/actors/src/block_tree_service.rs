@@ -134,10 +134,13 @@ impl BlockTreeService {
                         chain_sync_state,
                     },
                 };
-                block_tree_service
-                    .start()
-                    .await
-                    .expect("BlockTree encountered an irrecoverable error")
+                if let Err(e) = block_tree_service.start().await {
+                    error!(
+                        error = ?e,
+                        "BlockTree service exited with an error; lifecycle will treat \
+                         this as ServiceExited and run the ordered-shutdown path"
+                    );
+                }
             }
             .instrument(tracing::Span::current()),
         );
@@ -283,7 +286,12 @@ impl BlockTreeServiceInner {
     ) -> eyre::Result<(), PreValidationError> {
         let block_header = block.header();
         let block_hash = &block_header.block_hash;
-        let mut cache = self.cache.write().expect("cache lock poisoned");
+        let mut cache = self.cache.write().map_err(|_| {
+            error!("block tree cache write lock poisoned in on_block_prevalidated");
+            PreValidationError::CachePoisoned {
+                at: "on_block_prevalidated",
+            }
+        })?;
 
         // Early return if block already exists
         if let Some(existing) = cache.get_block(block_hash) {
@@ -294,16 +302,17 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
+        // The parent must be in the cache because pre-validation only fires
+        // after the parent has been observed. Reorg-driven cache prunes can
+        // still race this lookup; previously this panicked. Now surface as a
+        // typed error so the caller (validation service) can re-queue or drop.
         let parent_block_entry = cache
             .blocks
             .get(&block_header.previous_block_hash)
-            .unwrap_or_else(|| {
-                panic!(
-                    "block {} needs to be in cache at height: {}",
-                    block_header.previous_block_hash,
-                    block_header.height - 1
-                )
-            });
+            .ok_or_else(|| PreValidationError::ParentNotInCache {
+                parent_hash: block_header.previous_block_hash,
+                expected_height: block_header.height.saturating_sub(1),
+            })?;
 
         // Get the parent block's commitment snapshot
         let prev_commitment_snapshot = parent_block_entry.commitment_snapshot.clone();
@@ -416,10 +425,11 @@ impl BlockTreeServiceInner {
             self.chain_sync_state
                 .record_block_validation_error(error_message);
 
-            let mut cache = self
-                .cache
-                .write()
-                .expect("block tree cache write lock poisoned");
+            let mut cache = self.cache.write().map_err(|_| {
+                eyre::eyre!(
+                    "block tree cache write lock poisoned in on_block_validation_finished (invalid path)"
+                )
+            })?;
 
             let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
             let height = maybe_height.unwrap_or(0);
@@ -467,7 +477,7 @@ impl BlockTreeServiceInner {
         let Some(height) = self
             .cache
             .read()
-            .expect("cache read lock poisoned")
+            .map_err(|_| eyre::eyre!("block tree cache read lock poisoned looking up height"))?
             .get_block(&block_hash)
             .map(|block| block.height)
         else {
@@ -492,7 +502,9 @@ impl BlockTreeServiceInner {
             blocks_to_confirm,
         ) = {
             let binding = self.cache.clone();
-            let mut cache = binding.write().expect("cache write lock poisoned");
+            let mut cache = binding.write().map_err(|_| {
+                eyre::eyre!("block tree cache write lock poisoned in on_block_validation_finished")
+            })?;
 
             // Get the current tip before any changes
             // Note: We can't rely on canonical chain here, because the canonical chain was already updated when this
@@ -530,7 +542,24 @@ impl BlockTreeServiceInner {
 
                 // Even though the tip didn't change, broadcast the state update so that
                 // child blocks waiting in wait_for_parent_validation can proceed.
-                let (_, &state) = cache.get_block_and_status(&block_hash).unwrap_or_else(|| panic!("block {block_hash} (height {height}) not in cache after mark_block_as_valid succeeded under the same write lock"));
+                //
+                // Invariant note: mark_block_as_valid succeeded above under this same
+                // write lock, so the block must still be in the cache. We defensively
+                // fall back to NotOnchain(Unknown) instead of panicking — if the
+                // invariant is ever violated by a future refactor, the broadcast still
+                // fires with a recognisable state and downstream waiters unstick.
+                let state = cache
+                    .get_block_and_status(&block_hash)
+                    .map(|(_, s)| *s)
+                    .unwrap_or_else(|| {
+                        error!(
+                            block.hash = %block_hash,
+                            block.height = height,
+                            "invariant violation: block missing from cache after \
+                             mark_block_as_valid succeeded under the same write lock"
+                        );
+                        ChainState::NotOnchain(BlockState::Unknown)
+                    });
 
                 drop(cache);
 
@@ -556,11 +585,19 @@ impl BlockTreeServiceInner {
                 .iter()
                 .any(|bh| bh.header().block_hash == old_tip);
 
-            // Get block info before mutable operations
-            let block_entry = cache
-                .blocks
-                .get(&block_hash)
-                .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
+            // Get block info before mutable operations.
+            // We just observed the block in cache when computing `height` above (under
+            // the read lock), and mark_block_as_valid succeeded under this write lock.
+            // A missing entry means a concurrent prune raced these two locks — log
+            // and abort this validation pass instead of panicking.
+            let block_entry = cache.blocks.get(&block_hash).ok_or_else(|| {
+                error!(
+                    block.hash = %block_hash,
+                    block.height = height,
+                    "block entry pruned between height lookup and validation processing"
+                );
+                eyre::eyre!("block entry {block_hash} pruned during validation processing")
+            })?;
             let arc_block = block_entry.block.header().clone();
 
             let tip_changed = {
@@ -604,19 +641,30 @@ impl BlockTreeServiceInner {
                     // Collect all blocks that are being orphaned (from the prior canonical chain)
                     let mut orphaned_blocks =
                         cache.get_fork_blocks(old_tip_block.previous_block_hash);
-                    orphaned_blocks.push(
-                        cache
-                            .blocks
-                            .get(&old_tip_block.block_hash)
-                            .expect("old tip must be in cache")
-                            .block
-                            .clone(),
-                    );
+                    let old_tip_entry =
+                        cache.blocks.get(&old_tip_block.block_hash).ok_or_else(|| {
+                            error!(
+                                old_tip = %old_tip_block.block_hash,
+                                "old tip pruned from cache before reorg fork-point search"
+                            );
+                            eyre::eyre!(
+                                "old tip {} not in cache during reorg fork-point search",
+                                old_tip_block.block_hash
+                            )
+                        })?;
+                    orphaned_blocks.push(old_tip_entry.block.clone());
 
-                    // Find the fork point where the old and new chains diverged
-                    let fork_block_sealed = orphaned_blocks
-                        .first()
-                        .expect("no orphaned blocks to determine fork point");
+                    // Find the fork point where the old and new chains diverged.
+                    // orphaned_blocks must be non-empty: we just pushed the old tip above.
+                    // If this fires, the invariant was violated by a concurrent mutation
+                    // — log and abort the reorg rather than panicking.
+                    let fork_block_sealed = orphaned_blocks.first().ok_or_else(|| {
+                        error!(
+                            old_tip = %old_tip_block.block_hash,
+                            "no orphaned blocks present for reorg fork-point search"
+                        );
+                        eyre::eyre!("no orphaned blocks to determine fork point")
+                    })?;
                     let fork_hash = fork_block_sealed.header().block_hash;
                     let fork_height = fork_block_sealed.header().height;
                     let fork_block = fork_block_sealed.header().clone();
@@ -647,7 +695,7 @@ impl BlockTreeServiceInner {
                         new_canonical.0,
                         fork_hash,
                         fork_height,
-                    );
+                    )?;
 
                     // Pass sealed blocks directly (cheap Arc::clone, no deep copy)
                     let old_fork_blocks: Vec<Arc<SealedBlock>> = old_fork
@@ -729,11 +777,23 @@ impl BlockTreeServiceInner {
                         None
                     };
 
+                    // The block was just confirmed under this same write lock — it
+                    // must be in the cache. A missing entry indicates the invariant
+                    // was violated by a future refactor; abort the confirmation
+                    // path rather than panicking.
                     let tip_sealed = cache
                         .blocks
                         .get(&block_hash)
                         .map(|meta| Arc::clone(&meta.block))
-                        .expect("confirmed block must be in block tree cache");
+                        .ok_or_else(|| {
+                            error!(
+                                block.hash = %block_hash,
+                                "confirmed block missing from cache after tip change"
+                            );
+                            eyre::eyre!(
+                                "confirmed block {block_hash} missing from cache after tip change"
+                            )
+                        })?;
                     let blocks_to_confirm = vec![tip_sealed];
 
                     (new_epoch_block, None, new_fcu_markers, blocks_to_confirm)
@@ -798,14 +858,24 @@ impl BlockTreeServiceInner {
             // Emit consensus events
             self.emit_fcu(markers).await?;
 
-            // Emit block confirmations for all relevant blocks
+            // Emit block confirmations for all relevant blocks. The mempool may
+            // already be shutting down (its receiver dropped); log and continue
+            // — block confirmation itself is still valid, the mempool just
+            // won't be informed of this particular block.
             for sealed_block in &blocks_to_confirm {
-                self.service_senders
-                    .mempool
-                    .send_traced(MempoolServiceMessage::BlockConfirmed(Arc::clone(
-                        sealed_block,
-                    )))
-                    .expect("mempool service has unexpectedly become unreachable");
+                if let Err(e) =
+                    self.service_senders
+                        .mempool
+                        .send_traced(MempoolServiceMessage::BlockConfirmed(Arc::clone(
+                            sealed_block,
+                        )))
+                {
+                    error!(
+                        block.hash = %sealed_block.header().block_hash,
+                        ?e,
+                        "Failed to send BlockConfirmed to mempool — mempool service unreachable"
+                    );
+                }
             }
 
             // Delegate migration to BlockMigrationService (validates continuity internally)
@@ -814,19 +884,32 @@ impl BlockTreeServiceInner {
             }
         }
 
-        // Broadcast difficulty update to miners if tip difficulty changed from parent
-        let parent_diff_changed = tip_changed && {
-            let cache = self.cache.read().expect("cache read lock poisoned");
-            let parent_block = cache
-                .get_block(&arc_block.previous_block_hash)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "parent block {} not found in cache while broadcasting difficulty update",
-                        arc_block.previous_block_hash
-                    )
-                });
-            parent_block.diff != arc_block.diff
-        };
+        // Broadcast difficulty update to miners if tip difficulty changed from parent.
+        // On either lock poisoning or missing parent (the latter is a strong invariant
+        // — the tip just changed so the parent must be present — but a panic here
+        // would take the node down for a non-critical broadcast), skip the diff check
+        // and log instead. The downstream miners will pick up the difficulty on the
+        // next canonical update.
+        let parent_diff_changed = tip_changed
+            && match self.cache.read() {
+                Ok(cache) => match cache.get_block(&arc_block.previous_block_hash) {
+                    Some(parent_block) => parent_block.diff != arc_block.diff,
+                    None => {
+                        error!(
+                            parent_hash = %arc_block.previous_block_hash,
+                            block.hash = %arc_block.block_hash,
+                            "parent block missing from cache while broadcasting difficulty update; skipping"
+                        );
+                        false
+                    }
+                },
+                Err(_) => {
+                    error!(
+                        "block tree cache read lock poisoned during difficulty broadcast; skipping"
+                    );
+                    false
+                }
+            };
         if parent_diff_changed {
             self.service_senders
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
@@ -863,7 +946,7 @@ impl BlockTreeServiceInner {
         let epoch_snapshot = self
             .cache
             .read()
-            .expect("cache read lock poisoned")
+            .map_err(|_| eyre::eyre!("block tree cache read lock poisoned in send_epoch_events"))?
             .get_epoch_snapshot(&block_hash)
             .ok_or_else(|| {
                 eyre::eyre!(
@@ -913,31 +996,52 @@ impl BlockTreeServiceInner {
     }
 }
 
-/// Prunes two canonical chains at the specified common ancestor, returning only the divergent portions
-/// Returns (old_chain_from_fork, new_chain_from_fork)
+/// Prunes two canonical chains at the specified common ancestor, returning only the divergent portions.
+///
+/// Returns `Err` when the ancestor is missing from either chain — this is a
+/// no-common-ancestor reorg, the same divergence class F4 detects at startup.
+/// The reorg path callers log and abort the reorg instead of panicking.
 pub fn prune_chains_at_ancestor(
     old_chain: Vec<BlockTreeEntry>,
     new_chain: Vec<BlockTreeEntry>,
     ancestor_hash: BlockHash,
     ancestor_height: u64,
-) -> (Vec<BlockTreeEntry>, Vec<BlockTreeEntry>) {
+) -> eyre::Result<(Vec<BlockTreeEntry>, Vec<BlockTreeEntry>)> {
     // Find the ancestor index in the old chain
     let old_ancestor_idx = old_chain
         .iter()
         .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
-        .expect("Common ancestor should exist in old chain");
+        .ok_or_else(|| {
+            error!(
+                ancestor.hash = %ancestor_hash,
+                ancestor.height = ancestor_height,
+                "common ancestor missing from old chain during reorg fork-point trim"
+            );
+            eyre::eyre!(
+                "common ancestor {ancestor_hash} (height {ancestor_height}) not in old chain"
+            )
+        })?;
 
     // Find the ancestor index in the new chain
     let new_ancestor_idx = new_chain
         .iter()
         .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
-        .expect("Common ancestor should exist in new chain");
+        .ok_or_else(|| {
+            error!(
+                ancestor.hash = %ancestor_hash,
+                ancestor.height = ancestor_height,
+                "common ancestor missing from new chain during reorg fork-point trim"
+            );
+            eyre::eyre!(
+                "common ancestor {ancestor_hash} (height {ancestor_height}) not in new chain"
+            )
+        })?;
 
     // Return the portions after the common ancestor (excluding the ancestor itself)
     let old_divergent = old_chain[old_ancestor_idx + 1..].to_vec();
     let new_divergent = new_chain[new_ancestor_idx + 1..].to_vec();
 
-    (old_divergent, new_divergent)
+    Ok((old_divergent, new_divergent))
 }
 
 /// Result of block validation.
@@ -968,4 +1072,79 @@ pub fn get_block_header(
 
     // Fall back to database
     db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &block_hash, include_chunk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::BlockTransactions;
+    use rstest::rstest;
+
+    fn entry_at(height: u64, hash_byte: u8) -> BlockTreeEntry {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.block_hash = H256([hash_byte; 32]);
+        let sealed = SealedBlock::new_unchecked(Arc::new(header), BlockTransactions::default());
+        make_block_tree_entry(Arc::new(sealed))
+    }
+
+    /// Common-ancestor present at the same hash and height in both chains:
+    /// the function returns the divergent suffix of each chain (excluding the
+    /// ancestor itself).
+    #[test]
+    fn prune_chains_at_ancestor_returns_divergent_suffixes_when_ancestor_present() {
+        let ancestor = entry_at(10, 0xAA);
+        let old = vec![ancestor.clone(), entry_at(11, 0xB1), entry_at(12, 0xB2)];
+        let new = vec![ancestor.clone(), entry_at(11, 0xC1)];
+
+        let (old_div, new_div) =
+            prune_chains_at_ancestor(old, new, ancestor.block_hash(), ancestor.height())
+                .expect("ancestor present in both chains");
+
+        assert_eq!(old_div.len(), 2);
+        assert_eq!(old_div[0].height(), 11);
+        assert_eq!(old_div[1].height(), 12);
+        assert_eq!(new_div.len(), 1);
+        assert_eq!(new_div[0].height(), 11);
+        assert_eq!(new_div[0].block_hash(), H256([0xC1; 32]));
+    }
+
+    /// Reorg fork-point trim must surface a typed error rather than panic when
+    /// the supposed common ancestor is missing from one or both chains. F4
+    /// catches this class of divergence at startup; here we ensure runtime
+    /// reorg paths do not abort the node.
+    #[rstest]
+    #[case::missing_in_old(
+        vec![entry_at(11, 0xB1), entry_at(12, 0xB2)],
+        vec![entry_at(10, 0xAA), entry_at(11, 0xC1)],
+        "old chain"
+    )]
+    #[case::missing_in_new(
+        vec![entry_at(10, 0xAA), entry_at(11, 0xB1)],
+        vec![entry_at(11, 0xC1), entry_at(12, 0xC2)],
+        "new chain"
+    )]
+    #[case::missing_in_both(
+        vec![entry_at(11, 0xB1), entry_at(12, 0xB2)],
+        vec![entry_at(11, 0xC1), entry_at(12, 0xC2)],
+        "old chain"
+    )]
+    fn prune_chains_at_ancestor_returns_err_when_ancestor_missing(
+        #[case] old: Vec<BlockTreeEntry>,
+        #[case] new: Vec<BlockTreeEntry>,
+        #[case] expected_chain_in_msg: &str,
+    ) {
+        let ancestor_hash = H256([0xAA; 32]);
+        let result = prune_chains_at_ancestor(old, new, ancestor_hash, 10);
+        let err = result.expect_err("expected Err when ancestor is missing");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(expected_chain_in_msg),
+            "error must name the chain missing the ancestor; got: {msg}"
+        );
+        assert!(
+            !msg.contains("panic"),
+            "must not surface panic-style messages; got: {msg}"
+        );
+    }
 }

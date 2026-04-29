@@ -314,6 +314,21 @@ pub enum PreValidationError {
     /// Failed to add block to block tree
     #[error("Failed to add block {block_hash} to block tree: {reason}")]
     AddBlockFailed { block_hash: H256, reason: String },
+
+    /// The block tree cache RwLock was poisoned by a prior caller's panic.
+    /// Surfaces here so the caller can decide whether to retry, drop, or
+    /// escalate — instead of re-panicking at `expect("cache lock poisoned")`.
+    #[error("block tree cache lock poisoned at: {at}")]
+    CachePoisoned { at: &'static str },
+
+    /// Parent block referenced by an incoming pre-validated block was not
+    /// present in the cache. Reorg-driven cache prunes can race with this
+    /// path; previously panicked.
+    #[error("parent block {parent_hash} not in cache (expected at height {expected_height})")]
+    ParentNotInCache {
+        parent_hash: H256,
+        expected_height: u64,
+    },
 }
 
 /// Validation error type that covers all block validation failures.
