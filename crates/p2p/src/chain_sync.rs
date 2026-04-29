@@ -836,30 +836,40 @@ async fn initialize_sync_mode(
 
     if params.is_a_genesis_node {
         warn!(
-            "Sync task: Because the node is a genesis node, waiting for active peers for {}, and if no peers are added, then skipping the sync task",
+            "Sync task: Because the node is a genesis node, waiting for active peers for {}ms, and if no peers are added, then skipping the sync task",
             params.genesis_peer_discovery_timeout_millis
         );
-        match timeout(
-            Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
-            peer_list.wait_for_active_peers(),
-        )
-        .await
-        {
-            Ok(()) => {
-                info!("Genesis node has active peers");
-            }
-            Err(elapsed) => {
-                warn!(
-                    "Sync task: Due to the node being in genesis mode, after waiting for active peers for {} and no peers showing up, skipping the sync task",
-                    elapsed
-                );
-                sync_state.finish_sync();
-                return Ok(false);
-            }
-        };
+        let count = peer_list
+            .wait_for_active_peers(
+                config.node_config.sync.min_active_peers,
+                Duration::from_millis(params.genesis_peer_discovery_timeout_millis),
+            )
+            .await;
+        if count == 0 {
+            warn!(
+                "Sync task: Due to the node being in genesis mode, after waiting for active peers for {}ms and no peers showing up, skipping the sync task",
+                params.genesis_peer_discovery_timeout_millis
+            );
+            sync_state.finish_sync();
+            return Ok(false);
+        }
+        info!(
+            "Genesis node has {} active peer(s) (wanted {})",
+            count, config.node_config.sync.min_active_peers
+        );
     } else {
         sync_state.set_is_syncing(true);
-        peer_list.wait_for_active_peers().await;
+        let min_count = config.node_config.sync.min_active_peers;
+        let timeout_ms = config.node_config.sync.peer_wait_timeout_millis;
+        let count = peer_list
+            .wait_for_active_peers(min_count, Duration::from_millis(timeout_ms))
+            .await;
+        if count < min_count {
+            warn!(
+                "Sync task: proceeding with {} active peer(s) (wanted {}) after {}ms timeout",
+                count, min_count, timeout_ms
+            );
+        }
     }
 
     debug!("Sync task: Syncing started");

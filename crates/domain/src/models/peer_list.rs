@@ -319,36 +319,56 @@ impl PeerList {
             .contains_key(api_address)
     }
 
-    pub async fn wait_for_active_peers(&self) {
-        // Fast path: return immediately if any active peers exist
-        {
+    /// Wait until at least `min_count` peers are active+online, or `timeout` elapses.
+    ///
+    /// Returns the count of active+online peers when the wait ends. If the count is
+    /// `>= min_count` the wait was satisfied; if it is less, the timeout fired and
+    /// the caller is expected to proceed best-effort.
+    pub async fn wait_for_active_peers(&self, min_count: usize, timeout: Duration) -> usize {
+        let count_active = || -> usize {
             let bindings = self.read();
-            let persistent_active = bindings
+            let persistent = bindings
                 .persistent_peers_cache
                 .values()
-                .any(|peer| peer.reputation_score.is_active() && peer.is_online);
-            let purgatory_active = bindings
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            let purgatory = bindings
                 .unstaked_peer_purgatory
                 .iter()
                 .map(|(_, v)| v)
-                .any(|peer| peer.reputation_score.is_active() && peer.is_online);
-            if persistent_active || purgatory_active {
-                return;
-            }
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            persistent + purgatory
+        };
+
+        // Fast path: already satisfied
+        let initial = count_active();
+        if initial >= min_count {
+            return initial;
         }
 
-        // Slow path: subscribe and wait for the next BecameActive event
+        // Slow path: subscribe and recount on every event wakeup. Recounting (rather
+        // than tracking deltas) ensures BecameInactive transitions correctly drop
+        // the count.
         let mut rx = self.subscribe_to_peer_events();
+        let deadline = tokio::time::Instant::now() + timeout;
+
         loop {
-            match rx.recv().await {
-                Ok(PeerEvent::BecameActive { .. }) => return,
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            let current = count_active();
+            if current >= min_count {
+                return current;
+            }
+
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(_)) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                     warn!("peer events channel closed while waiting for active peers");
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     rx = self.subscribe_to_peer_events();
                 }
+                // Deadline elapsed: return whatever the current count is.
+                Err(_) => return count_active(),
             }
         }
     }
@@ -1939,6 +1959,115 @@ mod tests {
         assert_eq!(
             active_peers_count_both, 2,
             "Both staked and unstaked active peers should be counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_returns_immediately_when_already_satisfied() {
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (_addr_a, _id_a, peer_a) = create_test_peer(1);
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_a, true);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        // Both peers start with PeerScore::INITIAL = 50 which is >= ACTIVE_THRESHOLD = 20
+        // and is_online = true, so both are active+online.
+
+        let start = std::time::Instant::now();
+        let count = peer_list
+            .wait_for_active_peers(2, Duration::from_secs(5))
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(count >= 2, "expected at least 2 active peers, got {count}");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "fast path should return ~immediately, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_satisfied_via_events() {
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let waiter = peer_list.clone();
+
+        let handle = tokio::spawn(async move {
+            waiter.wait_for_active_peers(2, Duration::from_secs(2)).await
+        });
+
+        // Give the waiter time to enter the slow path
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (_addr_a, _id_a, peer_a) = create_test_peer(1);
+        peer_list.add_or_update_peer(peer_a, true);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        let count = handle.await.expect("waiter task");
+        assert!(count >= 2, "expected at least 2 after second peer added, got {count}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_timeout_partial() {
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (_addr, _id, peer) = create_test_peer(1);
+        peer_list.add_or_update_peer(peer, true);
+
+        let start = std::time::Instant::now();
+        let count = peer_list
+            .wait_for_active_peers(3, Duration::from_millis(200))
+            .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(count, 1, "only one peer was added");
+        assert!(
+            elapsed >= Duration::from_millis(190),
+            "should have waited near the full timeout, elapsed={:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_timeout_zero_peers() {
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let count = peer_list
+            .wait_for_active_peers(1, Duration::from_millis(200))
+            .await;
+
+        assert_eq!(count, 0, "no peers were added");
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_recounts_when_peer_goes_offline() {
+        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (addr_a, _id_a, peer_a) = create_test_peer(1);
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_a, true);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        let waiter = peer_list.clone();
+        let handle = tokio::spawn(async move {
+            // N=3 with only 2 peers online; we want the slow path so the offline
+            // transition is observed via PeerEvent.
+            waiter.wait_for_active_peers(3, Duration::from_millis(300)).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Flip peer A offline mid-wait. This emits PeerEvent::BecameInactive.
+        peer_list.set_is_online(&addr_a, false);
+
+        let count = handle.await.expect("waiter task");
+        assert_eq!(
+            count, 1,
+            "BecameInactive should drop A from the count without satisfying the wait"
         );
     }
 }
