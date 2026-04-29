@@ -1805,24 +1805,28 @@ impl BlockProdStrategy for ProductionStrategy {
 
 #[tracing::instrument(level = "trace", skip_all)]
 pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> UnixTimestampMs {
-    let now_ms = UnixTimestampMs::now().unwrap();
     let prev_secs = prev_block_header.timestamp.to_secs();
 
-    // If we're in the same second as the previous block, wait until the next second.
-    // This prevents EVM timestamp collisions (EVM uses second-precision).
-    // Dev configs can easily trigger this behaviour due to fast block times.
-    if now_ms.to_secs() == prev_secs {
+    // EVM block timestamps are seconds-precision and must be strictly greater
+    // than the parent's. Loop until wall-clock time has actually advanced past
+    // the parent's second. We re-check after each sleep because tokio's sleep
+    // is monotonic-clock based, while the timestamp comes from the realtime
+    // clock — the two can drift (notably under WSL2, which periodically
+    // resyncs CLOCK_REALTIME against the Windows host and can lurch by
+    // hundreds of ms or seconds), so a one-shot computed wait is unsafe.
+    loop {
+        let now_ms = UnixTimestampMs::now().unwrap();
+        if now_ms.to_secs() > prev_secs {
+            return now_ms;
+        }
         let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
-        let wait_duration = Duration::from_millis(1000 - ms_into_sec);
+        let wait_duration = Duration::from_millis(1001 - ms_into_sec);
         info!(
             "Waiting {:.2?} to prevent timestamp overlap",
             &wait_duration
         );
         tokio::time::sleep(wait_duration).await;
-        return UnixTimestampMs::now().unwrap();
     }
-
-    now_ms
 }
 
 /// Calculates the total number of full chunks needed to store a list of transactions,
