@@ -1088,6 +1088,8 @@ impl NodeConfig {
             stake_pledge_drives: false,
             sync: SyncConfig {
                 min_active_peers: 1,
+                // 100ms — fast-fail to best-effort in tests rather than stalling 20s.
+                peer_wait_timeout_millis: 100,
                 ..SyncConfig::default()
             },
             run_mode: RunMode::Test,
@@ -1454,7 +1456,10 @@ mod run_mode_tests {
     fn testing_node_config_overrides_sync_min_active_peers() {
         let cfg = super::NodeConfig::testing();
         assert_eq!(cfg.sync.min_active_peers, 1, "testing override expected");
-        assert_eq!(cfg.sync.peer_wait_timeout_millis, 20_000);
+        assert_eq!(
+            cfg.sync.peer_wait_timeout_millis, 100,
+            "testing override: short timeout to fast-fail rather than stall 20s"
+        );
     }
 
     #[test]
