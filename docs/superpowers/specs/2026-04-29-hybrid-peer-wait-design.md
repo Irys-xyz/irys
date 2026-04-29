@@ -31,35 +31,45 @@ whatever count we have, log a warning. Both N and X are configurable.
 - This change does not add cross-peer agreement / quorum at startup; downstream
   fetches (`get_block_index`, `check_and_update_full_validation_switch_height`)
   remain "first successful peer wins". Tightening those is a separate effort.
-- This change does not move related fields into a `SyncConfig` substruct; that
-  is left as a tracked TODO (see Follow-ups).
+- This change does not relocate the existing top-level
+  `genesis_peer_discovery_timeout_millis` into `SyncConfig`; that is left as
+  a small follow-up TODO.
 
 ## Design
 
 ### Config
 
-Two new fields on `NodeConfig` (`crates/types/src/config/node.rs`):
+Two new fields on the existing `SyncConfig` struct
+(`crates/types/src/config/node.rs:709`), accessed as
+`node_config.sync.{min_active_peers, peer_wait_timeout_millis}`:
 
 ```rust
-// TODO: consolidate {min_active_peers_for_sync, peer_wait_timeout_millis,
-// genesis_peer_discovery_timeout_millis} into a SyncConfig substruct.
-#[serde(default = "default_min_active_peers_for_sync")]
-pub min_active_peers_for_sync: usize,
-
-#[serde(default = "default_peer_wait_timeout_millis")]
-pub peer_wait_timeout_millis: u64,
+pub struct SyncConfig {
+    // ... existing fields ...
+    /// Minimum number of active+online peers required before chain sync proceeds.
+    /// If unmet within `peer_wait_timeout_millis`, sync proceeds best-effort
+    /// with however many peers are available.
+    pub min_active_peers: usize,
+    /// How long to wait for `min_active_peers` peers before proceeding
+    /// best-effort. Does not apply to the genesis branch, which uses
+    /// `genesis_peer_discovery_timeout_millis`.
+    pub peer_wait_timeout_millis: u64,
+}
 ```
 
 | field | production default | testing override |
 |---|---|---|
-| `min_active_peers_for_sync` | 3 | 1 |
-| `peer_wait_timeout_millis` | 20_000 | 20_000 |
+| `sync.min_active_peers` | 3 | 1 |
+| `sync.peer_wait_timeout_millis` | 20_000 | 20_000 |
 
-The defaults match what `NodeConfig::testing()` will set; the testing override
-exists to avoid coupling tests to the production minimum.
+`SyncConfig::default()` returns the production defaults. Tests using
+`NodeConfig::testing()` get the override via the existing testing-config
+construction path. The production builder explicitly matches the default.
 
-A second `// TODO: consolidate into SyncConfig` comment is placed above
-`genesis_peer_discovery_timeout_millis` so the future cleanup is easy to find.
+`genesis_peer_discovery_timeout_millis` remains top-level on `NodeConfig`
+as a pre-existing outlier — it is the genesis-only escape window, not a
+general sync tunable. A small `// TODO: move into SyncConfig` comment is
+left above it so a follow-up cleanup is easy to find.
 
 ### API
 
@@ -108,7 +118,7 @@ escape hatch by inspecting the returned count:
 ```rust
 let count = peer_list
     .wait_for_active_peers(
-        config.node_config.min_active_peers_for_sync,
+        config.node_config.sync.min_active_peers,
         Duration::from_millis(config.node_config.genesis_peer_discovery_timeout_millis),
     )
     .await;
@@ -131,16 +141,16 @@ ignore returned count beyond a warning log:
 sync_state.set_is_syncing(true);
 let count = peer_list
     .wait_for_active_peers(
-        config.node_config.min_active_peers_for_sync,
-        Duration::from_millis(config.node_config.peer_wait_timeout_millis),
+        config.node_config.sync.min_active_peers,
+        Duration::from_millis(config.node_config.sync.peer_wait_timeout_millis),
     )
     .await;
-if count < config.node_config.min_active_peers_for_sync {
+if count < config.node_config.sync.min_active_peers {
     warn!(
         "Sync task: proceeding with {} active peers (wanted {}) after {}ms timeout",
         count,
-        config.node_config.min_active_peers_for_sync,
-        config.node_config.peer_wait_timeout_millis,
+        config.node_config.sync.min_active_peers,
+        config.node_config.sync.peer_wait_timeout_millis,
     );
 }
 ```
@@ -197,9 +207,9 @@ No new chain_sync.rs integration tests; the unit-level guarantees of
 
 ## Follow-ups
 
-- Consolidate `min_active_peers_for_sync`, `peer_wait_timeout_millis`, and
-  `genesis_peer_discovery_timeout_millis` into a `SyncConfig` substruct on
-  `NodeConfig`. Tracked via TODO comments at the field sites.
+- Move `genesis_peer_discovery_timeout_millis` from top-level `NodeConfig`
+  into `SyncConfig` so all sync-related tunables live together. Tracked via
+  a `// TODO` comment at the field site.
 - Consider tightening "first responder wins" in `get_block_index` and
   `check_and_update_full_validation_switch_height` to require agreement
   across multiple trusted peers at startup. Out of scope for this change.
