@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777463832665,
+  "lastUpdate": 1777474209603,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2665,6 +2665,86 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 273.530517,
             "range": "± 0.889853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "00fe7c2fcc54da21506ada2eae6db9ba4414c982",
+          "message": "fix: clock drift/monotonic timers",
+          "timestamp": "2026-04-29T11:35:11Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1402/commits/00fe7c2fcc54da21506ada2eae6db9ba4414c982"
+        },
+        "date": 1777474208593,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074655,
+            "range": "± 0.000169",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.8689,
+            "range": "± 0.896272",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 967.667936,
+            "range": "± 0.725466",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117509,
+            "range": "± 0.000773",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.5441,
+            "range": "± 0.623168",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1524.807811,
+            "range": "± 2.373383",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.454585,
+            "range": "± 0.019976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.952481,
+            "range": "± 1.650531",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.641545,
+            "range": "± 0.966645",
             "unit": "ms/iter"
           },
           {
