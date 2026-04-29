@@ -813,6 +813,7 @@ mod tests {
         // TOML doesn't include these fields, so they default to production values
         expected_config.run_mode = RunMode::default();
         expected_config.database = DatabaseConfig::default();
+        expected_config.sync = SyncConfig::default();
         expected_config.reth.db_sync_mode = DbSyncMode::Durable;
         expected_config.reth.cross_block_cache_size_megabytes = None;
         expected_config.reth.additional_validation_tasks = 2;
