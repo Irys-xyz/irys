@@ -146,6 +146,7 @@ pub struct NodeConfig {
     #[serde(default)]
     pub stake_pledge_drives: bool,
 
+    // TODO: move into SyncConfig so all sync-related tunables live together.
     #[serde(default = "default_genesis_peer_discovery_timeout_millis")]
     pub genesis_peer_discovery_timeout_millis: u64,
 
@@ -719,6 +720,14 @@ pub struct SyncConfig {
     pub wait_queue_slot_timeout_secs: u64,
     /// Maximum consecutive timeout attempts when waiting for a queue slot with no active validations
     pub wait_queue_slot_max_attempts: usize,
+    /// Minimum number of active+online peers required before chain sync proceeds.
+    /// If unmet within `peer_wait_timeout_millis`, sync proceeds best-effort
+    /// with however many peers are available.
+    pub min_active_peers: usize,
+    /// How long to wait for `min_active_peers` peers before proceeding
+    /// best-effort. Does not apply to the genesis branch, which uses
+    /// `NodeConfig::genesis_peer_discovery_timeout_millis`.
+    pub peer_wait_timeout_millis: u64,
 }
 
 impl Default for SyncConfig {
@@ -731,6 +740,9 @@ impl Default for SyncConfig {
             enable_periodic_sync_check: true,
             wait_queue_slot_timeout_secs: 30,
             wait_queue_slot_max_attempts: 3,
+            // Production: require 3 active+online peers before chain sync proceeds.
+            min_active_peers: 3,
+            peer_wait_timeout_millis: 20_000,
         }
     }
 }
@@ -1074,7 +1086,12 @@ impl NodeConfig {
             p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
-            sync: SyncConfig::default(),
+            sync: SyncConfig {
+                min_active_peers: 1,
+                // 100ms — fast-fail to best-effort in tests rather than stalling 20s.
+                peer_wait_timeout_millis: 100,
+                ..SyncConfig::default()
+            },
             run_mode: RunMode::Test,
             database: DatabaseConfig {
                 sync_mode: DbSyncMode::UtterlyNoSync,
@@ -1433,5 +1450,22 @@ mod run_mode_tests {
         // vdf.core_pinning defaults to Auto
         assert_eq!(config.vdf.core_pinning, CorePinning::Auto);
         assert_eq!(config.vdf.core_pinning, CorePinning::default());
+    }
+
+    #[test]
+    fn testing_node_config_overrides_sync_min_active_peers() {
+        let cfg = super::NodeConfig::testing();
+        assert_eq!(cfg.sync.min_active_peers, 1, "testing override expected");
+        assert_eq!(
+            cfg.sync.peer_wait_timeout_millis, 100,
+            "testing override: short timeout to fast-fail rather than stall 20s"
+        );
+    }
+
+    #[test]
+    fn sync_config_defaults_match_spec() {
+        let cfg = super::SyncConfig::default();
+        assert_eq!(cfg.min_active_peers, 3, "production default expected");
+        assert_eq!(cfg.peer_wait_timeout_millis, 20_000);
     }
 }
