@@ -1964,7 +1964,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_n_peers_returns_immediately_when_already_satisfied() {
-        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         let (_addr_a, _id_a, peer_a) = create_test_peer(1);
         let (_addr_b, _id_b, peer_b) = create_test_peer(2);
@@ -1990,11 +1991,14 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_n_peers_satisfied_via_events() {
-        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
         let waiter = peer_list.clone();
 
         let handle = tokio::spawn(async move {
-            waiter.wait_for_active_peers(2, Duration::from_secs(2)).await
+            waiter
+                .wait_for_active_peers(2, Duration::from_secs(2))
+                .await
         });
 
         // Give the waiter time to enter the slow path
@@ -2009,12 +2013,16 @@ mod tests {
         peer_list.add_or_update_peer(peer_b, true);
 
         let count = handle.await.expect("waiter task");
-        assert!(count >= 2, "expected at least 2 after second peer added, got {count}");
+        assert!(
+            count >= 2,
+            "expected at least 2 after second peer added, got {count}"
+        );
     }
 
     #[tokio::test]
     async fn wait_for_n_peers_timeout_partial() {
-        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         let (_addr, _id, peer) = create_test_peer(1);
         peer_list.add_or_update_peer(peer, true);
@@ -2035,7 +2043,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_n_peers_timeout_zero_peers() {
-        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         let count = peer_list
             .wait_for_active_peers(1, Duration::from_millis(200))
@@ -2046,7 +2055,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_n_peers_recounts_when_peer_goes_offline() {
-        let peer_list = create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
 
         let (addr_a, _id_a, peer_a) = create_test_peer(1);
         let (_addr_b, _id_b, peer_b) = create_test_peer(2);
@@ -2057,7 +2067,9 @@ mod tests {
         let handle = tokio::spawn(async move {
             // N=3 with only 2 peers online; we want the slow path so the offline
             // transition is observed via PeerEvent.
-            waiter.wait_for_active_peers(3, Duration::from_millis(300)).await
+            waiter
+                .wait_for_active_peers(3, Duration::from_millis(300))
+                .await
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
