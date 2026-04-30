@@ -118,6 +118,15 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         output: PathBuf,
     },
+    #[command(
+        name = "import-genesis",
+        about = "Import genesis files from disk into the node database"
+    )]
+    ImportGenesis {
+        /// Directory containing .irys_genesis.json and .irys_genesis_commitments.json
+        #[arg(long, default_value = ".")]
+        genesis_dir: PathBuf,
+    },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
         /// Node URLs to connect to
@@ -346,6 +355,123 @@ async fn main() -> eyre::Result<()> {
             info!(
                 "  Add to peer configs: consensus.expected_genesis_hash = \"{}\"",
                 genesis_output.block.block_hash
+            );
+
+            Ok(())
+        }
+        Commands::ImportGenesis { genesis_dir } => {
+            use eyre::Context as _;
+            use irys_chain::genesis_builder::validate_genesis_commitments;
+            use irys_chain::genesis_utilities::{
+                load_genesis_block_from_disk, load_genesis_commitments_from_disk,
+                save_genesis_block_to_disk, save_genesis_commitments_to_disk,
+            };
+            use irys_database::database;
+            use irys_database::reth_db::transaction::DbTx as _;
+            use irys_database::reth_db::Database as _;
+            use irys_domain::BlockIndex;
+            use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+            use irys_types::{app_state::DatabaseProvider, SystemLedger};
+
+            let node_config: NodeConfig = load_config()?;
+            let config = Config::new_with_random_peer_id(node_config.clone());
+
+            let genesis_block = load_genesis_block_from_disk(&genesis_dir)
+                .wrap_err_with(|| format!("loading genesis block from {:?}", genesis_dir))?;
+            let commitments = load_genesis_commitments_from_disk(&genesis_dir)
+                .wrap_err_with(|| format!("loading genesis commitments from {:?}", genesis_dir))?;
+
+            if !genesis_block.is_signature_valid() {
+                bail!(
+                    "Genesis block signature is invalid for hash {}",
+                    genesis_block.block_hash
+                );
+            }
+
+            validate_genesis_commitments(&commitments)?;
+
+            // Verify the block header's commitment ledger txids match the supplied
+            // commitments — guards against ledger/file drift.
+            let ledger = genesis_block
+                .system_ledgers
+                .iter()
+                .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
+            match ledger {
+                Some(ledger) => {
+                    eyre::ensure!(
+                        ledger.tx_ids.len() == commitments.len(),
+                        "commitment count mismatch: block header has {} txids, \
+                         but {} commitments were supplied",
+                        ledger.tx_ids.len(),
+                        commitments.len(),
+                    );
+                    for (i, (ledger_id, commit)) in
+                        ledger.tx_ids.iter().zip(commitments.iter()).enumerate()
+                    {
+                        eyre::ensure!(
+                            *ledger_id == commit.id(),
+                            "commitment txid mismatch at index {i}: \
+                             block header has {ledger_id}, supplied commitment has {}",
+                            commit.id(),
+                        );
+                    }
+                }
+                None => bail!("genesis block has no commitment ledger in system_ledgers"),
+            }
+
+            if let Some(expected) = config.consensus.expected_genesis_hash {
+                eyre::ensure!(
+                    genesis_block.block_hash == expected,
+                    "genesis block hash mismatch: expected {expected}, got {}",
+                    genesis_block.block_hash
+                );
+            }
+
+            let irys_db_env = open_or_create_irys_consensus_data_db(
+                &config.node_config.irys_consensus_data_dir(),
+            )?;
+            let irys_db = DatabaseProvider(Arc::new(irys_db_env));
+            let mut block_index = BlockIndex::new(&config.node_config).await?;
+
+            if block_index.num_blocks() > 0 {
+                bail!(
+                    "Refusing to import genesis: block index already has {} block(s). \
+                     Use an empty/reset database before importing.",
+                    block_index.num_blocks()
+                );
+            }
+
+            let write_tx = irys_db.tx_mut()?;
+            database::insert_block_header(&write_tx, &genesis_block)?;
+            for commitment_tx in &commitments {
+                database::insert_commitment_tx(&write_tx, commitment_tx)?;
+            }
+            write_tx.commit()?;
+
+            block_index.push_block(&genesis_block, &Vec::new(), config.consensus.chunk_size)?;
+
+            // Save to base_directory so a subsequent node start finds them in place.
+            save_genesis_block_to_disk(genesis_block.clone(), &config.node_config.base_directory)
+                .wrap_err(
+                "writing genesis block to node base_directory — Database was already \
+                     updated successfully. You may need to manually copy the genesis files \
+                     to resolve this.",
+            )?;
+            save_genesis_commitments_to_disk(&commitments, &config.node_config.base_directory)
+                .wrap_err(
+                    "writing genesis commitments to node base_directory — Database was \
+                     already updated successfully. You may need to manually copy the \
+                     genesis files to resolve this.",
+                )?;
+
+            info!("Genesis imported from {}", genesis_dir.display());
+            info!(
+                "  Persisted to database at {}",
+                config.node_config.irys_consensus_data_dir().display()
+            );
+            info!(
+                "  Saved to node base_directory {}",
+                config.node_config.base_directory.display()
             );
 
             Ok(())

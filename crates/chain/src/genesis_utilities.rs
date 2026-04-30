@@ -62,3 +62,15 @@ pub fn save_genesis_commitments_to_disk(
     file.write_all(json.as_bytes())?;
     Ok(())
 }
+
+/// Read genesis commitment transactions from disk.
+pub fn load_genesis_commitments_from_disk(
+    base_directory: &Path,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let file = File::open(base_directory.join(GENESIS_COMMITMENTS_FILENAME))
+        .map_err(|e| eyre::eyre!("failed to open {}: {e}", GENESIS_COMMITMENTS_FILENAME))?;
+    let reader = std::io::BufReader::new(file);
+    let commitments: Vec<CommitmentTransaction> = serde_json::from_reader(reader)
+        .map_err(|e| eyre::eyre!("failed to parse {}: {e}", GENESIS_COMMITMENTS_FILENAME))?;
+    Ok(commitments)
+}
