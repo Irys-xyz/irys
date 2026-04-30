@@ -269,7 +269,7 @@ impl IrysRethConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenesisConfig {
     /// The timestamp in milliseconds used for the genesis block
@@ -304,6 +304,41 @@ pub struct GenesisConfig {
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub genesis_price: Amount<(IrysPrice, Usd)>,
+
+    /// Number of fully packed partitions to use for initial difficulty
+    /// calculation at genesis. Used by `genesis_builder::initial_packed_partitions_from_config`
+    /// with fallback chain: this field > `epoch.num_capacity_partitions` > total pledges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_packed_partitions: Option<f64>,
+}
+
+impl PartialEq for GenesisConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp_millis == other.timestamp_millis
+            && self.miner_address == other.miner_address
+            && self.reward_address == other.reward_address
+            && self.last_epoch_hash == other.last_epoch_hash
+            && self.vdf_seed == other.vdf_seed
+            && self.vdf_next_seed == other.vdf_next_seed
+            && self.genesis_price == other.genesis_price
+            && self.initial_packed_partitions.map(f64::to_bits)
+                == other.initial_packed_partitions.map(f64::to_bits)
+    }
+}
+
+impl Eq for GenesisConfig {}
+
+impl std::hash::Hash for GenesisConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.timestamp_millis.hash(state);
+        self.miner_address.hash(state);
+        self.reward_address.hash(state);
+        self.last_epoch_hash.hash(state);
+        self.vdf_seed.hash(state);
+        self.vdf_next_seed.hash(state);
+        self.genesis_price.hash(state);
+        self.initial_packed_partitions.map(f64::to_bits).hash(state);
+    }
 }
 
 /// # Epoch Configuration
@@ -563,6 +598,7 @@ impl ConsensusConfig {
                 vdf_next_seed: None,
                 // The initial price of the Irys token at genesis in USD Sets the baseline for all future pricing calculations
                 genesis_price: Amount::token(dec!(0.15)).expect("valid token amount"),
+                initial_packed_partitions: None,
             },
             mempool: MempoolConsensusConfig {
                 // Maximum number of data transactions that can be included in a single block
@@ -668,6 +704,7 @@ impl ConsensusConfig {
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+                initial_packed_partitions: None,
             },
             expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
@@ -810,6 +847,7 @@ impl ConsensusConfig {
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+                initial_packed_partitions: None,
             },
 
             mempool: MempoolConsensusConfig {

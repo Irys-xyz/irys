@@ -183,6 +183,18 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Returns the amount this commitment adds to the protocol treasury.
+    ///
+    /// Only Stake and Pledge lock funds into the treasury at inclusion time.
+    /// Unstake/Unpledge refunds are handled on epoch boundaries.
+    #[inline]
+    pub fn treasury_delta(&self) -> U256 {
+        match self.commitment_type() {
+            CommitmentTypeV1::Stake | CommitmentTypeV1::Pledge { .. } => self.value(),
+            CommitmentTypeV1::Unstake | CommitmentTypeV1::Unpledge { .. } => U256::zero(),
+        }
+    }
+
     /// Get the signer address from any version
     #[inline]
     pub fn signer(&self) -> IrysAddress {

@@ -18,6 +18,54 @@ use tracing::{info, warn};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
+use zeroize::Zeroizing;
+
+fn signing_key_from_hex(hex_str: Zeroizing<String>) -> eyre::Result<k256::ecdsa::SigningKey> {
+    let key_bytes = Zeroizing::new(
+        hex::decode(hex_str.trim_start_matches("0x"))
+            .map_err(|e| eyre::eyre!("Invalid hex for signing key: {e}"))?,
+    );
+    k256::ecdsa::SigningKey::from_slice(&key_bytes)
+        .map_err(|e| eyre::eyre!("Invalid signing key: {e}"))
+}
+
+/// Resolve a signing key from, in order:
+/// 1. Explicit hex string (CLI arg or `IRYS_SIGNING_KEY` env var)
+/// 2. Key file path (CLI arg or `IRYS_SIGNING_KEY_FILE` env var)
+/// 3. `mining_key` in config.toml
+fn resolve_signing_key(
+    explicit_hex: Option<String>,
+    key_file: Option<PathBuf>,
+) -> eyre::Result<k256::ecdsa::SigningKey> {
+    if let Some(hex_str) = explicit_hex {
+        return signing_key_from_hex(Zeroizing::new(hex_str));
+    }
+
+    if let Some(path) = key_file {
+        let contents = Zeroizing::new(
+            std::fs::read_to_string(&path)
+                .map_err(|e| eyre::eyre!("Failed to read key file {}: {e}", path.display()))?,
+        );
+        info!("Loaded signing key from {}", path.display());
+        return signing_key_from_hex(Zeroizing::new(contents.trim().to_owned()));
+    }
+
+    match load_config() {
+        Ok(node_config) => {
+            info!("Using mining_key from config.toml as signing key");
+            Ok(node_config.mining_key)
+        }
+        Err(e) => {
+            bail!(
+                "No signing key provided (config.toml error: {e}). Supply one via:\n  \
+                 --signing-key <hex>\n  \
+                 IRYS_SIGNING_KEY env var\n  \
+                 --signing-key-file <path> / IRYS_SIGNING_KEY_FILE env var\n  \
+                 mining_key in config.toml"
+            )
+        }
+    }
+}
 
 #[derive(Debug, Clone, Parser)]
 pub struct IrysCli {
@@ -35,6 +83,40 @@ pub enum Commands {
     RollbackBlocks {
         #[command(subcommand)]
         mode: RollbackMode,
+    },
+    #[command(
+        name = "build-genesis",
+        about = "Build a signed genesis block from miner keys or existing commitments",
+        group = clap::ArgGroup::new("genesis-source").required(true).args(&["miners", "commitments"]),
+    )]
+    BuildGenesis {
+        /// Path to genesis_miners.toml containing miner keys and pledge counts.
+        /// Mutually exclusive with --commitments.
+        #[arg(long, conflicts_with = "commitments")]
+        miners: Option<PathBuf>,
+
+        /// Path to a JSON file of pre-signed CommitmentTransaction objects.
+        /// Requires --signing-key. Mutually exclusive with --miners.
+        #[arg(long, conflicts_with = "miners")]
+        commitments: Option<PathBuf>,
+
+        /// Hex-encoded secp256k1 private key for signing the genesis block header.
+        /// Required when using --commitments. With --miners, the first miner signs.
+        ///
+        /// Resolution order: --signing-key flag, IRYS_SIGNING_KEY env var,
+        /// --signing-key-file / IRYS_SIGNING_KEY_FILE, then mining_key in config.toml.
+        #[arg(long, env = "IRYS_SIGNING_KEY")]
+        signing_key: Option<String>,
+
+        /// Path to a file containing the hex-encoded signing key.
+        /// The file should contain only the key (whitespace is trimmed).
+        #[arg(long, env = "IRYS_SIGNING_KEY_FILE")]
+        signing_key_file: Option<PathBuf>,
+
+        /// Output directory for genesis block and commitments JSON files.
+        /// Defaults to current directory.
+        #[arg(long, default_value = ".")]
+        output: PathBuf,
     },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
@@ -199,6 +281,72 @@ async fn main() -> eyre::Result<()> {
 
             use irys_database::reth_db::transaction::DbTx as _;
             rw_tx.commit()?;
+
+            Ok(())
+        }
+        Commands::BuildGenesis {
+            miners,
+            commitments,
+            signing_key,
+            signing_key_file,
+            output,
+        } => {
+            use irys_chain::genesis_builder::{
+                build_genesis_block_from_commitments, build_signed_genesis_block,
+                GenesisMinerManifest,
+            };
+            use irys_chain::genesis_utilities::{
+                save_genesis_block_to_disk, save_genesis_commitments_to_disk,
+            };
+
+            let node_config: NodeConfig = load_config()?;
+            let config = Config::new_with_random_peer_id(node_config);
+
+            let genesis_output = if let Some(miners_path) = miners {
+                let manifest = GenesisMinerManifest::load(&miners_path)?;
+                let miner_entries = manifest.into_entries()?;
+
+                info!(
+                    "Building genesis block with {} miner(s), {} total pledges",
+                    miner_entries.len(),
+                    miner_entries.iter().map(|m| m.pledge_count).sum::<u64>()
+                );
+
+                build_signed_genesis_block(&config, &miner_entries).await?
+            } else if let Some(commitments_path) = commitments {
+                let block_signer = resolve_signing_key(signing_key, signing_key_file)?;
+
+                let file = std::fs::File::open(&commitments_path).map_err(|e| {
+                    eyre::eyre!(
+                        "Failed to read commitments file {:?}: {e}",
+                        commitments_path
+                    )
+                })?;
+                let reader = std::io::BufReader::new(file);
+                let loaded_commitments: Vec<irys_types::CommitmentTransaction> =
+                    serde_json::from_reader(reader)
+                        .map_err(|e| eyre::eyre!("Failed to parse commitments JSON: {e}"))?;
+
+                info!(
+                    "Building genesis from {} existing commitments",
+                    loaded_commitments.len()
+                );
+
+                build_genesis_block_from_commitments(&config, loaded_commitments, &block_signer)?
+            } else {
+                bail!("Either --miners or --commitments must be provided");
+            };
+
+            save_genesis_block_to_disk(Arc::new(genesis_output.block.clone()), &output)?;
+            save_genesis_commitments_to_disk(&genesis_output.commitments, &output)?;
+
+            info!("Genesis block written to {:?}", &output);
+            info!("  Block hash: {}", genesis_output.block.block_hash);
+            info!("  Commitments: {} total", genesis_output.commitments.len());
+            info!(
+                "  Add to peer configs: consensus.expected_genesis_hash = \"{}\"",
+                genesis_output.block.block_hash
+            );
 
             Ok(())
         }

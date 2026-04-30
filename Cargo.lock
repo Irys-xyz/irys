@@ -5209,7 +5209,7 @@ dependencies = [
 
 [[package]]
 name = "irys-chain"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "actix-http",
  "actix-web",
@@ -5223,6 +5223,7 @@ dependencies = [
  "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
+ "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-macro",
  "alloy-sol-types",
@@ -5275,15 +5276,18 @@ dependencies = [
  "tracing",
  "tracing-error",
  "tracing-subscriber 0.3.20",
+ "zeroize",
 ]
 
 [[package]]
 name = "irys-cli"
 version = "0.1.0"
 dependencies = [
+ "alloy-signer",
  "clap",
  "color-eyre",
  "eyre",
+ "hex",
  "irys-chain",
  "irys-database",
  "irys-domain",
@@ -5291,14 +5295,17 @@ dependencies = [
  "irys-reth-node-bridge",
  "irys-tui",
  "irys-types",
+ "k256",
  "reth-node-core",
  "reth-node-types",
  "reth-provider",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
  "tracing-error",
  "tracing-subscriber 0.3.20",
+ "zeroize",
 ]
 
 [[package]]

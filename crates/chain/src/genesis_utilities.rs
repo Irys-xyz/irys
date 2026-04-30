@@ -1,4 +1,4 @@
-use irys_types::{IrysBlockHeader, IrysBlockHeaderV1};
+use irys_types::{CommitmentTransaction, IrysBlockHeader, IrysBlockHeaderV1};
 use std::{
     fs::{create_dir_all, File},
     io::Write as _,
@@ -7,6 +7,7 @@ use std::{
 };
 
 const GENESIS_BLOCK_FILENAME: &str = ".irys_genesis.json";
+const GENESIS_COMMITMENTS_FILENAME: &str = ".irys_genesis_commitments.json";
 
 /// Write genesis block to disk
 pub fn save_genesis_block_to_disk(
@@ -46,4 +47,18 @@ pub fn load_genesis_block_from_disk(
         .expect("genesis.json should be valid JSON and match IrysBlockHeaderV1");
 
     Ok(Arc::new(IrysBlockHeader::V1(genesis)))
+}
+
+/// Write genesis commitment transactions to disk as JSON.
+pub fn save_genesis_commitments_to_disk(
+    commitments: &[CommitmentTransaction],
+    base_directory: &Path,
+) -> eyre::Result<()> {
+    let json = serde_json::to_string_pretty(commitments)
+        .map_err(|e| eyre::eyre!("failed to serialize genesis commitments: {e}"))?;
+    create_dir_all(base_directory)
+        .map_err(|e| eyre::eyre!("failed to create directory {:?}: {e}", base_directory))?;
+    let mut file = File::create(base_directory.join(GENESIS_COMMITMENTS_FILENAME))?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
 }

@@ -305,6 +305,74 @@ impl IrysBlockHeader {
     pub fn timestamp_secs(&self) -> crate::UnixTimestamp {
         self.timestamp.to_secs()
     }
+
+    /// Append commitment transactions to this block's commitment system ledger.
+    ///
+    /// Creates the `Commitment` ledger if it doesn't already exist, appends each
+    /// commitment's txid, and returns the total treasury delta (the sum of
+    /// [`CommitmentTransaction::treasury_delta`] across all commitments).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sum of treasury deltas overflows `U256::MAX`, or if
+    /// any commitment txid is a duplicate — either appearing more than once in the
+    /// incoming slice or already present in the ledger.
+    pub fn append_commitments(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> eyre::Result<U256> {
+        if commitments.is_empty() {
+            return Ok(U256::zero());
+        }
+
+        // Guard against duplicate txids — duplicates would inflate the treasury.
+        {
+            use std::collections::HashSet;
+            let mut seen: HashSet<_> = self
+                .system_ledgers
+                .iter()
+                .find(|e| e.ledger_id == SystemLedger::Commitment as u32)
+                .map(|existing| existing.tx_ids.iter().copied().collect())
+                .unwrap_or_default();
+            for commitment in commitments {
+                let id = commitment.id();
+                eyre::ensure!(
+                    seen.insert(id),
+                    "append_commitments: commitment txid {id:?} is a duplicate \
+                     (already present in the ledger or appears more than once in the \
+                     incoming commitments slice)"
+                );
+            }
+        }
+
+        let ledger_idx = self
+            .system_ledgers
+            .iter()
+            .position(|e| e.ledger_id == SystemLedger::Commitment as u32);
+        let ledger = match ledger_idx {
+            Some(i) => &mut self.system_ledgers[i],
+            None => {
+                self.system_ledgers.push(SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment as u32,
+                    tx_ids: H256List::new(),
+                });
+                self.system_ledgers.last_mut().unwrap()
+            }
+        };
+
+        let mut treasury_delta = U256::zero();
+        for commitment in commitments {
+            ledger.tx_ids.push(commitment.id());
+            treasury_delta = treasury_delta
+                .checked_add(commitment.treasury_delta())
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "treasury_delta overflow: sum of commitment deltas exceeded U256::MAX"
+                    )
+                })?;
+        }
+        Ok(treasury_delta)
+    }
 }
 
 impl Versioned for IrysBlockHeaderV1 {

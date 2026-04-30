@@ -102,6 +102,7 @@ serde = { version = "1", default-features = false }
 serde_json = "1"
 test-fuzz = "6"
 thiserror = "1"
+zeroize = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 toml = "0.8"
 derive-syn-parse = "0"
