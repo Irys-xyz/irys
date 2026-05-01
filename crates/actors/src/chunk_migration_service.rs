@@ -182,6 +182,7 @@ impl ChunkMigrationServiceInner {
             }
         }
 
+
         // Process transactions for all data ledgers present in the block
         for (ledger, txs) in all_txs.iter() {
             process_ledger_transactions(
