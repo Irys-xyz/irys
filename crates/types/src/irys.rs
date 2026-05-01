@@ -13,33 +13,58 @@ use eyre::Result;
 use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]
-
 pub struct IrysSigner {
-    pub signer: SigningKey,
-    pub chain_id: u64,
-    pub chunk_size: u64,
+    signer: SigningKey,
+    chain_id: u64,
+    chunk_size: u64,
+    address: IrysAddress,
 }
 
 /// Encapsulates an Irys API for doing client type things, making transactions,
 /// signing them, posting them etc.
 impl IrysSigner {
+    pub fn new(signer: SigningKey, chain_id: u64, chunk_size: u64) -> Self {
+        let address = secret_key_to_address(&signer).into();
+        Self {
+            signer,
+            chain_id,
+            chunk_size,
+            address,
+        }
+    }
+
     pub fn random_signer(config: &crate::ConsensusConfig) -> Self {
         use rand::rngs::OsRng;
-
-        Self {
-            signer: k256::ecdsa::SigningKey::random(&mut OsRng),
-            chain_id: config.chain_id,
-            chunk_size: config.chunk_size,
-        }
+        Self::new(
+            k256::ecdsa::SigningKey::random(&mut OsRng),
+            config.chain_id,
+            config.chunk_size,
+        )
     }
 
     /// Returns the address associated with the signer's signing key
     pub fn address(&self) -> IrysAddress {
-        secret_key_to_address(&self.signer).into()
+        self.address
     }
 
     pub fn alloy_address(&self) -> Address {
-        secret_key_to_address(&self.signer)
+        self.address.to_alloy_address()
+    }
+
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signer
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
+    }
+
+    pub fn into_signing_key(self) -> SigningKey {
+        self.signer
     }
 
     /// Creates a transaction from a data iterator (which can yield any size Vec), with an optional anchor and flag for if the input data should be stored in the `data` field.

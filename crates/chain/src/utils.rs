@@ -22,7 +22,7 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
                 let mut config = NodeConfig::testnet();
                 let signer = config.new_random_signer();
                 config.reward_address = signer.address();
-                config.mining_key = signer.signer;
+                config.mining_key = signer.into_signing_key();
                 let mut file = std::fs::File::create(&config_path)?;
                 std::io::Write::write_all(&mut file, toml::to_string(&config)?.as_bytes())?;
                 eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
