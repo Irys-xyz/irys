@@ -1514,6 +1514,13 @@ impl IrysNode {
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
+        // Provide storage modules guard to block migration service for partition recovery
+        service_senders
+            .block_tree
+            .send_traced(BlockTreeServiceMessage::SetStorageModulesGuard(
+                storage_modules_guard.clone(),
+            ))?;
+
         // Spawn peer list service
         let (peer_network_handle, peer_list_guard) = init_peer_list_service(
             &irys_db,

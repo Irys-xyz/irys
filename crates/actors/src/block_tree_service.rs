@@ -11,6 +11,7 @@ use crate::{
 };
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
@@ -47,6 +48,7 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
+    SetStorageModulesGuard(StorageModulesReadGuard),
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -236,6 +238,10 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .instrument(tracing::info_span!(parent: &parent_span, "block_tree.validation_finished", block.hash = %block_hash))
                     .await?;
+            }
+            BlockTreeServiceMessage::SetStorageModulesGuard(guard) => {
+                self.block_migration_service
+                    .set_storage_modules_guard(guard);
             }
         }
         Ok(())
@@ -677,14 +683,10 @@ impl BlockTreeServiceInner {
                     // migrated block is orphaned only when the fork is strictly deeper
                     // than migration_depth.
                     if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
-                        error!(
-                            reorg_depth = old_fork_blocks.len(),
-                            migration_depth = self.config.consensus.block_migration_depth,
-                            fork_height,
-                            fork_hash = %fork_hash,
-                            new_tip = %block_hash,
-                            "reorg depth exceeds migration depth — already-migrated block would be reverted",
-                        );
+                        // Network partition recovery: roll back blocks migrated on the
+                        // minority fork before proceeding with the new canonical chain.
+                        self.block_migration_service
+                            .recover_from_network_partition(fork_height)?;
                     }
 
                     metrics::record_reorg();

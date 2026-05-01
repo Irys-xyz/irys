@@ -173,6 +173,16 @@ impl SupplyState {
         self.get().cumulative_emitted
     }
 
+    /// Rolls back block rewards during network partition recovery.
+    pub fn rollback_reward(&self, target_height: u64, reward_sum: U256) {
+        let mut data = self
+            .inner
+            .write()
+            .expect("supply state write lock poisoned");
+        data.cumulative_emitted = data.cumulative_emitted.saturating_sub(reward_sum);
+        data.height = target_height;
+    }
+
     pub fn add_block_reward(&self, height: u64, reward_amount: U256) -> Result<()> {
         let is_first_migration = {
             let mut data = self

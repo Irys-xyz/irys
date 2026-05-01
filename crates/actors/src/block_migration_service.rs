@@ -1,17 +1,25 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use eyre::{OptionExt as _, ensure};
-use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
-use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
+use irys_database::{
+    block_header_by_hash, db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header,
+    tx_header_by_txid,
+};
+use irys_domain::{
+    BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
+    block_index_guard::BlockIndexReadGuard, get_overlapped_storage_modules,
+};
+use irys_storage::ii;
 use irys_types::{
-    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
-    Traced, app_state::DatabaseProvider,
+    DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
+    PartitionChunkOffset, SealedBlock, SendTraced as _, SystemLedger, Traced, U256,
+    app_state::DatabaseProvider,
 };
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Block migration orchestration and DB persistence, called inline by `BlockTreeServiceInner`.
 #[derive(Debug)]
@@ -22,6 +30,7 @@ pub struct BlockMigrationService {
     chunk_size: u64,
     cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
+    storage_modules_guard: Option<StorageModulesReadGuard>,
 }
 
 impl BlockMigrationService {
@@ -40,7 +49,12 @@ impl BlockMigrationService {
             chunk_size,
             cache,
             chunk_migration_sender,
+            storage_modules_guard: None,
         }
+    }
+
+    pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
+        self.storage_modules_guard = Some(guard);
     }
 
     /// Atomically persists tx metadata (included_height, promoted_height) to the DB.
@@ -110,6 +124,164 @@ impl BlockMigrationService {
             cleared_blocks = blocks_to_clear.len(),
             confirmed_blocks = blocks_to_confirm.len(),
             "Persisted metadata to DB"
+        );
+
+        Ok(())
+    }
+
+    /// Rolls back blocks migrated on a minority fork during network partition recovery.
+    ///
+    /// Unassigns storage module offsets, truncates the block index, and rolls back
+    /// the supply state to the fork parent height.
+    pub fn recover_from_network_partition(&self, fork_parent_height: u64) -> eyre::Result<()> {
+        let storage_modules_guard = self.storage_modules_guard.as_ref().ok_or_else(|| {
+            eyre::eyre!("storage_modules_guard not set during partition recovery")
+        })?;
+
+        let block_index = self.block_index_guard.read();
+        let latest = block_index.latest_height();
+        if fork_parent_height >= latest {
+            return Ok(());
+        }
+
+        let rollback_count = latest - fork_parent_height;
+        warn!(
+            fork_parent_height,
+            latest_indexed = latest,
+            rollback_count,
+            "recovering from network partition"
+        );
+
+        // Phase 1: Collect per-block chunk ranges, tx data_roots, and reward amounts
+        // while the block index is still intact.
+        struct BlockRollbackInfo {
+            ledger_ranges: Vec<(DataLedger, LedgerChunkRange)>,
+            data_roots: Vec<H256>,
+            reward_amount: U256,
+        }
+
+        let mut rollback_infos = Vec::with_capacity(rollback_count as usize);
+        for h in (fork_parent_height + 1)..=latest {
+            let item = block_index
+                .get_item(h)
+                .ok_or_else(|| eyre::eyre!("missing block index entry at height {h}"))?;
+
+            let prev_item = block_index
+                .get_item(h - 1)
+                .ok_or_else(|| eyre::eyre!("missing block index entry at height {}", h - 1))?;
+
+            let header = self
+                .db
+                .view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
+                .ok_or_else(|| eyre::eyre!("missing block header for {}", item.block_hash))?;
+
+            let mut ledger_ranges = Vec::new();
+            for ledger_item in &item.ledgers {
+                let prev_total = prev_item
+                    .ledgers
+                    .iter()
+                    .find(|li| li.ledger == ledger_item.ledger)
+                    .map(|li| li.total_chunks)
+                    .unwrap_or(0);
+
+                if ledger_item.total_chunks > prev_total {
+                    let range = LedgerChunkRange(ii(
+                        LedgerChunkOffset::from(prev_total),
+                        LedgerChunkOffset::from(ledger_item.total_chunks - 1),
+                    ));
+                    ledger_ranges.push((ledger_item.ledger, range));
+                }
+            }
+
+            // Collect data_roots from orphaned block's transactions
+            let mut data_roots = Vec::new();
+            let tx_id_map = header.get_data_ledger_tx_ids();
+            for tx_ids in tx_id_map.values() {
+                for txid in tx_ids {
+                    if let Ok(Some(tx_header)) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))
+                    {
+                        data_roots.push(tx_header.data_root);
+                    }
+                }
+            }
+
+            rollback_infos.push(BlockRollbackInfo {
+                ledger_ranges,
+                data_roots,
+                reward_amount: header.reward_amount,
+            });
+        }
+
+        // Phase 2: Unassign storage module offsets and clear orphaned index entries
+        for info in &rollback_infos {
+            for (ledger, range) in &info.ledger_ranges {
+                let modules = get_overlapped_storage_modules(storage_modules_guard, *ledger, range);
+
+                for module in modules {
+                    let partition_range = match module.make_range_partition_relative(*range) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+
+                    // Clear offset index entries and data_root mappings for orphaned txs
+                    for offset in *partition_range.start()..=*partition_range.end() {
+                        let part_offset = PartitionChunkOffset::from(offset);
+                        let (_, submodule) = module.get_submodule_for_offset(part_offset)?;
+                        submodule.db.update_eyre(|tx| {
+                            irys_database::submodule::add_tx_path_hash_to_offset_index(
+                                tx,
+                                part_offset,
+                                None,
+                            )?;
+                            irys_database::submodule::add_data_path_hash_to_offset_index(
+                                tx,
+                                part_offset,
+                                None,
+                            )?;
+                            // Clear DataRootInfosByDataRoot for orphaned txs' data_roots
+                            for data_root in &info.data_roots {
+                                irys_database::submodule::set_data_root_infos_for_data_root(
+                                    tx,
+                                    *data_root,
+                                    irys_database::submodule::tables::DataRootInfos(Vec::new()),
+                                )?;
+                            }
+                            Ok(())
+                        })?;
+                    }
+
+                    // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
+                    {
+                        let mut intervals = module.intervals().write().unwrap();
+                        for offset in *partition_range.start()..=*partition_range.end() {
+                            let part_offset = PartitionChunkOffset::from(offset);
+                            StorageModule::cut_then_insert_interval_if_touching(
+                                &mut intervals,
+                                part_offset,
+                                ChunkType::Uninitialized,
+                            );
+                        }
+                    }
+                    module.write_intervals_to_submodules()?;
+                }
+            }
+        }
+
+        // Phase 3: Truncate block index
+        block_index.truncate_to_height(fork_parent_height)?;
+
+        // Phase 4: Roll back supply state
+        if let Some(supply_state) = &self.supply_state {
+            let reward_sum: U256 = rollback_infos.iter().fold(U256::zero(), |acc, info| {
+                acc.saturating_add(info.reward_amount)
+            });
+            supply_state.rollback_reward(fork_parent_height, reward_sum);
+        }
+
+        info!(
+            fork_parent_height,
+            blocks_rolled_back = rollback_count,
+            "network partition recovery complete"
         );
 
         Ok(())
