@@ -1,0 +1,30 @@
+# Run config for the d071fc03 ↔ HEAD multiversion test span.
+#
+# This particular pair straddles a couple of schema changes that don't
+# apply to typical adjacent-release tests:
+#
+#  * `bundle_format: Option<u64>` on OLD was renamed and retyped to
+#    `metadata_format: u8` on NEW. The fields aren't directly comparable
+#    on the wire, so we mark them as aliases. We also force the field to
+#    its default at signing time — a non-default value would change the
+#    canonical signature prehash on one side, and OLD nodes would reject
+#    the tx as `Invalid Signature` because they hash the field as
+#    `bundle_format` not `metadata_format`.
+#
+#  * `promoted_height` was removed from the inline tx header on NEW
+#    (moved to a separate `IrysDataTxMetadata` table). OLD's response
+#    JSON includes `promotedHeight`; NEW's doesn't. Skip it from the
+#    strict diff.
+#
+# For other version pairs you'd typically not need any of this — the
+# default empty config is the right starting point.
+
+[tx_header]
+aliases = [["bundleFormat", "metadataFormat"]]
+skip = ["promotedHeight"]
+
+[block_header]
+# No known block-header drift across this span. Add as needed.
+
+[tx_build]
+keep_default = ["metadata_format"]

@@ -27,6 +27,15 @@ tracing = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 nix = { workspace = true }
+# Data-tx submission against running nodes — the harness uses HEAD's signer +
+# tx types to construct/sign payloads, but speaks plain HTTP so it can target
+# both OLD and NEW api-server versions over the same `/v1/tx` shape.
+irys-types = { workspace = true, features = ["test-utils"] }
+irys-api-client = { workspace = true }
+hex = { workspace = true }
+# Need SigningKey directly to construct IrysSigner from a fixed test private key.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+eyre = { workspace = true }
 
 [dev-dependencies]
 test-log = { workspace = true }

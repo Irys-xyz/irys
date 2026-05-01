@@ -1,8 +1,9 @@
-use crate::binary::ResolvedBinary;
-use crate::config::{ConfigParams, NodeRole, PeerEndpoint, patch_node_mode, read_node_role};
+use crate::binary::{BinaryKind, ResolvedBinary};
+use crate::config::{ConfigParams, NodeRole, PeerEndpoint};
 use crate::ports::NodePorts;
 use crate::probe::HttpProbe;
 use crate::process::{NodeProcess, NodeProcessConfig};
+use crate::run_config::RunConfig;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,6 +12,10 @@ use thiserror::Error;
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const NODE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Cap on how many blocks we sweep when running the per-block consistency
+/// check. The test chains never run for very long (a few minutes max),
+/// so 500 covers the entire chain comfortably while bounding work.
+const BLOCK_INDEX_LIMIT: u64 = 500;
 
 #[derive(Debug, Error)]
 pub enum ClusterError {
@@ -45,6 +50,8 @@ pub enum ClusterError {
     MissingGenesis,
     #[error("expected exactly 1 genesis node but found {0}")]
     MultipleGenesis(usize),
+    #[error("data tx error: {0}")]
+    DataTx(String),
 }
 
 pub struct NodeSpec {
@@ -59,7 +66,18 @@ pub struct NodeSpec {
 pub struct ClusterSpec {
     pub nodes: Vec<NodeSpec>,
     pub height_tolerance: u64,
-    pub base_config: String,
+    /// Base TOML template for nodes running the OLD binary. The old ref's
+    /// `NodeConfig` schema may differ from HEAD's, so the cluster keeps a
+    /// separate template per kind and routes by [`BinaryKind`] at config-gen
+    /// time. Set to the same value as `base_config_new` when both versions
+    /// share a schema.
+    pub base_config_old: String,
+    /// Base TOML template for nodes running the NEW binary.
+    pub base_config_new: String,
+    /// Per-run knobs for cross-version comparison and tx construction —
+    /// e.g. field rename pairs, skip lists, fields to keep at default
+    /// during signing. See [`RunConfig`] for details.
+    pub run_config: RunConfig,
     /// Root directory for all test artifacts (data, configs, logs).
     /// Not cleaned up automatically — caller is responsible for cleanup.
     pub run_dir: PathBuf,
@@ -67,6 +85,53 @@ pub struct ClusterSpec {
     pub old_ref: Option<String>,
     /// Git ref / label for the "new" binary (if applicable).
     pub new_ref: Option<String>,
+}
+
+/// Captured consensus state needed to (re)write a peer's `[consensus.Custom]`
+/// block during an upgrade. `template_overlay` is `Some` when the new
+/// base-config template carries a hand-authored `[consensus.Custom]` block —
+/// see [`crate::config::patch_peer_consensus`] for the merge semantics.
+struct PeerConsensusPatch {
+    genesis_hash: String,
+    consensus_json: serde_json::Value,
+    template_overlay: Option<toml::map::Map<String, toml::Value>>,
+}
+
+/// Snapshot of the running chain's consensus parameters that test code
+/// needs to build signed transactions and pace cross-version transitions.
+/// Read from the genesis's `/v1/network/config` rather than hard-coded so
+/// the tests track whatever schema the actual running cluster uses.
+#[derive(Debug, Clone, Copy)]
+pub struct ChainParams {
+    pub chain_id: u64,
+    pub chunk_size: u64,
+    /// Number of blocks the chain must advance past a tx-containing block
+    /// before that tx is persisted from the in-memory block tree to the
+    /// `IrysDataTxHeaders` table on disk.
+    pub block_migration_depth: u64,
+}
+
+fn read_consensus_u64(consensus: &serde_json::Value, key: &str) -> Result<u64, ClusterError> {
+    consensus
+        .get(key)
+        .and_then(|v| match v {
+            serde_json::Value::String(s) => s.parse::<u64>().ok(),
+            serde_json::Value::Number(n) => n.as_u64(),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            ClusterError::DataTx(format!("missing or non-u64 `{key}` in /v1/network/config"))
+        })
+}
+
+/// Per-node identity preserved across upgrades so we can regenerate configs
+/// from the appropriate template when a node's binary kind changes.
+struct NodeIdentity {
+    role: NodeRole,
+    mining_key: String,
+    reward_address: String,
+    peers: Vec<String>,
+    kind: BinaryKind,
 }
 
 pub struct Cluster {
@@ -77,6 +142,10 @@ pub struct Cluster {
     height_tolerance: u64,
     old_ref: Option<String>,
     new_ref: Option<String>,
+    identities: HashMap<String, NodeIdentity>,
+    base_config_old: String,
+    base_config_new: String,
+    run_config: RunConfig,
 }
 
 impl Cluster {
@@ -95,6 +164,23 @@ impl Cluster {
 
         let probe = HttpProbe::new().map_err(ClusterError::ProbeInit)?;
 
+        let identities: HashMap<String, NodeIdentity> = spec
+            .nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.name.clone(),
+                    NodeIdentity {
+                        role: n.role,
+                        mining_key: n.mining_key.clone(),
+                        reward_address: n.reward_address.clone(),
+                        peers: n.peers.clone(),
+                        kind: n.binary.kind,
+                    },
+                )
+            })
+            .collect();
+
         let mut port_map = allocate_ports(&spec.nodes)?;
         let nodes = spawn_and_wait_for_nodes(&spec, &mut port_map, &run_dir, &probe).await?;
 
@@ -106,7 +192,18 @@ impl Cluster {
             height_tolerance: spec.height_tolerance,
             old_ref: spec.old_ref,
             new_ref: spec.new_ref,
+            identities,
+            base_config_old: spec.base_config_old,
+            base_config_new: spec.base_config_new,
+            run_config: spec.run_config,
         })
+    }
+
+    fn template_for(&self, kind: BinaryKind) -> &str {
+        match kind {
+            BinaryKind::Old => &self.base_config_old,
+            BinaryKind::New => &self.base_config_new,
+        }
     }
 
     pub fn node_mut(&mut self, name: &str) -> Result<&mut NodeProcess, ClusterError> {
@@ -180,8 +277,20 @@ impl Cluster {
         baseline: u64,
         timeout: Duration,
     ) -> Result<(), ClusterError> {
+        self.wait_for_height_at_least(baseline + 1, timeout).await
+    }
+
+    /// Polls until all nodes report a height >= `target`. Used by upgrade
+    /// tests to wait for the chain to advance past `block_migration_depth`,
+    /// which is how a tx submitted into the block tree finally lands in the
+    /// persistent `IrysDataTxHeaders` table — without that wait, a binary
+    /// swap exercises only in-memory state and migrations on disk are no-ops.
+    pub async fn wait_for_height_at_least(
+        &mut self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<(), ClusterError> {
         let urls = self.checked_api_urls()?;
-        let target = baseline + 1;
         let start = tokio::time::Instant::now();
         for url in &urls {
             let elapsed = start.elapsed();
@@ -207,11 +316,314 @@ impl Cluster {
         Ok(())
     }
 
+    /// Submits a data transaction to one node and asserts every running node
+    /// in the cluster eventually serves it on `/v1/tx/{id}`. The chain has to
+    /// produce at least one block after the submit for the tx to be visible
+    /// via the API, so we re-use the cluster's existing `wait_for_*` budget
+    /// for that.
+    ///
+    /// Used by every test path so we can prove the cluster is *functional*
+    /// (data flows through gossip, the mempool, block production, and the
+    /// HTTP API), not merely that the binaries booted.
+    pub async fn submit_and_verify_data(
+        &mut self,
+        target_node: &str,
+        data: Vec<u8>,
+        chain_id: u64,
+        chunk_size: u64,
+        timeout: Duration,
+    ) -> Result<irys_types::DataTransaction, ClusterError> {
+        let signer = crate::data_tx::dev_signer(chain_id, chunk_size)
+            .map_err(|e| ClusterError::DataTx(format!("dev_signer: {e}")))?;
+
+        let target_url = self
+            .nodes
+            .get_mut(target_node)
+            .ok_or_else(|| ClusterError::NodeNotFound(target_node.into()))?
+            .api_url();
+
+        let client = reqwest::Client::new();
+        let tx = crate::data_tx::submit_data_tx(
+            &client,
+            &target_url,
+            &signer,
+            data,
+            &self.run_config.tx_build,
+        )
+        .await
+        .map_err(|e| ClusterError::DataTx(e.to_string()))?;
+        let tx_id = tx.header.id;
+        tracing::info!(
+            tx_id = %tx_id,
+            target = %target_node,
+            "submitted data tx; waiting for cluster-wide visibility"
+        );
+
+        let urls = self.checked_api_urls()?;
+        for url in &urls {
+            crate::data_tx::wait_for_tx_visible(&client, url, tx_id, timeout)
+                .await
+                .map_err(|e| ClusterError::DataTx(e.to_string()))?;
+        }
+        Ok(tx)
+    }
+
+    /// End-to-end submit-and-promote helper: submits the tx, uploads its
+    /// chunks (so storage nodes can produce ingress proofs), and waits
+    /// for the genesis to report a non-`None` `promotion_height`. Returns
+    /// the promoted [`DataTransaction`] — its `header.id` is the tx_id
+    /// the rest of the test should track.
+    ///
+    /// Promotion is the path that exercises the V1→V2 migration's
+    /// `promoted_height` move: when a tx is promoted, its
+    /// `promoted_height` is set in `IrysDataTxMetadata` (NEW) or in the
+    /// inline header (OLD). After a rollback, an OLD binary that doesn't
+    /// know about the new metadata table will silently report the tx as
+    /// not-promoted — see [`assert_tx_promoted_on_all_nodes`].
+    pub async fn submit_promote_and_verify(
+        &mut self,
+        target_node: &str,
+        data: Vec<u8>,
+        chain_id: u64,
+        chunk_size: u64,
+        timeout: Duration,
+    ) -> Result<irys_types::DataTransaction, ClusterError> {
+        let signer = crate::data_tx::dev_signer(chain_id, chunk_size)
+            .map_err(|e| ClusterError::DataTx(format!("dev_signer: {e}")))?;
+
+        let target_url = self
+            .nodes
+            .get_mut(target_node)
+            .ok_or_else(|| ClusterError::NodeNotFound(target_node.into()))?
+            .api_url();
+
+        let client = reqwest::Client::new();
+        let tx = crate::data_tx::submit_data_tx(
+            &client,
+            &target_url,
+            &signer,
+            data,
+            &self.run_config.tx_build,
+        )
+        .await
+        .map_err(|e| ClusterError::DataTx(e.to_string()))?;
+        let tx_id = tx.header.id;
+        tracing::info!(
+            tx_id = %tx_id,
+            target = %target_node,
+            "submitted data tx; uploading chunks for promotion"
+        );
+
+        crate::data_tx::upload_chunks_for_tx(&client, &target_url, &tx)
+            .await
+            .map_err(|e| ClusterError::DataTx(format!("uploading chunks: {e}")))?;
+
+        let urls = self.checked_api_urls()?;
+        for url in &urls {
+            crate::data_tx::wait_for_tx_visible(&client, url, tx_id, timeout)
+                .await
+                .map_err(|e| ClusterError::DataTx(e.to_string()))?;
+        }
+
+        let genesis_url = self.find_running_genesis_url()?;
+        let height = crate::data_tx::wait_for_promotion(&client, &genesis_url, tx_id, timeout)
+            .await
+            .map_err(|e| ClusterError::DataTx(format!("wait_for_promotion: {e}")))?;
+        tracing::info!(tx_id = %tx_id, promotion_height = height, "tx promoted");
+
+        // Wait for the chain to advance past `block_migration_depth` after
+        // the promotion block. Until then, peer nodes have only seen the
+        // promotion in their in-memory block tree — `IrysDataTxMetadata`
+        // (the table backing `/v1/tx/{id}/promotion-status`) is only
+        // written when the block_migration_service migrates a block past
+        // that depth. Without this wait, assertions that poll every node
+        // for promotion can race the migration on slower peers (the case
+        // we hit immediately after upgrading the only mining node).
+        let consensus = self.probe.get_network_config(&genesis_url).await?;
+        let migration_depth = read_consensus_u64(&consensus, "blockMigrationDepth").unwrap_or(6);
+        self.wait_for_height_at_least(height + migration_depth + 2, timeout)
+            .await?;
+
+        Ok(tx)
+    }
+
+    /// Asserts every running node reports a non-`None` `promotion_height`
+    /// for `tx_id`. Polls each node up to `timeout` to allow promotion
+    /// information to gossip across the cluster after the genesis sets it.
+    ///
+    /// Critical post-rollback assertion: V1→V2 migration moves
+    /// `promoted_height` out of the inline tx header into the
+    /// `IrysDataTxMetadata` table. An OLD binary rolled back on top of
+    /// that schema doesn't know to look in the new table, so it would
+    /// silently report `promotion_height: None` for every previously-
+    /// promoted tx. This check fires the alarm.
+    pub async fn assert_tx_promoted_on_all_nodes(
+        &mut self,
+        tx_id: irys_types::H256,
+        timeout: Duration,
+    ) -> Result<(), ClusterError> {
+        let client = reqwest::Client::new();
+        let urls = self.checked_api_urls()?;
+        for url in &urls {
+            crate::data_tx::wait_for_promotion(&client, url, tx_id, timeout)
+                .await
+                .map_err(|e| {
+                    ClusterError::DataTx(format!(
+                        "tx {tx_id} did not report promoted at {url}: {e}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Strict assertion that **every** running node returns content for the
+    /// given transaction that exactly matches what we originally signed and
+    /// submitted. The plain `submit_and_verify_data` flow only checks that
+    /// `/v1/tx/{id}` responds 2xx — that's enough to catch missing data
+    /// but not silent corruption from cross-version mis-decoding. Use this
+    /// after operations that change a node's binary version on top of a
+    /// populated database (in particular: rollbacks).
+    pub async fn assert_tx_matches_on_all_nodes(
+        &mut self,
+        expected: &irys_types::DataTransaction,
+    ) -> Result<(), ClusterError> {
+        let client = reqwest::Client::new();
+        let urls = self.checked_api_urls()?;
+        for url in &urls {
+            crate::data_tx::assert_tx_matches_original(
+                &client,
+                url,
+                expected,
+                &self.run_config.tx_header,
+            )
+            .await
+            .map_err(|e| ClusterError::DataTx(format!("on {url}: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Asserts every block the cluster has finalized is served byte-
+    /// identically by every running node. Enumerates `/v1/block-index`
+    /// from the genesis, then for each block hash fetches the full
+    /// `/v1/block/{hash}` from every other node and diffs against the
+    /// genesis's view via [`crate::data_tx::compare_full_object`].
+    ///
+    /// This catches a class of cross-version drift the tx-header check
+    /// misses: `BlockHeader` carries enum-tagged sub-fields (PoA proofs,
+    /// ledger metadata, signatures) whose `Compact`/JSON shape can drift
+    /// across schema versions independently of the tx-header layout.
+    /// Iterating the whole index — rather than tracking per-tx block
+    /// hashes via `/v1/tx/{id}/status` — keeps the check working on
+    /// OLD-only and OLD/NEW-mixed clusters, since `block-index` exists
+    /// on both versions but `/status` is HEAD-only.
+    pub async fn assert_block_index_consistent(&mut self) -> Result<(), ClusterError> {
+        let client = reqwest::Client::new();
+        let genesis_url = self.find_running_genesis_url()?;
+        let block_hashes =
+            crate::data_tx::fetch_block_index_hashes(&client, &genesis_url, BLOCK_INDEX_LIMIT)
+                .await
+                .map_err(|e| {
+                    ClusterError::DataTx(format!("fetching block-index from genesis: {e}"))
+                })?;
+
+        let urls = self.checked_api_urls()?;
+        for block_hash in &block_hashes {
+            let reference = crate::data_tx::fetch_block_header(&client, &genesis_url, block_hash)
+                .await
+                .map_err(|e| {
+                    ClusterError::DataTx(format!(
+                        "fetching reference block {block_hash} from genesis: {e}"
+                    ))
+                })?;
+
+            for url in &urls {
+                if url == &genesis_url {
+                    continue;
+                }
+                let actual = crate::data_tx::fetch_block_header(&client, url, block_hash)
+                    .await
+                    .map_err(|e| {
+                        ClusterError::DataTx(format!("fetching block {block_hash} from {url}: {e}"))
+                    })?;
+                crate::data_tx::compare_full_object(
+                    &format!("block {block_hash} at {url} vs genesis"),
+                    &reference,
+                    &actual,
+                    &self.run_config.block_header,
+                )
+                .map_err(|e| ClusterError::DataTx(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runtime view of the chain parameters that test code needs to
+    /// construct signed payloads *and* pace cross-version transitions —
+    /// queried once from the running genesis's `/v1/network/config` instead
+    /// of being hard-coded as constants in test source. The migration depth
+    /// in particular has to come from the live chain because rollback tests
+    /// must wait that many blocks past a tx submission to force the on-disk
+    /// `IrysDataTxHeaders` table to be populated before a binary swap.
+    pub async fn fetch_chain_params(&mut self) -> Result<ChainParams, ClusterError> {
+        let genesis_url = self.find_running_genesis_url()?;
+        let consensus = self.probe.get_network_config(&genesis_url).await?;
+        Ok(ChainParams {
+            chain_id: read_consensus_u64(&consensus, "chainId")?,
+            chunk_size: read_consensus_u64(&consensus, "chunkSize")?,
+            block_migration_depth: read_consensus_u64(&consensus, "blockMigrationDepth")?,
+        })
+    }
+
     pub async fn upgrade_node(
         &mut self,
         name: &str,
         new_binary: &ResolvedBinary,
     ) -> Result<(), ClusterError> {
+        // Snapshot identity + template up front so we don't hold a borrow on
+        // self.identities or self.probe while we mutably borrow self.nodes
+        // below.
+        let identity = self
+            .identities
+            .get(name)
+            .ok_or_else(|| ClusterError::NodeNotFound(name.into()))?;
+        let role = identity.role;
+        let mining_key = identity.mining_key.clone();
+        let reward_address = identity.reward_address.clone();
+        let peer_names = identity.peers.clone();
+        let new_kind = new_binary.kind;
+        let template = self.template_for(new_kind).to_owned();
+        let peer_endpoints = build_peer_endpoints(&peer_names, &self.port_map)?;
+
+        // Every node — peer or genesis — needs a fresh `[consensus.Custom]`
+        // written into its config before the new binary starts, so it sees
+        // the chain's actual `expected_genesis_hash` and a consensus shape
+        // it can parse. We resolve this *before* shutting the node down so
+        // the genesis (still up — possibly the very node we're about to
+        // upgrade) can answer.
+        //
+        // The cross-version escape hatch: if the new base-config template
+        // carries a hand-authored `[consensus.Custom]` block, those keys are
+        // overlaid on top of the genesis-served values. This lets users
+        // backfill fields the old genesis doesn't know about (e.g. new
+        // consensus parameters added between versions) without losing the
+        // genesis's runtime values for shared fields like `chain_id` or the
+        // `genesis` block. Template absence falls through to plain re-fetch,
+        // matching the initial-startup `patch_peer_configs` flow.
+        //
+        // Genesis upgrades use the same path because the running genesis is
+        // its own source of truth — we want to preserve its on-chain
+        // consensus state across the binary swap. Querying it before
+        // shutdown is the same network call the peers make.
+        let template_overlay = crate::config::extract_consensus_custom_from_template(&template);
+        let genesis_url = self.find_running_genesis_url()?;
+        let genesis_hash = self.probe.get_genesis_hash(&genesis_url).await?;
+        let consensus_json = self.probe.get_network_config(&genesis_url).await?;
+        let peer_consensus_patch = PeerConsensusPatch {
+            genesis_hash,
+            consensus_json,
+            template_overlay,
+        };
+
         let node = self
             .nodes
             .get_mut(name)
@@ -221,28 +633,80 @@ impl Cluster {
             node.shutdown(SHUTDOWN_TIMEOUT).await?;
         }
 
-        let current_role = read_node_role(&node.config.config_path)?;
-
         node.config.binary_path = new_binary.path.clone(); // clone: stored as new binary path
         node.config.version_label = new_binary.label.clone(); // clone: stored as new label
 
-        // Preserve the node's original role. Only strip the GENESIS env var
-        // and switch to Peer mode when the node was already a peer.
-        match current_role {
+        // Schemas may differ across releases (fields added/removed), so the
+        // on-disk config is regenerated from scratch using the template that
+        // matches the new binary's kind. We do this *before* the new binary
+        // starts so it never sees the old-shaped file.
+        crate::config::generate_config(&ConfigParams {
+            base_template: &template,
+            role,
+            api_port: node.config.api_port,
+            gossip_port: node.config.gossip_port,
+            reth_port: node.config.reth_port,
+            data_dir: &node.config.data_dir,
+            mining_key: &mining_key,
+            reward_address: &reward_address,
+            peer_endpoints: &peer_endpoints,
+            output_path: &node.config.config_path,
+        })?;
+
+        // Re-patch consensus on every node — see the rationale where we
+        // build `peer_consensus_patch` above.
+        crate::config::patch_peer_consensus(
+            &node.config.config_path,
+            &peer_consensus_patch.consensus_json,
+            &peer_consensus_patch.genesis_hash,
+            peer_consensus_patch.template_overlay.as_ref(),
+        )?;
+
+        match role {
             NodeRole::Genesis => {
-                patch_node_mode(&node.config.config_path, NodeRole::Genesis)?;
+                // Genesis upgrades keep the GENESIS env var; nothing to strip.
             }
             NodeRole::Peer => {
                 node.config.env_vars.retain(|(k, _)| k != "GENESIS");
-                patch_node_mode(&node.config.config_path, NodeRole::Peer)?;
             }
         }
+
         node.respawn().await?;
 
         let url = node.api_url();
         wait_for_node_ready(&self.probe, node, &url, READY_TIMEOUT).await?;
+
+        // Update the in-memory identity to reflect the new kind so subsequent
+        // upgrades pick the right template.
+        if let Some(identity) = self.identities.get_mut(name) {
+            identity.kind = new_kind;
+        }
+
         tracing::info!(node = %name, version = %new_binary.label, "node upgraded and ready");
         Ok(())
+    }
+
+    /// Finds the API URL of the cluster's genesis node, if it's currently
+    /// running. Used by peer upgrades to re-fetch the chain's consensus
+    /// config + genesis hash. Takes `&mut self` because `NodeProcess::is_running`
+    /// reaps the child process, which requires mutable access.
+    fn find_running_genesis_url(&mut self) -> Result<String, ClusterError> {
+        let genesis_name = self
+            .identities
+            .iter()
+            .find_map(|(name, identity)| {
+                matches!(identity.role, NodeRole::Genesis).then(|| name.clone())
+            })
+            .ok_or(ClusterError::MissingGenesis)?;
+
+        let node = self
+            .nodes
+            .get_mut(&genesis_name)
+            .ok_or(ClusterError::MissingGenesis)?;
+        if !node.is_running() {
+            return Err(ClusterError::MissingGenesis);
+        }
+        Ok(node.api_url())
     }
 
     pub async fn shutdown(&mut self) {
@@ -262,6 +726,13 @@ impl Cluster {
             self.run_dir.join(".status"),
             format_status("PASSED", self.old_ref.as_deref(), self.new_ref.as_deref()),
         );
+    }
+}
+
+fn pick_template(spec: &ClusterSpec, kind: BinaryKind) -> &str {
+    match kind {
+        BinaryKind::Old => &spec.base_config_old,
+        BinaryKind::New => &spec.base_config_new,
     }
 }
 
@@ -334,8 +805,8 @@ async fn spawn_and_wait_for_nodes_inner(
         .iter()
         .filter(|n| matches!(n.role, NodeRole::Genesis))
     {
-        let mut proc =
-            build_node_process(node_spec, port_map, run_dir, &spec.base_config, &log_dir)?;
+        let template = pick_template(spec, node_spec.binary.kind);
+        let mut proc = build_node_process(node_spec, port_map, run_dir, template, &log_dir)?;
         let url = node_api_url(port_map, &node_spec.name)?;
         wait_for_node_ready(probe, &mut proc, &url, READY_TIMEOUT).await?;
         genesis_api_url = Some(url);
@@ -355,7 +826,8 @@ async fn spawn_and_wait_for_nodes_inner(
             .ok_or(ClusterError::MissingGenesis)?;
 
         for node_spec in &peer_specs {
-            generate_node_config(node_spec, port_map, run_dir, &spec.base_config)?;
+            let template = pick_template(spec, node_spec.binary.kind);
+            generate_node_config(node_spec, port_map, run_dir, template)?;
         }
 
         patch_peer_configs(probe, genesis_url, &peer_specs, run_dir).await?;
@@ -394,7 +866,7 @@ async fn patch_peer_configs(
 
     for node_spec in peer_specs {
         let config_path = temp_base.join(format!("config-{}.toml", node_spec.name));
-        crate::config::patch_peer_consensus(&config_path, &consensus_json, &genesis_hash)?;
+        crate::config::patch_peer_consensus(&config_path, &consensus_json, &genesis_hash, None)?;
         tracing::info!(node = %node_spec.name, "patched peer consensus config");
     }
     Ok(())
