@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777463832665,
+  "lastUpdate": 1777661973207,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2671,6 +2671,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8ed43e685bd7e0e214e748379b10a8e1ffe5e2a9",
+          "message": "fix(storage): map OneYear/ThirtyDay ledgers to storage modules (#1406)\n\nfix(storage): map OneYear/ThirtyDay ledgers to storage modules and migrate their chunks\n\nmap_storage_modules_to_partition_assignments() only processed Publish,\nSubmit, and Capacity partitions — OneYear and ThirtyDay assignments\nexisted in the epoch snapshot but were never forwarded to the\nStorageModuleService.\n\non_block_migrated() only extracted Submit and Publish ledger transactions\nduring chunk migration, so OneYear and ThirtyDay chunks were never\nwritten to storage modules.",
+          "timestamp": "2026-05-01T11:44:49-07:00",
+          "tree_id": "eb26b23296f0bab4f519070abee615d66a1548bc",
+          "url": "https://github.com/Irys-xyz/irys/commit/8ed43e685bd7e0e214e748379b10a8e1ffe5e2a9"
+        },
+        "date": 1777661971769,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083769,
+            "range": "± 0.004837",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 837.730562,
+            "range": "± 25.22574",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1020.788313,
+            "range": "± 17.895627",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.145369,
+            "range": "± 0.006837",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1491.606439,
+            "range": "± 52.676809",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1596.661943,
+            "range": "± 119.324765",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.453707,
+            "range": "± 0.037271",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 227.744878,
+            "range": "± 8.852574",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 292.424308,
+            "range": "± 65.864013",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000128,
+            "range": "± 0.000012",
             "unit": "ms/iter"
           }
         ]
