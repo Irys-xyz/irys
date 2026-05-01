@@ -1642,8 +1642,11 @@ impl IrysNode {
         let block_discovery_facade =
             BlockDiscoveryFacadeImpl::new(service_senders.block_discovery.clone());
 
-        let block_status_provider =
-            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
+        let block_status_provider = BlockStatusProvider::new(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            config.consensus.block_tree_depth,
+        );
 
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will
