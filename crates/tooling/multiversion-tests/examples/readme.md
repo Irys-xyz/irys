@@ -1,9 +1,9 @@
-example set of configurations for running multiversion tests from a significantly older version (d071fc03af2721a6eb58ffcc20fd234162f49ecc) to HEAD (fd107a5e9280498ae84fcccc784ffceeeb6f8fa8)
+example set of configurations for running multiversion tests from a significantly older version (9f074ccf35319cbb046b150a2e37e4ab37feb66b) to HEAD (fd107a5e9280498ae84fcccc784ffceeeb6f8fa8)
 full command:
 ```
 cargo xtask multiversion-test \
   --profile dev \
-  --old-ref d071fc03af2721a6eb58ffcc20fd234162f49ecc \
+  --old-ref 9f074ccf35319cbb046b150a2e37e4ab37feb66b \
   --new-ref CURRENT \
   --base-config-old ./crates/tooling/multiversion-tests/examples/base-config-old.toml \
   --base-config-new ./crates/tooling/multiversion-tests/examples/base-config-new.toml \
