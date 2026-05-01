@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777463832665,
+  "lastUpdate": 1777653801435,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2670,6 +2670,86 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.00011,
+            "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "7dd99948ca9d666bb3f20e5867ef4df44bd0bed5",
+          "message": "Network partition recovery: deep reorg support + integration test",
+          "timestamp": "2026-04-29T11:35:11Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1405/commits/7dd99948ca9d666bb3f20e5867ef4df44bd0bed5"
+        },
+        "date": 1777653800455,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.0761,
+            "range": "± 0.002003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.363122,
+            "range": "± 12.501788",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 975.606764,
+            "range": "± 8.208923",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119999,
+            "range": "± 0.00142",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1199.229011,
+            "range": "± 12.755077",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1555.39045,
+            "range": "± 0.810637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.483312,
+            "range": "± 0.04527",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.334703,
+            "range": "± 1.34435",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.581666,
+            "range": "± 1.043995",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0",
             "unit": "ms/iter"
           }
