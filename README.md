@@ -128,5 +128,28 @@ sudo chmod 644 /Library/LaunchDaemons/limit.maxfiles.plist
 
 sudo launchctl load -w /Library/LaunchDaemons/limit.maxfiles.plist
 ```
+
+## WSL2 clock instability
+
+If you're running tests under WSL2, you may see intermittent failures around
+block production, hardfork activation, or any test that mixes
+`tokio::time::sleep` (monotonic) with `SystemTime::now()` /
+`UnixTimestamp::now()` (realtime). This is WSL2's Hyper-V
+time-sync integration component periodically jamming the Windows host clock
+into the VM, which makes `CLOCK_REALTIME` lurch backwards (we've measured
+backward jumps of up to ~12s on this codebase) while `CLOCK_MONOTONIC` keeps
+ticking smoothly.
+
+### Fix (Windows-side, persistent)
+
+Edit `%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+kernelCommandLine = hv_utils.timesync_implicit=0
+```
+
+Then `wsl --shutdown` once. 
+
 ## Misc
 use the `IRYS_CUSTOM_TMP_DIR` env var to change the temporary directory used for tests from ./.tmp to whatever path you like. it can also be set to another env var to lookup and resolve as a path at runtime.

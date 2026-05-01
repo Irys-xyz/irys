@@ -5,7 +5,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{CommitmentTransaction, NodeConfig, irys::IrysSigner};
 
 #[tokio::test]
-async fn spiky_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
+async fn spiky_slow_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe {
         std::env::set_var(
@@ -15,7 +15,7 @@ async fn spiky_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> 
     }
     initialize_tracing();
 
-    let seconds_to_wait = 30;
+    let seconds_to_wait = 50;
 
     // Set up consensus to require 3 ingress proofs to promote
     let mut config = NodeConfig::testing()
