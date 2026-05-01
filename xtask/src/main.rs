@@ -34,6 +34,9 @@ enum Commands {
             conflicts_with = "rerun_failures"
         )]
         coverage: bool,
+        /// Include benchmark targets
+        #[clap(long, default_value_t = false)]
+        benches: bool,
         /// Only run tests that failed in the previous run
         #[clap(long, default_value_t = false)]
         rerun_failures: bool,
@@ -188,6 +191,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         Commands::Test {
             args,
             coverage,
+            benches,
             rerun_failures,
             clean,
             no_update_failures,
@@ -361,6 +365,10 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             nextest_args.push("--tests".to_string());
             nextest_args.push("--all-targets".to_string());
+
+            if benches {
+                nextest_args.push("--benches".to_string());
+            }
 
             // Validate passthrough args don't conflict with xtask-injected flags.
             let user_has_config_file = args
@@ -638,6 +646,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 run_command(
                     Commands::Test {
                         coverage: false,
+                        benches: false,
                         rerun_failures: false,
                         clean: false,
                         no_update_failures: false,

@@ -47,8 +47,13 @@ async-trait = "0.1"
 proptest.workspace = true
 rstest.workspace = true
 syn.workspace = true
+criterion.workspace = true
 tempfile.workspace = true
 test-log.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "p2p_bench"
+harness = false
