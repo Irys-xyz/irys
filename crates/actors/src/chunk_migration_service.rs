@@ -164,35 +164,19 @@ impl ChunkMigrationServiceInner {
         let db = Arc::new(self.db.clone());
         let service_senders = self.service_senders.clone();
 
-        // Extract transactions for each ledger
-        let submit_txs = all_txs.get(&DataLedger::Submit);
-        let publish_txs = all_txs.get(&DataLedger::Publish);
         let block_height = block.height;
 
-        // Process Submit ledger transactions
-        if let Some(submit_txs) = submit_txs {
+        // Process transactions for all data ledgers present in the block
+        for (ledger, txs) in all_txs.iter() {
             process_ledger_transactions(
                 &block,
-                DataLedger::Submit,
-                submit_txs,
+                *ledger,
+                txs,
                 &block_index,
                 chunk_size,
                 &storage_modules,
                 &db,
-            )?
-        }
-
-        // Process Publish ledger transactions
-        if let Some(publish_txs) = publish_txs {
-            process_ledger_transactions(
-                &block,
-                DataLedger::Publish,
-                publish_txs,
-                &block_index,
-                chunk_size,
-                &storage_modules,
-                &db,
-            )?
+            )?;
         }
 
         // forward the finalization message to the cache service for cleanup
