@@ -245,7 +245,17 @@ pub enum HandshakeRequirementReason {
 
 /// Wire type — serialized as part of [`GossipResponse::Rejected`].
 /// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+///
+/// Wire format is **v1-compatible**: every variant either serializes as a
+/// bare unit string (e.g. `"HandshakeRequired"`) or — for variants that
+/// carry load-bearing data — as the externally-tagged form
+/// (e.g. `{"UnsupportedProtocolVersion": 5}`). The
+/// `Option<HandshakeRequirementReason>` payload on [`Self::HandshakeRequired`]
+/// is intentionally a runtime-only diagnostic: it is dropped on serialize so
+/// that mainnet v1 nodes (which only know the unit form) can still parse our
+/// responses, and we accept *both* shapes on deserialize so we can parse
+/// theirs. See `crates/p2p/src/types.rs` `Serialize`/`Deserialize` impls.
+#[derive(Debug, Clone, Copy)]
 pub enum RejectionReason {
     HandshakeRequired(Option<HandshakeRequirementReason>),
     GossipDisabled,
@@ -256,6 +266,162 @@ pub enum RejectionReason {
     ProtocolMismatch,
     UnsupportedProtocolVersion(u32),
     UnsupportedFeature,
+}
+
+const REJECTION_REASON_VARIANTS: &[&str] = &[
+    "HandshakeRequired",
+    "GossipDisabled",
+    "InvalidData",
+    "RateLimited",
+    "UnableToVerifyOrigin",
+    "InvalidCredentials",
+    "ProtocolMismatch",
+    "UnsupportedProtocolVersion",
+    "UnsupportedFeature",
+];
+
+impl Serialize for RejectionReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // v1-compat: drop the diagnostic `Option<reason>` and emit just
+            // the unit string. v1 peers only know the unit form, so this
+            // keeps NEW→OLD responses parseable. Local code paths that need
+            // the reason can read it directly from the in-memory value
+            // before it's serialized.
+            Self::HandshakeRequired(_) => {
+                serializer.serialize_unit_variant("RejectionReason", 0, "HandshakeRequired")
+            }
+            Self::GossipDisabled => {
+                serializer.serialize_unit_variant("RejectionReason", 1, "GossipDisabled")
+            }
+            Self::InvalidData => {
+                serializer.serialize_unit_variant("RejectionReason", 2, "InvalidData")
+            }
+            Self::RateLimited => {
+                serializer.serialize_unit_variant("RejectionReason", 3, "RateLimited")
+            }
+            Self::UnableToVerifyOrigin => {
+                serializer.serialize_unit_variant("RejectionReason", 4, "UnableToVerifyOrigin")
+            }
+            Self::InvalidCredentials => {
+                serializer.serialize_unit_variant("RejectionReason", 5, "InvalidCredentials")
+            }
+            Self::ProtocolMismatch => {
+                serializer.serialize_unit_variant("RejectionReason", 6, "ProtocolMismatch")
+            }
+            // The version number IS load-bearing — without it the peer can't
+            // tell what version we expected — so we keep the newtype shape.
+            // v1 peers will reject this as unknown, which is the correct
+            // outcome (they didn't understand the negotiation anyway).
+            Self::UnsupportedProtocolVersion(n) => serializer.serialize_newtype_variant(
+                "RejectionReason",
+                7,
+                "UnsupportedProtocolVersion",
+                n,
+            ),
+            Self::UnsupportedFeature => {
+                serializer.serialize_unit_variant("RejectionReason", 8, "UnsupportedFeature")
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RejectionReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RejectionReason;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a RejectionReason variant: either a unit string \
+                     (v1 wire form) or a single-key object (newtype form)",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<RejectionReason, E> {
+                match s {
+                    "HandshakeRequired" => Ok(RejectionReason::HandshakeRequired(None)),
+                    "GossipDisabled" => Ok(RejectionReason::GossipDisabled),
+                    "InvalidData" => Ok(RejectionReason::InvalidData),
+                    "RateLimited" => Ok(RejectionReason::RateLimited),
+                    "UnableToVerifyOrigin" => Ok(RejectionReason::UnableToVerifyOrigin),
+                    "InvalidCredentials" => Ok(RejectionReason::InvalidCredentials),
+                    "ProtocolMismatch" => Ok(RejectionReason::ProtocolMismatch),
+                    "UnsupportedFeature" => Ok(RejectionReason::UnsupportedFeature),
+                    other => Err(E::unknown_variant(other, REJECTION_REASON_VARIANTS)),
+                }
+            }
+
+            fn visit_string<E: serde::de::Error>(self, s: String) -> Result<RejectionReason, E> {
+                self.visit_str(&s)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<RejectionReason, A::Error> {
+                let key: String = map.next_key()?.ok_or_else(|| {
+                    serde::de::Error::custom("RejectionReason object must have a single key")
+                })?;
+                let value = match key.as_str() {
+                    "HandshakeRequired" => {
+                        let reason: Option<HandshakeRequirementReason> = map.next_value()?;
+                        RejectionReason::HandshakeRequired(reason)
+                    }
+                    "UnsupportedProtocolVersion" => {
+                        let n: u32 = map.next_value()?;
+                        RejectionReason::UnsupportedProtocolVersion(n)
+                    }
+                    // Older peers may have serialized these as objects when
+                    // they were derived; tolerate that on input even though
+                    // we never emit it.
+                    "GossipDisabled" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::GossipDisabled
+                    }
+                    "InvalidData" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::InvalidData
+                    }
+                    "RateLimited" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::RateLimited
+                    }
+                    "UnableToVerifyOrigin" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::UnableToVerifyOrigin
+                    }
+                    "InvalidCredentials" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::InvalidCredentials
+                    }
+                    "ProtocolMismatch" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::ProtocolMismatch
+                    }
+                    "UnsupportedFeature" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::UnsupportedFeature
+                    }
+                    other => {
+                        return Err(serde::de::Error::unknown_variant(
+                            other,
+                            REJECTION_REASON_VARIANTS,
+                        ));
+                    }
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "RejectionReason object must have exactly one key",
+                    ));
+                }
+                Ok(value)
+            }
+        }
+
+        deserializer.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

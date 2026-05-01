@@ -731,9 +731,25 @@ impl GossipClient {
             ));
         }
 
-        let versions: Vec<u32> = response.json().await.map_err(|error| {
+        // Tolerate both shapes for v1 backwards-compat:
+        //   * `[1, 2]`  — current shape (array of supported versions)
+        //   * `1`       — older v1 peers' `/protocol_version` endpoint, which
+        //     returns the single u32 it understands. Rather than 404'ing on
+        //     the route, those peers serve `Ok(1)`, so the path above (which
+        //     looks at HTTP status) never fires for them.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum ProtocolVersionsRepr {
+            Many(Vec<u32>),
+            Single(u32),
+        }
+        let parsed: ProtocolVersionsRepr = response.json().await.map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
         })?;
+        let versions = match parsed {
+            ProtocolVersionsRepr::Many(v) => v,
+            ProtocolVersionsRepr::Single(v) => vec![v],
+        };
 
         // Reject peers advertising too many versions to prevent DDoS attacks
         if versions.len() > MAX_PROTOCOL_VERSIONS {
