@@ -1151,10 +1151,14 @@ impl PeerListDataInner {
                 mining_addr, old_peer_id, peer_id
             );
 
-            // Remove old entry and update with new peer_id
-            if let Some(old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
+            // Remove old entry, sync the inner peer_id field, then re-insert under
+            // the new key. Without the field update, server.rs:check_peer_v2 keeps
+            // reading the stale field and rejects every V2 gossip request.
+            if let Some(mut old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
+                old_peer.peer_id = peer_id;
                 self.persistent_peers_cache.insert(peer_id, old_peer);
-            } else if let Some(old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
+            } else if let Some(mut old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
+                old_peer.peer_id = peer_id;
                 self.unstaked_peer_purgatory.put(peer_id, old_peer);
             }
 
@@ -2080,6 +2084,65 @@ mod tests {
         assert_eq!(
             count, 1,
             "BecameInactive should drop A from the count without satisfying the wait"
+        );
+    }
+
+    #[test]
+    fn peer_id_change_with_same_address_updates_inner_peer_id_field() {
+        // Regression: when a peer regenerates its libp2p key (e.g. peer_key.bin
+        // wiped by reset.yml), it re-handshakes with the same mining_address and
+        // gossip/api address but a fresh peer_id. The cache must re-key the entry
+        // AND update the inner PeerListItem.peer_id field — server.rs:check_peer_v2
+        // reads that field to authorise V2 gossip and rejects with HandshakeRequired
+        // on mismatch, so a stale field traps the cluster in a handshake loop.
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (mining_addr, peer_id_old, peer) = create_test_peer(1);
+        let peer_address = peer.address;
+
+        peer_list.add_or_update_peer(peer.clone(), true);
+
+        let peer_id_new = IrysPeerId::from([99_u8; 20]);
+        let mut updated = peer;
+        updated.peer_id = peer_id_new;
+        peer_list.add_or_update_peer(updated, true);
+
+        let stored = peer_list
+            .peer_by_id(&peer_id_new)
+            .expect("peer reachable by new peer_id");
+        assert!(
+            peer_list.peer_by_id(&peer_id_old).is_none(),
+            "old peer_id must be evicted",
+        );
+        assert_eq!(
+            stored.peer_id, peer_id_new,
+            "inner peer_id field must match new peer_id",
+        );
+        assert_eq!(stored.mining_address, mining_addr);
+
+        let inner = peer_list.read();
+        assert_eq!(
+            inner.miner_addr_to_peer_id_map.get(&mining_addr).copied(),
+            Some(peer_id_new),
+        );
+        assert!(!inner.peer_id_to_miner_addr_map.contains_key(&peer_id_old));
+        assert_eq!(
+            inner.peer_id_to_miner_addr_map.get(&peer_id_new).copied(),
+            Some(mining_addr),
+        );
+        assert_eq!(
+            inner
+                .gossip_addr_to_peer_id_map
+                .get(&peer_address.gossip.ip())
+                .copied(),
+            Some(peer_id_new),
+        );
+        assert_eq!(
+            inner
+                .api_addr_to_peer_id_map
+                .get(&peer_address.api)
+                .copied(),
+            Some(peer_id_new),
         );
     }
 }
