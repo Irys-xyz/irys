@@ -207,24 +207,16 @@
     "Rejected": "GossipDisabled"
   },
   "gossip_response_rejected_handshake_required_none": {
-    "Rejected": {
-      "HandshakeRequired": null
-    }
+    "Rejected": "HandshakeRequired"
   },
   "gossip_response_rejected_handshake_required_not_in_peer_list": {
-    "Rejected": {
-      "HandshakeRequired": "RequestOriginIsNotInThePeerList"
-    }
+    "Rejected": "HandshakeRequired"
   },
   "gossip_response_rejected_handshake_required_origin_mismatch": {
-    "Rejected": {
-      "HandshakeRequired": "RequestOriginDoesNotMatchExpected"
-    }
+    "Rejected": "HandshakeRequired"
   },
   "gossip_response_rejected_handshake_required_unknown_miner": {
-    "Rejected": {
-      "HandshakeRequired": "MinerAddressIsUnknown"
-    }
+    "Rejected": "HandshakeRequired"
   },
   "gossip_response_rejected_invalid_credentials": {
     "Rejected": "InvalidCredentials"
