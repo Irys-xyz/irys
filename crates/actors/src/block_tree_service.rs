@@ -683,8 +683,21 @@ impl BlockTreeServiceInner {
                     // migrated block is orphaned only when the fork is strictly deeper
                     // than migration_depth.
                     if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
-                        // Network partition recovery: roll back blocks migrated on the
-                        // minority fork before proceeding with the new canonical chain.
+                        error!(
+                            fork_depth = old_fork_blocks.len(),
+                            new_fork_depth = new_fork_blocks.len(),
+                            fork_height,
+                            current_height = arc_block.height,
+                            "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                             and fell behind the canonical chain. Deep reorg rolling back {} \
+                             migrated blocks. Investigate peer connectivity — check firewall \
+                             rules, network routes, and gossip health between this node and \
+                             its peers.",
+                            old_fork_blocks.len() as u32
+                                - self.config.consensus.block_migration_depth,
+                        );
+                        // Roll back blocks migrated on the minority fork before
+                        // proceeding with the new canonical chain.
                         self.block_migration_service
                             .recover_from_network_partition(fork_height)?;
                     }
