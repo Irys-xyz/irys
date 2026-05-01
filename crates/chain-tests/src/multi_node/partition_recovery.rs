@@ -15,9 +15,7 @@ use tracing::info;
 /// Timeline:
 ///   Blocks 1–6  (gossip ON)  — genesis mines shared base with txs, peer follows
 ///   Blocks 7+   (gossip OFF) — each node posts unique txs and mines independently
-///   Reorg       — peer's fork blocks sent to genesis via send_full_block,
-///                 bypassing the block pool (which rejects blocks at heights
-///                 already in the block index as PartOfAPrunedFork)
+///   Gossip ON   — peer gossips longer fork to genesis, genesis reorgs
 ///
 /// Verifies on genesis:
 ///   - Shared offsets 0–2: data_root + path hashes preserved
@@ -96,7 +94,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     peer.wait_for_packing(seconds_to_wait).await;
 
     // Post shared txs on genesis
-    let shared_publish_chunks = [[1u8; 32], [2u8; 32], [3u8; 32]];
+    let shared_publish_chunks = [[1_u8; 32], [2_u8; 32], [3_u8; 32]];
     let shared_publish_tx = post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -105,7 +103,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let shared_one_year_chunks = [[4u8; 32], [5u8; 32], [6u8; 32]];
+    let shared_one_year_chunks = [[4_u8; 32], [5_u8; 32], [6_u8; 32]];
     let shared_one_year_tx = post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -114,7 +112,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let shared_thirty_day_chunks = [[7u8; 32], [8u8; 32], [9u8; 32]];
+    let shared_thirty_day_chunks = [[7_u8; 32], [8_u8; 32], [9_u8; 32]];
     let shared_thirty_day_tx = post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -124,14 +122,14 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     .await?;
 
     // Mine blocks 3–6, syncing peer after each
-    for h in 3..=6u64 {
+    for h in 3..=6_u64 {
         genesis.mine_block().await?;
         let block = genesis.get_block_by_height(h).await?;
         peer.wait_for_block(&block.block_hash, seconds_to_wait)
             .await?;
         info!(height = h, "Both nodes synced");
     }
-    let fork_height = 6u64;
+    let fork_height = 6_u64;
     info!("Shared base complete at height {fork_height}");
 
     // Wait for shared tx migration on genesis and verify chunks
@@ -148,7 +146,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
             )
             .await?;
     }
-    let data_size = 96u64;
+    let data_size = 96_u64;
     for (i, chunk) in shared_publish_chunks.iter().enumerate() {
         genesis
             .verify_migrated_chunk_32b(
@@ -183,7 +181,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     info!("Gossip disabled, fork point at height {fork_height}");
 
     // Genesis posts unique txs (minority fork)
-    let genesis_publish_chunks = [[40u8; 32], [41u8; 32], [42u8; 32]];
+    let genesis_publish_chunks = [[40_u8; 32], [41_u8; 32], [42_u8; 32]];
     post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -192,7 +190,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let genesis_one_year_chunks = [[50u8; 32], [51u8; 32], [52u8; 32]];
+    let genesis_one_year_chunks = [[50_u8; 32], [51_u8; 32], [52_u8; 32]];
     let genesis_one_year_tx = post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -201,7 +199,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let genesis_thirty_day_chunks = [[60u8; 32], [61u8; 32], [62u8; 32]];
+    let genesis_thirty_day_chunks = [[60_u8; 32], [61_u8; 32], [62_u8; 32]];
     let genesis_thirty_day_tx = post_tx_with_chunks(
         &genesis,
         &genesis_signer,
@@ -215,7 +213,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     peer.wait_for_packing(seconds_to_wait).await;
 
     // Peer posts unique txs (majority fork)
-    let peer_publish_chunks = [[140u8; 32], [141u8; 32], [142u8; 32]];
+    let peer_publish_chunks = [[140_u8; 32], [141_u8; 32], [142_u8; 32]];
     let peer_publish_tx = post_tx_with_chunks(
         &peer,
         &peer_signer,
@@ -224,7 +222,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let peer_one_year_chunks = [[150u8; 32], [151u8; 32], [152u8; 32]];
+    let peer_one_year_chunks = [[150_u8; 32], [151_u8; 32], [152_u8; 32]];
     let peer_one_year_tx = post_tx_with_chunks(
         &peer,
         &peer_signer,
@@ -233,7 +231,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     )
     .await?;
 
-    let peer_thirty_day_chunks = [[160u8; 32], [161u8; 32], [162u8; 32]];
+    let peer_thirty_day_chunks = [[160_u8; 32], [161_u8; 32], [162_u8; 32]];
     let peer_thirty_day_tx = post_tx_with_chunks(
         &peer,
         &peer_signer,
@@ -274,45 +272,34 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     // higher and the reorg triggers deterministically.
     let mut peer_fork_blocks = Vec::new();
     for i in 0..3 {
-        let (block, payload, txs) = peer.mine_block_without_gossip().await?;
+        let (block, _payload, _txs) = peer.mine_block_without_gossip().await?;
         let tx_count: usize = block.data_ledgers.iter().map(|dl| dl.tx_ids.0.len()).sum();
         info!(height = block.height, tx_count, "Peer fork block {}", i + 1);
-        peer_fork_blocks.push((block, payload, txs));
+        peer_fork_blocks.push(block);
     }
     let peer_height = fork_height + 3; // = 9
     info!(peer_height, genesis_height, "Peer fork is longer");
 
-    // ─── Stage 3: Reorg — send peer's longer chain to genesis ───
+    // ─── Stage 3: Reorg — gossip peer's longer chain to genesis ───
 
-    // Pre-ingest peer's unique tx headers + chunks into genesis so block
-    // validation succeeds and chunk migration can write data.
-    for (tx, chunks) in [
-        (&peer_publish_tx, &peer_publish_chunks[..]),
-        (&peer_one_year_tx, &peer_one_year_chunks[..]),
-        (&peer_thirty_day_tx, &peer_thirty_day_chunks[..]),
-    ] {
-        genesis.ingest_data_tx(tx.header.clone()).await?;
-        for (i, _) in chunks.iter().enumerate() {
-            genesis.post_chunk_32b_with_status(tx, i, chunks).await;
-        }
-    }
-    info!("Pre-ingested peer's unique txs + chunks into genesis");
+    // Re-enable gossip and re-announce so peers are marked online.
+    // Health checks during the disabled window may have set is_online=false,
+    // which would block payload fetching via top_active_peers.
+    genesis.gossip_enable();
+    peer.gossip_enable();
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    info!("Gossip re-enabled, peers re-announced");
 
-    // We use send_full_block (not gossip) because the fork crosses the block
-    // index boundary. The block pool rejects blocks at already-indexed heights
-    // with different hashes (PartOfAPrunedFork), but send_full_block bypasses
-    // the block pool and delivers directly to block_discovery.
-    for (block, payload, txs) in &peer_fork_blocks {
-        peer.send_full_block(&genesis, block, payload.clone(), txs.clone())
+    // Gossip peer's fork blocks to genesis one at a time.
+    // The receiving node pulls block bodies (incl. tx headers) and ETH
+    // execution payloads from the peer via P2P.
+    for block in &peer_fork_blocks {
+        peer.gossip_block_to_peers(block)?;
+        genesis
+            .wait_for_block(&block.block_hash, seconds_to_wait)
             .await?;
     }
 
-    // Wait for genesis to adopt the peer's chain. The last peer block (height 9)
-    // is taller than genesis's tip (height 8), guaranteeing the reorg.
-    let last_peer_block = &peer_fork_blocks.last().unwrap().0;
-    genesis
-        .wait_for_block(&last_peer_block.block_hash, seconds_to_wait)
-        .await?;
     genesis
         .wait_until_height(peer_height, seconds_to_wait)
         .await?;
@@ -368,7 +355,7 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
 
     // Path hashes at shared offsets still present
     for ledger in &ledgers_to_verify {
-        for offset in 0..3u32 {
+        for offset in 0..3_u32 {
             assert!(
                 has_path_hashes_at_offset(&genesis, *ledger, 0, offset),
                 "{:?}: path hashes at shared offset {offset} should be preserved",
