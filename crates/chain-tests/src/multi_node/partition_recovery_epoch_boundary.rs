@@ -100,7 +100,7 @@ async fn heavy4_partition_recovery_epoch_boundary() -> eyre::Result<()> {
     peer_node.gossip_disable();
     error!("Gossip disabled, fork point at height 2");
 
-    // Genesis posts a 6th pledge (minority fork only, 5 auto-pledges already exist)
+    // Genesis posts an additional pledge (minority fork only)
     let genesis_pledge2 = genesis_node
         .post_pledge_commitment_without_gossip(Some(genesis_node.get_anchor().await?))
         .await?;
