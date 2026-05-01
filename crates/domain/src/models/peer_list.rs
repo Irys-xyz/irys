@@ -954,6 +954,11 @@ impl PeerListDataInner {
             existing_peer.last_seen = peer.last_seen;
             existing_peer.reputation_score = peer.reputation_score;
             existing_peer.protocol_version = peer.protocol_version;
+            // Inbound handshakes prove the peer is reachable right now, so trust the
+            // refreshed `is_online` value here. Without this, a peer probe-marked offline
+            // (e.g. RejectionReason::GossipDisabled) stays offline in `top_active_peers`
+            // until the next health-check tick, even after the peer re-handshakes.
+            existing_peer.is_online = peer.is_online;
             if existing_peer.address != peer_address {
                 debug!(
                     "Peer address mismatch, updating from {:?} to {:?}",
@@ -1516,6 +1521,38 @@ mod tests {
                 "Unstaked peer should be removed after any decrease operation"
             );
         }
+    }
+
+    /// Regression: when an existing peer was probe-marked offline (e.g. its gossip
+    /// was disabled), a subsequent inbound handshake reconstructs the entry with
+    /// `is_online: true` and calls `add_or_update_peer`. If the update path drops
+    /// that field, `top_active_peers` keeps excluding the peer, so
+    /// `pull_payload_from_network` returns `NoPeersAvailable` until the next
+    /// `hydrate_peers_online_status` tick — even though we *just* received the
+    /// peer's connection and know they are reachable.
+    #[test]
+    fn test_add_or_update_peer_refreshes_is_online_for_existing_peer() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (_mining_addr, peer_id, peer) = create_test_peer(1);
+
+        peer_list.add_or_update_peer(peer.clone(), true);
+        peer_list.set_is_online_by_peer_id(&peer_id, false);
+        assert!(
+            !peer_list.peer_by_id(&peer_id).unwrap().is_online,
+            "precondition: peer must be offline before re-handshake"
+        );
+
+        // Simulate the inbound-handshake path: handle_handshake_v{1,2} always
+        // builds a fresh PeerListItem with is_online=true and calls add_or_update_peer.
+        let mut re_handshake = peer;
+        re_handshake.is_online = true;
+        peer_list.add_or_update_peer(re_handshake, true);
+
+        assert!(
+            peer_list.peer_by_id(&peer_id).unwrap().is_online,
+            "add_or_update_peer must refresh is_online from the incoming entry"
+        );
     }
 
     #[tokio::test]
