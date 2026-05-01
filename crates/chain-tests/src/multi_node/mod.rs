@@ -5,6 +5,7 @@ pub(crate) mod fork_recovery;
 pub(crate) mod fork_recovery_epoch;
 pub(crate) mod mempool_tests;
 pub(crate) mod partition_recovery;
+pub(crate) mod partition_recovery_epoch_boundary;
 pub(crate) mod peer_discovery;
 pub(crate) mod peer_mining;
 pub(crate) mod reth_restart;
