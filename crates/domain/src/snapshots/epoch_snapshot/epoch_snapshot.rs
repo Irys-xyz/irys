@@ -1207,7 +1207,27 @@ impl EpochSnapshot {
             num_chunks,
         );
 
-        // STEP 3: Capacity (with remaining slots limit)
+        // STEP 3: OneYear ledger
+        self.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            Some(DataLedger::OneYear as u32),
+            miner,
+            num_chunks,
+        );
+
+        // STEP 4: ThirtyDay ledger
+        self.process_storage_module_assignments(
+            &assignments,
+            &mut sm_packing_info,
+            &mut module_infos,
+            Some(DataLedger::ThirtyDay as u32),
+            miner,
+            num_chunks,
+        );
+
+        // STEP 5: Capacity (with remaining slots limit)
         self.process_storage_module_assignments(
             &assignments,
             &mut sm_packing_info,
