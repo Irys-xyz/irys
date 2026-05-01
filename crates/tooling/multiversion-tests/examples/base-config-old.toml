@@ -1,0 +1,108 @@
+node_mode = "Peer"
+sync_mode = "Full"
+mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
+reward_address = "0x0000000000000000000000000000000000000001"
+base_directory = "/tmp/irys-test"
+consensus = "Testing"
+trusted_peers = []
+initial_stake_and_pledge_whitelist = []
+initial_whitelist = []
+peer_filter_mode = "unrestricted"
+stake_pledge_drives = false
+genesis_peer_discovery_timeout_millis = 10000
+
+[network_defaults]
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[gossip]
+public_port = 0
+bind_port = 0
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[http]
+public_port = 0
+bind_port = 0
+public_ip = "127.0.0.1"
+bind_ip = "127.0.0.1"
+
+[reth.network]
+use_random_ports = true
+public_ip = "127.0.0.1"
+public_port = 0
+bind_ip = "127.0.0.1"
+bind_port = 0
+peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+[storage]
+num_writes_before_sync = 1
+
+[data_sync]
+max_pending_chunk_requests = 1000
+max_storage_throughput_bps = 209715200
+bandwidth_adjustment_interval = "5s"
+chunk_request_timeout = "10s"
+
+[packing]
+remote = []
+
+[packing.local]
+cpu_packing_concurrency = 4
+gpu_packing_batch_size = 1024
+
+[cache]
+cache_clean_lag = 2
+max_cache_size_bytes = 10737418240
+prune_at_capacity_percent = 80.0
+
+[[oracles]]
+type = "mock"
+initial_price = 1.0
+incremental_change = 0.00000000000001
+smoothing_interval = 15
+initial_direction_up = true
+poll_interval_ms = 10000
+
+[vdf]
+parallel_verification_thread_limit = 4
+
+[mempool]
+max_pending_pledge_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_preheader_chunks_per_item = 64
+max_preheader_data_path_bytes = 65536
+max_valid_items = 10000
+max_invalid_items = 10000
+max_valid_chunks = 10000
+max_valid_submit_txs = 3000
+max_valid_commitment_addresses = 300
+max_commitments_per_address = 20
+max_concurrent_mempool_tasks = 30
+
+[p2p_handshake]
+max_concurrent_handshakes = 32
+max_peers_per_response = 25
+max_retries = 8
+backoff_base_secs = 1
+backoff_cap_secs = 60
+blocklist_ttl_secs = 600
+server_peer_list_cap = 25
+
+[p2p_gossip]
+broadcast_batch_size = 50
+broadcast_batch_throttle_interval = 100
+enable_scoring = true
+
+[p2p_pull]
+top_active_window = 10
+sample_size = 5
+max_attempts = 5
+
+[sync]
+block_batch_size = 50
+periodic_sync_check_interval_secs = 30
+retry_block_request_timeout_secs = 30
+enable_periodic_sync_check = true

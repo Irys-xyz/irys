@@ -123,6 +123,25 @@ enum Commands {
         /// When omitted, tries "debug-release" then falls back to "release".
         #[clap(long)]
         profile: Option<String>,
+        /// Path to a TOML base-config template used to generate configs for
+        /// nodes running the OLD binary. Falls back to the bundled
+        /// `fixtures/base-config.toml` when omitted. Useful when the old ref
+        /// has a different `NodeConfig` schema than HEAD.
+        #[clap(long)]
+        base_config_old: Option<String>,
+        /// Path to a TOML base-config template used to generate configs for
+        /// nodes running the NEW binary. Falls back to the bundled
+        /// `fixtures/base-config.toml` when omitted.
+        #[clap(long)]
+        base_config_new: Option<String>,
+        /// Path to a TOML run-config file with cross-version comparison
+        /// knobs (field-rename aliases, skip lists, fields to keep at
+        /// default during signing). Used to make the harness apply to
+        /// arbitrary OLD↔NEW spans without hardcoding any particular
+        /// version pair's quirks. See
+        /// `crates/tooling/multiversion-tests/src/run_config.rs`.
+        #[clap(long)]
+        run_config: Option<String>,
         /// Remove the target/multiversion directory before running
         #[clap(long, default_value_t = false)]
         clean: bool,
@@ -676,6 +695,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             test_targets,
             filter,
             profile,
+            base_config_old,
+            base_config_new,
+            run_config,
             clean,
             clean_data,
             args,
@@ -738,6 +760,35 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             if let Some(ref p) = profile {
                 sh.set_var("IRYS_BUILD_PROFILE", p);
+            }
+            let base_config_old = base_config_old
+                .map(|p| {
+                    std::fs::canonicalize(&p).map_err(|e| {
+                        eyre::eyre!("base_config_old: failed to canonicalize `{p}`: {e}")
+                    })
+                })
+                .transpose()?;
+            let base_config_new = base_config_new
+                .map(|p| {
+                    std::fs::canonicalize(&p).map_err(|e| {
+                        eyre::eyre!("base_config_new: failed to canonicalize `{p}`: {e}")
+                    })
+                })
+                .transpose()?;
+            if let Some(ref path) = base_config_old {
+                sh.set_var("IRYS_BASE_CONFIG_OLD", path);
+            }
+            if let Some(ref path) = base_config_new {
+                sh.set_var("IRYS_BASE_CONFIG_NEW", path);
+            }
+            let run_config = run_config
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("run_config: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            if let Some(ref path) = run_config {
+                sh.set_var("IRYS_TEST_RUN_CONFIG", path);
             }
             sh.set_var("IRYS_RUN_ID", &run_id);
 

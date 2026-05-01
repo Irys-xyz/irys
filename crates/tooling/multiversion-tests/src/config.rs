@@ -120,70 +120,44 @@ fn patch_reth_network(
     Ok(())
 }
 
-/// Reads the current `node_mode` from a config file.
-pub fn read_node_role(config_path: &Path) -> Result<NodeRole, ConfigError> {
-    let content = std::fs::read_to_string(config_path)?;
-    let config: Value = content.parse()?;
-    let table = config.as_table().ok_or(ConfigError::InvalidTemplate)?;
-    match table.get("node_mode").and_then(|v| v.as_str()) {
-        Some("Genesis") => Ok(NodeRole::Genesis),
-        _ => Ok(NodeRole::Peer),
-    }
-}
-
-/// Rewrites the `node_mode` field in an existing config file.
-pub fn patch_node_mode(config_path: &Path, role: NodeRole) -> Result<(), ConfigError> {
-    let content = std::fs::read_to_string(config_path)?;
-    let mut config: Value = content.parse()?;
-    let table = config.as_table_mut().ok_or(ConfigError::InvalidTemplate)?;
-
-    let mode = match role {
-        NodeRole::Genesis => "Genesis",
-        NodeRole::Peer => "Peer",
-    };
-    table.insert("node_mode".into(), Value::String(mode.into()));
-
-    let output = toml::to_string_pretty(&config)?;
-    let tmp_path = config_path.with_extension("toml.tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
-    file.write_all(output.as_bytes())?;
-    file.flush()?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp_path, config_path)?;
-    Ok(())
-}
-
 /// Rewrites a peer node's config file, replacing `consensus = "Testing"` with
 /// `[consensus.Custom]` populated from the genesis node's `/v1/network/config`
 /// response plus the actual genesis hash.
+///
+/// `template_overlay` is the cross-version escape hatch: any fields the user
+/// authored under `[consensus.Custom]` in `--base-config-new` win over the
+/// genesis-served values, and any fields the genesis doesn't serve at all
+/// (because they're new in the upgraded binary) get backfilled from the
+/// template. The genesis values still win for any field the template didn't
+/// specify, so the upgraded peer stays coherent with the running chain.
 pub fn patch_peer_consensus(
     config_path: &Path,
     consensus_json: &serde_json::Value,
     genesis_hash: &str,
+    template_overlay: Option<&toml::map::Map<String, Value>>,
 ) -> Result<(), ConfigError> {
     let content = std::fs::read_to_string(config_path)?;
     let mut config: Value = content.parse()?;
     let table = config.as_table_mut().ok_or(ConfigError::InvalidTemplate)?;
 
-    let consensus_toml = json_to_toml(consensus_json)
+    let mut consensus_toml = json_to_toml(consensus_json)
         .and_then(|v| match v {
             Value::Table(t) => Some(t),
             _ => None,
         })
         .ok_or(ConfigError::InvalidConsensusJson)?;
 
-    let mut custom_table = toml::map::Map::new();
-    for (k, v) in consensus_toml {
-        custom_table.insert(k, v);
+    if let Some(overlay) = template_overlay {
+        overlay_template_onto_consensus(&mut consensus_toml, overlay);
     }
-    custom_table.insert(
+
+    consensus_toml.insert(
         "expected_genesis_hash".into(),
         Value::String(genesis_hash.to_owned()),
     );
 
     let mut consensus_wrapper = toml::map::Map::new();
-    consensus_wrapper.insert("Custom".into(), Value::Table(custom_table));
+    consensus_wrapper.insert("Custom".into(), Value::Table(consensus_toml));
     table.insert("consensus".into(), Value::Table(consensus_wrapper));
 
     let output = toml::to_string_pretty(&config)?;
@@ -195,6 +169,38 @@ pub fn patch_peer_consensus(
     drop(file);
     std::fs::rename(&tmp_path, config_path)?;
     Ok(())
+}
+
+/// Returns the `[consensus.Custom]` sub-table from a base-config template, or
+/// `None` if the template uses bare `consensus = "Testing"` / `"Mainnet"` /
+/// has no `consensus` key. Used by [`patch_peer_consensus`] as the
+/// cross-version overlay source.
+pub fn extract_consensus_custom_from_template(
+    template: &str,
+) -> Option<toml::map::Map<String, Value>> {
+    let parsed: Value = template.parse().ok()?;
+    let consensus = parsed.as_table()?.get("consensus")?;
+    let custom = consensus.as_table()?.get("Custom")?;
+    custom.as_table().cloned()
+}
+
+/// Recursively merges `overlay` into `target`, with overlay values winning
+/// for shared keys. Tables on both sides are merged in-place; any other value
+/// (or table-vs-non-table mismatch) is replaced by the overlay value.
+fn overlay_template_onto_consensus(
+    target: &mut toml::map::Map<String, Value>,
+    overlay: &toml::map::Map<String, Value>,
+) {
+    for (key, overlay_value) in overlay {
+        match (target.get_mut(key), overlay_value) {
+            (Some(Value::Table(target_table)), Value::Table(overlay_table)) => {
+                overlay_template_onto_consensus(target_table, overlay_table);
+            }
+            (_, _) => {
+                target.insert(key.clone(), overlay_value.clone());
+            }
+        }
+    }
 }
 
 fn json_to_toml(json: &serde_json::Value) -> Option<Value> {

@@ -29,6 +29,27 @@ static RUN_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub(super) const BASE_CONFIG: &str = include_str!("../../fixtures/base-config.toml");
 
+/// Reads a base-config TOML file pointed to by `env_var`, falling back to the
+/// bundled fixture when unset. Set via xtask `--base-config-old` /
+/// `--base-config-new` for cross-version runs whose `NodeConfig` schemas
+/// differ between refs.
+fn load_base_config(env_var: &str) -> String {
+    match std::env::var(env_var) {
+        Ok(path) if !path.is_empty() => std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("failed to read {env_var}={path}: {e}");
+        }),
+        _ => BASE_CONFIG.to_owned(),
+    }
+}
+
+pub(super) fn base_config_old() -> String {
+    load_base_config("IRYS_BASE_CONFIG_OLD")
+}
+
+pub(super) fn base_config_new() -> String {
+    load_base_config("IRYS_BASE_CONFIG_NEW")
+}
+
 /// (mining_key, reward_address) tuples. Index 0 is reserved for the genesis node.
 const NODE_IDENTITIES: &[(&str, &str)] = &[
     (
@@ -119,7 +140,24 @@ pub(super) async fn assert_node_running_binary(
 }
 
 pub(super) fn cluster_spec(test_name: &str, nodes: Vec<NodeSpec>) -> ClusterSpec {
-    cluster_spec_with_refs(test_name, nodes, None, None)
+    // Single-version flow (e2e tests): always use the bundled fixture for
+    // both kinds. The cross-version `IRYS_BASE_CONFIG_*` overlays are only
+    // meaningful when there's an actual older binary in the picture — they
+    // can be partial templates that rely on consensus state coming from a
+    // running genesis, which doesn't exist yet at fresh-cluster startup.
+    // The run config is also irrelevant for single-version flows so we use
+    // the empty default.
+    let run_dir = RUN_DIR.join(test_name);
+    ClusterSpec {
+        nodes,
+        height_tolerance: 2,
+        base_config_old: BASE_CONFIG.to_owned(),
+        base_config_new: BASE_CONFIG.to_owned(),
+        run_config: crate::run_config::RunConfig::default(),
+        run_dir,
+        old_ref: None,
+        new_ref: None,
+    }
 }
 
 pub(super) fn cluster_spec_with_refs(
@@ -132,7 +170,9 @@ pub(super) fn cluster_spec_with_refs(
     ClusterSpec {
         nodes,
         height_tolerance: 2,
-        base_config: BASE_CONFIG.to_owned(),
+        base_config_old: base_config_old(),
+        base_config_new: base_config_new(),
+        run_config: crate::run_config::RunConfig::load(),
         run_dir,
         old_ref,
         new_ref,
