@@ -5334,8 +5334,13 @@ dependencies = [
 name = "irys-multiversion-tests"
 version = "0.1.0"
 dependencies = [
+ "eyre",
  "futures",
+ "hex",
+ "irys-api-client",
  "irys-testing-utils",
+ "irys-types",
+ "k256",
  "nix",
  "proptest",
  "reqwest 0.12.28",
