@@ -1514,6 +1514,13 @@ impl IrysNode {
         let storage_modules = Self::init_storage_modules(&config, storage_module_infos)?;
         let storage_modules_guard = StorageModulesReadGuard::new(storage_modules.clone());
 
+        // Provide storage modules guard to block migration service for partition recovery
+        service_senders
+            .block_tree
+            .send_traced(BlockTreeServiceMessage::SetStorageModulesGuard(
+                storage_modules_guard.clone(),
+            ))?;
+
         // Spawn peer list service
         let (peer_network_handle, peer_list_guard) = init_peer_list_service(
             &irys_db,
@@ -1635,8 +1642,11 @@ impl IrysNode {
         let block_discovery_facade =
             BlockDiscoveryFacadeImpl::new(service_senders.block_discovery.clone());
 
-        let block_status_provider =
-            BlockStatusProvider::new(block_index_guard.clone(), block_tree_guard.clone());
+        let block_status_provider = BlockStatusProvider::new(
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            config.consensus.block_tree_depth,
+        );
 
         // In case if you're wondering why this channel is not in the service senders:
         // It's because ChainSyncService depends on the BlockPool, and moving it to actors will

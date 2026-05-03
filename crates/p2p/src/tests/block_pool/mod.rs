@@ -601,7 +601,14 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
 #[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
-    let (_tmp_dir, config) = create_test_config();
+    // Use a small block_tree_depth so that old blocks (height ~2) fall outside
+    // the reorg range relative to the latest index height (~10).
+    let (_tmp_dir, config) = {
+        let (tmp_dir, config) = create_test_config();
+        let mut node_config = config.node_config.clone();
+        node_config.consensus.get_mut().block_tree_depth = 3;
+        (tmp_dir, Config::new(node_config, config.peer_id))
+    };
 
     let MockedServices {
         block_status_provider_mock,
@@ -685,7 +692,14 @@ async fn should_warn_about_mismatches_for_very_old_block() {
 
 #[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
-    let (_tmp_dir, config) = create_test_config();
+    // Use a small block_tree_depth so that old blocks (height ~2) fall outside
+    // the reorg range relative to the latest index height (~10).
+    let (_tmp_dir, config) = {
+        let (tmp_dir, config) = create_test_config();
+        let mut node_config = config.node_config.clone();
+        node_config.consensus.get_mut().block_tree_depth = 3;
+        (tmp_dir, Config::new(node_config, config.peer_id))
+    };
 
     let MockedServices {
         block_status_provider_mock,

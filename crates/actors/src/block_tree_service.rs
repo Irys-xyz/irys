@@ -11,6 +11,7 @@ use crate::{
 };
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
@@ -47,6 +48,7 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
+    SetStorageModulesGuard(StorageModulesReadGuard),
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -236,6 +238,10 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .instrument(tracing::info_span!(parent: &parent_span, "block_tree.validation_finished", block.hash = %block_hash))
                     .await?;
+            }
+            BlockTreeServiceMessage::SetStorageModulesGuard(guard) => {
+                self.block_migration_service
+                    .set_storage_modules_guard(guard);
             }
         }
         Ok(())
@@ -663,9 +669,39 @@ impl BlockTreeServiceInner {
                     let blocks_to_confirm = new_fork_blocks.clone();
 
                     debug!(
-                        "Reorg at block height {} with {}",
-                        arc_block.height, arc_block.block_hash
+                        "Reorg at block height {} with {}, old fork is {} blocks long, new one is {} blocks",
+                        arc_block.height,
+                        arc_block.block_hash,
+                        old_fork_blocks.len(),
+                        new_fork_blocks.len()
                     );
+
+                    // Migration for the current tick hasn't run yet (it happens after
+                    // this reorg path, in migrate_block()). The highest migrated block is
+                    // at old_tip - migration_depth, from the previous tick's migration.
+                    // old_fork_blocks excludes the fork point (common ancestor), so a
+                    // migrated block is orphaned only when the fork is strictly deeper
+                    // than migration_depth.
+                    if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
+                        error!(
+                            fork_depth = old_fork_blocks.len(),
+                            new_fork_depth = new_fork_blocks.len(),
+                            fork_height,
+                            current_height = arc_block.height,
+                            "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                             and fell behind the canonical chain. Deep reorg rolling back {} \
+                             migrated blocks. Investigate peer connectivity — check firewall \
+                             rules, network routes, and gossip health between this node and \
+                             its peers.",
+                            old_fork_blocks.len() as u32
+                                - self.config.consensus.block_migration_depth,
+                        );
+                        // Roll back blocks migrated on the minority fork before
+                        // proceeding with the new canonical chain.
+                        self.block_migration_service
+                            .recover_from_network_partition(fork_height)?;
+                    }
+
                     metrics::record_reorg();
 
                     // Create reorg event with all necessary data for downstream processing

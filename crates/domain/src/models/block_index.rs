@@ -7,7 +7,7 @@
 use eyre::Result;
 use irys_database::{
     block_index_item_by_height, block_index_latest_height, block_index_num_blocks,
-    db::IrysDatabaseExt as _, insert_block_index_item,
+    db::IrysDatabaseExt as _, delete_block_index_range, insert_block_index_item,
 };
 use irys_types::{
     BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, H256, LedgerChunkOffset,
@@ -127,6 +127,12 @@ impl BlockIndex {
                 Ok(items)
             })
             .unwrap_or_default()
+    }
+
+    /// Removes all block index entries above `target_height`.
+    pub fn truncate_to_height(&self, target_height: u64) -> eyre::Result<()> {
+        self.db
+            .update_eyre(|tx| delete_block_index_range(tx, (target_height + 1)..))
     }
 
     /// Pushes a new [`BlockIndexItem`] at the given height

@@ -1011,6 +1011,7 @@ pub(crate) fn data_handler_stub(
         BlockStatusProvider::new(
             block_index_read_guard_stub.clone(),
             block_tree_read_guard_stub.clone(),
+            config.consensus.block_tree_depth,
         ),
         // Reth service as a second argument
         execution_payload_cache.clone(),

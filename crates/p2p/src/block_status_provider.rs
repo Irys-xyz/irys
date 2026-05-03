@@ -43,6 +43,10 @@ impl BlockStatus {
 pub struct BlockStatusProvider {
     block_index_read_guard: BlockIndexReadGuard,
     block_tree_read_guard: BlockTreeReadGuard,
+    /// Maximum depth from the latest indexed height at which a competing block
+    /// (same height, different hash) is still treated as a potential reorg
+    /// candidate rather than a pruned fork. Derived from `block_tree_depth`.
+    max_reorg_depth: u64,
 }
 
 impl Default for BlockStatusProvider {
@@ -55,10 +59,12 @@ impl BlockStatusProvider {
     pub fn new(
         block_index_read_guard: BlockIndexReadGuard,
         block_tree_read_guard: BlockTreeReadGuard,
+        block_tree_depth: u64,
     ) -> Self {
         Self {
             block_tree_read_guard,
             block_index_read_guard,
+            max_reorg_depth: block_tree_depth,
         }
     }
 
@@ -75,7 +81,8 @@ impl BlockStatusProvider {
     /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
     ///   be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
-    /// TODO: this needs to handle migrated block reorgs, it does not currently :)
+    /// - `PartOfAPrunedFork`: The block is at an indexed height with a different hash and is
+    ///   too old to be a valid reorg candidate.
     /// NOTE: block height is UNTRUSTED here, we haven't validated it yet
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
         let block_is_anywhere_in_the_tree = self.is_block_in_the_tree(block_hash);
@@ -90,17 +97,27 @@ impl BlockStatusProvider {
             if hash_is_in_the_index {
                 // Block is in the block index, it has been migrated
                 return BlockStatus::Finalized;
-            } else {
-                return BlockStatus::PartOfAPrunedFork;
             }
+            // Height is indexed but with a different hash. This could be:
+            // 1. A block already in the tree as a fork candidate (deep reorg in progress)
+            // 2. A new competing block within reorg range (potential deep reorg)
+            // 3. A genuinely old pruned fork block (reject for DoS protection)
+            if block_is_anywhere_in_the_tree {
+                return BlockStatus::ProcessedButCanBeReorganized;
+            }
+            let latest_indexed = binding.latest_height();
+            if latest_indexed.saturating_sub(block_height) <= self.max_reorg_depth {
+                // Within reorg range — let the block tree decide via
+                // recover_from_network_partition if needed.
+                return BlockStatus::NotProcessed;
+            }
+            return BlockStatus::PartOfAPrunedFork;
         }
 
-        if !height_is_in_the_index && block_is_anywhere_in_the_tree {
+        if block_is_anywhere_in_the_tree {
             // All blocks in the tree are a subject of reorganization
             BlockStatus::ProcessedButCanBeReorganized
-        } else
-        /* !height_is_in_the_index && !block_is_anywhere_in_the_tree */
-        {
+        } else {
             // No information about the block in the index or tree
             BlockStatus::NotProcessed
         }
@@ -219,6 +236,7 @@ impl BlockStatusProvider {
                 node_config.consensus_config(),
             )))),
             block_index_read_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db)),
+            max_reorg_depth: node_config.consensus_config().block_tree_depth,
         }
     }
 
