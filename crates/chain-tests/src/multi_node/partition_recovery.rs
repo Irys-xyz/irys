@@ -337,6 +337,28 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
     );
     info!("Supply state verified");
 
+    // ── Block index contains winning fork blocks, not orphaned ──
+    for h in (fork_height + 1)..=index_height {
+        let indexed_block = genesis.get_block_by_height_from_index(h, false)?;
+        let canonical_block = genesis.get_block_by_height(h).await?;
+        assert_eq!(
+            indexed_block.block_hash, canonical_block.block_hash,
+            "Block index at height {h} should contain the winning fork's block"
+        );
+    }
+    info!("Block index verified: all entries from winning fork");
+
+    // ── Chain linkage across recovery boundary ──
+    let block_at_fork = genesis.get_block_by_height_from_index(fork_height, false)?;
+    let block_after = genesis.get_block_by_height_from_index(fork_height + 1, false)?;
+    assert_eq!(
+        block_after.previous_block_hash,
+        block_at_fork.block_hash,
+        "Block at height {} should link to the fork point at height {fork_height}",
+        fork_height + 1
+    );
+    info!("Chain linkage verified across recovery boundary");
+
     // ── Common ancestor data preserved (offsets 0–2) ──
     // Shared tx data_roots should still be indexed
     let shared_txs: Vec<(DataLedger, &DataTransaction)> = vec![
@@ -424,6 +446,37 @@ async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
         );
     }
     info!("Peer unique tx data_roots confirmed re-indexed");
+
+    // ── Verify continued operation after recovery ──
+    genesis.mine_block().await?;
+    peer.wait_until_height(peer_height + 1, seconds_to_wait)
+        .await?;
+    genesis.mine_block().await?;
+    peer.wait_until_height(peer_height + 2, seconds_to_wait)
+        .await?;
+
+    let final_index_height = genesis.get_block_index_height();
+    assert!(
+        final_index_height > peer_height,
+        "Block index should continue advancing after recovery, got {final_index_height}"
+    );
+
+    let final_supply = genesis
+        .node_ctx
+        .supply_state_guard
+        .as_ref()
+        .expect("supply state not set")
+        .get();
+    let mut final_expected = irys_types::U256::zero();
+    for h in 1..=final_index_height {
+        let block = genesis.get_block_by_height_from_index(h, false)?;
+        final_expected = final_expected.saturating_add(block.reward_amount);
+    }
+    assert_eq!(
+        final_supply.cumulative_emitted, final_expected,
+        "Supply state should remain consistent after continued mining"
+    );
+    info!("Continued operation verified — mining and supply state consistent");
 
     genesis.stop().await;
     peer.stop().await;
