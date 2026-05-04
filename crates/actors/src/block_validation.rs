@@ -331,6 +331,26 @@ pub enum PreValidationError {
     },
 }
 
+impl PreValidationError {
+    /// Returns true for transient race conditions that the caller should
+    /// retry (instead of dropping the block as a permanent failure).
+    /// Currently `ParentNotInCache`: a concurrent reorg-driven prune evicted
+    /// the parent between the parent-status check (in `BlockPool`) and the
+    /// cache lookup (in `BlockTreeService`). The block can stay in the pool
+    /// — when the parent re-arrives, the orphan-trigger reprocesses it.
+    pub fn is_retryable_race(&self) -> bool {
+        matches!(self, Self::ParentNotInCache { .. })
+    }
+
+    /// Returns true for unrecoverable cache corruption (the block tree
+    /// `RwLock` was poisoned by a prior caller's panic). The cache is
+    /// corrupt; retry will hit the same poison. Caller should escalate
+    /// rather than silently dropping.
+    pub fn is_fatal_corruption(&self) -> bool {
+        matches!(self, Self::CachePoisoned { .. })
+    }
+}
+
 /// Validation error type that covers all block validation failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
@@ -1125,6 +1145,55 @@ pub fn height_is_valid(
             expected,
             got: block.height,
         })
+    }
+}
+
+#[cfg(test)]
+mod prevalidation_error_classification_tests {
+    use super::*;
+
+    /// Regression: `ParentNotInCache` is the transient race signal that
+    /// callers (block_pool) MUST distinguish from terminal validation
+    /// failures so the block stays in the pool for parent-arrival retry.
+    /// Pre-fix it collapsed to `BlockPrevalidationFailed` and was dropped.
+    #[test]
+    fn parent_not_in_cache_is_retryable_race() {
+        let err = PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        };
+        assert!(
+            err.is_retryable_race(),
+            "ParentNotInCache must be retryable"
+        );
+        assert!(
+            !err.is_fatal_corruption(),
+            "ParentNotInCache must not be fatal corruption"
+        );
+    }
+
+    /// `CachePoisoned` is unrecoverable — retry will hit the same poisoned
+    /// lock. Caller must escalate, not silently drop.
+    #[test]
+    fn cache_poisoned_is_fatal_corruption() {
+        let err = PreValidationError::CachePoisoned { at: "test_site" };
+        assert!(
+            err.is_fatal_corruption(),
+            "CachePoisoned must surface as fatal corruption"
+        );
+        assert!(
+            !err.is_retryable_race(),
+            "CachePoisoned must not be classified as a transient race"
+        );
+    }
+
+    /// Genuine validation failures (signature, height, etc.) are terminal —
+    /// retrying gives the same answer.
+    #[test]
+    fn genuine_validation_failures_are_neither_race_nor_corruption() {
+        let err = PreValidationError::BlockSignatureInvalid;
+        assert!(!err.is_retryable_race());
+        assert!(!err.is_fatal_corruption());
     }
 }
 

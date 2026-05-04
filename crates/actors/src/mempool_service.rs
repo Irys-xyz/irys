@@ -677,26 +677,31 @@ impl AtomicMempoolState {
 
     /// Batch-removes expired data txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
-    pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) {
-        match self.write().await {
-            Ok(mut g) => g.batch_prune_data_txs(expired),
-            Err(e) => warn!(
-                ?e,
-                "Mempool write lock contention; skipping batch_prune_data_txs"
-            ),
-        }
+    ///
+    /// Returns `Err(LockContention)` so callers can keep the mempool in sync
+    /// with downstream caches: the `prune_pending_txs` flow must skip the
+    /// `CachedDataRoots` invalidation when this returns Err, otherwise the
+    /// cache would drop txid references that the mempool still retains.
+    pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) -> Result<(), MempoolError> {
+        let mut g = self.write().await?;
+        g.batch_prune_data_txs(expired);
+        Ok(())
     }
 
     /// Batch-removes expired commitment txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
-    pub async fn batch_prune_commitment_txs(&self, expired: &[(H256, H256)]) {
-        match self.write().await {
-            Ok(mut g) => g.batch_prune_commitment_txs(expired),
-            Err(e) => warn!(
-                ?e,
-                "Mempool write lock contention; skipping batch_prune_commitment_txs"
-            ),
-        }
+    ///
+    /// Returns `Err(LockContention)` so callers can react to a winding-down
+    /// mempool. Commitment-tx pruning is independent of `CachedDataRoots`, so
+    /// failure here does not affect the data-tx cache invariants enforced by
+    /// `batch_prune_data_txs`.
+    pub async fn batch_prune_commitment_txs(
+        &self,
+        expired: &[(H256, H256)],
+    ) -> Result<(), MempoolError> {
+        let mut g = self.write().await?;
+        g.batch_prune_commitment_txs(expired);
+        Ok(())
     }
 
     /// Returns all valid commitment txs sorted by the priority rules.
@@ -1492,23 +1497,28 @@ impl AtomicMempoolState {
     /// This batches the work of `set_data_tx_included_height_overwrite`,
     /// `set_commitment_tx_included_height`, and `set_promoted_height` to avoid
     /// acquiring the write lock once per transaction (~120 times per block).
+    ///
+    /// All three update phases run atomically under a single write guard: either
+    /// every applicable tx in the mempool gets its metadata updated, or none do.
+    /// Per-tx absence (txid not present in mempool) is normal and silently
+    /// skipped — txs may have been pruned between block production and
+    /// confirmation.
+    ///
+    /// Returns `Err(LockContention)` when the write lock cannot be acquired
+    /// within the timeout. The contended `write()` already triggered
+    /// `signal_fatal_shutdown`, so callers MUST short-circuit any follow-up
+    /// work that would leave the mempool partially synchronised with the
+    /// confirmed block (e.g., DB cache writes, prune loops). Continuing past
+    /// this error produces a divergent view: the block is confirmed but the
+    /// mempool still treats its txs as pending.
     pub async fn apply_block_confirmed_updates(
         &self,
         submit_and_publish_txids: &[H256],
         commitment_txids: &[H256],
         publish_txids: &[H256],
         height: u64,
-    ) {
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; skipping apply_block_confirmed_updates"
-                );
-                return;
-            }
-        };
+    ) -> Result<(), MempoolError> {
+        let mut state = self.write().await?;
 
         // 1. Set included_height (with overwrite) for submit + publish data txs
         for txid in submit_and_publish_txids {
@@ -1555,6 +1565,8 @@ impl AtomicMempoolState {
                 state.recent_valid_tx.put(*txid, ());
             }
         }
+
+        Ok(())
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
@@ -3219,5 +3231,352 @@ mod lock_contention_tests {
         let mempool_state = AtomicMempoolState::new(empty_state());
         // No install_shutdown_token call. Must not panic.
         mempool_state.signal_fatal_shutdown("test");
+    }
+}
+
+/// Regression tests for `apply_block_confirmed_updates`.
+///
+/// Previously this function returned `()` and silently swallowed lock
+/// contention with a `warn!`, so the caller (`handle_block_confirmed_message`)
+/// would proceed with DB cache writes, chunk-ingress notifications, and
+/// pending-tx pruning while the mempool itself still treated the block's txs
+/// as un-included — a partial application that left the mempool diverged from
+/// the confirmed canonical chain.
+#[cfg(test)]
+mod apply_block_confirmed_updates_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        DataTransactionMetadata, IrysSignature,
+    };
+
+    fn empty_mempool_state() -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: HashMap::new(),
+            max_submit_txs: 100,
+            valid_commitment_tx: HashMap::new(),
+            max_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(1_u64).into(),
+                perm_fee: Some(U256::from(1_u64).into()),
+                ledger_id: DataLedger::Submit as u32,
+                metadata_format: 0,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id,
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(1_u64),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        })
+    }
+
+    /// Success path: all three update phases (data tx included_height,
+    /// commitment tx included_height, publish tx promoted_height) apply
+    /// atomically under a single write lock and the function returns Ok.
+    #[tokio::test]
+    async fn success_path_applies_all_three_update_phases_atomically() {
+        let data_id = H256::random();
+        let commitment_id = H256::random();
+        let publish_id = H256::random();
+        let signer = IrysAddress::random();
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(data_id, data_tx_with_id(data_id));
+        state
+            .valid_submit_ledger_tx
+            .insert(publish_id, data_tx_with_id(publish_id));
+        state
+            .valid_commitment_tx
+            .insert(signer, vec![commitment_tx_with_id(commitment_id, signer)]);
+
+        let mempool_state = AtomicMempoolState::new(state);
+        let height = 42_u64;
+
+        let result = mempool_state
+            .apply_block_confirmed_updates(
+                &[data_id, publish_id],
+                &[commitment_id],
+                &[publish_id],
+                height,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&data_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "data tx must have included_height set"
+        );
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&publish_id)
+                .unwrap()
+                .metadata()
+                .promoted_height,
+            Some(height),
+            "publish tx must have promoted_height set"
+        );
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&publish_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "publish tx must also have included_height set (covered by submit_and_publish_txids)"
+        );
+        assert_eq!(
+            guard
+                .valid_commitment_tx
+                .get(&signer)
+                .unwrap()
+                .iter()
+                .find(|t| t.id() == commitment_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "commitment tx must have included_height set"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&data_id),
+            "data tx must be marked recent_valid"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&commitment_id),
+            "commitment tx must be marked recent_valid"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&publish_id),
+            "publish tx must be marked recent_valid"
+        );
+    }
+
+    /// Per-tx absence is normal: txids in the input slices that are not
+    /// present in the mempool (e.g., already pruned) are silently skipped
+    /// without affecting the rest of the batch or the Result. The function
+    /// still returns Ok and the txs that ARE present still get updated.
+    #[tokio::test]
+    async fn missing_txids_are_silently_skipped_without_failing_the_batch() {
+        let present_id = H256::random();
+        let absent_id = H256::random();
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(present_id, data_tx_with_id(present_id));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .apply_block_confirmed_updates(&[present_id, absent_id], &[], &[], 7)
+            .await;
+        assert!(result.is_ok(), "absent txids must not fail the batch");
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&present_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(7),
+            "present tx must still get its update"
+        );
+    }
+}
+
+/// Regression tests for `batch_prune_data_txs` / `batch_prune_commitment_txs`
+/// returning `Result<(), MempoolError>` so the prune_pending_txs flow can keep
+/// the mempool in sync with `CachedDataRoots`.
+///
+/// Previously these returned `()` and swallowed lock-contention errors with a
+/// `warn!`, so `prune_pending_txs` would proceed to Phase 4 (cache
+/// invalidation) even when Phase 3 silently no-op'd — the cache would drop
+/// txid references that the mempool still held, silently filtering valid
+/// publish candidates.
+#[cfg(test)]
+mod batch_prune_result_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        DataTransactionMetadata, IrysSignature,
+    };
+
+    fn empty_mempool_state() -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: HashMap::new(),
+            max_submit_txs: 100,
+            valid_commitment_tx: HashMap::new(),
+            max_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(1_u64).into(),
+                perm_fee: Some(U256::from(1_u64).into()),
+                ledger_id: DataLedger::Submit as u32,
+                metadata_format: 0,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id,
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(1_u64),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        })
+    }
+
+    /// Success path: data tx prune returns Ok, mempool state is updated, and
+    /// the txid moves from valid → invalid sets so subsequent ingress rejects
+    /// duplicates.
+    #[tokio::test]
+    async fn data_tx_prune_success_returns_ok_and_updates_state() {
+        let id = H256::random();
+        let mut state = empty_mempool_state();
+        state.valid_submit_ledger_tx.insert(id, data_tx_with_id(id));
+        state.recent_valid_tx.put(id, ());
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .batch_prune_data_txs(&[(id, H256::zero())])
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert!(
+            !guard.valid_submit_ledger_tx.contains_key(&id),
+            "tx must be removed from valid set"
+        );
+        assert!(
+            guard.recent_invalid_tx.contains(&id),
+            "tx must be marked recent_invalid"
+        );
+        assert!(
+            !guard.recent_valid_tx.contains(&id),
+            "tx must be removed from recent_valid"
+        );
+    }
+
+    /// Success path: commitment tx prune returns Ok and removes the tx from
+    /// the per-address vector.
+    #[tokio::test]
+    async fn commitment_tx_prune_success_returns_ok_and_updates_state() {
+        let id = H256::random();
+        let signer = IrysAddress::random();
+        let mut state = empty_mempool_state();
+        state
+            .valid_commitment_tx
+            .insert(signer, vec![commitment_tx_with_id(id, signer)]);
+        state.recent_valid_tx.put(id, ());
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .batch_prune_commitment_txs(&[(id, H256::zero())])
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert!(
+            !guard.valid_commitment_tx.contains_key(&signer),
+            "address entry must be removed when its only tx is pruned"
+        );
+        assert!(
+            guard.recent_invalid_tx.contains(&id),
+            "tx must be marked recent_invalid"
+        );
+    }
+
+    /// Empty input is a no-op success — caller can pass an empty slice without
+    /// triggering write-lock contention or spurious errors.
+    #[tokio::test]
+    async fn empty_input_is_a_noop_success() {
+        let mempool_state = AtomicMempoolState::new(empty_mempool_state());
+
+        assert!(
+            mempool_state.batch_prune_data_txs(&[]).await.is_ok(),
+            "empty data prune must succeed"
+        );
+        assert!(
+            mempool_state.batch_prune_commitment_txs(&[]).await.is_ok(),
+            "empty commitment prune must succeed"
+        );
     }
 }

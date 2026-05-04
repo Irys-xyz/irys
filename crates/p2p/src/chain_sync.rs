@@ -1729,9 +1729,27 @@ async fn synced_peers_sorted_by_cumulative_diff(
             peer_list.top_active_peers(None, None)
         };
         if peers.is_empty() {
-            return Err(ChainSyncError::Network(
-                "No online peers available".to_string(),
-            ));
+            // Spend the existing 15s deadline retrying empty snapshots rather
+            // than failing on the first one. The retry block further down
+            // only fires when peers were found but all gave PeerSyncing,
+            // which leaves a gap: a transient hydrate failure (e.g. a probe
+            // racing peer.stop() during a rapid restart) flips genesis to
+            // is_online=false and yields an empty top_active_peers snapshot,
+            // which previously bailed immediately. Looping here gives the
+            // peer-network inactive-peer health check (every 10s) and any
+            // BecameActive gossip events a chance to flip the flag back
+            // before we declare no peers available.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ChainSyncError::Network(
+                    "No online peers available".to_string(),
+                ));
+            }
+            debug!(
+                "No online peers yet; retrying in {:?}",
+                SYNCED_PEER_DISCOVERY_INTERVAL
+            );
+            tokio::time::sleep(SYNCED_PEER_DISCOVERY_INTERVAL).await;
+            continue;
         }
 
         let mut had_syncing_peers = false;

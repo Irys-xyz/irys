@@ -50,14 +50,32 @@ impl Inner {
             .chain(thirty_day_txids.iter())
             .copied()
             .collect();
-        self.mempool_state
+        if let Err(e) = self
+            .mempool_state
             .apply_block_confirmed_updates(
                 &all_data_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
             )
-            .await;
+            .await
+        {
+            // `apply_block_confirmed_updates` -> `write` already triggered
+            // `signal_fatal_shutdown`. Short-circuit the rest of confirmation:
+            // proceeding would update the DB's `CachedDataRoots`, notify chunk
+            // ingress, and prune pending txs while the mempool itself still
+            // reflects pre-confirmation state — the exact partial application
+            // (DB/cache moved forward, mempool stale) this fix is meant to
+            // prevent. Returning Ok lets the lifecycle drive the wind-down
+            // instead of panicking via `handle_message`'s spawn wrapper.
+            warn!(
+                ?e,
+                block.hash = %block.block_hash,
+                block.height = block.height,
+                "Mempool contention applying block-confirmed updates; signal_fatal_shutdown already triggered, aborting confirmation work for this block"
+            );
+            return Ok(());
+        }
 
         // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
         // Track which roots were successfully cached so we only trigger proof generation
@@ -315,19 +333,53 @@ impl Inner {
             }
         }
 
-        // Phase 3: Batch-remove under a single write lock each
-        if !expired_data.is_empty() {
-            self.mempool_state.batch_prune_data_txs(&expired_data).await;
-        }
-        if !expired_commits.is_empty() {
-            self.mempool_state
+        // Phase 3a: Batch-remove expired data txs under a single write lock.
+        //
+        // The `data_txs_pruned` flag gates Phase 4 (cache invalidation): if this
+        // write fails, the mempool still holds the txs, so notifying the cache
+        // to remove their entries from `CachedDataRoot.txid_set` would create a
+        // desync where the cache says "no such tx for this data_root" while
+        // the mempool still has it — silently dropping txs from publish
+        // candidate selection until the next prune cycle.
+        let data_txs_pruned = if expired_data.is_empty() {
+            true
+        } else {
+            match self.mempool_state.batch_prune_data_txs(&expired_data).await {
+                Ok(()) => true,
+                Err(e) => {
+                    // `batch_prune_data_txs` -> `write` already triggered
+                    // `signal_fatal_shutdown`. Skip cache invalidation to keep
+                    // mempool ⇄ CachedDataRoots in sync; the lifecycle drives
+                    // the wind-down.
+                    warn!(
+                        ?e,
+                        "Mempool contention pruning expired data txs; skipping CachedDataRoots invalidation to preserve cache invariant"
+                    );
+                    false
+                }
+            }
+        };
+
+        // Phase 3b: Batch-remove expired commitment txs under a single write lock.
+        // Independent of Phase 3a / Phase 4: commitment txs do not appear in
+        // `CachedDataRoots`, so contention here cannot desync that cache.
+        if !expired_commits.is_empty()
+            && let Err(e) = self
+                .mempool_state
                 .batch_prune_commitment_txs(&expired_commits)
-                .await;
+                .await
+        {
+            warn!(
+                ?e,
+                "Mempool contention pruning expired commitment txs; lifecycle wind-down in flight"
+            );
         }
 
         // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
-        // This prevents stale txid references from blocking publish candidate selection.
-        if !expired_by_data_root.is_empty()
+        // Only fires when Phase 3a actually pruned the mempool — otherwise we'd
+        // tell the cache to forget txids the mempool still serves.
+        if data_txs_pruned
+            && !expired_by_data_root.is_empty()
             && let Err(e) = self.service_senders.chunk_cache.send_traced(
                 crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
                     expired_by_data_root,

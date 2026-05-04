@@ -1163,4 +1163,102 @@ mod validate_tests {
             "expected error referencing both fields, got: {msg}"
         );
     }
+
+    /// Backward-compat contract for `max_control_plane_concurrent_tasks`:
+    /// existing operator configs that predate this field must continue to
+    /// parse and validate. The field's serde default (4) is supplied by
+    /// `MempoolNodeConfig`'s struct-level `#[serde(default)]`, and the
+    /// default is small enough to satisfy `< max_concurrent_chunk_ingress_tasks`
+    /// for the shipped default total (30) and for any reasonable operator
+    /// override.
+    ///
+    /// If anyone removes the struct-level `#[serde(default)]` or changes the
+    /// `Default` impl to a value that conflicts with the strict-validation
+    /// invariant, this test fails — surfacing the regression at unit-test
+    /// time rather than at operator-upgrade time.
+    #[test]
+    fn old_mempool_toml_missing_control_plane_field_still_parses_and_validates() {
+        // Mempool section as it would appear in an operator config that was
+        // written before `max_control_plane_concurrent_tasks` and
+        // `max_concurrent_chunk_ingress_tasks` existed. Includes the other
+        // mempool fields the operator may have tuned, to make sure the
+        // missing-field path doesn't depend on absent neighbours.
+        let toml_data = r#"
+        node_mode = "Genesis"
+        sync_mode = "Full"
+        base_directory = "~/.tmp/.irys"
+        consensus = "Testing"
+        mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        trusted_peers = []
+
+        [storage]
+        num_writes_before_sync = 1
+
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
+        [gossip]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [packing.local]
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+
+        [cache]
+        cache_clean_lag = 2
+
+        [http]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [reth.network]
+        use_random_ports = true
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+
+        [vdf]
+        parallel_verification_thread_limit = 8
+
+        [mempool]
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
+        max_preheader_chunks_per_item = 64
+        max_preheader_data_path_bytes = 65536
+        max_invalid_items = 10000
+        max_valid_items = 10000
+        max_valid_chunks = 10000
+        max_valid_submit_txs = 3000
+        max_valid_commitment_addresses = 300
+        max_commitments_per_address = 20
+        "#;
+
+        let nc = toml::from_str::<NodeConfig>(toml_data)
+            .expect("Old mempool TOML missing the new field must still parse");
+
+        assert_eq!(
+            nc.mempool.max_control_plane_concurrent_tasks, 4,
+            "missing field must take the documented default (4)"
+        );
+        assert_eq!(
+            nc.mempool.max_concurrent_chunk_ingress_tasks, 30,
+            "missing field must take the documented default (30)"
+        );
+
+        Config::new_with_random_peer_id(nc)
+            .validate()
+            .expect("Old mempool TOML missing the new field must pass validation");
+    }
 }
