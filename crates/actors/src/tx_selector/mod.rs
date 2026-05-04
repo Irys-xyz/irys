@@ -707,7 +707,15 @@ pub async fn select_best_txs(
         "Mempool transaction selection completed"
     );
 
-    // Check for high rejection rate
+    // Check for high rejection rate.
+    //
+    // `total_available == 0` is ambiguous: either the mempool was genuinely
+    // empty, or `sorted_commitments` / `all_valid_submit_ledgers_cloned`
+    // returned empty under read-lock contention (best-effort during
+    // shutdown — see their docstrings). The guard suppresses a misleading
+    // 100% rejection warning during shutdown, at the cost of also missing
+    // it on a genuinely-empty mempool. Acceptable: if the mempool is empty,
+    // there is nothing to reject.
     let total_commitments_available = sorted_commitments.len();
     let total_available = total_commitments_available + total_data_available;
     let total_selected = commitment_tx.len() + submit_tx.len();

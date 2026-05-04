@@ -338,6 +338,13 @@ impl Clone for StopGuard {
 /// init failures surface their real cause and lifecycle panics rethrow with their original
 /// payload — instead of being hidden behind a generic `RecvError` ("channel closed").
 ///
+/// `biased;` makes the recv arm strictly preferred so that when the lifecycle's
+/// early-return path fires both `tx.send(Err(err))` *and* a return-from-task in the
+/// same scheduler tick, the cause-bearing oneshot wins the select instead of the
+/// JoinHandle arm collapsing the chain into a generic
+/// `"lifecycle exited during init with reason: ..."`. The cause is also embedded
+/// in the `FatalError` reason at the call sites (defense-in-depth).
+///
 /// Returns the constructed `T` on success. On error the caller's `?` propagates the eyre
 /// error chain that includes the underlying cause from the lifecycle's early-return paths.
 async fn await_lifecycle_init<T>(
@@ -345,6 +352,8 @@ async fn await_lifecycle_init<T>(
     handle: &mut tokio::task::JoinHandle<ShutdownReason>,
 ) -> eyre::Result<T> {
     tokio::select! {
+        biased;
+
         res = rx => match res {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => Err(e.wrap_err("node lifecycle failed during init")),
@@ -1121,11 +1130,10 @@ impl IrysNode {
                     let err = e.wrap_err(format!(
                         "start_reth_node failed at block height {latest_block_height}"
                     ));
+                    let reason = format!("{err:?}");
                     error!(error = ?err, "Failed to start reth node");
                     let _ = irys_node_ctx_tx.send(Err(err));
-                    return ShutdownReason::FatalError(format!(
-                        "start_reth_node failed at block height {latest_block_height}"
-                    ));
+                    return ShutdownReason::FatalError(reason);
                 }
             };
 
@@ -1151,9 +1159,10 @@ impl IrysNode {
                 Ok(result) => result,
                 Err(e) => {
                     let err = e.wrap_err("init_services failed");
+                    let reason = format!("{err:?}");
                     error!(error = ?err, "Failed to initialize services");
                     let _ = irys_node_ctx_tx.send(Err(err));
-                    return ShutdownReason::FatalError("init_services failed".into());
+                    return ShutdownReason::FatalError(reason);
                 }
             };
 
@@ -2708,5 +2717,45 @@ mod tests {
             .expect("expected success");
         assert_eq!(value, 42);
         handle.abort();
+    }
+
+    /// Regression: when the lifecycle's early-return path fires both
+    /// `tx.send(Err(err))` AND the JoinHandle return in the same scheduler
+    /// tick, the recv arm must win — otherwise the cause-bearing oneshot
+    /// loses to the JoinHandle arm and the caller sees a generic
+    /// "lifecycle exited during init with reason: ...". `biased;` enforces
+    /// the recv-first ordering.
+    ///
+    /// Run 50 iterations: without `biased;`, tokio's select! picks a random
+    /// ready branch each call, so ~half would surface the wrong arm. 50
+    /// iterations make the regression effectively impossible to miss
+    /// (probability of all 50 hitting recv by chance is ~(0.5)^50 ≈ 10^-15).
+    #[tokio::test]
+    async fn await_lifecycle_init_recv_arm_wins_race_with_joinhandle() {
+        for iteration in 0..50 {
+            let (tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+            let mut handle: tokio::task::JoinHandle<ShutdownReason> =
+                Handle::current().spawn(async move {
+                    let err = eyre::eyre!("init_services failed: real cause");
+                    let _ = tx.send(Err(err));
+                    ShutdownReason::FatalError("init_services failed: real cause".into())
+                });
+            // Wait until the spawned task has both sent on the oneshot and
+            // returned — so both branches become Ready in the next select! poll.
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let result = await_lifecycle_init(&mut rx, &mut handle).await;
+            let err = result.expect_err("expected error");
+            let chain = format!("{err:?}");
+            assert!(
+                chain.contains("real cause"),
+                "iteration {iteration}: recv arm must win the race so the cause survives; got: {chain}"
+            );
+            assert!(
+                !chain.contains("lifecycle exited during init with reason"),
+                "iteration {iteration}: JoinHandle arm must not win when oneshot is also ready; got: {chain}"
+            );
+        }
     }
 }

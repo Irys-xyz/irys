@@ -132,10 +132,13 @@ where
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send chunk: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send chunk",
+            );
         }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -452,10 +455,13 @@ where
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send execution payload",
+            );
         }
 
         debug!("Gossip execution payload handled");
@@ -494,10 +500,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send transaction",
+            );
         }
 
         debug!("Gossip data handled");
@@ -535,10 +544,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send commitment transaction",
+            );
         }
 
         debug!("Gossip data handled");
@@ -574,10 +586,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send ingress proof",
+            );
         }
 
         debug!("Gossip data handled");
@@ -632,10 +647,13 @@ where
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send chunk: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send chunk",
+            );
         }
 
         debug!("Gossip data handled");
@@ -829,10 +847,13 @@ where
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send execution payload: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send execution payload",
+            );
         }
 
         debug!("Gossip data handled");
@@ -875,10 +896,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send data transaction header: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send data transaction header",
+            );
         }
 
         debug!("Gossip data handled");
@@ -920,10 +944,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send commitment transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send commitment transaction",
+            );
         }
 
         debug!("Gossip data handled");
@@ -963,10 +990,13 @@ where
 
         let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list, is_syncing);
-            error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send ingress proof",
+            );
         }
 
         debug!("Gossip data handled");
@@ -1360,6 +1390,31 @@ where
         HttpResponse::Ok().json(irys_types::ProtocolVersion::supported_versions_u32())
     }
 
+    /// Convert a gossip-handler error into the appropriate `HttpResponse`,
+    /// preserving the retryable-backpressure signal.
+    ///
+    /// `RateLimited` (and the chunk-ingress overload signal that gets mapped
+    /// to it in `gossip_data_handler`) returns `RejectionReason::RateLimited`
+    /// and applies no peer penalty — the peer is fine, we are saturated.
+    /// Everything else routes through `handle_invalid_data` (which decides
+    /// whether to penalise based on the variant) and surfaces as `InvalidData`.
+    fn rejection_response_for_error(
+        error: &GossipError,
+        peer_miner_address: &IrysAddress,
+        peer_list: &PeerList,
+        is_syncing: bool,
+        context: &str,
+    ) -> HttpResponse {
+        if matches!(error, GossipError::RateLimited) {
+            debug!(%error, context, "Gossip rate-limited");
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+        }
+        Self::handle_invalid_data(peer_miner_address, error, peer_list, is_syncing);
+        error!("Failed to {}: {}", context, error);
+        HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+    }
+
     fn handle_invalid_data(
         peer_miner_address: &IrysAddress,
         error: &GossipError,
@@ -1464,6 +1519,11 @@ where
                 None => HttpResponse::Ok()
                     .json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>)),
             },
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited data request from peer");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
+            }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::Ok()
@@ -1570,6 +1630,11 @@ where
             Ok(maybe_data) => {
                 let wire_data: Option<wire_types::GossipDataV2> = maybe_data.map(Into::into);
                 HttpResponse::Ok().json(GossipResponse::Accepted(wire_data))
+            }
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited pull data request from peer");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
             }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);

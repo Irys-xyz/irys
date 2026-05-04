@@ -699,13 +699,23 @@ impl AtomicMempoolState {
         }
     }
 
+    /// Returns all valid commitment txs sorted by the priority rules.
+    ///
+    /// Best-effort under contention: `read()` already triggered
+    /// `signal_fatal_shutdown` when the timeout fired, so the lifecycle is
+    /// winding down by the time the empty `Vec` reaches the caller. Block
+    /// production (`tx_selector`) consumes empty as authoritative — the
+    /// resulting under-filled block is acceptable because the FCU/migration
+    /// pipeline downstream is also being torn down. The empty path is NOT
+    /// safe outside the shutdown window; if ever called from a steady-state
+    /// path, switch to a `Result`-returning variant.
     pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
         let mempool_state_guard = match self.read().await {
             Ok(g) => g,
             Err(e) => {
                 warn!(
                     ?e,
-                    "Mempool read lock contention; sorted_commitments returning empty"
+                    "Mempool read lock contention; sorted_commitments returning empty (signal_fatal_shutdown already triggered)"
                 );
                 return Vec::new();
             }
@@ -963,13 +973,19 @@ impl AtomicMempoolState {
             .cloned()
     }
 
+    /// Snapshot of all valid Submit-ledger txs.
+    ///
+    /// Best-effort under contention: see `sorted_commitments` for the full
+    /// shutdown-window contract. Returning an empty `HashMap` on contention
+    /// causes `tx_selector` to produce an under-filled block, but the
+    /// lifecycle is already winding down via `signal_fatal_shutdown`.
     pub async fn all_valid_submit_ledgers_cloned(&self) -> HashMap<H256, DataTransactionHeader> {
         match self.read().await {
             Ok(g) => g.valid_submit_ledger_tx.clone(),
             Err(e) => {
                 warn!(
                     ?e,
-                    "Mempool read lock contention; all_valid_submit_ledgers_cloned returning empty"
+                    "Mempool read lock contention; all_valid_submit_ledgers_cloned returning empty (signal_fatal_shutdown already triggered)"
                 );
                 HashMap::new()
             }
@@ -1145,25 +1161,26 @@ impl AtomicMempoolState {
         }
     }
 
-    /// Clear included_height for a data transaction (re-org handling)
-    /// Returns true if the transaction was found and the height was cleared
-    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> bool {
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; clear_data_tx_included_height_inner returning false"
-                );
-                return false;
-            }
-        };
-        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped_tx.metadata_mut().included_height = None;
-            true
-        } else {
-            false
-        }
+    /// Clear included_height for a data transaction (re-org handling).
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and height cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; `signal_fatal_shutdown`
+    ///   was already triggered. Distinguishing this from `Ok(false)` matters
+    ///   for reorg cleanup: pre-fix, contention silently looked like
+    ///   "tx absent", and stale `included_height` survived the reorg with the
+    ///   mempool state disagreeing with the canonical chain.
+    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> Result<bool, MempoolError> {
+        let mut state = self.write().await?;
+        Ok(
+            if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+                wrapped_tx.metadata_mut().included_height = None;
+                true
+            } else {
+                false
+            },
+        )
     }
 
     /// Set included_height for a commitment transaction
@@ -1200,24 +1217,24 @@ impl AtomicMempoolState {
     }
 
     /// Clears the included_height for a commitment transaction.
-    /// Returns true if the transaction was found.
-    pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; clear_commitment_tx_included_height returning false"
-                );
-                return false;
-            }
-        };
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and height cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; reorg cleanup must
+    ///   distinguish this from `Ok(false)` to avoid leaving stale
+    ///   `included_height` after the canonical chain has diverged.
+    pub async fn clear_commitment_tx_included_height(
+        &self,
+        tx_id: H256,
+    ) -> Result<bool, MempoolError> {
+        let mut state = self.write().await?;
 
         // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
                 tx.metadata_mut().included_height = None;
-                return true;
+                return Ok(true);
             }
         }
 
@@ -1225,11 +1242,11 @@ impl AtomicMempoolState {
         for (_, pledges_cache) in state.pending_pledges.iter_mut() {
             if let Some(tx) = pledges_cache.get_mut(&tx_id) {
                 tx.metadata_mut().included_height = None;
-                return true;
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -1402,18 +1419,18 @@ impl AtomicMempoolState {
             });
     }
 
-    pub async fn clear_promoted_height(&self, txid: H256) -> bool {
+    /// Clears `promoted_height` for a tx during reorg unpromotion.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and `promoted_height` cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; reorg cleanup must
+    ///   surface this distinctly so a stale `promoted_height` doesn't survive
+    ///   the reorg and cause `tx_selector::retain_unconfirmed_submit_candidates`
+    ///   to drop a now-orphaned tx from block production candidates.
+    pub async fn clear_promoted_height(&self, txid: H256) -> Result<bool, MempoolError> {
         let mut cleared = false;
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; clear_promoted_height returning false"
-                );
-                return false;
-            }
-        };
+        let mut state = self.write().await?;
         if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
             // Clear promoted_height in metadata
             wrapped_header.metadata_mut().promoted_height = None;
@@ -1421,7 +1438,7 @@ impl AtomicMempoolState {
             tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
             cleared = true;
         }
-        cleared
+        Ok(cleared)
     }
 
     /// Atomically sets the promoted_height on a transaction in the mempool.
@@ -1541,8 +1558,8 @@ impl AtomicMempoolState {
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
-    /// Returns true if the tx was found and updated, false otherwise.
-    pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
+    /// See `clear_data_tx_included_height_inner` for the contention semantics.
+    pub async fn clear_data_tx_included_height(&self, txid: H256) -> Result<bool, MempoolError> {
         self.clear_data_tx_included_height_inner(txid).await
     }
 

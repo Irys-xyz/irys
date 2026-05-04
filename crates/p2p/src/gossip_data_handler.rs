@@ -7,7 +7,7 @@ use crate::{
         record_gossip_inbound_error,
     },
     rate_limiting::{DataRequestTracker, RequestCheckResult},
-    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
+    types::{InternalGossipError, InvalidDataError},
 };
 use core::net::SocketAddr;
 use irys_actors::block_discovery::{
@@ -15,8 +15,8 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
-    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
+    MempoolFacade, block_discovery::BlockDiscoveryFacade,
+    chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -142,38 +142,11 @@ where
             }
             Err(error) => {
                 record_gossip_inbound_error(error.error_type(), error.is_advisory());
-
-                Err(match error {
-                    ChunkIngressError::Critical(err) => match err {
-                        CriticalChunkIngressError::InvalidProof => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof)
-                        }
-                        CriticalChunkIngressError::InvalidDataHash => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash)
-                        }
-                        CriticalChunkIngressError::InvalidChunkSize => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
-                        }
-                        CriticalChunkIngressError::InvalidDataSize => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize)
-                        }
-                        CriticalChunkIngressError::InvalidOffset(msg) => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
-                        }
-                        CriticalChunkIngressError::DatabaseError => GossipError::Internal(
-                            InternalGossipError::Database("Chunk ingress database error".into()),
-                        ),
-                        CriticalChunkIngressError::ServiceUninitialized => {
-                            GossipError::Internal(InternalGossipError::ServiceUninitialized)
-                        }
-                        CriticalChunkIngressError::Other(other) => {
-                            GossipError::Internal(InternalGossipError::Unknown(other))
-                        }
-                    },
-                    ChunkIngressError::Advisory(err) => {
-                        GossipError::Advisory(AdvisoryGossipError::ChunkIngress(err))
-                    }
-                })
+                // The conversion lives on `impl From<ChunkIngressError> for
+                // GossipError` (types.rs) so the Advisory(Overloaded) ->
+                // RateLimited mapping is testable in isolation and shared
+                // with any future caller.
+                Err(error.into())
             }
         }
     }

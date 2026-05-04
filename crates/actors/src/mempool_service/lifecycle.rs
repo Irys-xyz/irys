@@ -207,13 +207,27 @@ impl Inner {
     /// during reorg handling. Only affects in-memory state; does not persist to DB.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
     async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
-        // Try fast-path: clear in-place if present in the mempool
-        if self.mempool_state.clear_promoted_height(txid).await {
-            return Ok(());
+        match self.mempool_state.clear_promoted_height(txid).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
+                Ok(())
+            }
+            Err(e) => {
+                // `signal_fatal_shutdown` already triggered by the contended
+                // write — distinguishing this from the benign "tx absent"
+                // path matters: pre-fix it looked the same, leaving stale
+                // `promoted_height` after the canonical chain diverged.
+                // Returning Ok lets the lifecycle drive the wind-down
+                // instead of panicking via `start()`'s spawn wrapper.
+                warn!(
+                    ?e,
+                    tx.id = %txid,
+                    "Mempool contention during unpromote; signal_fatal_shutdown already triggered, skipping"
+                );
+                Ok(())
+            }
         }
-
-        tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
-        Ok(())
     }
 
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
@@ -439,13 +453,26 @@ impl Inner {
 
         // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
         // DB metadata is already cleared by BlockMigrationService::persist_metadata() in BlockTreeService.
+        // On contention we abort the cleanup loop: signal_fatal_shutdown is in flight,
+        // and continuing would queue more contended writes against a winding-down mempool.
         for id in orphaned_commitment_tx_ids.iter() {
-            if self
+            match self
                 .mempool_state
                 .clear_commitment_tx_included_height(*id)
                 .await
             {
-                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %id,
+                        "Mempool contention during commitment reorg cleanup; aborting cleanup, lifecycle will drive shutdown"
+                    );
+                    return Ok(());
+                }
             }
         }
 
@@ -582,14 +609,27 @@ impl Inner {
             );
         }
 
-        // Clear included_height for orphaned term transactions
+        // Clear included_height for orphaned term transactions. On contention,
+        // abort: signal_fatal_shutdown is in flight and continuing would queue
+        // more contended writes.
         for tx_id in orphaned_term_txs.iter().copied() {
-            if self
+            match self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %tx_id,
+                        "Mempool contention during term-tx reorg cleanup; aborting"
+                    );
+                    return Ok(());
+                }
             }
         }
 
@@ -629,14 +669,26 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
-        // Clear included_height for orphaned publish transactions
+        // Clear included_height for orphaned publish transactions. Same
+        // contention semantics as the term-tx loop above.
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
-            if self
+            match self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %tx_id,
+                        "Mempool contention during publish-tx reorg cleanup; aborting"
+                    );
+                    return Ok(());
+                }
             }
         }
 
