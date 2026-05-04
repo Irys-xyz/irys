@@ -89,8 +89,9 @@ impl VdfState {
             );
             return self.global_step;
         }
-        // saturating fallback: vdf_depth is bounded by seeds.len() comparisons below,
-        // so a u64 step count outside usize is bounded to "always pop_front".
+        // Saturating to usize::MAX means seeds.len() >= vdf_depth is always
+        // false, so the buffer never trims in this edge case. Safe — only
+        // unrealistic step counts (well past usize::MAX) would hit this.
         let vdf_depth = usize::try_from(global_step.saturating_sub(self.minimum_step_to_keep))
             .unwrap_or(usize::MAX);
         if self.seeds.len() >= vdf_depth {

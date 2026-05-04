@@ -165,6 +165,13 @@ impl Config {
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
         );
 
+        // Zero satisfies wait_for_active_peers immediately on the empty snapshot,
+        // so genesis nodes would skip sync without ever observing a peer.
+        ensure!(
+            self.node_config.sync.min_active_peers > 0,
+            "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
+        );
+
         // publish_ledger_epoch_length must be > 0 if set, and must not overflow when multiplied
         if let Some(n) = self.consensus.epoch.publish_ledger_epoch_length {
             ensure!(

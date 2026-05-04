@@ -591,13 +591,12 @@ impl BlockTree {
             }
         }
 
-        // Remove the block
         info!(
             block.hash = %block_hash,
             block.height = height,
             chain_state = ?chain_state,
             cache.size_before = self.blocks.len(),
-            "Block removed from block tree cache"
+            "Removing block from block tree cache"
         );
         self.blocks.remove(block_hash);
 

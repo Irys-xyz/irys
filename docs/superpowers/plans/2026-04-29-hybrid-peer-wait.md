@@ -182,7 +182,7 @@ async fn wait_for_n_peers_returns_immediately_when_already_satisfied() {
     peer_list.add_or_update_peer(peer_a, true);
     peer_list.add_or_update_peer(peer_b, true);
 
-    // Both peers start with PeerScore::INITIAL = 50 which is >= ACTIVE_THRESHOLD = 20
+    // Both peers start with PeerScore::INITIAL = 50 which is >= ACTIVE_THRESHOLD = 10
     // and is_online = true, so both are active+online.
 
     let start = std::time::Instant::now();

@@ -109,11 +109,6 @@ pub(crate) enum ProcessBlockResult {
     ParentRequestFailed,
     /// Block has been added to the pool, but no request for the parent block was made (too far ahead of canonical)
     ParentTooFarAhead,
-    /// Pre-validation hit a transient race (parent pruned between
-    /// status check and cache lookup). The block stays in the pool;
-    /// the orphan-trigger reprocesses it when the parent re-arrives.
-    /// Distinct from `ParentRequested` because no network request was made.
-    PreValidationRaceWillRetry,
 }
 
 #[derive(Debug, Clone)]
@@ -900,48 +895,34 @@ where
             .handle_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await
         {
-            // Inspect the typed inner error so transient races (parent
-            // pruned mid-lookup) leave the block in the pool for
-            // parent-arrival retry instead of being permanently dropped.
             // Cache poisoning is unrecoverable; surface as critical so the
-            // service can escalate.
-            if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
-                if pre_err.is_retryable_race() {
-                    warn!(
-                        block.hash = ?block_hash,
-                        block.height = current_block_height,
-                        error = ?pre_err,
-                        "Block pool: pre-validation hit a transient race (parent pruned between status check and cache lookup); leaving block in pool for parent-arrival retry"
-                    );
-                    // Mark as not-processing so a subsequent process_block
-                    // call (triggered when the parent re-arrives via the
-                    // orphan-handler) can re-attempt.
-                    self.blocks_cache
-                        .change_block_processing_status(block_hash, false)
-                        .await;
-                    return Ok(ProcessBlockResult::PreValidationRaceWillRetry);
-                }
-                if pre_err.is_fatal_corruption() {
-                    error!(
-                        block.hash = ?block_hash,
-                        error = ?pre_err,
-                        "Block pool: fatal block-tree cache corruption; cannot continue"
-                    );
-                    self.blocks_cache
-                        .remove_block(
-                            &block_hash,
-                            BlockRemovalReason::FailedToProcess(
-                                FailureReason::BlockPrevalidationFailed,
-                            ),
-                        )
-                        .await;
-                    self.sync_state
-                        .record_block_processing_error(pre_err.to_string());
-                    return Err(CriticalBlockPoolError::BlockError(format!(
-                        "fatal cache corruption: {pre_err}"
-                    ))
-                    .into());
-                }
+            // service can escalate. All other pre-validation failures —
+            // including `ParentNotInCache` — are terminal: nothing in the
+            // current pipeline reliably re-invokes `process_block` after a
+            // parent-pruned race, so a "retry" path here would just leak
+            // entries until LRU eviction.
+            if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error
+                && pre_err.is_fatal_corruption()
+            {
+                error!(
+                    block.hash = ?block_hash,
+                    error = ?pre_err,
+                    "Block pool: fatal block-tree cache corruption; cannot continue"
+                );
+                self.blocks_cache
+                    .remove_block(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(
+                            FailureReason::BlockPrevalidationFailed,
+                        ),
+                    )
+                    .await;
+                self.sync_state
+                    .record_block_processing_error(pre_err.to_string());
+                return Err(CriticalBlockPoolError::BlockError(format!(
+                    "fatal cache corruption: {pre_err}"
+                ))
+                .into());
             }
 
             error!(

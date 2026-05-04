@@ -842,7 +842,7 @@ async fn initialize_sync_mode(
         warn!(
             wanted = params.min_active_peers,
             timeout_ms = params.genesis_peer_discovery_timeout_millis,
-            "Sync task: genesis node waiting for up to {} active peer(s); will proceed best-effort once any peers connect, or skip sync entirely if none arrive within {}ms",
+            "Sync task: genesis node waiting for up to {} active peer(s); will proceed best-effort with however many peers are reachable at the timeout, or skip sync entirely if none arrive within {}ms",
             params.min_active_peers,
             params.genesis_peer_discovery_timeout_millis
         );
@@ -875,6 +875,23 @@ async fn initialize_sync_mode(
                 Duration::from_millis(params.peer_wait_timeout_millis),
             )
             .await;
+        if count == 0 {
+            // Without this skip the next call (`fetch_initial_block_index` →
+            // `get_block_index`) bails on the empty peer set and aborts node
+            // startup — defeating the hybrid-peer-wait contract. Skipping sync
+            // best-effort lets the node start; the sync layer re-engages once
+            // peers come online via the normal gossip event flow.
+            warn!(
+                wanted = params.min_active_peers,
+                timeout_ms = params.peer_wait_timeout_millis,
+                "Sync task: peer node found 0 active peers within {}ms (wanted {}); skipping initial sync to let startup complete; sync will engage when peers connect",
+                params.peer_wait_timeout_millis,
+                params.min_active_peers
+            );
+            sync_state.set_is_syncing(false);
+            sync_state.finish_sync();
+            return Ok(false);
+        }
         if count < params.min_active_peers {
             warn!(
                 "Sync task: proceeding with {} active peer(s) (wanted {}) after {}ms timeout",
@@ -1727,6 +1744,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     trusted_peers_only: bool,
 ) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
     let deadline = tokio::time::Instant::now() + SYNCED_PEER_DISCOVERY_TIMEOUT;
+    let mut seen_candidate = false;
 
     loop {
         let peers = if trusted_peers_only {
@@ -1735,28 +1753,31 @@ async fn synced_peers_sorted_by_cumulative_diff(
             peer_list.top_active_peers(None, None)
         };
         if peers.is_empty() {
-            // Spend the existing 15s deadline retrying empty snapshots rather
-            // than failing on the first one. The retry block further down
-            // only fires when peers were found but all gave PeerSyncing,
-            // which leaves a gap: a transient hydrate failure (e.g. a probe
-            // racing peer.stop() during a rapid restart) flips genesis to
-            // is_online=false and yields an empty top_active_peers snapshot,
-            // which previously bailed immediately. Looping here gives the
-            // peer-network inactive-peer health check (every 10s) and any
-            // BecameActive gossip events a chance to flip the flag back
-            // before we declare no peers available.
+            // Only retry when a candidate has *previously* been observed —
+            // a transient hydrate failure (probe racing peer.stop() during a
+            // rapid restart) momentarily flips is_online=false. Without this
+            // gate the helper would burn its 15s deadline on every cold
+            // startup without peers, exceeding the caller's
+            // `peer_wait_timeout_millis` budget and undermining the
+            // hybrid-peer-wait contract.
+            if !seen_candidate {
+                return Err(ChainSyncError::Network(
+                    "No online peers available".to_string(),
+                ));
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ChainSyncError::Network(
                     "No online peers available".to_string(),
                 ));
             }
             debug!(
-                "No online peers yet; retrying in {:?}",
+                "Peer set went empty after a candidate was seen; retrying in {:?}",
                 SYNCED_PEER_DISCOVERY_INTERVAL
             );
             tokio::time::sleep(SYNCED_PEER_DISCOVERY_INTERVAL).await;
             continue;
         }
+        seen_candidate = true;
 
         let mut had_syncing_peers = false;
         let mut had_non_syncing_errors = false;

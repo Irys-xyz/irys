@@ -507,6 +507,8 @@ impl Inner {
     /// means these fields are lost during serialization. The DB is authoritative since
     /// `BlockMigrationService` persists them at confirmation time.
     pub async fn reconstruct_metadata_from_db(&self) {
+        // Startup-only path: no other writers exist yet, so the timeout-guarded
+        // `mempool_state.write()` helper is unnecessary here. Direct write is safe.
         let mut state = self.mempool_state.state.write().await;
         let mut reconstructed = 0_u64;
         for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
