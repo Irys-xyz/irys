@@ -316,9 +316,11 @@ pub struct DataTransactionHeaderV1 {
     #[rlp(default)]
     pub signature: IrysSignature,
 
-    #[serde(default, with = "optional_string_u64")]
+    #[serde(default)]
     /// WARNING: None == Some(0) for RLP!!
-    pub bundle_format: Option<u64>,
+    /// TODO: make an enum
+    /// 0 = no/custom format (ignored by normal indexers)
+    pub metadata_format: u8,
 
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default)]
@@ -414,7 +416,7 @@ impl DataTransactionHeaderV1 {
             term_fee: BoundedFee::zero(),
             perm_fee: None,
             ledger_id: DataLedger::Publish.into(),
-            bundle_format: None,
+            metadata_format: 0,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
         }
@@ -892,7 +894,7 @@ mod tests {
             term_fee: BoundedFee::from(100_u64),
             perm_fee: Some(BoundedFee::from(200_u64)),
             ledger_id: DataLedger::Submit.into(),
-            bundle_format: None,
+            metadata_format: 0,
             chain_id: 1,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
         };
@@ -1192,7 +1194,7 @@ mod tests {
                 term_fee: BoundedFee::from(100_u64),
                 perm_fee: Some(BoundedFee::from(200_u64)),
                 ledger_id: DataLedger::Submit.into(),
-                bundle_format: None,
+                metadata_format: 0,
                 chain_id: config.chain_id,
                 signature: Signature::test_signature().into(),
             },

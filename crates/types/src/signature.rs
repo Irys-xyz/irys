@@ -244,7 +244,7 @@ mod tests {
                     term_fee: BoundedFee::from(99_u64),
                     perm_fee: Some(BoundedFee::from(98_u64)),
                     ledger_id: DataLedger::Publish.into(),
-                    bundle_format: None,
+                    metadata_format: 0,
                     chain_id: testing_config.chain_id,
                     signature: Default::default(),
                 },

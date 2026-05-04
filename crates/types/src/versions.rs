@@ -55,11 +55,17 @@ pub enum DatabaseVersion {
     /// * Back-filled `IrysDataTxMetadata` rows from existing block headers so
     ///   that every stored transaction has consistent metadata.
     V2 = 2,
+
+    /// `bundle_format` → `metadata_format` rename migration.
+    ///
+    /// Replaces the inline `bundle_format: Option<u64>` field on
+    /// `DataTransactionHeaderV1` with `metadata_format: u8`.
+    V3 = 3,
 }
 
 impl DatabaseVersion {
     /// The current schema version that this binary expects.
-    pub const CURRENT: Self = Self::V2;
+    pub const CURRENT: Self = Self::V3;
 
     /// Returns `Some(version)` if the raw value corresponds to a known variant,
     /// or `None` if the value was written by a newer binary.
@@ -68,6 +74,7 @@ impl DatabaseVersion {
             0 => Some(Self::V0),
             1 => Some(Self::V1),
             2 => Some(Self::V2),
+            3 => Some(Self::V3),
             _ => None,
         }
     }

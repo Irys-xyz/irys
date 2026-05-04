@@ -2729,7 +2729,7 @@ mod bounded_mempool_tests {
                 term_fee: U256::from(fee).into(),
                 perm_fee: Some(U256::from(100).into()),
                 ledger_id: DataLedger::Publish as u32,
-                bundle_format: Some(0),
+                metadata_format: 0,
                 signature: IrysSignature::default(),
                 chain_id: 1,
             },

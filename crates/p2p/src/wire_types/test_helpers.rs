@@ -269,7 +269,7 @@ pub(crate) fn canonical_data_tx_header_v1_inner() -> DataTransactionHeaderV1 {
         term_fee: 1_000_000_u64.into(),
         perm_fee: Some(500_000_u64.into()),
         ledger_id: 1,
-        bundle_format: Some(1),
+        metadata_format: 1,
         chain_id: 1270,
         signature: test_signature(),
     }
