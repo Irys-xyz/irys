@@ -1118,9 +1118,9 @@ impl IrysNode {
             {
                 Ok(result) => result,
                 Err(e) => {
-                    let err = eyre::eyre!(
-                        "start_reth_node failed at block height {latest_block_height}: {e}"
-                    );
+                    let err = e.wrap_err(format!(
+                        "start_reth_node failed at block height {latest_block_height}"
+                    ));
                     error!(error = ?err, "Failed to start reth node");
                     let _ = irys_node_ctx_tx.send(Err(err));
                     return ShutdownReason::FatalError(format!(
@@ -1150,7 +1150,7 @@ impl IrysNode {
             {
                 Ok(result) => result,
                 Err(e) => {
-                    let err = eyre::eyre!("init_services failed: {e}");
+                    let err = e.wrap_err("init_services failed");
                     error!(error = ?err, "Failed to initialize services");
                     let _ = irys_node_ctx_tx.send(Err(err));
                     return ShutdownReason::FatalError("init_services failed".into());

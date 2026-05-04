@@ -91,8 +91,9 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) irys_db: DatabaseProvider,
     pub(crate) message_handler_semaphore: Arc<Semaphore>,
     /// Reserved lane for control-plane messages (`IngestIngressProof`,
-    /// `ProcessPendingChunks`). Chunk floods saturate
-    /// `message_handler_semaphore` but cannot starve the control plane.
+    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`). Chunk
+    /// floods saturate `message_handler_semaphore` but cannot starve the
+    /// control plane.
     pub(crate) control_plane_semaphore: Arc<Semaphore>,
     pub(crate) max_concurrent_tasks: u32,
     pub(crate) max_control_plane_tasks: u32,
@@ -341,10 +342,20 @@ impl ChunkIngressService {
                                     break 'service;
                                 }
                                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                                    if has_reply {
-                                        // Caller is awaiting a reply — hand back
-                                        // a fast advisory so they can retry
-                                        // upstream rather than waiting on us.
+                                    // Chunk-lane saturation always fast-fails
+                                    // so chunk floods cannot park the recv
+                                    // loop and starve the control plane. Lost
+                                    // chunks are recoverable: reply-bearing
+                                    // callers retry on the Overloaded
+                                    // advisory; fire-and-forget chunks (only
+                                    // emitted by data_sync_service as an
+                                    // SM-write fallback) are re-fetched from
+                                    // peers by the sync layer.
+                                    let is_chunk_lane = matches!(
+                                        msg,
+                                        ChunkIngressMessage::IngestChunk(..)
+                                    );
+                                    if is_chunk_lane || has_reply {
                                         warn!(
                                             msg_type = %msg_type,
                                             "Chunk ingress service lane saturated, returning Overloaded"
@@ -352,9 +363,8 @@ impl ChunkIngressService {
                                         Self::send_overloaded_errors(msg);
                                         continue 'service;
                                     }
-                                    // No reply channel means internal work
-                                    // with no caller to retry. Wait for a
-                                    // permit rather than silently drop it.
+                                    // Control-plane fire-and-forget: wait for
+                                    // a permit rather than silently drop it.
                                     // While parked here the recv loop is not
                                     // polled, so new IngestChunk messages
                                     // queue in msg_rx until a permit frees —
@@ -521,17 +531,26 @@ impl ChunkIngressService {
     /// so peers are not penalised for hitting our backpressure.
     fn send_overloaded_errors(msg: ChunkIngressMessage) {
         match msg {
-            ChunkIngressMessage::IngestChunk(_, Some(reply)) => {
-                let _ = reply.send(Err(ChunkIngressError::Advisory(
-                    AdvisoryChunkIngressError::Overloaded,
-                )));
+            ChunkIngressMessage::IngestChunk(_, reply) => {
+                // Record the saturation signal even when there is no reply
+                // channel; otherwise dashboards miss fast-failed chunks.
+                metrics::record_chunk_error(
+                    AdvisoryChunkIngressError::Overloaded.error_type(),
+                    true,
+                );
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(ChunkIngressError::Advisory(
+                        AdvisoryChunkIngressError::Overloaded,
+                    )));
+                }
             }
             ChunkIngressMessage::IngestIngressProof(_, reply) => {
                 let _ = reply.send(Err(IngressProofError::Overloaded));
             }
-            // No response channel — nothing to notify.
-            ChunkIngressMessage::IngestChunk(_, None)
-            | ChunkIngressMessage::ProcessPendingChunks(_)
+            // Fire-and-forget control-plane variants don't reach this path in
+            // production (the recv loop parks for them instead), but the
+            // helper must remain total for tests and future callers.
+            ChunkIngressMessage::ProcessPendingChunks(_)
             | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
         }
     }

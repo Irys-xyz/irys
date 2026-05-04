@@ -101,7 +101,6 @@ pub fn run_vdf<B: BlockProvider>(
                     "Fastforward Step {:?} with Seed {:?}",
                     proposed_ff_step.global_step_number, proposed_ff_step.step
                 );
-                hash = proposed_ff_step.step;
 
                 if let Some(vdf_info) = block_provider.latest_canonical_vdf_info() {
                     next_reset_seed = vdf_info.next_seed;
@@ -110,7 +109,7 @@ pub fn run_vdf<B: BlockProvider>(
 
                 let prev_step = global_step_number;
                 let Some(returned) = store_step(
-                    hash,
+                    proposed_ff_step.step,
                     &atomic_vdf_global_step,
                     &vdf_state,
                     proposed_ff_step.global_step_number,
@@ -118,14 +117,19 @@ pub fn run_vdf<B: BlockProvider>(
                 ) else {
                     return;
                 };
-                global_step_number = returned;
-                if global_step_number == prev_step {
+                if returned == prev_step {
+                    // Gap rejected — leave hash and global_step_number
+                    // untouched so the VDF state stays consistent. Normal
+                    // stepping will close the gap.
                     warn!(
                         prev = prev_step,
                         proposed = proposed_ff_step.global_step_number,
                         "Fast-forward step had a gap; VDF will catch up via normal stepping"
                     );
+                    continue;
                 }
+                global_step_number = returned;
+                hash = proposed_ff_step.step;
                 chain_sync_state.record_vdf_step(global_step_number);
                 hash = process_reset(
                     global_step_number,
