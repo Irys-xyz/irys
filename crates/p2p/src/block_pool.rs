@@ -2,7 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -895,6 +895,36 @@ where
             .handle_block(Arc::clone(&block), skip_validation_for_fast_track)
             .await
         {
+            // Cache poisoning is unrecoverable; surface as critical so the
+            // service can escalate. All other pre-validation failures —
+            // including `ParentNotInCache` — are terminal: nothing in the
+            // current pipeline reliably re-invokes `process_block` after a
+            // parent-pruned race, so a "retry" path here would just leak
+            // entries until LRU eviction.
+            if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error
+                && pre_err.is_fatal_corruption()
+            {
+                error!(
+                    block.hash = ?block_hash,
+                    error = ?pre_err,
+                    "Block pool: fatal block-tree cache corruption; cannot continue"
+                );
+                self.blocks_cache
+                    .remove_block(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(
+                            FailureReason::BlockPrevalidationFailed,
+                        ),
+                    )
+                    .await;
+                self.sync_state
+                    .record_block_processing_error(pre_err.to_string());
+                return Err(CriticalBlockPoolError::BlockError(format!(
+                    "fatal cache corruption: {pre_err}"
+                ))
+                .into());
+            }
+
             error!(
                 "Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool",
                 block_hash, block_discovery_error

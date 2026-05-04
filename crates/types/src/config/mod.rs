@@ -150,8 +150,26 @@ impl Config {
             "mempool.max_concurrent_chunk_ingress_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall the chunk ingress service)"
         );
         ensure!(
+            self.mempool.max_control_plane_concurrent_tasks > 0,
+            "mempool.max_control_plane_concurrent_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall control-plane messages)"
+        );
+        ensure!(
+            self.mempool.max_control_plane_concurrent_tasks
+                < self.mempool.max_concurrent_chunk_ingress_tasks,
+            "mempool.max_control_plane_concurrent_tasks ({}) must be strictly less than max_concurrent_chunk_ingress_tasks ({}) (the control-plane lane is carved out of the total budget and must leave at least one permit for chunk handlers)",
+            self.mempool.max_control_plane_concurrent_tasks,
+            self.mempool.max_concurrent_chunk_ingress_tasks
+        );
+        ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
+        );
+
+        // Zero satisfies wait_for_active_peers immediately on the empty snapshot,
+        // so genesis nodes would skip sync without ever observing a peer.
+        ensure!(
+            self.node_config.sync.min_active_peers > 0,
+            "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
         );
 
         // publish_ledger_epoch_length must be > 0 if set, and must not overflow when multiplied
@@ -229,6 +247,7 @@ impl From<&NodeConfig> for MempoolConfig {
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
             max_concurrent_chunk_ingress_tasks: value.mempool.max_concurrent_chunk_ingress_tasks,
+            max_control_plane_concurrent_tasks: value.mempool.max_control_plane_concurrent_tasks,
             chunk_writer_buffer_size: value.mempool.chunk_writer_buffer_size,
         }
     }
@@ -344,6 +363,12 @@ pub struct MempoolConfig {
     /// Maximum number of concurrent handlers for chunk ingress messages
     pub max_concurrent_chunk_ingress_tasks: usize,
 
+    /// Reserved concurrency for control-plane messages (`IngestIngressProof`,
+    /// `ProcessPendingChunks`) on the chunk ingress service. Carved out of
+    /// `max_concurrent_chunk_ingress_tasks` so total peak concurrency is
+    /// unchanged; chunk floods still cannot starve control-plane work.
+    pub max_control_plane_concurrent_tasks: usize,
+
     /// Backpressure channel capacity for the async chunk write-behind buffer
     pub chunk_writer_buffer_size: usize,
 }
@@ -371,6 +396,7 @@ impl MempoolConfig {
             max_commitments_per_address: 10,
             max_concurrent_mempool_tasks: 10,
             max_concurrent_chunk_ingress_tasks: 10,
+            max_control_plane_concurrent_tasks: 4,
             chunk_writer_buffer_size: 4096,
         }
     }
@@ -794,6 +820,7 @@ mod tests {
         // TOML doesn't include these fields, so they default to production values
         expected_config.run_mode = RunMode::default();
         expected_config.database = DatabaseConfig::default();
+        expected_config.sync = SyncConfig::default();
         expected_config.reth.db_sync_mode = DbSyncMode::Durable;
         expected_config.reth.cross_block_cache_size_megabytes = None;
         expected_config.reth.additional_validation_tasks = 2;
@@ -1099,6 +1126,10 @@ mod validate_tests {
         |nc: &mut NodeConfig| { nc.mempool.max_concurrent_chunk_ingress_tasks = 0; },
         "max_concurrent_chunk_ingress_tasks"
     )]
+    #[case::max_control_plane_concurrent_tasks(
+        |nc: &mut NodeConfig| { nc.mempool.max_control_plane_concurrent_tasks = 0; },
+        "max_control_plane_concurrent_tasks"
+    )]
     #[case::max_pending_chunk_items(
         |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
         "max_pending_chunk_items"
@@ -1114,5 +1145,127 @@ mod validate_tests {
             msg.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {msg}"
         );
+    }
+
+    /// `max_control_plane_concurrent_tasks` is carved out of
+    /// `max_concurrent_chunk_ingress_tasks`, so it must be strictly less to
+    /// leave at least one permit for chunk handlers. Validate fails fast
+    /// rather than letting `spawn_service()` silently clamp.
+    #[rstest]
+    #[case::equal(30, 30)]
+    #[case::greater(40, 30)]
+    fn validate_rejects_control_plane_not_less_than_total(
+        #[case] control_plane: usize,
+        #[case] total: usize,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.mempool.max_concurrent_chunk_ingress_tasks = total;
+            nc.mempool.max_control_plane_concurrent_tasks = control_plane;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_control_plane_concurrent_tasks")
+                && msg.contains("max_concurrent_chunk_ingress_tasks"),
+            "expected error referencing both fields, got: {msg}"
+        );
+    }
+
+    /// Backward-compat contract for `max_control_plane_concurrent_tasks`:
+    /// existing operator configs that predate this field must continue to
+    /// parse and validate. The field's serde default (4) is supplied by
+    /// `MempoolNodeConfig`'s struct-level `#[serde(default)]`, and the
+    /// default is small enough to satisfy `< max_concurrent_chunk_ingress_tasks`
+    /// for the shipped default total (30) and for any reasonable operator
+    /// override.
+    ///
+    /// If anyone removes the struct-level `#[serde(default)]` or changes the
+    /// `Default` impl to a value that conflicts with the strict-validation
+    /// invariant, this test fails — surfacing the regression at unit-test
+    /// time rather than at operator-upgrade time.
+    #[test]
+    fn old_mempool_toml_missing_control_plane_field_still_parses_and_validates() {
+        // Mempool section as it would appear in an operator config that was
+        // written before `max_control_plane_concurrent_tasks` and
+        // `max_concurrent_chunk_ingress_tasks` existed. Includes the other
+        // mempool fields the operator may have tuned, to make sure the
+        // missing-field path doesn't depend on absent neighbours.
+        let toml_data = r#"
+        node_mode = "Genesis"
+        sync_mode = "Full"
+        base_directory = "~/.tmp/.irys"
+        consensus = "Testing"
+        mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        trusted_peers = []
+
+        [storage]
+        num_writes_before_sync = 1
+
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
+        [gossip]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [packing.local]
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+
+        [cache]
+        cache_clean_lag = 2
+
+        [http]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [reth.network]
+        use_random_ports = true
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+
+        [vdf]
+        parallel_verification_thread_limit = 8
+
+        [mempool]
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
+        max_preheader_chunks_per_item = 64
+        max_preheader_data_path_bytes = 65536
+        max_invalid_items = 10000
+        max_valid_items = 10000
+        max_valid_chunks = 10000
+        max_valid_submit_txs = 3000
+        max_valid_commitment_addresses = 300
+        max_commitments_per_address = 20
+        "#;
+
+        let nc = toml::from_str::<NodeConfig>(toml_data)
+            .expect("Old mempool TOML missing the new field must still parse");
+
+        assert_eq!(
+            nc.mempool.max_control_plane_concurrent_tasks, 4,
+            "missing field must take the documented default (4)"
+        );
+        assert_eq!(
+            nc.mempool.max_concurrent_chunk_ingress_tasks, 30,
+            "missing field must take the documented default (30)"
+        );
+
+        Config::new_with_random_peer_id(nc)
+            .validate()
+            .expect("Old mempool TOML missing the new field must pass validation");
     }
 }

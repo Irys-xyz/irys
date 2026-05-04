@@ -57,6 +57,31 @@ impl ChunkIngressMessage {
             Self::TryGenerateProofsForConfirmedRoots(_) => "TryGenerateProofsForConfirmedRoots",
         }
     }
+
+    /// Returns true when the message carries a oneshot reply channel the caller
+    /// is awaiting. Reply-bearing variants fast-fail on saturation so callers
+    /// can retry. Fire-and-forget variants are handled by their re-fire
+    /// strategy (drop for upstream-recoverable control-plane messages, park
+    /// for chunk-lane fallback chunks that have no upstream re-fire).
+    pub fn has_reply_channel(&self) -> bool {
+        match self {
+            Self::IngestChunk(_, reply) => reply.is_some(),
+            Self::IngestIngressProof(_, _) => true,
+            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
+        }
+    }
+
+    /// Returns true when the variant is recoverable upstream — the mempool
+    /// re-fires `ProcessPendingChunks` per data tx (`mempool_service::data_txs`)
+    /// and `TryGenerateProofsForConfirmedRoots` per block confirmation
+    /// (`mempool_service::lifecycle`). The recv loop drops these on saturation
+    /// rather than parking, since a re-fire will follow.
+    pub fn is_recoverable_upstream(&self) -> bool {
+        matches!(
+            self,
+            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_)
+        )
+    }
 }
 
 /// Shared read handle for chunk ingress state.
@@ -78,12 +103,33 @@ pub(crate) struct ChunkIngressServiceInner {
     pub(crate) exec: TaskExecutor,
     pub(crate) irys_db: DatabaseProvider,
     pub(crate) message_handler_semaphore: Arc<Semaphore>,
+    /// Reserved lane for control-plane messages (`IngestIngressProof`,
+    /// `ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`). Chunk
+    /// floods saturate `message_handler_semaphore` but cannot starve the
+    /// control plane.
+    pub(crate) control_plane_semaphore: Arc<Semaphore>,
     pub(crate) max_concurrent_tasks: u32,
+    pub(crate) max_control_plane_tasks: u32,
     pub(crate) service_senders: ServiceSenders,
     pub(crate) storage_modules_guard: StorageModulesReadGuard,
     pub(crate) recent_valid_chunks: tokio::sync::RwLock<LruCache<ChunkPathHash, ()>>,
     pub(crate) pending_chunks: Arc<RwLock<PriorityPendingChunks>>,
     pub(crate) chunk_data_writer: chunk_data_writer::ChunkDataWriter,
+}
+
+impl ChunkIngressServiceInner {
+    /// Pick the semaphore that gates the given message variant. Chunk ingress
+    /// uses the main semaphore; control-plane messages use the reserved lane.
+    fn semaphore_for(&self, msg: &ChunkIngressMessage) -> Arc<Semaphore> {
+        match msg {
+            ChunkIngressMessage::IngestChunk(..) => self.message_handler_semaphore.clone(),
+            ChunkIngressMessage::IngestIngressProof(..)
+            | ChunkIngressMessage::ProcessPendingChunks(..)
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(..) => {
+                self.control_plane_semaphore.clone()
+            }
+        }
+    }
 }
 
 pub struct ChunkIngressService {
@@ -179,16 +225,41 @@ impl ChunkIngressService {
         let max_valid_chunks = mempool_config.max_valid_chunks;
         let max_pending_chunk_items = mempool_config.max_pending_chunk_items;
         let max_preheader_chunks_per_item = mempool_config.max_preheader_chunks_per_item;
-        let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
+        // The only runtime clamp kept here is the u32 ceiling: the semaphore
+        // permit count is stored as `u32` for `acquire_many_owned`, so values
+        // above `u32::MAX` must be capped. `Config::validate()` already
+        // enforces the real invariants (>0 and strict inequality with the
+        // control-plane lane), so there is no lower clamp — operator intent
+        // is honoured instead of silently overridden.
         const MAX_PERMITS: usize = u32::MAX as usize;
-        const MIN_CONCURRENT: usize = 20;
-        let max_concurrent_chunk_ingress_tasks =
-            raw_max_concurrent.clamp(MIN_CONCURRENT, MAX_PERMITS);
+        let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
+        let max_concurrent_chunk_ingress_tasks = raw_max_concurrent.min(MAX_PERMITS);
         if max_concurrent_chunk_ingress_tasks != raw_max_concurrent {
             warn!(
                 configured = raw_max_concurrent,
                 effective = max_concurrent_chunk_ingress_tasks,
-                "Adjusted max_concurrent_chunk_ingress_tasks to supported range {MIN_CONCURRENT}..=u32::MAX"
+                "Capped max_concurrent_chunk_ingress_tasks at u32::MAX (semaphore permit count ceiling)"
+            );
+        }
+        // Carve the control-plane slice out of the total chunk ingress
+        // budget rather than stacking on top. Peak concurrency therefore
+        // stays at `max_concurrent_chunk_ingress_tasks`, matching what an
+        // operator who tuned that knob to a safe limit would expect. Must
+        // leave at least one permit for the chunk lane; clamped to at least
+        // 1 for the control plane (mempool config validation also rejects 0).
+        let raw_control_plane_tasks = mempool_config.max_control_plane_concurrent_tasks;
+        let control_plane_tasks = raw_control_plane_tasks
+            .min(max_concurrent_chunk_ingress_tasks.saturating_sub(1))
+            .max(1);
+        let chunk_lane_tasks = max_concurrent_chunk_ingress_tasks
+            .saturating_sub(control_plane_tasks)
+            .max(1);
+        if control_plane_tasks != raw_control_plane_tasks {
+            warn!(
+                configured = raw_control_plane_tasks,
+                effective = control_plane_tasks,
+                total = max_concurrent_chunk_ingress_tasks,
+                "Adjusted max_control_plane_concurrent_tasks: carved out of max_concurrent_chunk_ingress_tasks"
             );
         }
         let chunk_writer_buffer_size = mempool_config.chunk_writer_buffer_size;
@@ -222,10 +293,11 @@ impl ChunkIngressService {
                         config,
                         exec: task_executor,
                         irys_db,
-                        message_handler_semaphore: Arc::new(Semaphore::new(
-                            max_concurrent_chunk_ingress_tasks,
-                        )),
-                        max_concurrent_tasks: u32::try_from(max_concurrent_chunk_ingress_tasks)
+                        message_handler_semaphore: Arc::new(Semaphore::new(chunk_lane_tasks)),
+                        control_plane_semaphore: Arc::new(Semaphore::new(control_plane_tasks)),
+                        max_concurrent_tasks: u32::try_from(chunk_lane_tasks)
+                            .expect("clamped to u32::MAX above"),
+                        max_control_plane_tasks: u32::try_from(control_plane_tasks)
                             .expect("clamped to u32::MAX above"),
                         service_senders,
                         storage_modules_guard,
@@ -255,70 +327,103 @@ impl ChunkIngressService {
         info!("starting ChunkIngressService");
 
         let mut shutdown_future = pin!(self.shutdown);
-        loop {
+        'service: loop {
             tokio::select! {
                 _ = &mut shutdown_future => {
                     info!("ChunkIngressService received shutdown signal");
-                    break;
+                    break 'service;
                 }
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(traced) => {
                             let (msg, parent_span) = traced.into_parts();
                             let msg_type = msg.variant_name();
+                            let has_reply = msg.has_reply_channel();
                             let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
-                            let semaphore = self.inner.message_handler_semaphore.clone();
-                            match semaphore.try_acquire_owned() {
-                                Ok(permit) => {
-                                    let inner = Arc::clone(&self.inner);
-                                    runtime_handle.spawn(async move {
-                                        let _permit = permit;
-                                        let task_info = format!("Chunk ingress message handler for {}", msg_type);
-                                        wait_with_progress(
-                                            inner.handle_message(msg),
-                                            20,
-                                            &task_info,
-                                        ).await;
-                                    }.instrument(span));
+                            // Pick the right lane: chunk ingress goes through
+                            // the main semaphore; control-plane messages get
+                            // the reserved lane that chunk floods cannot starve.
+                            let semaphore = self.inner.semaphore_for(&msg);
+                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(tokio::sync::TryAcquireError::Closed) => {
+                                    error!(
+                                        msg_type = %msg_type,
+                                        "Chunk ingress semaphore closed during try_acquire; terminating service"
+                                    );
+                                    break 'service;
                                 }
-                                Err(e) => {
-                                    match e {
-                                        tokio::sync::TryAcquireError::Closed => {
-                                            error!("Chunk ingress message handler semaphore closed");
-                                            break;
+                                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    if has_reply {
+                                        // Reply-bearing callers retry on the
+                                        // Overloaded advisory; never park.
+                                        warn!(
+                                            msg_type = %msg_type,
+                                            "Chunk ingress lane saturated; returning Overloaded to caller"
+                                        );
+                                        Self::send_overloaded_errors(msg);
+                                        continue 'service;
+                                    }
+                                    if msg.is_recoverable_upstream() {
+                                        // Control-plane fire-and-forget the
+                                        // mempool re-emits (per-tx for
+                                        // ProcessPendingChunks, per-block-
+                                        // confirmation for
+                                        // TryGenerateProofsForConfirmedRoots).
+                                        // Drop rather than park the recv loop
+                                        // — proof generation is one of the
+                                        // longest control-plane tasks and
+                                        // parking here would HOL-block every
+                                        // subsequent reply-bearing chunk and
+                                        // ingress-proof request behind it.
+                                        warn!(
+                                            msg_type = %msg_type,
+                                            "Chunk ingress control plane saturated; dropping recoverable message (will be re-emitted by upstream)"
+                                        );
+                                        continue 'service;
+                                    }
+                                    // IngestChunk(_, None): the
+                                    // data_sync_service SM-write fallback has
+                                    // no caller to advise and no upstream
+                                    // re-fire. Park the recv loop until a
+                                    // permit frees so the chunk is not lost.
+                                    // HOL impact is bounded by chunk
+                                    // processing time (much shorter than
+                                    // proof generation), and the fallback
+                                    // path itself is rare.
+                                    warn!(
+                                        msg_type = %msg_type,
+                                        "Chunk ingress chunk lane saturated; awaiting permit (recv loop parked) to avoid dropping fire-and-forget chunk"
+                                    );
+                                    tokio::select! {
+                                        _ = &mut shutdown_future => {
+                                            info!("ChunkIngressService received shutdown signal while awaiting permit");
+                                            break 'service;
                                         }
-                                        tokio::sync::TryAcquireError::NoPermits => {
-                                            warn!("Chunk ingress message handler semaphore at capacity, waiting for permit");
+                                        res = semaphore.acquire_owned() => match res {
+                                            Ok(permit) => permit,
+                                            Err(_) => {
+                                                error!(
+                                                    msg_type = %msg_type,
+                                                    "Chunk ingress semaphore closed while awaiting permit; terminating service"
+                                                );
+                                                break 'service;
+                                            }
                                         }
                                     }
-                                    // Await inline (blocking the loop) for natural backpressure,
-                                    // matching the mempool service pattern.
-                                    let inner = Arc::clone(&self.inner);
-                                    let semaphore = inner.message_handler_semaphore.clone();
-                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
-                                        Ok(Ok(permit)) => {
-                                            runtime_handle.spawn(async move {
-                                                let _permit = permit;
-                                                let task_info = format!("Chunk ingress message handler for {}", msg_type);
-                                                wait_with_progress(
-                                                    inner.handle_message(msg),
-                                                    20,
-                                                    &task_info,
-                                                ).await;
-                                            }.instrument(span));
-                                        }
-                                        Ok(Err(err)) => {
-                                            error!("Failed to acquire chunk ingress message handler permit: {:?}", err);
-                                            Self::send_timeout_errors(msg);
-                                        }
-                                        Err(_) => {
-                                            warn!("Timed out waiting for chunk ingress message handler permit, dropping message");
-                                            Self::send_timeout_errors(msg);
-                                        }
-                                    }
                                 }
-                            }
+                            };
+                            let inner = Arc::clone(&self.inner);
+                            runtime_handle.spawn(async move {
+                                let _permit = permit;
+                                let task_info = format!("Chunk ingress message handler for {}", msg_type);
+                                wait_with_progress(
+                                    inner.handle_message(msg),
+                                    20,
+                                    &task_info,
+                                ).await;
+                            }.instrument(span));
                         }
                         None => {
                             warn!("ChunkIngressService receiver channel closed");
@@ -338,7 +443,8 @@ impl ChunkIngressService {
             let span = tracing::info_span!(parent: &parent_span, "chunk_ingress_handle_message", msg_type = %msg_type);
 
             let inner = Arc::clone(&self.inner);
-            match inner.message_handler_semaphore.clone().try_acquire_owned() {
+            let semaphore = inner.semaphore_for(&msg);
+            match semaphore.try_acquire_owned() {
                 Ok(permit) => {
                     runtime_handle.spawn(
                         async move {
@@ -363,27 +469,52 @@ impl ChunkIngressService {
             }
         }
 
-        // Phase 2: acquire all permits to wait for in-flight + drain-spawned handlers
-        let acquire_fut = self
+        // Phase 2: acquire all permits from both lanes to wait for in-flight
+        // and drain-spawned handlers. Use `acquire_many_owned` so the permits
+        // are not lifetime-tied to the semaphore arcs. The flush only needs
+        // chunk-lane quiescence, so we gate it on the chunk drain alone and
+        // best-effort drain the control lane within the remaining budget —
+        // a stuck proof-generation handler on the control lane must not
+        // skip the durability flush for completed chunk writes.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let chunk_acquire = self
             .inner
             .message_handler_semaphore
-            .acquire_many(self.inner.max_concurrent_tasks);
-        let handlers_quiesced =
-            match tokio::time::timeout(Duration::from_secs(30), acquire_fut).await {
-                Ok(Ok(permits)) => {
-                    tracing::debug!("All chunk ingress handlers completed");
-                    let _all_permits = permits;
-                    true
-                }
-                Ok(Err(_)) => {
-                    error!("Semaphore closed during chunk ingress shutdown drain");
-                    false
-                }
-                Err(_) => {
-                    warn!("Timed out waiting for in-flight chunk ingress handlers; skipping flush");
-                    false
-                }
-            };
+            .clone()
+            .acquire_many_owned(self.inner.max_concurrent_tasks);
+        let handlers_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
+            Ok(Ok(permits)) => {
+                tracing::debug!("All chunk ingress handlers completed");
+                let _permits = permits;
+                true
+            }
+            Ok(Err(_)) => {
+                error!("Chunk-lane semaphore closed during chunk ingress shutdown drain");
+                false
+            }
+            Err(_) => {
+                warn!("Timed out waiting for in-flight chunk ingress handlers; skipping flush");
+                false
+            }
+        };
+
+        let control_acquire = self
+            .inner
+            .control_plane_semaphore
+            .clone()
+            .acquire_many_owned(self.inner.max_control_plane_tasks);
+        match tokio::time::timeout_at(drain_deadline, control_acquire).await {
+            Ok(Ok(permits)) => {
+                tracing::debug!("All control-plane handlers completed");
+                let _permits = permits;
+            }
+            Ok(Err(_)) => {
+                error!("Control-plane semaphore closed during chunk ingress shutdown drain");
+            }
+            Err(_) => {
+                warn!("Timed out waiting for in-flight control-plane handlers");
+            }
+        }
 
         if handlers_quiesced && let Err(e) = self.inner.chunk_data_writer.flush().await {
             warn!("Failed to flush chunk writer on shutdown: {:?}", e);
@@ -415,5 +546,190 @@ impl ChunkIngressService {
             | ChunkIngressMessage::ProcessPendingChunks(_)
             | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
         }
+    }
+
+    /// Send `Overloaded` advisory errors through any oneshot channels in a
+    /// message so the caller gets a fast, retryable response instead of waiting
+    /// for the service to clear. The advisory variant is score-neutral upstream,
+    /// so peers are not penalised for hitting our backpressure.
+    fn send_overloaded_errors(msg: ChunkIngressMessage) {
+        match msg {
+            ChunkIngressMessage::IngestChunk(_, reply) => {
+                // Record the saturation signal even when there is no reply
+                // channel; otherwise dashboards miss fast-failed chunks.
+                metrics::record_chunk_error(
+                    AdvisoryChunkIngressError::Overloaded.error_type(),
+                    true,
+                );
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(ChunkIngressError::Advisory(
+                        AdvisoryChunkIngressError::Overloaded,
+                    )));
+                }
+            }
+            ChunkIngressMessage::IngestIngressProof(_, reply) => {
+                let _ = reply.send(Err(IngressProofError::Overloaded));
+            }
+            // Fire-and-forget control-plane variants don't reach this path in
+            // production (the recv loop parks for them instead), but the
+            // helper must remain total for tests and future callers.
+            ChunkIngressMessage::ProcessPendingChunks(_)
+            | ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(_) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod overload_helpers_tests {
+    use super::*;
+    use irys_types::{DataRoot, H256, IrysSignature, ingress::IngressProof};
+
+    fn dummy_chunk() -> UnpackedChunk {
+        UnpackedChunk {
+            data_root: DataRoot::from([0_u8; 32]),
+            data_size: 0,
+            tx_offset: 0_u32.into(),
+            data_path: Default::default(),
+            bytes: Default::default(),
+        }
+    }
+
+    fn dummy_ingress_proof() -> IngressProof {
+        IngressProof::V1(irys_types::ingress::IngressProofV1 {
+            signature: IrysSignature::default(),
+            data_root: H256::zero(),
+            proof: H256::zero(),
+            chain_id: 0,
+            anchor: H256::zero(),
+        })
+    }
+
+    /// `send_overloaded_errors` must return the advisory `Overloaded` variant
+    /// to a chunk caller that supplied a reply channel. The advisory variant
+    /// is score-neutral upstream, so peers will retry rather than penalise.
+    #[tokio::test]
+    async fn ingest_chunk_overloaded_returns_advisory_overloaded() {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx));
+
+        ChunkIngressService::send_overloaded_errors(msg);
+
+        let result = reply_rx.await.expect("oneshot must be resolved");
+        match result {
+            Err(ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded)) => {}
+            other => panic!("expected Advisory(Overloaded), got {:?}", other),
+        }
+    }
+
+    /// `send_overloaded_errors` must not panic on chunk messages with no reply
+    /// channel — there is simply no caller to notify.
+    #[tokio::test]
+    async fn ingest_chunk_overloaded_no_reply_is_noop() {
+        let msg = ChunkIngressMessage::IngestChunk(dummy_chunk(), None);
+        ChunkIngressService::send_overloaded_errors(msg);
+    }
+
+    /// Control-plane `IngestIngressProof` callers must also receive a fast
+    /// failure (not a silent drop) when the control lane is saturated. The
+    /// dedicated `Overloaded` variant lets callers distinguish backpressure
+    /// from generic errors without string matching.
+    #[tokio::test]
+    async fn ingest_ingress_proof_overloaded_returns_overloaded() {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let msg = ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx);
+
+        ChunkIngressService::send_overloaded_errors(msg);
+
+        let result = reply_rx.await.expect("oneshot must be resolved");
+        assert!(matches!(result, Err(IngressProofError::Overloaded)));
+    }
+
+    /// `ProcessPendingChunks` has no response channel, so `send_overloaded_errors`
+    /// is a no-op for it — the pending chunks stay queued and will be
+    /// processed on a future trigger. Must not panic.
+    #[tokio::test]
+    async fn process_pending_chunks_overloaded_is_noop() {
+        let msg = ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]));
+        ChunkIngressService::send_overloaded_errors(msg);
+    }
+
+    /// `Overloaded` exposes its own `error_type()` string so dashboards can
+    /// distinguish it from other advisory errors.
+    #[test]
+    fn overloaded_error_type_is_distinct() {
+        assert_eq!(
+            AdvisoryChunkIngressError::Overloaded.error_type(),
+            "overloaded"
+        );
+    }
+
+    /// `has_reply_channel` drives the fast-fail branch: any reply-bearing
+    /// message returns `Overloaded` to its caller on saturation rather than
+    /// parking the recv loop.
+    #[test]
+    fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx)).has_reply_channel()
+        );
+        assert!(!ChunkIngressMessage::IngestChunk(dummy_chunk(), None).has_reply_channel());
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx)
+                .has_reply_channel()
+        );
+
+        assert!(
+            !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+                .has_reply_channel()
+        );
+
+        assert!(
+            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
+                [2_u8; 32]
+            )])
+            .has_reply_channel()
+        );
+    }
+
+    /// Regression: control-plane fire-and-forget variants must be classified
+    /// as recoverable upstream so the recv loop drops them on saturation
+    /// instead of parking. Pre-fix the loop awaited a permit inline, head-of-
+    /// line-blocking every reply-bearing chunk and ingress-proof request
+    /// behind a slow proof-generation task. `IngestChunk(_, None)` must NOT
+    /// be classified as recoverable: the data_sync_service SM-write fallback
+    /// has no upstream re-fire, so dropping it would lose the chunk.
+    #[test]
+    fn is_recoverable_upstream_only_for_control_plane_fire_and_forget() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            !ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx))
+                .is_recoverable_upstream(),
+            "reply-bearing IngestChunk must fast-fail, not drop"
+        );
+        assert!(
+            !ChunkIngressMessage::IngestChunk(dummy_chunk(), None).is_recoverable_upstream(),
+            "fire-and-forget IngestChunk has no upstream re-fire — recv loop must park, not drop"
+        );
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            !ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx)
+                .is_recoverable_upstream(),
+            "reply-bearing IngestIngressProof must fast-fail, not drop"
+        );
+        assert!(
+            ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+                .is_recoverable_upstream(),
+            "ProcessPendingChunks re-fires from mempool data_txs per data tx"
+        );
+        assert!(
+            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
+                [2_u8; 32]
+            )])
+            .is_recoverable_upstream(),
+            "TryGenerateProofsForConfirmedRoots re-fires from mempool lifecycle per block confirmation"
+        );
     }
 }

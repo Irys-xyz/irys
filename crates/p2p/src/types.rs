@@ -1,7 +1,7 @@
 use crate::block_pool::{AdvisoryBlockPoolError, BlockPoolError, CriticalBlockPoolError};
 use irys_actors::{
-    AdvisoryChunkIngressError, ChunkIngressError, chunk_ingress_service::IngressProofError,
-    mempool_service::TxIngressError,
+    AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError,
+    chunk_ingress_service::IngressProofError, mempool_service::TxIngressError,
 };
 use irys_types::{CommitmentValidationError, PeerNetworkError};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,10 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::DatabaseError(err) => {
                 Self::Internal(InternalGossipError::Database(err))
             }
+            // Overloaded is a retryable backpressure signal — use the
+            // dedicated `RateLimited` variant so metrics/dashboards classify
+            // it correctly instead of polluting `Internal` error counts.
+            IngressProofError::Overloaded => Self::RateLimited,
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
@@ -58,6 +62,49 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::InvalidAnchor(anchor) => {
                 Self::InvalidData(InvalidDataError::IngressProofAnchor(anchor))
             }
+        }
+    }
+}
+
+impl From<ChunkIngressError> for GossipError {
+    fn from(value: ChunkIngressError) -> Self {
+        match value {
+            ChunkIngressError::Critical(err) => match err {
+                CriticalChunkIngressError::InvalidProof => {
+                    Self::InvalidData(InvalidDataError::ChunkInvalidProof)
+                }
+                CriticalChunkIngressError::InvalidDataHash => {
+                    Self::InvalidData(InvalidDataError::ChunkInvalidDataHash)
+                }
+                CriticalChunkIngressError::InvalidChunkSize => {
+                    Self::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
+                }
+                CriticalChunkIngressError::InvalidDataSize => {
+                    Self::InvalidData(InvalidDataError::ChunkInvalidDataSize)
+                }
+                CriticalChunkIngressError::InvalidOffset(msg) => {
+                    Self::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
+                }
+                CriticalChunkIngressError::DatabaseError => Self::Internal(
+                    InternalGossipError::Database("Chunk ingress database error".into()),
+                ),
+                CriticalChunkIngressError::ServiceUninitialized => {
+                    Self::Internal(InternalGossipError::ServiceUninitialized)
+                }
+                CriticalChunkIngressError::Other(other) => {
+                    Self::Internal(InternalGossipError::Unknown(other))
+                }
+            },
+            ChunkIngressError::Advisory(err) => match err {
+                // Saturation is a retryable backpressure signal — map it to
+                // the dedicated `RateLimited` variant (mirrors
+                // `IngressProofError::Overloaded`). Without this the gossip
+                // POST handlers collapse it into `InvalidData`, hiding the
+                // retry signal and penalising the peer for our own
+                // backpressure.
+                AdvisoryChunkIngressError::Overloaded => Self::RateLimited,
+                other => Self::Advisory(AdvisoryGossipError::ChunkIngress(other)),
+            },
         }
     }
 }
@@ -379,5 +426,49 @@ mod tests {
             let json2 = serde_json::to_string(&decoded).unwrap();
             prop_assert_eq!(json, json2);
         }
+    }
+
+    /// Backpressure signals from chunk-ingress and ingress-proof MUST map to
+    /// `GossipError::RateLimited` (which the gossip POST handlers translate
+    /// to `RejectionReason::RateLimited`). Pre-fix the chunk path collapsed
+    /// to `Advisory(ChunkIngress(Overloaded))`, which the handlers further
+    /// collapsed to `RejectionReason::InvalidData` — losing the retry signal
+    /// AND penalising the peer for our own backpressure.
+    #[test]
+    fn ingress_proof_overloaded_maps_to_rate_limited() {
+        let mapped: GossipError = IngressProofError::Overloaded.into();
+        assert!(
+            matches!(mapped, GossipError::RateLimited),
+            "expected GossipError::RateLimited, got {:?}",
+            mapped
+        );
+    }
+
+    #[test]
+    fn chunk_ingress_overloaded_maps_to_rate_limited() {
+        let mapped: GossipError =
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::Overloaded).into();
+        assert!(
+            matches!(mapped, GossipError::RateLimited),
+            "expected GossipError::RateLimited, got {:?}",
+            mapped
+        );
+    }
+
+    /// Non-overload Advisory variants stay in the Advisory bucket.
+    #[test]
+    fn chunk_ingress_other_advisory_stays_advisory() {
+        let mapped: GossipError =
+            ChunkIngressError::Advisory(AdvisoryChunkIngressError::Other("test".into())).into();
+        assert!(
+            matches!(
+                mapped,
+                GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                    AdvisoryChunkIngressError::Other(_)
+                ))
+            ),
+            "expected Advisory(ChunkIngress(Other)), got {:?}",
+            mapped
+        );
     }
 }

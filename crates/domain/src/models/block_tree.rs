@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{
     BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochReplayData,
@@ -506,6 +506,15 @@ impl BlockTree {
             },
         );
 
+        info!(
+            block.hash = %block.header().block_hash,
+            block.height = block.header().height,
+            block.cumulative_diff = %block.header().cumulative_diff,
+            chain_state = ?chain_state,
+            cache.size = self.blocks.len(),
+            "Block entered block tree cache"
+        );
+
         self.update_longest_chain_cache();
         Ok(())
     }
@@ -559,6 +568,7 @@ impl BlockTree {
         let solution_hash = block_entry.block.header().solution_hash;
         let height = block_entry.block.header().height;
         let prev_hash = block_entry.block.header().previous_block_hash;
+        let chain_state = block_entry.chain_state;
 
         // Update parent's children set
         if let Some(prev_entry) = self.blocks.get_mut(&prev_hash) {
@@ -581,7 +591,13 @@ impl BlockTree {
             }
         }
 
-        // Remove the block
+        info!(
+            block.hash = %block_hash,
+            block.height = height,
+            chain_state = ?chain_state,
+            cache.size_before = self.blocks.len(),
+            "Removing block from block tree cache"
+        );
         self.blocks.remove(block_hash);
 
         // Update max_cumulative_difficulty if necessary
@@ -1207,10 +1223,30 @@ impl BlockTree {
             .header()
             .height;
         let min_keep_height = tip_height.saturating_sub(depth);
+        let cache_size_before = self.blocks.len();
+
+        info!(
+            prune.depth = depth,
+            prune.tip = %self.tip,
+            prune.tip_height = tip_height,
+            prune.min_keep_height = min_keep_height,
+            cache.size = cache_size_before,
+            "Starting block tree cache prune"
+        );
 
         let min_height = match self.height_index.keys().min() {
             Some(&h) => h,
-            None => return,
+            None => {
+                info!(
+                    prune.depth = depth,
+                    prune.tip_height = tip_height,
+                    cache.size_before = cache_size_before,
+                    cache.size_after = cache_size_before,
+                    blocks_removed = 0_usize,
+                    "Completed block tree cache prune (height index empty)"
+                );
+                return;
+            }
         };
 
         let mut current_height = min_height;
@@ -1258,6 +1294,17 @@ impl BlockTree {
 
             current_height += 1;
         }
+
+        let cache_size_after = self.blocks.len();
+        info!(
+            prune.depth = depth,
+            prune.tip_height = tip_height,
+            prune.min_keep_height = min_keep_height,
+            cache.size_before = cache_size_before,
+            cache.size_after = cache_size_after,
+            blocks_removed = cache_size_before.saturating_sub(cache_size_after),
+            "Completed block tree cache prune"
+        );
     }
 
     /// Returns true if solution hash exists in cache

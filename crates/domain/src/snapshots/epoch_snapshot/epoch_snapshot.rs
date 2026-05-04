@@ -1237,7 +1237,7 @@ impl EpochSnapshot {
             num_chunks,
         );
 
-        // STEP 4: Unassigned & assignments from the future
+        // STEP 6: Unassigned & assignments from the future
         for (original_idx, (path, _)) in
             sm_packing_info
                 .iter()

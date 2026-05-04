@@ -319,36 +319,56 @@ impl PeerList {
             .contains_key(api_address)
     }
 
-    pub async fn wait_for_active_peers(&self) {
-        // Fast path: return immediately if any active peers exist
-        {
+    /// Wait until at least `min_count` peers are active+online, or `timeout` elapses.
+    ///
+    /// Returns the count of active+online peers when the wait ends. If the count is
+    /// `>= min_count` the wait was satisfied; if it is less, the timeout fired and
+    /// the caller is expected to proceed best-effort.
+    pub async fn wait_for_active_peers(&self, min_count: usize, timeout: Duration) -> usize {
+        let count_active = || -> usize {
             let bindings = self.read();
-            let persistent_active = bindings
+            let persistent = bindings
                 .persistent_peers_cache
                 .values()
-                .any(|peer| peer.reputation_score.is_active() && peer.is_online);
-            let purgatory_active = bindings
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            let purgatory = bindings
                 .unstaked_peer_purgatory
                 .iter()
                 .map(|(_, v)| v)
-                .any(|peer| peer.reputation_score.is_active() && peer.is_online);
-            if persistent_active || purgatory_active {
-                return;
-            }
+                .filter(|peer| peer.reputation_score.is_active() && peer.is_online)
+                .count();
+            persistent + purgatory
+        };
+
+        // Fast path: already satisfied
+        let initial = count_active();
+        if initial >= min_count {
+            return initial;
         }
 
-        // Slow path: subscribe and wait for the next BecameActive event
+        // Slow path: subscribe and recount on every event wakeup. Recounting (rather
+        // than tracking deltas) ensures BecameInactive transitions correctly drop
+        // the count.
         let mut rx = self.subscribe_to_peer_events();
+        let deadline = tokio::time::Instant::now() + timeout;
+
         loop {
-            match rx.recv().await {
-                Ok(PeerEvent::BecameActive { .. }) => return,
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            let current = count_active();
+            if current >= min_count {
+                return current;
+            }
+
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(_)) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                     warn!("peer events channel closed while waiting for active peers");
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     rx = self.subscribe_to_peer_events();
                 }
+                // Deadline elapsed: return whatever the current count is.
+                Err(_) => return count_active(),
             }
         }
     }
@@ -898,7 +918,7 @@ impl PeerListDataInner {
                     peer_item.reputation_score.decrease_slow();
                 }
                 ScoreDecreaseReason::NetworkError(message) => {
-                    peer_item.reputation_score.decrease_offline(&message);
+                    peer_item.reputation_score.decrease_network_error(&message);
                 }
             }
 
@@ -1131,10 +1151,14 @@ impl PeerListDataInner {
                 mining_addr, old_peer_id, peer_id
             );
 
-            // Remove old entry and update with new peer_id
-            if let Some(old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
+            // Remove old entry, sync the inner peer_id field, then re-insert under
+            // the new key. Without the field update, server.rs:check_peer_v2 keeps
+            // reading the stale field and rejects every V2 gossip request.
+            if let Some(mut old_peer) = self.persistent_peers_cache.remove(&old_peer_id) {
+                old_peer.peer_id = peer_id;
                 self.persistent_peers_cache.insert(peer_id, old_peer);
-            } else if let Some(old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
+            } else if let Some(mut old_peer) = self.unstaked_peer_purgatory.pop(&old_peer_id) {
+                old_peer.peer_id = peer_id;
                 self.unstaked_peer_purgatory.put(peer_id, old_peer);
             }
 
@@ -1351,7 +1375,10 @@ mod tests {
         #[case(ScoreDecreaseReason::BogusData(String::from("test")), 45)]
         #[case(ScoreDecreaseReason::Offline(String::from("test")), 47)]
         #[case(ScoreDecreaseReason::SlowResponse, 49)]
-        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 47)]
+        // NetworkError is -1 (distinct from Offline -3) because a network
+        // timeout against an overloaded-but-honest peer is not the same
+        // signal as a peer being deliberately unreachable.
+        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 49)]
         fn test_decrease_peer_score_persistent_cache(
             #[case] reason: ScoreDecreaseReason,
             #[case] expected_score: u16,
@@ -1403,9 +1430,10 @@ mod tests {
                 &peer_id,
                 ScoreDecreaseReason::NetworkError("network_error".into()),
             );
+            // 41 - 1 = 40 (NetworkError penalty is -1, not -3)
             assert_eq!(
                 peer_list.get_peer(&peer_id).unwrap().reputation_score.get(),
-                38
+                40
             );
         }
 
@@ -1414,8 +1442,8 @@ mod tests {
             let peer_list =
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
-            // BogusData penalty is 5, ACTIVE_THRESHOLD is 20: 24 - 5 = 19 < 20 (inactive)
-            peer.reputation_score = PeerScore::new(24);
+            // BogusData penalty is 5, ACTIVE_THRESHOLD is 10: 14 - 5 = 9 < 10 (inactive)
+            peer.reputation_score = PeerScore::new(14);
 
             peer_list.add_or_update_peer(peer.clone(), true);
             assert!(peer_list.all_known_peers().contains(&peer.address));
@@ -1475,6 +1503,8 @@ mod tests {
                 create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
             let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
+            // Start just above the threshold so Offline (-3) pushes below,
+            // and Online (+1) pulls back to exactly the threshold.
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
             peer_list.add_or_update_peer(peer, true);
 
@@ -1484,12 +1514,18 @@ mod tests {
             );
             let updated_peer = peer_list.get_peer(&peer_id).unwrap();
 
-            assert_eq!(updated_peer.reputation_score.get(), 19);
+            assert_eq!(
+                updated_peer.reputation_score.get(),
+                PeerScore::ACTIVE_THRESHOLD - 1
+            );
             assert!(!updated_peer.reputation_score.is_active());
 
             peer_list.increase_peer_score_by_peer_id(&peer_id, ScoreIncreaseReason::Online);
             let final_peer = peer_list.get_peer(&peer_id).unwrap();
-            assert_eq!(final_peer.reputation_score.get(), 20);
+            assert_eq!(
+                final_peer.reputation_score.get(),
+                PeerScore::ACTIVE_THRESHOLD
+            );
             assert!(final_peer.reputation_score.is_active());
         }
 
@@ -1679,8 +1715,8 @@ mod tests {
             create_test_peer(3);
         let (_inactive_unstaked_mining_addr, inactive_unstaked_peer_id, mut inactive_unstaked_peer) =
             create_test_peer(4);
-        inactive_staked_peer.reputation_score = PeerScore::new(10); // Below active threshold
-        inactive_unstaked_peer.reputation_score = PeerScore::new(10); // Below active threshold
+        inactive_staked_peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD - 1); // Below active threshold
+        inactive_unstaked_peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD - 1); // Below active threshold
         peer_list.add_or_update_peer(inactive_staked_peer, true);
         peer_list.add_or_update_peer(inactive_unstaked_peer, false);
 
@@ -1874,7 +1910,7 @@ mod tests {
         let (_staked_mining_addr, _staked_peer_id, mut staked_peer) = create_test_peer(1);
         let (_unstaked_mining_addr, _unstaked_peer_id, mut unstaked_peer) = create_test_peer(2);
 
-        // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 20)
+        // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 10)
         // Start with INITIAL = 50, so they should already be active
         staked_peer.reputation_score = PeerScore::new(80); // Well above active threshold
         unstaked_peer.reputation_score = PeerScore::new(80); // Well above active threshold
@@ -1927,6 +1963,186 @@ mod tests {
         assert_eq!(
             active_peers_count_both, 2,
             "Both staked and unstaked active peers should be counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_returns_immediately_when_already_satisfied() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (_addr_a, _id_a, peer_a) = create_test_peer(1);
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_a, true);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        // Both peers start with PeerScore::INITIAL = 50 which is >= PeerScore::ACTIVE_THRESHOLD
+        // and is_online = true, so both are active+online.
+
+        let start = std::time::Instant::now();
+        let count = peer_list
+            .wait_for_active_peers(2, Duration::from_secs(5))
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(count >= 2, "expected at least 2 active peers, got {count}");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "fast path should return ~immediately, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_satisfied_via_events() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let waiter = peer_list.clone();
+
+        let handle = tokio::spawn(async move {
+            waiter
+                .wait_for_active_peers(2, Duration::from_secs(2))
+                .await
+        });
+
+        // Give the waiter time to enter the slow path
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (_addr_a, _id_a, peer_a) = create_test_peer(1);
+        peer_list.add_or_update_peer(peer_a, true);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        let count = handle.await.expect("waiter task");
+        assert!(
+            count >= 2,
+            "expected at least 2 after second peer added, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_timeout_partial() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (_addr, _id, peer) = create_test_peer(1);
+        peer_list.add_or_update_peer(peer, true);
+
+        let start = std::time::Instant::now();
+        let count = peer_list
+            .wait_for_active_peers(3, Duration::from_millis(200))
+            .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(count, 1, "only one peer was added");
+        assert!(
+            elapsed >= Duration::from_millis(190),
+            "should have waited near the full timeout, elapsed={:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_timeout_zero_peers() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let count = peer_list
+            .wait_for_active_peers(1, Duration::from_millis(200))
+            .await;
+
+        assert_eq!(count, 0, "no peers were added");
+    }
+
+    #[tokio::test]
+    async fn wait_for_n_peers_recounts_when_peer_goes_offline() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+
+        let (addr_a, _id_a, peer_a) = create_test_peer(1);
+        let (_addr_b, _id_b, peer_b) = create_test_peer(2);
+        peer_list.add_or_update_peer(peer_a, true);
+        peer_list.add_or_update_peer(peer_b, true);
+
+        let waiter = peer_list.clone();
+        let handle = tokio::spawn(async move {
+            // N=3 with only 2 peers online; we want the slow path so the offline
+            // transition is observed via PeerEvent.
+            waiter
+                .wait_for_active_peers(3, Duration::from_millis(300))
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Flip peer A offline mid-wait. This emits PeerEvent::BecameInactive.
+        peer_list.set_is_online(&addr_a, false);
+
+        let count = handle.await.expect("waiter task");
+        assert_eq!(
+            count, 1,
+            "BecameInactive should drop A from the count without satisfying the wait"
+        );
+    }
+
+    #[test]
+    fn peer_id_change_with_same_address_updates_inner_peer_id_field() {
+        // Regression: when a peer regenerates its libp2p key (e.g. peer_key.bin
+        // wiped by reset.yml), it re-handshakes with the same mining_address and
+        // gossip/api address but a fresh peer_id. The cache must re-key the entry
+        // AND update the inner PeerListItem.peer_id field — server.rs:check_peer_v2
+        // reads that field to authorise V2 gossip and rejects with HandshakeRequired
+        // on mismatch, so a stale field traps the cluster in a handshake loop.
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (mining_addr, peer_id_old, peer) = create_test_peer(1);
+        let peer_address = peer.address;
+
+        peer_list.add_or_update_peer(peer.clone(), true);
+
+        let peer_id_new = IrysPeerId::from([99_u8; 20]);
+        let mut updated = peer;
+        updated.peer_id = peer_id_new;
+        peer_list.add_or_update_peer(updated, true);
+
+        let stored = peer_list
+            .peer_by_id(&peer_id_new)
+            .expect("peer reachable by new peer_id");
+        assert!(
+            peer_list.peer_by_id(&peer_id_old).is_none(),
+            "old peer_id must be evicted",
+        );
+        assert_eq!(
+            stored.peer_id, peer_id_new,
+            "inner peer_id field must match new peer_id",
+        );
+        assert_eq!(stored.mining_address, mining_addr);
+
+        let inner = peer_list.read();
+        assert_eq!(
+            inner.miner_addr_to_peer_id_map.get(&mining_addr).copied(),
+            Some(peer_id_new),
+        );
+        assert!(!inner.peer_id_to_miner_addr_map.contains_key(&peer_id_old));
+        assert_eq!(
+            inner.peer_id_to_miner_addr_map.get(&peer_id_new).copied(),
+            Some(mining_addr),
+        );
+        assert_eq!(
+            inner
+                .gossip_addr_to_peer_id_map
+                .get(&peer_address.gossip.ip())
+                .copied(),
+            Some(peer_id_new),
+        );
+        assert_eq!(
+            inner
+                .api_addr_to_peer_id_map
+                .get(&peer_address.api)
+                .copied(),
+            Some(peer_id_new),
         );
     }
 }

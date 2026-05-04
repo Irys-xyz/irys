@@ -314,6 +314,31 @@ pub enum PreValidationError {
     /// Failed to add block to block tree
     #[error("Failed to add block {block_hash} to block tree: {reason}")]
     AddBlockFailed { block_hash: H256, reason: String },
+
+    /// The block tree cache RwLock was poisoned by a prior caller's panic.
+    /// Surfaces here so the caller can decide whether to retry, drop, or
+    /// escalate — instead of re-panicking at `expect("cache lock poisoned")`.
+    #[error("block tree cache lock poisoned at: {at}")]
+    CachePoisoned { at: &'static str },
+
+    /// Parent block referenced by an incoming pre-validated block was not
+    /// present in the cache. Reorg-driven cache prunes can race with this
+    /// path; previously panicked.
+    #[error("parent block {parent_hash} not in cache (expected at height {expected_height})")]
+    ParentNotInCache {
+        parent_hash: H256,
+        expected_height: u64,
+    },
+}
+
+impl PreValidationError {
+    /// Returns true for unrecoverable cache corruption (the block tree
+    /// `RwLock` was poisoned by a prior caller's panic). The cache is
+    /// corrupt; retry will hit the same poison. Caller should escalate
+    /// rather than silently dropping.
+    pub fn is_fatal_corruption(&self) -> bool {
+        matches!(self, Self::CachePoisoned { .. })
+    }
 }
 
 /// Validation error type that covers all block validation failures.
@@ -1110,6 +1135,37 @@ pub fn height_is_valid(
             expected,
             got: block.height,
         })
+    }
+}
+
+#[cfg(test)]
+mod prevalidation_error_classification_tests {
+    use super::*;
+
+    /// `CachePoisoned` is unrecoverable — retry will hit the same poisoned
+    /// lock. Caller must escalate, not silently drop.
+    #[test]
+    fn cache_poisoned_is_fatal_corruption() {
+        let err = PreValidationError::CachePoisoned { at: "test_site" };
+        assert!(
+            err.is_fatal_corruption(),
+            "CachePoisoned must surface as fatal corruption"
+        );
+    }
+
+    /// Genuine validation failures and `ParentNotInCache` are terminal —
+    /// retrying gives the same answer (or, for `ParentNotInCache`, no retry
+    /// mechanism re-invokes process_block once is_processing is flipped back).
+    #[test]
+    fn non_corruption_errors_are_not_fatal_corruption() {
+        assert!(!PreValidationError::BlockSignatureInvalid.is_fatal_corruption());
+        assert!(
+            !PreValidationError::ParentNotInCache {
+                parent_hash: H256::zero(),
+                expected_height: 0,
+            }
+            .is_fatal_corruption()
+        );
     }
 }
 

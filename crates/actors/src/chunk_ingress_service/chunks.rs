@@ -771,6 +771,10 @@ pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedDataPath,
     PreHeaderOffsetExceedsCap,
     PreHeaderInvalidOffset(String),
+    /// Service is at capacity and cannot accept the chunk right now. Caller
+    /// should retry later. Distinct from a network failure: the peer is fine,
+    /// the receiver is just saturated.
+    Overloaded,
     Other(String),
 }
 
@@ -781,6 +785,7 @@ impl AdvisoryChunkIngressError {
             Self::PreHeaderOversizedDataPath => "pre_header_oversized_data_path",
             Self::PreHeaderOffsetExceedsCap => "pre_header_offset_exceeds_cap",
             Self::PreHeaderInvalidOffset(_) => "pre_header_invalid_offset",
+            Self::Overloaded => "overloaded",
             Self::Other(_) => "other",
         }
     }

@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::time::{Duration, sleep};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -73,16 +73,32 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
-        let vdf_depth = global_step.saturating_sub(self.minimum_step_to_keep) as usize;
+        if self.global_step + 1 != global_step {
+            // Gap path: previously panicked, now log and no-op so the VDF
+            // loop catches up via normal stepping. Callers detect the no-op
+            // by observing the returned step == self.global_step.
+            //
+            // pop_front MUST stay in the sequential branch below — a stale
+            // pop_front here silently shrinks the seed buffer on every gap
+            // until `get_last_step_and_seed` panics on an empty deque.
+            error!(
+                current = self.global_step,
+                proposed = global_step,
+                gap = global_step.saturating_sub(self.global_step + 1),
+                "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
+            );
+            return self.global_step;
+        }
+        // Saturating to usize::MAX means seeds.len() >= vdf_depth is always
+        // false, so the buffer never trims in this edge case. Safe — only
+        // unrealistic step counts (well past usize::MAX) would hit this.
+        let vdf_depth = usize::try_from(global_step.saturating_sub(self.minimum_step_to_keep))
+            .unwrap_or(usize::MAX);
         if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
-        if self.global_step + 1 == global_step {
-            self.seeds.push_back(seed);
-            self.global_step += 1;
-        } else {
-            panic!("VDF steps can't have gaps and have to be inserted in sequence");
-        }
+        self.seeds.push_back(seed);
+        self.global_step += 1;
         global_step
     }
 
@@ -591,5 +607,101 @@ mod tests {
             "Cancellation took too long: {:?}",
             elapsed
         );
+    }
+
+    fn vdf_state_at(current_step: u64) -> VdfState {
+        let capacity: usize = 64;
+        VdfState {
+            global_step: current_step,
+            global_step_from_the_latest_canonical_block: current_step,
+            minimum_step_to_keep: current_step.saturating_sub(capacity as u64),
+            seeds: VecDeque::with_capacity(capacity),
+            capacity,
+            is_vdf_mining_enabled: None,
+        }
+    }
+
+    proptest::proptest! {
+        /// Invariants of `store_step`:
+        ///   1. returned step is either `current` (no progress) or `current + 1` (advance),
+        ///   2. advance happens iff `proposed == current + 1`,
+        ///   3. it never panics — including for backwards/equal/large-gap proposals.
+        #[test]
+        fn store_step_advances_by_at_most_one_or_no_op(
+            current in 0_u64..1_000_000,
+            proposed in 0_u64..1_000_000,
+        ) {
+            let mut state = vdf_state_at(current);
+            let returned = state.store_step(Seed(H256::zero()), proposed);
+
+            proptest::prop_assert!(
+                returned == current || returned == current + 1,
+                "returned ({}) must be current ({}) or current+1",
+                returned, current
+            );
+            if returned == current + 1 {
+                proptest::prop_assert_eq!(
+                    proposed, current + 1,
+                    "advance only when proposed == current + 1"
+                );
+            } else {
+                proptest::prop_assert_eq!(
+                    returned, current,
+                    "no-op must leave step unchanged"
+                );
+            }
+        }
+
+        /// Regression: rejected gaps must not shrink the seed buffer.
+        /// Reachable when canonical has lapped local + capacity so vdf_depth
+        /// saturates near 0; pre-fix each rejected gap leaked one seed until
+        /// the buffer was empty and `get_last_step_and_seed` panicked.
+        #[test]
+        fn gap_rejection_preserves_seed_buffer(
+            initial_seeds in 1_usize..32,
+            gap_count in 1_usize..20,
+        ) {
+            let capacity = 64;
+            let local_step = 100_u64;
+            let canonical = 10_000_u64;
+            let mut state = VdfState {
+                global_step: local_step,
+                global_step_from_the_latest_canonical_block: canonical,
+                minimum_step_to_keep: canonical.saturating_sub(capacity as u64),
+                seeds: (0..initial_seeds)
+                    .map(|i| Seed(H256::from_low_u64_be(i as u64)))
+                    .collect(),
+                capacity,
+                is_vdf_mining_enabled: None,
+            };
+            let initial_len = state.seeds.len();
+
+            for i in 0..gap_count {
+                let proposed = local_step + 2 + i as u64;
+                let returned = state.store_step(Seed(H256::zero()), proposed);
+                proptest::prop_assert_eq!(
+                    returned, local_step,
+                    "gap proposal must not advance step"
+                );
+            }
+
+            proptest::prop_assert_eq!(
+                state.seeds.len(),
+                initial_len,
+                "seed buffer must not shrink on gap rejections"
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::same_step(100, 100, 100)]
+    #[case::backward(100, 99, 100)]
+    #[case::sequential(100, 101, 101)]
+    #[case::small_gap(100, 102, 100)]
+    #[case::large_gap(100, 200, 100)]
+    fn store_step_gap_handling(#[case] current: u64, #[case] proposed: u64, #[case] expected: u64) {
+        let mut state = vdf_state_at(current);
+        let returned = state.store_step(Seed(H256::zero()), proposed);
+        assert_eq!(returned, expected);
     }
 }

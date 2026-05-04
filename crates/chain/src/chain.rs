@@ -334,6 +334,43 @@ impl Clone for StopGuard {
     }
 }
 
+/// Polls the IrysNodeCtx oneshot recv concurrently with the lifecycle JoinHandle so that
+/// init failures surface their real cause and lifecycle panics rethrow with their original
+/// payload — instead of being hidden behind a generic `RecvError` ("channel closed").
+///
+/// `biased;` makes the recv arm strictly preferred so that when the lifecycle's
+/// early-return path fires both `tx.send(Err(err))` *and* a return-from-task in the
+/// same scheduler tick, the cause-bearing oneshot wins the select instead of the
+/// JoinHandle arm collapsing the chain into a generic
+/// `"lifecycle exited during init with reason: ..."`. The cause is also embedded
+/// in the `FatalError` reason at the call sites (defense-in-depth).
+///
+/// Returns the constructed `T` on success. On error the caller's `?` propagates the eyre
+/// error chain that includes the underlying cause from the lifecycle's early-return paths.
+async fn await_lifecycle_init<T>(
+    rx: &mut oneshot::Receiver<eyre::Result<T>>,
+    handle: &mut tokio::task::JoinHandle<ShutdownReason>,
+) -> eyre::Result<T> {
+    tokio::select! {
+        biased;
+
+        res = rx => match res {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e.wrap_err("node lifecycle failed during init")),
+            Err(_) => Err(eyre::eyre!(
+                "lifecycle dropped IrysNodeCtx sender without producing a result"
+            )),
+        },
+        res = handle => match res {
+            Ok(reason) => Err(eyre::eyre!(
+                "lifecycle exited during init with reason: {reason}"
+            )),
+            Err(je) if je.is_panic() => std::panic::resume_unwind(je.into_panic()),
+            Err(je) => Err(eyre::eyre!("lifecycle task aborted: {je}")),
+        },
+    }
+}
+
 async fn start_reth_node(
     task_executor: TaskExecutor,
     chainspec: Arc<ChainSpec>,
@@ -778,7 +815,8 @@ impl IrysNode {
         .build()?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<ShutdownReason>(1);
-        let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
+        let (irys_node_ctx_tx, mut irys_node_ctx_rx) =
+            oneshot::channel::<eyre::Result<IrysNodeCtx>>();
         let irys_provider = reth_provider::create_provider();
         let shutdown_token = CancellationToken::new();
 
@@ -786,7 +824,7 @@ impl IrysNode {
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = reth_runtime.clone();
 
-        let lifecycle_handle = runtime_handle.spawn(
+        let mut lifecycle_handle = runtime_handle.spawn(
             Self::node_lifecycle(
                 self.config.clone(),
                 Arc::clone(&latest_block),
@@ -808,7 +846,7 @@ impl IrysNode {
             .in_current_span(),
         );
 
-        let mut ctx = irys_node_ctx_rx.await?;
+        let mut ctx = await_lifecycle_init(&mut irys_node_ctx_rx, &mut lifecycle_handle).await?;
         ctx.lifecycle_handle = Arc::new(std::sync::Mutex::new(Some(lifecycle_handle)));
         ctx.shutdown_sender = shutdown_tx;
         ctx.shutdown_token = shutdown_token;
@@ -1068,7 +1106,7 @@ impl IrysNode {
         latest_block_height: u64,
         genesis_hash: H256,
         mut shutdown_rx: tokio::sync::mpsc::Receiver<ShutdownReason>,
-        irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
+        irys_node_ctx_tx: oneshot::Sender<eyre::Result<IrysNodeCtx>>,
         irys_provider: IrysRethProvider,
         reth_runtime: reth::tasks::Runtime,
         reth_chainspec: Arc<ChainSpec>,
@@ -1089,18 +1127,18 @@ impl IrysNode {
             {
                 Ok(result) => result,
                 Err(e) => {
-                    error!(
-                        "Failed to start reth node at block height {}: {:?}",
-                        latest_block_height, e
-                    );
-                    return ShutdownReason::FatalError(format!(
-                        "start_reth_node failed at block height {latest_block_height}: {e}"
+                    let err = e.wrap_err(format!(
+                        "start_reth_node failed at block height {latest_block_height}"
                     ));
+                    let reason = format!("{err:?}");
+                    error!(error = ?err, "Failed to start reth node");
+                    let _ = irys_node_ctx_tx.send(Err(err));
+                    return ShutdownReason::FatalError(reason);
                 }
             };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
-        let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
+        let (irys_node_ctx, actix_server, vdf_exit_token, gossip_service_handle, service_set) =
             match Self::init_services(
                 &config,
                 genesis_hash,
@@ -1120,8 +1158,11 @@ impl IrysNode {
             {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("Failed to initialize services: {:?}", e);
-                    return ShutdownReason::FatalError(format!("init_services failed: {e}"));
+                    let err = e.wrap_err("init_services failed");
+                    let reason = format!("{err:?}");
+                    error!(error = ?err, "Failed to initialize services");
+                    let _ = irys_node_ctx_tx.send(Err(err));
+                    return ShutdownReason::FatalError(reason);
                 }
             };
 
@@ -1131,7 +1172,7 @@ impl IrysNode {
         let mut actix_task = runtime_handle.spawn(actix_server);
 
         // Send IrysNodeCtx back to start()
-        let early_shutdown = match irys_node_ctx_tx.send(irys_node_ctx) {
+        let early_shutdown = match irys_node_ctx_tx.send(Ok(irys_node_ctx)) {
             Ok(()) => None,
             Err(_) => {
                 error!("IrysNodeCtx receiver dropped before context could be sent");
@@ -1164,6 +1205,12 @@ impl IrysNode {
                 },
                 _ = reth_exit => {
                     ShutdownReason::RethExit
+                },
+                // VDF thread exit (poisoned-lock graceful return, panic, or
+                // unexpected return) — without this arm, the node continues
+                // running mining-less but appears healthy.
+                _ = vdf_exit_token.cancelled() => {
+                    ShutdownReason::VdfExited
                 },
                 _ = shutdown_token.cancelled() => {
                     ShutdownReason::CancellationToken
@@ -1249,12 +1296,14 @@ impl IrysNode {
             Err(_) => error!("Gossip service stop timed out after {GOSSIP_STOP_TIMEOUT:?}"),
         }
 
-        // Wait for VDF thread
+        // Wait for VDF thread. The CancelOnDrop guard inside the spawned
+        // thread cancels this token on any exit (clean return, poisoned-lock
+        // graceful exit, or panic via Drop unwind), so an immediate
+        // resolution here means the VDF thread is fully done.
         info!(shutdown.phase = "vdf_wait", "Lifecycle shutdown phase");
         debug!("Waiting for VDF thread to finish");
-        match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_done_rx).await {
-            Ok(Ok(())) => debug!("VDF thread finished"),
-            Ok(Err(_)) => error!("VDF thread likely panicked (completion channel dropped)"),
+        match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_exit_token.cancelled()).await {
+            Ok(()) => debug!("VDF thread finished"),
             Err(_) => error!("VDF thread did not finish within {VDF_THREAD_TIMEOUT:?}"),
         }
 
@@ -1307,7 +1356,7 @@ impl IrysNode {
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
-        oneshot::Receiver<()>,
+        CancellationToken,
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1551,6 +1600,7 @@ impl IrysNode {
             &service_senders,
             runtime_handle.clone(),
             chunk_ingress_state.clone(),
+            shutdown_token.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
 
@@ -1714,7 +1764,7 @@ impl IrysNode {
         );
 
         // set up the vdf thread
-        let vdf_done_rx = Self::init_vdf_thread(
+        let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,
             Arc::clone(&is_vdf_mining_enabled),
@@ -1930,7 +1980,7 @@ impl IrysNode {
         Ok((
             irys_node_ctx,
             server,
-            vdf_done_rx,
+            vdf_exit_token,
             p2p_service_handle,
             ServiceSet::new(services),
         ))
@@ -1959,15 +2009,28 @@ impl IrysNode {
         block_status_provider: BlockStatusProvider,
         chain_sync_state: ChainSyncState,
         shutdown_token: CancellationToken,
-    ) -> oneshot::Receiver<()> {
+    ) -> CancellationToken {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         let span = tracing::Span::current();
-        let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
+        // Cancelled when the VDF thread exits for any reason (clean exit,
+        // poisoned-lock graceful return, or panic via Drop unwind). The
+        // lifecycle's steady-state select! watches this so a silent VDF
+        // exit triggers shutdown instead of leaving the node mining-less.
+        let vdf_exit_token = CancellationToken::new();
 
         std::thread::spawn({
             let vdf_config = config.vdf.clone();
             let core_pinning = config.node_config.vdf.core_pinning;
+            let exit_token = vdf_exit_token.clone();
             move || {
+                struct CancelOnDrop(CancellationToken);
+                impl Drop for CancelOnDrop {
+                    fn drop(&mut self) {
+                        self.0.cancel();
+                    }
+                }
+                let _exit_guard = CancelOnDrop(exit_token);
+
                 let _span = span.enter();
 
                 match core_pinning {
@@ -2017,10 +2080,9 @@ impl IrysNode {
                     chain_sync_state,
                     shutdown_token,
                 );
-                let _ = vdf_done_tx.send(());
             }
         });
-        vdf_done_rx
+        vdf_exit_token
     }
 
     fn init_partition_mining_services(
@@ -2566,4 +2628,134 @@ async fn stake_and_pledge(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::runtime::Handle;
+
+    /// Drives `await_lifecycle_init` against a synthetic lifecycle that mirrors how
+    /// `node_lifecycle`'s early-return paths behave: send `Err` on the oneshot, then
+    /// park forever so the recv arm reliably wins the select (without the park, the
+    /// JoinHandle arm could race the recv and surface a different — still
+    /// informative — error). Verifies the recv-arm error carries the real cause
+    /// instead of the previous opaque `"channel closed"`.
+    #[tokio::test]
+    async fn await_lifecycle_init_surfaces_real_init_error() {
+        let (tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+        let mut handle: tokio::task::JoinHandle<ShutdownReason> =
+            Handle::current().spawn(async move {
+                let err = eyre::eyre!("init_services failed: simulated db open error");
+                let _ = tx.send(Err(err));
+                std::future::pending::<ShutdownReason>().await
+            });
+
+        let result = await_lifecycle_init(&mut rx, &mut handle).await;
+        handle.abort();
+        let err = result.expect_err("expected error from synthetic lifecycle");
+        let chain = format!("{err:?}");
+        assert!(
+            chain.contains("init_services failed") && chain.contains("simulated db open error"),
+            "expected real cause in error chain, got: {chain}"
+        );
+        assert!(
+            !chain.contains("channel closed"),
+            "should not contain 'channel closed' opacity, got: {chain}"
+        );
+    }
+
+    /// If the lifecycle drops the sender without producing a result (sender goes out
+    /// of scope), the recv arm sees `RecvError`; we surface a self-describing eyre
+    /// error instead of leaking the raw recv error text.
+    #[tokio::test]
+    async fn await_lifecycle_init_reports_dropped_sender() {
+        let (tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+        let mut handle = Handle::current().spawn(async move {
+            drop(tx);
+            ShutdownReason::FatalError("sender dropped before send".into())
+        });
+
+        let result = await_lifecycle_init(&mut rx, &mut handle).await;
+        let err = result.expect_err("expected error when sender is dropped");
+        let chain = format!("{err:?}");
+        // The lifecycle JoinHandle arm may resolve first (returning the FatalError reason)
+        // or the recv arm may win the race — both are valid surfaces, both must be informative
+        // and neither must be the previous opaque `"channel closed"`.
+        let acceptable = chain.contains("lifecycle dropped IrysNodeCtx sender")
+            || chain.contains("lifecycle exited during init")
+            || chain.contains("sender dropped before send");
+        assert!(acceptable, "expected informative error, got: {chain}");
+    }
+
+    /// A panic inside the lifecycle task is rethrown with its original payload so the
+    /// global panic hook sees the real panic, instead of `start()` masking it as a
+    /// generic recv error.
+    #[tokio::test]
+    #[should_panic(expected = "deliberate lifecycle panic")]
+    async fn await_lifecycle_init_resumes_unwind_on_lifecycle_panic() {
+        let (_tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+        let mut handle: tokio::task::JoinHandle<ShutdownReason> =
+            Handle::current().spawn(async move {
+                panic!("deliberate lifecycle panic");
+            });
+        let _ = await_lifecycle_init(&mut rx, &mut handle).await;
+    }
+
+    /// On the success path the helper returns the produced value cleanly.
+    #[tokio::test]
+    async fn await_lifecycle_init_returns_value_on_success() {
+        let (tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+        let mut handle = Handle::current().spawn(async move {
+            let _ = tx.send(Ok(42));
+            // Hold the lifecycle alive past the recv so the recv arm wins the select.
+            std::future::pending::<ShutdownReason>().await
+        });
+
+        let value = await_lifecycle_init(&mut rx, &mut handle)
+            .await
+            .expect("expected success");
+        assert_eq!(value, 42);
+        handle.abort();
+    }
+
+    /// Regression: when the lifecycle's early-return path fires both
+    /// `tx.send(Err(err))` AND the JoinHandle return in the same scheduler
+    /// tick, the recv arm must win — otherwise the cause-bearing oneshot
+    /// loses to the JoinHandle arm and the caller sees a generic
+    /// "lifecycle exited during init with reason: ...". `biased;` enforces
+    /// the recv-first ordering.
+    ///
+    /// Run 50 iterations: without `biased;`, tokio's select! picks a random
+    /// ready branch each call, so ~half would surface the wrong arm. 50
+    /// iterations make the regression effectively impossible to miss
+    /// (probability of all 50 hitting recv by chance is ~(0.5)^50 ≈ 10^-15).
+    #[tokio::test]
+    async fn await_lifecycle_init_recv_arm_wins_race_with_joinhandle() {
+        for iteration in 0..50 {
+            let (tx, mut rx) = oneshot::channel::<eyre::Result<u32>>();
+            let mut handle: tokio::task::JoinHandle<ShutdownReason> =
+                Handle::current().spawn(async move {
+                    let err = eyre::eyre!("init_services failed: real cause");
+                    let _ = tx.send(Err(err));
+                    ShutdownReason::FatalError("init_services failed: real cause".into())
+                });
+            // Wait until the spawned task has both sent on the oneshot and
+            // returned — so both branches become Ready in the next select! poll.
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let result = await_lifecycle_init(&mut rx, &mut handle).await;
+            let err = result.expect_err("expected error");
+            let chain = format!("{err:?}");
+            assert!(
+                chain.contains("real cause"),
+                "iteration {iteration}: recv arm must win the race so the cause survives; got: {chain}"
+            );
+            assert!(
+                !chain.contains("lifecycle exited during init with reason"),
+                "iteration {iteration}: JoinHandle arm must not win when oneshot is also ready; got: {chain}"
+            );
+        }
+    }
 }

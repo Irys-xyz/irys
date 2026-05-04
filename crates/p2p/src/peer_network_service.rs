@@ -384,10 +384,12 @@ impl PeerNetworkService {
                     {
                         Ok(true) => {
                             debug!("Peer {:?} is online", peer_id);
+                            peer_list.set_is_online_by_peer_id(&peer_id, true);
                             inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                         }
                         Ok(false) => {
                             debug!("Peer {:?} is offline", peer_id);
+                            peer_list.set_is_online_by_peer_id(&peer_id, false);
                             inner_clone.decrease_peer_score(
                                 &peer_id,
                                 ScoreDecreaseReason::Offline(
@@ -401,6 +403,7 @@ impl PeerNetworkService {
                                 peer_id, url, status
                             );
                             debug!("{message}");
+                            peer_list.set_is_online_by_peer_id(&peer_id, false);
                             inner_clone.decrease_peer_score(
                                 &peer_id,
                                 ScoreDecreaseReason::NetworkError(message),
@@ -1160,7 +1163,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
     use tokio::test;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::time::{Duration, sleep};
 
     fn create_test_peer(
         mining_addr: &str,
@@ -1546,7 +1549,9 @@ mod tests {
         .expect("peer list");
         let wait_list = peer_list.clone();
         let wait_handle = tokio::spawn(async move {
-            wait_list.wait_for_active_peers().await;
+            wait_list
+                .wait_for_active_peers(1, Duration::from_secs(2))
+                .await
         });
         sleep(Duration::from_millis(50)).await;
         let (_mining_addr, peer) = create_test_peer(
@@ -1556,7 +1561,8 @@ mod tests {
             None,
         );
         peer_list.add_or_update_peer(peer.clone(), true);
-        wait_handle.await.expect("wait task");
+        let count = wait_handle.await.expect("wait task");
+        assert!(count >= 1, "expected at least 1 active peer, got {count}");
         let active = peer_list.top_active_peers(None, None);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].1, peer);
@@ -1575,12 +1581,10 @@ mod tests {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
         )
         .expect("peer list");
-        let wait_list = peer_list.clone();
-        let result = timeout(Duration::from_millis(200), async move {
-            wait_list.wait_for_active_peers().await;
-        })
-        .await;
-        assert!(result.is_err(), "wait should time out without peers");
+        let count = peer_list
+            .wait_for_active_peers(1, Duration::from_millis(200))
+            .await;
+        assert_eq!(count, 0, "wait should return count=0 when no peers");
     }
 
     #[test]

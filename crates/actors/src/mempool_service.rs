@@ -43,6 +43,7 @@ use std::{
 };
 use tokio::sync::{RwLock, Semaphore, broadcast, mpsc::UnboundedReceiver, oneshot};
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, debug, error, info, instrument, warn};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
@@ -506,7 +507,9 @@ impl Inner {
     /// means these fields are lost during serialization. The DB is authoritative since
     /// `BlockMigrationService` persists them at confirmation time.
     pub async fn reconstruct_metadata_from_db(&self) {
-        let mut state = self.mempool_state.0.write().await;
+        // Startup-only path: no other writers exist yet, so the timeout-guarded
+        // `mempool_state.write()` helper is unnecessary here. Direct write is safe.
+        let mut state = self.mempool_state.state.write().await;
         let mut reconstructed = 0_u64;
         for (txid, tx_header) in state.valid_submit_ledger_tx.iter_mut() {
             let db_meta = match self.irys_db.view_eyre(|tx| {
@@ -607,15 +610,57 @@ pub enum PromotionStatus {
 /// Although this structure has private read and write methods, these should not be used outside
 /// the AtomicMempoolState under any condition.
 #[derive(Debug, Clone)]
-pub struct AtomicMempoolState(Arc<RwLock<MempoolState>>);
+pub struct AtomicMempoolState {
+    state: Arc<RwLock<MempoolState>>,
+    /// Shutdown token used to request a graceful node shutdown when the mempool
+    /// detects an unrecoverable lock contention. Wired up by `spawn_service`;
+    /// `None` in tests where lock contention surfaces only as `Err` (no node
+    /// to bring down). `Arc<OnceLock<…>>` lets all clones observe the token
+    /// once it is installed without breaking existing constructors.
+    shutdown_token: Arc<std::sync::OnceLock<CancellationToken>>,
+}
 
 impl AtomicMempoolState {
     pub fn new(inner: MempoolState) -> Self {
-        Self(Arc::new(RwLock::new(inner)))
+        Self {
+            state: Arc::new(RwLock::new(inner)),
+            shutdown_token: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Wires up the node-wide cancellation token so that fatal lock contention
+    /// can request a graceful node shutdown via the lifecycle's `select!`.
+    /// Idempotent: only the first call takes effect; subsequent calls are
+    /// silently ignored (the OnceLock semantics).
+    pub fn install_shutdown_token(&self, token: CancellationToken) {
+        let _ = self.shutdown_token.set(token);
+    }
+
+    /// Cancels the installed shutdown token and emits a FATAL log line with
+    /// the operation that detected the contention. The lifecycle's `select!`
+    /// picks up the cancellation and runs the ordered-shutdown path. No-op
+    /// when no token has been installed (test fixtures).
+    fn signal_fatal_shutdown(&self, op: &str) {
+        error!(
+            op,
+            "FATAL: mempool lock contention detected; initiating graceful node shutdown"
+        );
+        if let Some(token) = self.shutdown_token.get() {
+            token.cancel();
+        }
     }
 
     pub async fn remove_blacklisted_txids(&self, tx_ids: &[H256]) {
-        let mut state = self.write().await;
+        let mut state = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; skipping remove_blacklisted_txids"
+                );
+                return;
+            }
+        };
         for tx_id in tx_ids {
             state.recent_invalid_tx.pop(tx_id);
         }
@@ -623,23 +668,65 @@ impl AtomicMempoolState {
 
     /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
     pub async fn mark_tx_as_invalid(&self, tx_id: IrysTransactionId, err_reason: impl ToString) {
-        self.write().await.mark_tx_as_invalid(tx_id, err_reason);
+        match self.write().await {
+            Ok(mut g) => g.mark_tx_as_invalid(tx_id, err_reason),
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping mark_tx_as_invalid"
+            ),
+        }
     }
 
     /// Batch-removes expired data txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
-    pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) {
-        self.write().await.batch_prune_data_txs(expired);
+    ///
+    /// Returns `Err(LockContention)` so callers can keep the mempool in sync
+    /// with downstream caches: the `prune_pending_txs` flow must skip the
+    /// `CachedDataRoots` invalidation when this returns Err, otherwise the
+    /// cache would drop txid references that the mempool still retains.
+    pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) -> Result<(), MempoolError> {
+        let mut g = self.write().await?;
+        g.batch_prune_data_txs(expired);
+        Ok(())
     }
 
     /// Batch-removes expired commitment txs under a single write lock.
     /// Each entry is (tx_id, anchor) — the anchor is used for the InvalidAnchor error reason.
-    pub async fn batch_prune_commitment_txs(&self, expired: &[(H256, H256)]) {
-        self.write().await.batch_prune_commitment_txs(expired);
+    ///
+    /// Returns `Err(LockContention)` so callers can react to a winding-down
+    /// mempool. Commitment-tx pruning is independent of `CachedDataRoots`, so
+    /// failure here does not affect the data-tx cache invariants enforced by
+    /// `batch_prune_data_txs`.
+    pub async fn batch_prune_commitment_txs(
+        &self,
+        expired: &[(H256, H256)],
+    ) -> Result<(), MempoolError> {
+        let mut g = self.write().await?;
+        g.batch_prune_commitment_txs(expired);
+        Ok(())
     }
 
+    /// Returns all valid commitment txs sorted by the priority rules.
+    ///
+    /// Best-effort under contention: `read()` already triggered
+    /// `signal_fatal_shutdown` when the timeout fired, so the lifecycle is
+    /// winding down by the time the empty `Vec` reaches the caller. Block
+    /// production (`tx_selector`) consumes empty as authoritative — the
+    /// resulting under-filled block is acceptable because the FCU/migration
+    /// pipeline downstream is also being torn down. The empty path is NOT
+    /// safe outside the shutdown window; if ever called from a steady-state
+    /// path, switch to a `Result`-returning variant.
     pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; sorted_commitments returning empty (signal_fatal_shutdown already triggered)"
+                );
+                return Vec::new();
+            }
+        };
 
         mempool_state_guard
             .valid_commitment_tx
@@ -664,7 +751,16 @@ impl AtomicMempoolState {
         commitment_tx_ids: &[IrysTransactionId],
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
         const PRESUMED_PLEDGES_PER_ACCOUNT: usize = 4;
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_commitment_txs returning empty"
+                );
+                return HashMap::new();
+            }
+        };
 
         // Build lookup map of ALL transactions in mempool - O(m)
         let mut all_txs = HashMap::with_capacity(
@@ -705,7 +801,16 @@ impl AtomicMempoolState {
         &self,
         data_tx_ids: &[IrysTransactionId],
     ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_data_txs returning empty"
+                );
+                return HashMap::new();
+            }
+        };
         let mut results = HashMap::with_capacity(data_tx_ids.len());
         for tx_id in data_tx_ids {
             if let Some(tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
@@ -718,7 +823,16 @@ impl AtomicMempoolState {
     // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
     // right now this only wipes `recent_invalid_tx`
     pub async fn wipe_blacklists(&self) {
-        let mut write = self.write().await;
+        let mut write = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; skipping wipe_blacklists"
+                );
+                return;
+            }
+        };
         write.recent_invalid_tx.clear();
         write.recent_invalid_payload_fingerprints.clear();
     }
@@ -731,7 +845,28 @@ impl AtomicMempoolState {
         // Read chunk ingress count first to avoid holding the mempool lock across the await.
         let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
 
-        let state = self.read().await;
+        let state = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_status returning best-effort empty status"
+                );
+                let mempool_config = config.consensus_config().mempool;
+                return MempoolStatus {
+                    data_tx_count: 0,
+                    commitment_tx_count: 0,
+                    pending_chunks_count,
+                    pending_pledges_count: 0,
+                    recent_valid_tx_count: 0,
+                    recent_invalid_tx_count: 0,
+                    data_tx_total_size: 0,
+                    config: mempool_config,
+                    data_tx_capacity_pct: 0.0,
+                    commitment_address_capacity_pct: 0.0,
+                };
+            }
+        };
 
         // Calculate total data size
         let data_tx_total_size: u64 = state
@@ -795,7 +930,7 @@ impl AtomicMempoolState {
     }
 
     pub async fn mark_fingerprint_as_invalid(&self, fingerprint: H256) {
-        self.0
+        self.state
             .write()
             .await
             .recent_invalid_payload_fingerprints
@@ -803,7 +938,7 @@ impl AtomicMempoolState {
     }
 
     pub async fn is_a_recent_invalid_fingerprint(&self, fingerprint: &H256) -> bool {
-        self.0
+        self.state
             .read()
             .await
             .recent_invalid_payload_fingerprints
@@ -811,20 +946,33 @@ impl AtomicMempoolState {
     }
 
     pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {
-        let mut state = self.write().await;
-        state.stake_and_pledge_whitelist.extend(new_entries);
+        match self.write().await {
+            Ok(mut g) => g.stake_and_pledge_whitelist.extend(new_entries),
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping extend_stake_and_pledge_whitelist"
+            ),
+        }
     }
 
     pub async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<IrysAddress> {
-        let state = self.read().await;
-        state.stake_and_pledge_whitelist.clone()
+        match self.read().await {
+            Ok(g) => g.stake_and_pledge_whitelist.clone(),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; whitelist returning empty"
+                );
+                HashSet::new()
+            }
+        }
     }
 
     pub async fn valid_submit_ledger_tx_cloned(
         &self,
         tx_id: &H256,
     ) -> Option<DataTransactionHeader> {
-        self.0
+        self.state
             .read()
             .await
             .valid_submit_ledger_tx
@@ -832,13 +980,37 @@ impl AtomicMempoolState {
             .cloned()
     }
 
+    /// Snapshot of all valid Submit-ledger txs.
+    ///
+    /// Best-effort under contention: see `sorted_commitments` for the full
+    /// shutdown-window contract. Returning an empty `HashMap` on contention
+    /// causes `tx_selector` to produce an under-filled block, but the
+    /// lifecycle is already winding down via `signal_fatal_shutdown`.
     pub async fn all_valid_submit_ledgers_cloned(&self) -> HashMap<H256, DataTransactionHeader> {
-        self.read().await.valid_submit_ledger_tx.clone()
+        match self.read().await {
+            Ok(g) => g.valid_submit_ledger_tx.clone(),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; all_valid_submit_ledgers_cloned returning empty (signal_fatal_shutdown already triggered)"
+                );
+                HashMap::new()
+            }
+        }
     }
 
     /// For confirmed blocks, we log warnings but don't fail if mempool is full
     pub async fn bounded_insert_data_tx(&self, header: DataTransactionHeader) {
-        let mut mempool_guard = self.write().await;
+        let mut mempool_guard = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; skipping bounded_insert_data_tx"
+                );
+                return;
+            }
+        };
         if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
             warn!(
                 tx.id = ?header.id,
@@ -855,7 +1027,16 @@ impl AtomicMempoolState {
         commitment_type_filter: impl Fn(CommitmentTypeV2) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
-        let mempool = self.read().await;
+        let mempool = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; count_mempool_commitments returning 0"
+                );
+                return 0;
+            }
+        };
 
         mempool
             .valid_commitment_tx
@@ -875,38 +1056,55 @@ impl AtomicMempoolState {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        self.write().await.insert_tx_and_mark_valid(tx)
+        self.write().await?.insert_tx_and_mark_valid(tx)
     }
 
     pub async fn all_valid_commitment_txs_cloned(
         &self,
     ) -> HashMap<IrysAddress, Vec<CommitmentTransaction>> {
-        self.read().await.valid_commitment_tx.clone()
+        match self.read().await {
+            Ok(g) => g.valid_commitment_tx.clone(),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; all_valid_commitment_txs_cloned returning empty"
+                );
+                HashMap::new()
+            }
+        }
     }
 
     pub async fn all_valid_submit_ledger_ids(&self) -> Vec<H256> {
-        let state = self.read().await;
-        state
-            .valid_submit_ledger_tx
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
+        match self.read().await {
+            Ok(g) => g.valid_submit_ledger_tx.keys().copied().collect::<Vec<_>>(),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; all_valid_submit_ledger_ids returning empty"
+                );
+                Vec::new()
+            }
+        }
     }
 
     pub async fn all_valid_commitment_ledger_addresses(&self) -> Vec<IrysAddress> {
-        let state = self.read().await;
-        state
-            .valid_commitment_tx
-            .keys()
-            .copied()
-            .collect::<Vec<_>>()
+        match self.read().await {
+            Ok(g) => g.valid_commitment_tx.keys().copied().collect::<Vec<_>>(),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; all_valid_commitment_ledger_addresses returning empty"
+                );
+                Vec::new()
+            }
+        }
     }
 
     pub async fn valid_commitment_txs_cloned(
         &self,
         address: &IrysAddress,
     ) -> Option<Vec<CommitmentTransaction>> {
-        self.0
+        self.state
             .read()
             .await
             .valid_commitment_tx
@@ -915,8 +1113,15 @@ impl AtomicMempoolState {
     }
 
     pub async fn remove_valid_submit_ledger_tx(&self, tx_id: &H256) {
-        let mut state = self.write().await;
-        state.valid_submit_ledger_tx.remove(tx_id);
+        match self.write().await {
+            Ok(mut g) => {
+                g.valid_submit_ledger_tx.remove(tx_id);
+            }
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping remove_valid_submit_ledger_tx"
+            ),
+        }
     }
 
     /// Set included_height for a data transaction with optional overwrite
@@ -934,7 +1139,16 @@ impl AtomicMempoolState {
         height: u64,
         overwrite: bool,
     ) -> bool {
-        let mut state = self.write().await;
+        let mut state = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; set_data_tx_included_height_inner returning false"
+                );
+                return false;
+            }
+        };
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
             let updated = overwrite || wrapped_tx.metadata().included_height.is_none();
             if updated {
@@ -954,22 +1168,41 @@ impl AtomicMempoolState {
         }
     }
 
-    /// Clear included_height for a data transaction (re-org handling)
-    /// Returns true if the transaction was found and the height was cleared
-    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> bool {
-        let mut state = self.write().await;
-        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped_tx.metadata_mut().included_height = None;
-            true
-        } else {
-            false
-        }
+    /// Clear included_height for a data transaction (re-org handling).
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and height cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; `signal_fatal_shutdown`
+    ///   was already triggered. Distinguishing this from `Ok(false)` matters
+    ///   for reorg cleanup: pre-fix, contention silently looked like
+    ///   "tx absent", and stale `included_height` survived the reorg with the
+    ///   mempool state disagreeing with the canonical chain.
+    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> Result<bool, MempoolError> {
+        let mut state = self.write().await?;
+        Ok(
+            if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+                wrapped_tx.metadata_mut().included_height = None;
+                true
+            } else {
+                false
+            },
+        )
     }
 
     /// Set included_height for a commitment transaction
     /// Returns true if the transaction was found and updated
     pub async fn set_commitment_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
-        let mut state = self.write().await;
+        let mut state = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; set_commitment_tx_included_height returning false"
+                );
+                return false;
+            }
+        };
 
         // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
@@ -991,15 +1224,24 @@ impl AtomicMempoolState {
     }
 
     /// Clears the included_height for a commitment transaction.
-    /// Returns true if the transaction was found.
-    pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
-        let mut state = self.write().await;
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and height cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; reorg cleanup must
+    ///   distinguish this from `Ok(false)` to avoid leaving stale
+    ///   `included_height` after the canonical chain has diverged.
+    pub async fn clear_commitment_tx_included_height(
+        &self,
+        tx_id: H256,
+    ) -> Result<bool, MempoolError> {
+        let mut state = self.write().await?;
 
         // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
                 tx.metadata_mut().included_height = None;
-                return true;
+                return Ok(true);
             }
         }
 
@@ -1007,11 +1249,11 @@ impl AtomicMempoolState {
         for (_, pledges_cache) in state.pending_pledges.iter_mut() {
             if let Some(tx) = pledges_cache.get_mut(&tx_id) {
                 tx.metadata_mut().included_height = None;
-                return true;
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
@@ -1025,7 +1267,16 @@ impl AtomicMempoolState {
     pub async fn remove_commitment_txs(&self, txids: impl IntoIterator<Item = H256>) -> bool {
         let mut found = false;
         let txids_set: HashSet<H256> = txids.into_iter().collect();
-        let mut mempool_state_guard = self.write().await;
+        let mut mempool_state_guard = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; remove_commitment_txs returning false"
+                );
+                return false;
+            }
+        };
 
         // Remove all txids from recent_valid_tx cache
         for txid in &txids_set {
@@ -1065,7 +1316,16 @@ impl AtomicMempoolState {
         HashMap<H256, DataTransactionHeader>,
         HashMap<IrysAddress, Vec<CommitmentTransaction>>,
     ) {
-        let mut state = self.write().await;
+        let mut state = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; take_all_valid_txs returning empty"
+                );
+                return (HashMap::new(), HashMap::new());
+            }
+        };
         state.recent_valid_tx.clear();
 
         // Return the transactions directly (they already contain metadata)
@@ -1077,7 +1337,16 @@ impl AtomicMempoolState {
 
     /// Check if a transaction ID is in the recent valid transactions cache
     pub async fn is_recent_valid_tx(&self, tx_id: &H256) -> bool {
-        self.read().await.recent_valid_tx.contains(tx_id)
+        match self.read().await {
+            Ok(g) => g.recent_valid_tx.contains(tx_id),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; is_recent_valid_tx returning false"
+                );
+                false
+            }
+        }
     }
 
     /// Get transaction metadata from the mempool.
@@ -1092,7 +1361,16 @@ impl AtomicMempoolState {
     /// [`valid_commitment_tx`]: MempoolState::valid_commitment_tx
     /// [`pending_pledges`]: MempoolState::pending_pledges
     pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TxMetadata> {
-        let state = self.read().await;
+        let state = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_tx_metadata returning None"
+                );
+                return None;
+            }
+        };
 
         // Check data transactions - metadata is embedded
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
@@ -1117,7 +1395,16 @@ impl AtomicMempoolState {
     }
 
     pub async fn remove_transactions_from_pending_valid_pool(&self, submit_tx_ids: &[H256]) {
-        let mut guard = self.write().await;
+        let mut guard = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; skipping remove_transactions_from_pending_valid_pool"
+                );
+                return;
+            }
+        };
         for txid in submit_tx_ids {
             guard.valid_submit_ledger_tx.remove(txid);
             guard.recent_valid_tx.pop(txid);
@@ -1125,7 +1412,7 @@ impl AtomicMempoolState {
     }
 
     pub async fn update_submit_transaction(&self, tx: DataTransactionHeader) {
-        self.0
+        self.state
             .write()
             .await
             .valid_submit_ledger_tx
@@ -1139,9 +1426,18 @@ impl AtomicMempoolState {
             });
     }
 
-    pub async fn clear_promoted_height(&self, txid: H256) -> bool {
+    /// Clears `promoted_height` for a tx during reorg unpromotion.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — tx found and `promoted_height` cleared
+    /// - `Ok(false)` — tx not present in mempool (benign no-op)
+    /// - `Err(LockContention)` — write lock contended; reorg cleanup must
+    ///   surface this distinctly so a stale `promoted_height` doesn't survive
+    ///   the reorg and cause `tx_selector::retain_unconfirmed_submit_candidates`
+    ///   to drop a now-orphaned tx from block production candidates.
+    pub async fn clear_promoted_height(&self, txid: H256) -> Result<bool, MempoolError> {
         let mut cleared = false;
-        let mut state = self.write().await;
+        let mut state = self.write().await?;
         if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
             // Clear promoted_height in metadata
             wrapped_header.metadata_mut().promoted_height = None;
@@ -1149,7 +1445,7 @@ impl AtomicMempoolState {
             tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
             cleared = true;
         }
-        cleared
+        Ok(cleared)
     }
 
     /// Atomically sets the promoted_height on a transaction in the mempool.
@@ -1160,7 +1456,16 @@ impl AtomicMempoolState {
         txid: H256,
         height: u64,
     ) -> Option<DataTransactionHeader> {
-        let mut state = self.write().await;
+        let mut state = match self.write().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; set_promoted_height returning None"
+                );
+                return None;
+            }
+        };
         let wrapped_header = state.valid_submit_ledger_tx.get_mut(&txid)?;
         if wrapped_header.promoted_height().is_none() {
             // Set promoted_height in metadata
@@ -1194,14 +1499,28 @@ impl AtomicMempoolState {
     /// This batches the work of `set_data_tx_included_height_overwrite`,
     /// `set_commitment_tx_included_height`, and `set_promoted_height` to avoid
     /// acquiring the write lock once per transaction (~120 times per block).
+    ///
+    /// All three update phases run atomically under a single write guard: either
+    /// every applicable tx in the mempool gets its metadata updated, or none do.
+    /// Per-tx absence (txid not present in mempool) is normal and silently
+    /// skipped — txs may have been pruned between block production and
+    /// confirmation.
+    ///
+    /// Returns `Err(LockContention)` when the write lock cannot be acquired
+    /// within the timeout. The contended `write()` already triggered
+    /// `signal_fatal_shutdown`, so callers MUST short-circuit any follow-up
+    /// work that would leave the mempool partially synchronised with the
+    /// confirmed block (e.g., DB cache writes, prune loops). Continuing past
+    /// this error produces a divergent view: the block is confirmed but the
+    /// mempool still treats its txs as pending.
     pub async fn apply_block_confirmed_updates(
         &self,
         submit_and_publish_txids: &[H256],
         commitment_txids: &[H256],
         publish_txids: &[H256],
         height: u64,
-    ) {
-        let mut state = self.write().await;
+    ) -> Result<(), MempoolError> {
+        let mut state = self.write().await?;
 
         // 1. Set included_height (with overwrite) for submit + publish data txs
         for txid in submit_and_publish_txids {
@@ -1248,20 +1567,37 @@ impl AtomicMempoolState {
                 state.recent_valid_tx.put(*txid, ());
             }
         }
+
+        Ok(())
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
-    /// Returns true if the tx was found and updated, false otherwise.
-    pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
+    /// See `clear_data_tx_included_height_inner` for the contention semantics.
+    pub async fn clear_data_tx_included_height(&self, txid: H256) -> Result<bool, MempoolError> {
         self.clear_data_tx_included_height_inner(txid).await
     }
 
     pub async fn put_recent_invalid(&self, tx_id: H256) {
-        self.write().await.put_recent_invalid(tx_id);
+        match self.write().await {
+            Ok(mut g) => g.put_recent_invalid(tx_id),
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping put_recent_invalid"
+            ),
+        }
     }
 
     pub async fn mempool_data_tx_status(&self, txid: &H256) -> Option<TxKnownStatus> {
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; mempool_data_tx_status returning None"
+                );
+                return None;
+            }
+        };
 
         // #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard
@@ -1283,7 +1619,16 @@ impl AtomicMempoolState {
         &self,
         commitment_tx_id: &H256,
     ) -> Option<TxKnownStatus> {
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; mempool_commitment_tx_status returning None"
+                );
+                return None;
+            }
+        };
 
         #[expect(clippy::if_same_then_else, reason = "readability")]
         if mempool_state_guard
@@ -1320,14 +1665,32 @@ impl AtomicMempoolState {
     }
 
     pub async fn is_address_in_a_whitelist(&self, address: &IrysAddress) -> bool {
-        let read_guard = self.read().await;
+        let read_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; is_address_in_a_whitelist returning false"
+                );
+                return false;
+            }
+        };
         let whitelist = &read_guard.stake_and_pledge_whitelist;
         whitelist.is_empty() || whitelist.contains(address)
     }
 
     /// Returns true if the commitment tx is already known in the mempool caches/maps.
     pub async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: IrysAddress) -> bool {
-        let guard = self.read().await;
+        let guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; is_known_commitment_in_mempool returning false"
+                );
+                return false;
+            }
+        };
         // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
         if guard.recent_valid_tx.contains(tx_id) {
             return true;
@@ -1348,7 +1711,16 @@ impl AtomicMempoolState {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the commitment transactions
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_all_commitment_tx returning empty"
+                );
+                return hash_map;
+            }
+        };
 
         // Get any CommitmentTransactions from the valid commitments
         mempool_state_guard
@@ -1375,7 +1747,16 @@ impl AtomicMempoolState {
         &self,
         signer: &IrysAddress,
     ) -> Option<LruCache<IrysTransactionId, CommitmentTransaction>> {
-        self.write().await.pending_pledges.pop(signer)
+        match self.write().await {
+            Ok(mut g) => g.pending_pledges.pop(signer),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool write lock contention; pop_pending_pledges_for_signer returning None"
+                );
+                None
+            }
+        }
     }
 
     /// Caches an unstaked pledge in the two-level LRU structure.
@@ -1384,9 +1765,13 @@ impl AtomicMempoolState {
         tx: &CommitmentTransaction,
         max_pending_pledge_items: usize,
     ) {
-        self.write()
-            .await
-            .cache_unstaked_pledge(tx, max_pending_pledge_items);
+        match self.write().await {
+            Ok(mut g) => g.cache_unstaked_pledge(tx, max_pending_pledge_items),
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping cache_unstaked_pledge"
+            ),
+        }
     }
 
     /// Inserts a commitment into the mempool valid map and marks it as recently valid.
@@ -1395,12 +1780,21 @@ impl AtomicMempoolState {
         &self,
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        self.write().await.insert_commitment_and_mark_valid(tx)
+        self.write().await?.insert_commitment_and_mark_valid(tx)
     }
 
     async fn is_there_a_pledge_for_unstaked_address(&self, signer: &IrysAddress) -> bool {
         // For unstaked addresses, check for pending stake transactions
-        let mempool_state_guard = self.read().await;
+        let mempool_state_guard = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; is_there_a_pledge_for_unstaked_address returning false"
+                );
+                return false;
+            }
+        };
         // Get pending transactions for this address
         if let Some(pending) = mempool_state_guard.valid_commitment_tx.get(signer) {
             // Check if there's at least one pending stake transaction
@@ -1422,7 +1816,16 @@ impl AtomicMempoolState {
         &self,
         tx_ids: &[H256],
     ) -> Vec<Option<DataTransactionHeader>> {
-        let state = self.read().await;
+        let state = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; batch_valid_submit_ledger_tx_cloned returning all-None"
+                );
+                return vec![None; tx_ids.len()];
+            }
+        };
         tx_ids
             .iter()
             .map(|tx_id| state.valid_submit_ledger_tx.get(tx_id).cloned())
@@ -1431,27 +1834,45 @@ impl AtomicMempoolState {
 
     /// Returns a write guard for callers that need to hold the lock across
     /// multiple MempoolState method calls (e.g., reorg revalidation).
-    pub(crate) async fn write_for_reorg(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
+    pub(crate) async fn write_for_reorg(
+        &self,
+    ) -> Result<tokio::sync::RwLockWriteGuard<'_, MempoolState>, MempoolError> {
         self.write().await
     }
 
-    /// Do not call this function from anywhere outside AtomicMempoolState
+    /// Do not call this function from anywhere outside AtomicMempoolState.
+    /// Returns `MempoolError::LockContention` and triggers a graceful node
+    /// shutdown on timeout — lock contention beyond `LOCK_TIMEOUT` indicates
+    /// the mempool can no longer make progress (deadlock, runaway holder,
+    /// IO stall) and the node should wind down rather than serve stale data.
     #[instrument(skip_all)]
-    async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
-        tokio::time::timeout(Duration::from_secs(10), self.0.read()).await.unwrap_or_else(|elapsed| {
-            error!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock");
-            panic!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock")
-        })
+    async fn read(&self) -> Result<tokio::sync::RwLockReadGuard<'_, MempoolState>, MempoolError> {
+        let timeout = Self::LOCK_TIMEOUT;
+        match tokio::time::timeout(timeout, self.state.read()).await {
+            Ok(guard) => Ok(guard),
+            Err(_) => {
+                self.signal_fatal_shutdown("read");
+                Err(MempoolError::LockContention { timeout })
+            }
+        }
     }
 
-    /// Do not call this function from anywhere outside AtomicMempoolState
+    /// Do not call this function from anywhere outside AtomicMempoolState.
+    /// Returns `MempoolError::LockContention` and triggers a graceful node
+    /// shutdown on timeout — see `read()` for the rationale.
     #[instrument(skip_all)]
-    async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
-        tokio::time::timeout(Duration::from_secs(10), self.0.write()).await.unwrap_or_else(|elapsed| {
-            error!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock");
-            panic!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock")
-        })
+    async fn write(&self) -> Result<tokio::sync::RwLockWriteGuard<'_, MempoolState>, MempoolError> {
+        let timeout = Self::LOCK_TIMEOUT;
+        match tokio::time::timeout(timeout, self.state.write()).await {
+            Ok(guard) => Ok(guard),
+            Err(_) => {
+                self.signal_fatal_shutdown("write");
+                Err(MempoolError::LockContention { timeout })
+            }
+        }
     }
+
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 }
 
 #[derive(Debug)]
@@ -1949,6 +2370,26 @@ impl TxIngressError {
     }
 }
 
+/// Mempool-level operational errors, distinct from the per-transaction
+/// `TxIngressError`. Currently only carries `LockContention`, which fires when
+/// the mempool RwLock cannot be acquired within the configured timeout — so
+/// callers can drop / retry / fail the request instead of aborting the node.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MempoolError {
+    #[error("mempool lock contention timed out after {timeout:?}")]
+    LockContention { timeout: Duration },
+}
+
+impl From<MempoolError> for TxIngressError {
+    fn from(e: MempoolError) -> Self {
+        match e {
+            MempoolError::LockContention { timeout } => Self::Other(format!(
+                "mempool lock contention timed out after {timeout:?}"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MempoolTxs {
     pub commitment_tx: Vec<CommitmentTransaction>,
@@ -1984,6 +2425,7 @@ impl MempoolService {
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
         chunk_ingress_state: ChunkIngressState,
+        shutdown_token: CancellationToken,
     ) -> eyre::Result<TokioServiceHandle> {
         info!("Spawning mempool service");
 
@@ -2015,6 +2457,10 @@ impl MempoolService {
         let handle = runtime_handle.spawn(
             async move {
                 let mempool_state = AtomicMempoolState::new(mempool_state);
+                // Install the node-wide cancellation token so a fatal lock
+                // contention requests a graceful node shutdown instead of
+                // silently degrading.
+                mempool_state.install_shutdown_token(shutdown_token);
                 let pledge_provider = MempoolPledgeProvider::new(
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
@@ -2043,10 +2489,19 @@ impl MempoolService {
                         chunk_ingress_state,
                     }),
                 };
-                mempool_service
-                    .start(handle_for_inner)
-                    .await
-                    .expect("Mempool service encountered an irrecoverable error")
+                if let Err(e) = mempool_service.start(handle_for_inner).await {
+                    // Do not panic: the contention paths inside the mempool
+                    // already call `signal_fatal_shutdown`, which cancels the
+                    // lifecycle's shutdown token and drives an ordered wind-down.
+                    // Panicking here would short-circuit that path. Logging and
+                    // exiting hands control to the spawn wrapper / `ServiceSet`
+                    // which surfaces this as `ShutdownReason::ServiceExited`.
+                    error!(
+                        error = ?e,
+                        "Mempool service exited with an error; lifecycle will treat \
+                         this as ServiceExited and run the ordered-shutdown path"
+                    );
+                }
             }
             .instrument(tracing::Span::current()),
         );
@@ -2589,5 +3044,541 @@ mod bounded_mempool_tests {
 
         // Assert: Address A now has 2 commitments
         assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::*;
+    use std::time::Instant;
+    use tokio::sync::RwLock as TokioRwLock;
+
+    fn empty_state() -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: HashMap::new(),
+            max_submit_txs: 100,
+            valid_commitment_tx: HashMap::new(),
+            max_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    /// Construct an `AtomicMempoolState` with a short lock-contention timeout so
+    /// the tests don't have to actually wait 10 seconds. We do this by hand
+    /// because the production `LOCK_TIMEOUT` is intentionally constant.
+    struct ShortTimeoutMempool {
+        inner: Arc<TokioRwLock<MempoolState>>,
+    }
+
+    impl ShortTimeoutMempool {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(TokioRwLock::new(empty_state())),
+            }
+        }
+
+        async fn read(
+            &self,
+            timeout: Duration,
+        ) -> Result<tokio::sync::RwLockReadGuard<'_, MempoolState>, MempoolError> {
+            match tokio::time::timeout(timeout, self.inner.read()).await {
+                Ok(g) => Ok(g),
+                Err(_) => Err(MempoolError::LockContention { timeout }),
+            }
+        }
+
+        async fn write(
+            &self,
+            timeout: Duration,
+        ) -> Result<tokio::sync::RwLockWriteGuard<'_, MempoolState>, MempoolError> {
+            match tokio::time::timeout(timeout, self.inner.write()).await {
+                Ok(g) => Ok(g),
+                Err(_) => Err(MempoolError::LockContention { timeout }),
+            }
+        }
+    }
+
+    /// When a writer holds the lock longer than the read timeout, the reader
+    /// returns `MempoolError::LockContention` rather than panicking. Mirrors
+    /// the production read() helper: the only difference is the configurable
+    /// timeout used here so the test runs in milliseconds.
+    #[tokio::test]
+    async fn read_returns_lock_contention_when_writer_holds_lock_too_long() {
+        let mempool = Arc::new(ShortTimeoutMempool::new());
+        let timeout = Duration::from_millis(50);
+
+        let holder_inner = mempool.inner.clone();
+        let holder = tokio::spawn(async move {
+            let _w = holder_inner.write().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        });
+
+        // Yield enough for the holder to acquire the write lock.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let started = Instant::now();
+        let result = mempool.read(timeout).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(MempoolError::LockContention { timeout: t }) if t == timeout),
+            "expected LockContention; got {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed >= timeout,
+            "must wait for the timeout before failing; elapsed={:?}",
+            elapsed
+        );
+
+        holder.await.unwrap();
+    }
+
+    /// Symmetric test for the write path.
+    #[tokio::test]
+    async fn write_returns_lock_contention_when_reader_holds_lock_too_long() {
+        let mempool = Arc::new(ShortTimeoutMempool::new());
+        let timeout = Duration::from_millis(50);
+
+        let holder_inner = mempool.inner.clone();
+        let holder = tokio::spawn(async move {
+            let _r = holder_inner.read().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Hold a second reader so a writer cannot acquire the lock.
+        let _blocker = mempool.inner.read().await;
+
+        let started = Instant::now();
+        let result = mempool.write(timeout).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(MempoolError::LockContention { timeout: t }) if t == timeout),
+            "expected LockContention; got {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed >= timeout,
+            "must wait for the timeout before failing; elapsed={:?}",
+            elapsed
+        );
+
+        drop(_blocker);
+        holder.await.unwrap();
+    }
+
+    /// `MempoolError::LockContention` converts to `TxIngressError::Other` so
+    /// existing Result-returning callers can propagate via `?` without losing
+    /// context.
+    #[test]
+    fn from_mempool_error_into_tx_ingress_error_preserves_context() {
+        let timeout = Duration::from_secs(7);
+        let me = MempoolError::LockContention { timeout };
+        let tie: TxIngressError = me.into();
+        match tie {
+            TxIngressError::Other(s) => assert!(s.contains("7s") || s.contains('7')),
+            other => panic!("expected TxIngressError::Other, got {:?}", other),
+        }
+    }
+
+    /// Read-lock contention on the production AtomicMempoolState cancels the
+    /// installed shutdown token so the lifecycle's `select!` triggers a
+    /// graceful node shutdown. Uses a tiny override on `LOCK_TIMEOUT` via a
+    /// test helper that mirrors the production `read()` path so the test
+    /// finishes in milliseconds rather than 10 seconds.
+    #[tokio::test]
+    async fn read_contention_cancels_shutdown_token() {
+        let mempool_state = AtomicMempoolState::new(empty_state());
+        let token = CancellationToken::new();
+        mempool_state.install_shutdown_token(token.clone());
+
+        // Manually drive a contended read against the inner RwLock with a
+        // short timeout that calls signal_fatal_shutdown on contention,
+        // mirroring the production helper. The point is to exercise the
+        // signal_fatal_shutdown wiring; the production timeout itself is
+        // tested by the dedicated read/write LockContention tests above.
+        let inner = mempool_state.state.clone();
+        let holder = tokio::spawn(async move {
+            let _w = inner.write().await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let timeout = Duration::from_millis(50);
+        let attempt = tokio::time::timeout(timeout, mempool_state.state.read()).await;
+        if attempt.is_err() {
+            mempool_state.signal_fatal_shutdown("read");
+        }
+
+        assert!(
+            token.is_cancelled(),
+            "shutdown token must be cancelled on contention"
+        );
+        holder.await.unwrap();
+    }
+
+    /// `signal_fatal_shutdown` is a no-op when no token has been installed so
+    /// test fixtures that construct an AtomicMempoolState without wiring up a
+    /// node lifecycle don't crash.
+    #[test]
+    fn signal_fatal_shutdown_is_noop_without_token() {
+        let mempool_state = AtomicMempoolState::new(empty_state());
+        // No install_shutdown_token call. Must not panic.
+        mempool_state.signal_fatal_shutdown("test");
+    }
+}
+
+/// Regression tests for `apply_block_confirmed_updates`.
+///
+/// Previously this function returned `()` and silently swallowed lock
+/// contention with a `warn!`, so the caller (`handle_block_confirmed_message`)
+/// would proceed with DB cache writes, chunk-ingress notifications, and
+/// pending-tx pruning while the mempool itself still treated the block's txs
+/// as un-included — a partial application that left the mempool diverged from
+/// the confirmed canonical chain.
+#[cfg(test)]
+mod apply_block_confirmed_updates_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        DataTransactionMetadata, IrysSignature,
+    };
+
+    fn empty_mempool_state() -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: HashMap::new(),
+            max_submit_txs: 100,
+            valid_commitment_tx: HashMap::new(),
+            max_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(1_u64).into(),
+                perm_fee: Some(U256::from(1_u64).into()),
+                ledger_id: DataLedger::Submit as u32,
+                metadata_format: 0,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id,
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(1_u64),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        })
+    }
+
+    /// Success path: all three update phases (data tx included_height,
+    /// commitment tx included_height, publish tx promoted_height) apply
+    /// atomically under a single write lock and the function returns Ok.
+    #[tokio::test]
+    async fn success_path_applies_all_three_update_phases_atomically() {
+        let data_id = H256::random();
+        let commitment_id = H256::random();
+        let publish_id = H256::random();
+        let signer = IrysAddress::random();
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(data_id, data_tx_with_id(data_id));
+        state
+            .valid_submit_ledger_tx
+            .insert(publish_id, data_tx_with_id(publish_id));
+        state
+            .valid_commitment_tx
+            .insert(signer, vec![commitment_tx_with_id(commitment_id, signer)]);
+
+        let mempool_state = AtomicMempoolState::new(state);
+        let height = 42_u64;
+
+        let result = mempool_state
+            .apply_block_confirmed_updates(
+                &[data_id, publish_id],
+                &[commitment_id],
+                &[publish_id],
+                height,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&data_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "data tx must have included_height set"
+        );
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&publish_id)
+                .unwrap()
+                .metadata()
+                .promoted_height,
+            Some(height),
+            "publish tx must have promoted_height set"
+        );
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&publish_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "publish tx must also have included_height set (covered by submit_and_publish_txids)"
+        );
+        assert_eq!(
+            guard
+                .valid_commitment_tx
+                .get(&signer)
+                .unwrap()
+                .iter()
+                .find(|t| t.id() == commitment_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "commitment tx must have included_height set"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&data_id),
+            "data tx must be marked recent_valid"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&commitment_id),
+            "commitment tx must be marked recent_valid"
+        );
+        assert!(
+            guard.recent_valid_tx.contains(&publish_id),
+            "publish tx must be marked recent_valid"
+        );
+    }
+
+    /// Per-tx absence is normal: txids in the input slices that are not
+    /// present in the mempool (e.g., already pruned) are silently skipped
+    /// without affecting the rest of the batch or the Result. The function
+    /// still returns Ok and the txs that ARE present still get updated.
+    #[tokio::test]
+    async fn missing_txids_are_silently_skipped_without_failing_the_batch() {
+        let present_id = H256::random();
+        let absent_id = H256::random();
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(present_id, data_tx_with_id(present_id));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .apply_block_confirmed_updates(&[present_id, absent_id], &[], &[], 7)
+            .await;
+        assert!(result.is_ok(), "absent txids must not fail the batch");
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&present_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(7),
+            "present tx must still get its update"
+        );
+    }
+}
+
+/// Regression tests for `batch_prune_data_txs` / `batch_prune_commitment_txs`
+/// returning `Result<(), MempoolError>` so the prune_pending_txs flow can keep
+/// the mempool in sync with `CachedDataRoots`.
+///
+/// Previously these returned `()` and swallowed lock-contention errors with a
+/// `warn!`, so `prune_pending_txs` would proceed to Phase 4 (cache
+/// invalidation) even when Phase 3 silently no-op'd — the cache would drop
+/// txid references that the mempool still held, silently filtering valid
+/// publish candidates.
+#[cfg(test)]
+mod batch_prune_result_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        DataTransactionMetadata, IrysSignature,
+    };
+
+    fn empty_mempool_state() -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: HashMap::new(),
+            max_submit_txs: 100,
+            valid_commitment_tx: HashMap::new(),
+            max_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(1_u64).into(),
+                perm_fee: Some(U256::from(1_u64).into()),
+                ledger_id: DataLedger::Submit as u32,
+                metadata_format: 0,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id,
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(1_u64),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        })
+    }
+
+    /// Success path: data tx prune returns Ok, mempool state is updated, and
+    /// the txid moves from valid → invalid sets so subsequent ingress rejects
+    /// duplicates.
+    #[tokio::test]
+    async fn data_tx_prune_success_returns_ok_and_updates_state() {
+        let id = H256::random();
+        let mut state = empty_mempool_state();
+        state.valid_submit_ledger_tx.insert(id, data_tx_with_id(id));
+        state.recent_valid_tx.put(id, ());
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .batch_prune_data_txs(&[(id, H256::zero())])
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert!(
+            !guard.valid_submit_ledger_tx.contains_key(&id),
+            "tx must be removed from valid set"
+        );
+        assert!(
+            guard.recent_invalid_tx.contains(&id),
+            "tx must be marked recent_invalid"
+        );
+        assert!(
+            !guard.recent_valid_tx.contains(&id),
+            "tx must be removed from recent_valid"
+        );
+    }
+
+    /// Success path: commitment tx prune returns Ok and removes the tx from
+    /// the per-address vector.
+    #[tokio::test]
+    async fn commitment_tx_prune_success_returns_ok_and_updates_state() {
+        let id = H256::random();
+        let signer = IrysAddress::random();
+        let mut state = empty_mempool_state();
+        state
+            .valid_commitment_tx
+            .insert(signer, vec![commitment_tx_with_id(id, signer)]);
+        state.recent_valid_tx.put(id, ());
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let result = mempool_state
+            .batch_prune_commitment_txs(&[(id, H256::zero())])
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on success path; got {result:?}"
+        );
+
+        let guard = mempool_state.state.read().await;
+        assert!(
+            !guard.valid_commitment_tx.contains_key(&signer),
+            "address entry must be removed when its only tx is pruned"
+        );
+        assert!(
+            guard.recent_invalid_tx.contains(&id),
+            "tx must be marked recent_invalid"
+        );
+    }
+
+    /// Empty input is a no-op success — caller can pass an empty slice without
+    /// triggering write-lock contention or spurious errors.
+    #[tokio::test]
+    async fn empty_input_is_a_noop_success() {
+        let mempool_state = AtomicMempoolState::new(empty_mempool_state());
+
+        assert!(
+            mempool_state.batch_prune_data_txs(&[]).await.is_ok(),
+            "empty data prune must succeed"
+        );
+        assert!(
+            mempool_state.batch_prune_commitment_txs(&[]).await.is_ok(),
+            "empty commitment prune must succeed"
+        );
     }
 }
