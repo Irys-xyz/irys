@@ -69,6 +69,16 @@ impl ChunkIngressMessage {
             Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
         }
     }
+
+    /// Returns true when the message is gated by the chunk-lane semaphore
+    /// (vs the control-plane lane). The recv loop fast-fails chunk-lane
+    /// saturation (regardless of `has_reply_channel`) so chunk floods cannot
+    /// park the loop and starve the control plane. Block-on-permit is
+    /// reserved for control-plane fire-and-forget variants
+    /// (`ProcessPendingChunks`, `TryGenerateProofsForConfirmedRoots`).
+    pub fn uses_chunk_lane(&self) -> bool {
+        matches!(self, Self::IngestChunk(..))
+    }
 }
 
 /// Shared read handle for chunk ingress state.
@@ -351,11 +361,7 @@ impl ChunkIngressService {
                                     // emitted by data_sync_service as an
                                     // SM-write fallback) are re-fetched from
                                     // peers by the sync layer.
-                                    let is_chunk_lane = matches!(
-                                        msg,
-                                        ChunkIngressMessage::IngestChunk(..)
-                                    );
-                                    if is_chunk_lane || has_reply {
+                                    if msg.uses_chunk_lane() || has_reply {
                                         warn!(
                                             msg_type = %msg_type,
                                             "Chunk ingress service lane saturated, returning Overloaded"
@@ -640,12 +646,11 @@ mod overload_helpers_tests {
         );
     }
 
-    /// `has_reply_channel` must classify variants correctly so the service
-    /// loop can decide between fast-fail (caller-retryable) and block-on-permit
-    /// (fire-and-forget) under saturation. Reply-less variants must return
-    /// `false` — dropping them silently under `NoPermits` would lose internal
-    /// work (`ProcessPendingChunks` from the mempool, sync-path fallback
-    /// `IngestChunk(_, None)`) with nothing to trigger a retry.
+    /// `has_reply_channel` must classify variants correctly. Combined with
+    /// `uses_chunk_lane`, the service loop decides between fast-fail
+    /// (chunk-lane OR reply-bearing) and block-on-permit (control-plane
+    /// fire-and-forget). Note: `IngestChunk(_, None)` returns `false` here
+    /// but `true` from `uses_chunk_lane`, so the loop fast-fails it.
     #[test]
     fn has_reply_channel_distinguishes_fire_and_forget_from_reply_bearing() {
         let (reply_tx, _reply_rx) = oneshot::channel();
@@ -670,6 +675,44 @@ mod overload_helpers_tests {
                 [2_u8; 32]
             )])
             .has_reply_channel()
+        );
+    }
+
+    /// Regression: `IngestChunk(_, None)` MUST be classified as chunk-lane so
+    /// the recv loop fast-fails it on saturation. Pre-fix it routed to the
+    /// block-on-permit branch (because `has_reply_channel()` returned false),
+    /// parking the entire service while `data_sync_service`'s SM-write fallback
+    /// trickled in. Reply-bearing chunk and proof requests piled up in msg_rx
+    /// behind the parked recv loop.
+    #[test]
+    fn uses_chunk_lane_classifies_ingest_chunk_variants_for_fast_fail() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx)).uses_chunk_lane(),
+            "IngestChunk with reply must use chunk lane"
+        );
+        assert!(
+            ChunkIngressMessage::IngestChunk(dummy_chunk(), None).uses_chunk_lane(),
+            "IngestChunk without reply must use chunk lane (otherwise the recv loop parks under saturation)"
+        );
+
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        assert!(
+            !ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx)
+                .uses_chunk_lane(),
+            "IngestIngressProof is control-plane, not chunk lane"
+        );
+        assert!(
+            !ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
+                .uses_chunk_lane(),
+            "ProcessPendingChunks is control-plane fire-and-forget, must NOT use chunk lane"
+        );
+        assert!(
+            !ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
+                [2_u8; 32]
+            )])
+            .uses_chunk_lane(),
+            "TryGenerateProofsForConfirmedRoots is control-plane fire-and-forget"
         );
     }
 }

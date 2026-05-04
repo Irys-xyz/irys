@@ -73,6 +73,22 @@ impl VdfState {
         if self.global_step >= global_step {
             return self.global_step;
         }
+        if self.global_step + 1 != global_step {
+            // Gap path: previously panicked, now log and no-op so the VDF
+            // loop catches up via normal stepping. Callers detect the no-op
+            // by observing the returned step == self.global_step.
+            //
+            // pop_front MUST stay in the sequential branch below — a stale
+            // pop_front here silently shrinks the seed buffer on every gap
+            // until `get_last_step_and_seed` panics on an empty deque.
+            error!(
+                current = self.global_step,
+                proposed = global_step,
+                gap = global_step.saturating_sub(self.global_step + 1),
+                "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
+            );
+            return self.global_step;
+        }
         // saturating fallback: vdf_depth is bounded by seeds.len() comparisons below,
         // so a u64 step count outside usize is bounded to "always pop_front".
         let vdf_depth = usize::try_from(global_step.saturating_sub(self.minimum_step_to_keep))
@@ -80,24 +96,9 @@ impl VdfState {
         if self.seeds.len() >= vdf_depth {
             self.seeds.pop_front();
         }
-        if self.global_step + 1 == global_step {
-            self.seeds.push_back(seed);
-            self.global_step += 1;
-            global_step
-        } else {
-            // A gap means we'd insert a non-sequential step; previously this
-            // panicked which aborted the VDF thread (and via the panic hook,
-            // the whole node). Log and no-op so the VDF loop catches up via
-            // normal stepping. Callers that need to detect the no-op observe
-            // the returned step == self.global_step.
-            error!(
-                current = self.global_step,
-                proposed = global_step,
-                gap = global_step.saturating_sub(self.global_step + 1),
-                "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
-            );
-            self.global_step
-        }
+        self.seeds.push_back(seed);
+        self.global_step += 1;
+        global_step
     }
 
     /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
@@ -648,6 +649,46 @@ mod tests {
                     "no-op must leave step unchanged"
                 );
             }
+        }
+
+        /// Regression: rejected gaps must not shrink the seed buffer.
+        /// Reachable when canonical has lapped local + capacity so vdf_depth
+        /// saturates near 0; pre-fix each rejected gap leaked one seed until
+        /// the buffer was empty and `get_last_step_and_seed` panicked.
+        #[test]
+        fn gap_rejection_preserves_seed_buffer(
+            initial_seeds in 1_usize..32,
+            gap_count in 1_usize..20,
+        ) {
+            let capacity = 64;
+            let local_step = 100_u64;
+            let canonical = 10_000_u64;
+            let mut state = VdfState {
+                global_step: local_step,
+                global_step_from_the_latest_canonical_block: canonical,
+                minimum_step_to_keep: canonical.saturating_sub(capacity as u64),
+                seeds: (0..initial_seeds)
+                    .map(|i| Seed(H256::from_low_u64_be(i as u64)))
+                    .collect(),
+                capacity,
+                is_vdf_mining_enabled: None,
+            };
+            let initial_len = state.seeds.len();
+
+            for i in 0..gap_count {
+                let proposed = local_step + 2 + i as u64;
+                let returned = state.store_step(Seed(H256::zero()), proposed);
+                proptest::prop_assert_eq!(
+                    returned, local_step,
+                    "gap proposal must not advance step"
+                );
+            }
+
+            proptest::prop_assert_eq!(
+                state.seeds.len(),
+                initial_len,
+                "seed buffer must not shrink on gap rejections"
+            );
         }
     }
 

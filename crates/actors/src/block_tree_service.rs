@@ -724,15 +724,28 @@ impl BlockTreeServiceInner {
                     // old_fork_blocks excludes the fork point (common ancestor), so a
                     // migrated block is orphaned only when the fork is strictly deeper
                     // than migration_depth.
-                    if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
+                    //
+                    // This is an unrecoverable divergence: the FCU + downstream migration
+                    // path cannot un-migrate already-finalised blocks. Aborting the reorg
+                    // returns Err, which propagates up through handle_message → start()
+                    // and triggers the spawn wrapper's controlled-shutdown path
+                    // (ServiceSet detects the exit and lifecycle runs ordered shutdown).
+                    let migration_depth = self.config.consensus.block_migration_depth;
+                    if u32::try_from(old_fork_blocks.len()).unwrap_or(u32::MAX) > migration_depth {
                         error!(
                             reorg_depth = old_fork_blocks.len(),
-                            migration_depth = self.config.consensus.block_migration_depth,
+                            migration_depth,
                             fork_height,
                             fork_hash = %fork_hash,
                             new_tip = %block_hash,
-                            "reorg depth exceeds migration depth — already-migrated block would be reverted",
+                            "reorg depth exceeds migration depth — already-migrated block would be reverted; aborting reorg to trigger controlled shutdown",
                         );
+                        return Err(eyre::eyre!(
+                            "reorg depth ({}) exceeds migration depth ({}); already-migrated block at fork height {} would be reverted",
+                            old_fork_blocks.len(),
+                            migration_depth,
+                            fork_height,
+                        ));
                     }
 
                     metrics::record_reorg();

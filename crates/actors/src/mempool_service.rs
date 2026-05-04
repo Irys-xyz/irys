@@ -2458,10 +2458,19 @@ impl MempoolService {
                         chunk_ingress_state,
                     }),
                 };
-                mempool_service
-                    .start(handle_for_inner)
-                    .await
-                    .expect("Mempool service encountered an irrecoverable error")
+                if let Err(e) = mempool_service.start(handle_for_inner).await {
+                    // Do not panic: the contention paths inside the mempool
+                    // already call `signal_fatal_shutdown`, which cancels the
+                    // lifecycle's shutdown token and drives an ordered wind-down.
+                    // Panicking here would short-circuit that path. Logging and
+                    // exiting hands control to the spawn wrapper / `ServiceSet`
+                    // which surfaces this as `ShutdownReason::ServiceExited`.
+                    error!(
+                        error = ?e,
+                        "Mempool service exited with an error; lifecycle will treat \
+                         this as ServiceExited and run the ordered-shutdown path"
+                    );
+                }
             }
             .instrument(tracing::Span::current()),
         );

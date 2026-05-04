@@ -635,6 +635,101 @@ mod tests {
         );
     }
 
+    /// Regression: a fast-forward step with a gap must not corrupt the
+    /// running `hash`. Pre-fix, `hash = proposed_ff_step.step` ran before
+    /// `store_step`, so a gap-rejected FF still left `hash` pointing at the
+    /// future seed; the next sequential `vdf_sha` then derived a step from
+    /// the wrong seed and broadcast it to peers as a fast-forward.
+    /// Asserts that step 1 is the SHA-derivative of the original initial
+    /// seed, not of the rejected FF's seed.
+    #[tokio::test]
+    async fn rejected_gap_ff_does_not_corrupt_subsequent_hash() {
+        let mut node_config = NodeConfig::testing();
+        // No reset within the test window so process_reset is a no-op and
+        // step 1 derives directly from the initial seed.
+        node_config.consensus.get_mut().vdf.reset_frequency = 1_000;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        init_tracing();
+
+        let initial_seed = H256::random();
+        let reset_seed = H256::random();
+        let bad_ff_seed = H256::repeat_byte(0xAA);
+        let gap_target_step: u64 = 100;
+
+        let (ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: bad_ff_seed,
+                global_step_number: gap_target_step,
+            }))
+            .unwrap();
+
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
+        let vdf_state = mocked_vdf_service(&config);
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
+        let atomic_step = Arc::new(AtomicU64::new(0));
+
+        // Canonical far ahead so the "too far ahead" guard never pauses.
+        let mut mock_header = IrysBlockHeader::new_mock_header();
+        mock_header.vdf_limiter_info.global_step_number = 10_000;
+
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown_token = CancellationToken::new();
+        let vdf_thread = std::thread::spawn({
+            let config = config.clone();
+            let shutdown_token = shutdown_token.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    0,
+                    initial_seed,
+                    reset_seed,
+                    ff_rx,
+                    mining_state,
+                    MockMining,
+                    vdf_state.clone(),
+                    atomic_step,
+                    MockBlockProvider(mock_header),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        shutdown_token.cancel();
+        vdf_thread.join().unwrap();
+
+        let step_num = vdf_steps_guard.read().global_step;
+        assert!(step_num > 0, "VDF should produce sequential steps");
+        assert!(
+            step_num < gap_target_step,
+            "gap FF must not advance the local step to its proposed value; got {step_num}"
+        );
+
+        // Step 1 must equal vdf_sha(salt(0), initial_seed). Pre-fix, the
+        // bad FF seed (post-reset) would have been used instead.
+        let mut expected_hash = initial_seed;
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, 0));
+        vdf_sha(
+            salt,
+            &mut expected_hash,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let stored_step_1 = vdf_steps_guard.read().get_steps(ii(1, 1)).unwrap()[0];
+        assert_eq!(
+            stored_step_1, expected_hash,
+            "step 1 must derive from initial_seed, not from the rejected FF's bad seed"
+        );
+    }
+
     mod process_reset_props {
         use super::super::process_reset;
         use crate::apply_reset_seed;

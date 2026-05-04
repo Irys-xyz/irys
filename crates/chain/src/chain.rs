@@ -1130,7 +1130,7 @@ impl IrysNode {
             };
 
         // Phase 2: Init services (sequential, receives reth_node directly)
-        let (irys_node_ctx, actix_server, vdf_done_rx, gossip_service_handle, service_set) =
+        let (irys_node_ctx, actix_server, vdf_exit_token, gossip_service_handle, service_set) =
             match Self::init_services(
                 &config,
                 genesis_hash,
@@ -1196,6 +1196,12 @@ impl IrysNode {
                 },
                 _ = reth_exit => {
                     ShutdownReason::RethExit
+                },
+                // VDF thread exit (poisoned-lock graceful return, panic, or
+                // unexpected return) — without this arm, the node continues
+                // running mining-less but appears healthy.
+                _ = vdf_exit_token.cancelled() => {
+                    ShutdownReason::VdfExited
                 },
                 _ = shutdown_token.cancelled() => {
                     ShutdownReason::CancellationToken
@@ -1281,12 +1287,14 @@ impl IrysNode {
             Err(_) => error!("Gossip service stop timed out after {GOSSIP_STOP_TIMEOUT:?}"),
         }
 
-        // Wait for VDF thread
+        // Wait for VDF thread. The CancelOnDrop guard inside the spawned
+        // thread cancels this token on any exit (clean return, poisoned-lock
+        // graceful exit, or panic via Drop unwind), so an immediate
+        // resolution here means the VDF thread is fully done.
         info!(shutdown.phase = "vdf_wait", "Lifecycle shutdown phase");
         debug!("Waiting for VDF thread to finish");
-        match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_done_rx).await {
-            Ok(Ok(())) => debug!("VDF thread finished"),
-            Ok(Err(_)) => error!("VDF thread likely panicked (completion channel dropped)"),
+        match tokio::time::timeout(VDF_THREAD_TIMEOUT, vdf_exit_token.cancelled()).await {
+            Ok(()) => debug!("VDF thread finished"),
             Err(_) => error!("VDF thread did not finish within {VDF_THREAD_TIMEOUT:?}"),
         }
 
@@ -1339,7 +1347,7 @@ impl IrysNode {
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
-        oneshot::Receiver<()>,
+        CancellationToken,
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1747,7 +1755,7 @@ impl IrysNode {
         );
 
         // set up the vdf thread
-        let vdf_done_rx = Self::init_vdf_thread(
+        let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,
             Arc::clone(&is_vdf_mining_enabled),
@@ -1963,7 +1971,7 @@ impl IrysNode {
         Ok((
             irys_node_ctx,
             server,
-            vdf_done_rx,
+            vdf_exit_token,
             p2p_service_handle,
             ServiceSet::new(services),
         ))
@@ -1992,15 +2000,28 @@ impl IrysNode {
         block_status_provider: BlockStatusProvider,
         chain_sync_state: ChainSyncState,
         shutdown_token: CancellationToken,
-    ) -> oneshot::Receiver<()> {
+    ) -> CancellationToken {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         let span = tracing::Span::current();
-        let (vdf_done_tx, vdf_done_rx) = oneshot::channel::<()>();
+        // Cancelled when the VDF thread exits for any reason (clean exit,
+        // poisoned-lock graceful return, or panic via Drop unwind). The
+        // lifecycle's steady-state select! watches this so a silent VDF
+        // exit triggers shutdown instead of leaving the node mining-less.
+        let vdf_exit_token = CancellationToken::new();
 
         std::thread::spawn({
             let vdf_config = config.vdf.clone();
             let core_pinning = config.node_config.vdf.core_pinning;
+            let exit_token = vdf_exit_token.clone();
             move || {
+                struct CancelOnDrop(CancellationToken);
+                impl Drop for CancelOnDrop {
+                    fn drop(&mut self) {
+                        self.0.cancel();
+                    }
+                }
+                let _exit_guard = CancelOnDrop(exit_token);
+
                 let _span = span.enter();
 
                 match core_pinning {
@@ -2050,10 +2071,9 @@ impl IrysNode {
                     chain_sync_state,
                     shutdown_token,
                 );
-                let _ = vdf_done_tx.send(());
             }
         });
-        vdf_done_rx
+        vdf_exit_token
     }
 
     fn init_partition_mining_services(
