@@ -840,7 +840,10 @@ async fn initialize_sync_mode(
 
     if params.is_a_genesis_node {
         warn!(
-            "Sync task: Because the node is a genesis node, waiting for active peers for {}ms, and if no peers are added, then skipping the sync task",
+            wanted = params.min_active_peers,
+            timeout_ms = params.genesis_peer_discovery_timeout_millis,
+            "Sync task: genesis node waiting for up to {} active peer(s); will proceed best-effort once any peers connect, or skip sync entirely if none arrive within {}ms",
+            params.min_active_peers,
             params.genesis_peer_discovery_timeout_millis
         );
         let count = peer_list
@@ -851,8 +854,11 @@ async fn initialize_sync_mode(
             .await;
         if count == 0 {
             warn!(
-                "Sync task: Due to the node being in genesis mode, after waiting for active peers for {}ms and no peers showing up, skipping the sync task",
-                params.genesis_peer_discovery_timeout_millis
+                wanted = params.min_active_peers,
+                timeout_ms = params.genesis_peer_discovery_timeout_millis,
+                "Sync task: genesis node found 0 active peers within {}ms (wanted {}); skipping the sync task",
+                params.genesis_peer_discovery_timeout_millis,
+                params.min_active_peers
             );
             sync_state.finish_sync();
             return Ok(false);

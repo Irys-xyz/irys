@@ -859,7 +859,11 @@ impl BlockTreeServiceInner {
 
         if let Some(markers) = &new_canonical_markers {
             if tip_changed {
-                info!(
+                // Per-block hot path: emit at debug to avoid flooding info-level
+                // logs (~7k entries/day at 12s blocks). Operators monitoring tip
+                // progress should consume the canonical_tip_height metric below
+                // instead.
+                debug!(
                     block.height = arc_block.height,
                     block.hash = ?arc_block.block_hash,
                     block.timestamp_ms = arc_block.timestamp.as_millis(),
