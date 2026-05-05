@@ -1,6 +1,6 @@
 # Hybrid `wait_for_active_peers`: N-peers-or-timeout
 
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented (see `docs/superpowers/plans/2026-04-29-hybrid-peer-wait.md`)
 **Date:** 2026-04-29
 **Author:** jesse@irys.xyz (with Claude)
 

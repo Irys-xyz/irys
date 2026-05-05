@@ -1,4 +1,4 @@
-use crate::mempool_service::AtomicMempoolState;
+use crate::mempool_service::{AtomicMempoolState, MempoolError};
 use irys_database::{db::IrysDatabaseExt as _, tx_header_by_txid};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
@@ -39,11 +39,10 @@ impl MempoolReadGuard {
     ///
     /// Complexity: O(n + m) where n is the number of requested IDs and m is the total
     /// number of transactions in the mempool.
-    #[must_use]
     pub async fn get_commitment_txs(
         &self,
         commitment_tx_ids: &[IrysTransactionId],
-    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+    ) -> Result<HashMap<IrysTransactionId, CommitmentTransaction>, MempoolError> {
         self.mempool_state
             .get_commitment_txs(commitment_tx_ids)
             .await
@@ -53,14 +52,14 @@ impl MempoolReadGuard {
     ///
     /// This searches `valid_submit_ledger_tx` for the requested transactions.
     ///
-    /// Returns a HashMap containing only the requested transactions that were found.
+    /// Returns a HashMap containing only the requested transactions that were found,
+    /// or `MempoolError::LockContention` when the read lock is contended.
     ///
     /// Complexity: O(n) where n is the number of requested IDs.
-    #[must_use]
     pub async fn get_data_txs(
         &self,
         data_tx_ids: &[IrysTransactionId],
-    ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
+    ) -> Result<HashMap<IrysTransactionId, DataTransactionHeader>, MempoolError> {
         self.mempool_state.get_data_txs(data_tx_ids).await
     }
 

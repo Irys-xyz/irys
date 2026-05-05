@@ -498,10 +498,30 @@ impl Inner {
             }
         }
 
-        eyre::ensure!(
-            orphaned_full_commitment_txs.iter().len() == orphaned_commitment_tx_ids.iter().len(),
-            "Should always be able to get all orphaned commitment transactions"
-        );
+        // A commitment tx may be on the orphan-id list yet absent from any
+        // epoch snapshot — for example, a stake/pledge tx confirmed in the
+        // old fork before its first epoch boundary. That is a legitimate
+        // condition during reorg cleanup; previously a hard assert here took
+        // the entire mempool service down via `?`, triggering controlled
+        // shutdown for what is recoverable. Continue with the partial set;
+        // any txs we could not resolve will retry through the normal
+        // mempool ingress paths if the peer or the dual-publish flow re-
+        // submits them.
+        if orphaned_full_commitment_txs.len() != orphaned_commitment_tx_ids.len() {
+            let resolved: HashSet<H256> = orphaned_full_commitment_txs.keys().copied().collect();
+            let missing: Vec<H256> = orphaned_commitment_tx_ids
+                .iter()
+                .filter(|id| !resolved.contains(id))
+                .copied()
+                .collect();
+            warn!(
+                resolved = orphaned_full_commitment_txs.len(),
+                expected = orphaned_commitment_tx_ids.len(),
+                ?missing,
+                "Some orphaned commitment txs were not present in any epoch snapshot; \
+                 continuing cleanup with the partial set"
+            );
+        }
 
         // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
         // DB metadata is already cleared by BlockMigrationService::persist_metadata() in BlockTreeService.
@@ -802,8 +822,17 @@ impl Inner {
 
                 // Set promoted_height in metadata (in-memory only)
                 tx.metadata_mut().promoted_height = Some(header.height);
-                // update entry
-                self.mempool_state.update_submit_transaction(tx).await;
+                // update entry — propagate LockContention so the lifecycle
+                // shutdown signal is observed; signal_fatal_shutdown is
+                // already triggered by the wrapper, just stop iterating.
+                if let Err(e) = self.mempool_state.update_submit_transaction(tx).await {
+                    warn!(
+                        ?e,
+                        ?txid,
+                        "Reorg dual-publish update aborted: mempool wind-down already in progress"
+                    );
+                    return Ok(());
+                }
                 debug!(
                     "Reorged dual-published tx with {} proofs for {}",
                     &tx_proofs.len(),

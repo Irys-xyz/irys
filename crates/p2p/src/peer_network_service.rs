@@ -1650,7 +1650,17 @@ mod tests {
         let peer_id = peer.peer_id;
         peer_list.add_or_update_peer(peer.clone(), false);
         assert!(peer_list.temporary_peers().contains(&peer_id));
-        peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
+        // Unstaked peers are evicted from purgatory only when their reputation
+        // score crosses the active threshold (`PeerScore::ACTIVE_THRESHOLD`).
+        // BogusData decrements by 5; INITIAL is 50; the threshold is 10; so
+        // 9 decrements take the score from 50 → 5 (< 10). One decrement is
+        // not enough — the previous "single signal evicts" policy was changed
+        // during the divergence post-mortem so honest overload doesn't churn
+        // unstaked peers.
+        for _ in 0..9 {
+            peer_list
+                .decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
+        }
         assert!(!peer_list.temporary_peers().contains(&peer_id));
         peer_list.add_or_update_peer(peer, false);
         assert!(peer_list.temporary_peers().contains(&peer_id));

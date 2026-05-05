@@ -1493,6 +1493,16 @@ where
                 );
                 shutdown_token.cancel();
             }
+            GossipError::BlockPool(CriticalBlockPoolError::ParentNotInCache(msg)) => {
+                // Local prune/reorg race: our cache evicted the parent before
+                // this peer's child block arrived. The peer is innocent — do
+                // NOT decrement reputation. The block is dropped; the peer
+                // will resend on the next gossip round if they still have it.
+                debug!(
+                    error = %msg,
+                    "Block pool: parent not in cache (local prune/reorg race); peer not penalised"
+                );
+            }
             GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
                 peer_list.decrease_peer_score(
                     peer_miner_address,
@@ -1938,6 +1948,43 @@ mod tests {
         assert!(
             !shutdown_token.is_cancelled(),
             "BlockError must not trigger shutdown"
+        );
+    }
+
+    /// `ParentNotInCache` is a *local* prune/reorg race — our cache evicted
+    /// the parent before the peer's child block arrived. The peer is innocent;
+    /// reputation must not move. The lifecycle's shutdown token must NOT be
+    /// cancelled either (the node continues running normally and re-requests
+    /// the block on the next gossip round if it is still relevant).
+    #[test]
+    fn handle_parent_not_in_cache_does_not_penalize_peer() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let initial_score = peer_list
+            .peer_by_mining_address(&miner)
+            .unwrap()
+            .reputation_score
+            .get();
+        let error = GossipError::BlockPool(CriticalBlockPoolError::ParentNotInCache(
+            "parent block 0xabc..def not in cache (expected at height 42)".into(),
+        ));
+        let shutdown_token = CancellationToken::new();
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
+        );
+
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(
+            peer.reputation_score.get(),
+            initial_score,
+            "ParentNotInCache must not penalise the peer (local prune/reorg race)"
+        );
+        assert!(
+            !shutdown_token.is_cancelled(),
+            "ParentNotInCache must not trigger shutdown"
         );
     }
 

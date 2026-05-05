@@ -953,8 +953,21 @@ impl PeerListDataInner {
                         ScoreDecreaseReason::SlowResponse => {
                             peer_item.reputation_score.decrease_slow();
                         }
+                        // Transient network errors should not drive purgatory
+                        // eviction. An unstaked peer reachable now can become
+                        // unreachable for seconds at a time during honest
+                        // overload (especially during the divergence-cascade
+                        // scenarios behind the 2026-04-15 post-mortem). Keep
+                        // the peer in purgatory and let the next successful
+                        // request re-confirm liveness instead of eroding the
+                        // reputation toward eviction.
                         ScoreDecreaseReason::NetworkError(message) => {
-                            peer_item.reputation_score.decrease_network_error(&message);
+                            debug!(
+                                ?peer_id,
+                                ?message,
+                                "Network error on unstaked purgatory peer ignored \
+                                 (no reputation decrement)"
+                            );
                         }
                     }
                     !peer_item.reputation_score.is_active()
@@ -962,18 +975,16 @@ impl PeerListDataInner {
                     false
                 };
 
-            if should_evict {
-                if let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
-                    let mining_addr = peer.mining_address;
-                    self.gossip_addr_to_peer_id_map
-                        .remove(&peer.address.gossip.ip());
-                    self.api_addr_to_peer_id_map.remove(&peer.address.api);
-                    self.miner_addr_to_peer_id_map.remove(&mining_addr);
-                    self.peer_id_to_miner_addr_map.remove(peer_id);
-                    self.known_peers_cache.remove(&peer.address);
-                    debug!("Removed unstaked peer {:?} from all caches", peer_id);
-                    self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
-                }
+            if should_evict && let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
+                let mining_addr = peer.mining_address;
+                self.gossip_addr_to_peer_id_map
+                    .remove(&peer.address.gossip.ip());
+                self.api_addr_to_peer_id_map.remove(&peer.address.api);
+                self.miner_addr_to_peer_id_map.remove(&mining_addr);
+                self.peer_id_to_miner_addr_map.remove(peer_id);
+                self.known_peers_cache.remove(&peer.address);
+                debug!("Removed unstaked peer {:?} from all caches", peer_id);
+                self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
             }
         }
     }
@@ -1494,10 +1505,18 @@ mod tests {
             peer_list.add_or_update_peer(peer.clone(), false);
             assert!(peer_list.get_peer(&peer_id).is_some());
 
-            peer_list.decrease_peer_score_by_peer_id(
-                &peer_id,
-                ScoreDecreaseReason::Offline("offline".into()),
-            );
+            // Unstaked peers are evicted from purgatory only after the
+            // reputation score crosses the active threshold (set during the
+            // 2026-04-15 divergence post-mortem so honest overload doesn't
+            // churn unstaked peers). Offline decrements by 3; INITIAL is 50;
+            // ACTIVE_THRESHOLD is 10; so (50 − 10) ÷ 3 = 14 decrements take
+            // the score to 8 (< 10).
+            for _ in 0..14 {
+                peer_list.decrease_peer_score_by_peer_id(
+                    &peer_id,
+                    ScoreDecreaseReason::Offline("offline".into()),
+                );
+            }
             assert!(peer_list.get_peer(&peer_id).is_none());
             assert!(!peer_list.all_known_peers().contains(&peer.address));
         }
@@ -1565,15 +1584,50 @@ mod tests {
             let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
             assert_eq!(initial_score, 50);
 
-            peer_list.decrease_peer_score_by_peer_id(
-                &peer_id,
-                ScoreDecreaseReason::BogusData("bogus".into()),
-            );
+            // BogusData decrements by 5; ACTIVE_THRESHOLD is 10. After 8
+            // decrements the score is 50 − 40 = 10 (still active); 9
+            // decrements take it to 5 (< 10), which trips the eviction gate.
+            for _ in 0..9 {
+                peer_list.decrease_peer_score_by_peer_id(
+                    &peer_id,
+                    ScoreDecreaseReason::BogusData("bogus".into()),
+                );
+            }
 
             let final_peer = peer_list.get_peer(&peer_id);
             assert!(
                 final_peer.is_none(),
-                "Unstaked peer should be removed after any decrease operation"
+                "Unstaked peer should be removed once the reputation score \
+                 crosses ACTIVE_THRESHOLD"
+            );
+        }
+
+        /// Honest-overload regression: a transient network error against an
+        /// unstaked purgatory peer must not drive eviction. Even a flood of
+        /// `NetworkError` signals (the kind the divergence cascade produced)
+        /// should leave the peer's score and presence intact.
+        #[test]
+        fn network_error_on_unstaked_purgatory_peer_does_not_decrement_or_evict() {
+            let peer_list =
+                create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
+            peer.reputation_score = PeerScore::new(50);
+            peer_list.add_or_update_peer(peer, false);
+
+            for _ in 0..1_000 {
+                peer_list.decrease_peer_score_by_peer_id(
+                    &peer_id,
+                    ScoreDecreaseReason::NetworkError("transient".into()),
+                );
+            }
+
+            let final_peer = peer_list
+                .get_peer(&peer_id)
+                .expect("purgatory peer must survive network errors");
+            assert_eq!(
+                final_peer.reputation_score.get(),
+                50,
+                "NetworkError must not decrement an unstaked purgatory peer's reputation"
             );
         }
     }

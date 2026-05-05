@@ -149,10 +149,13 @@ impl Config {
             self.mempool.max_concurrent_chunk_ingress_tasks > 0,
             "mempool.max_concurrent_chunk_ingress_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall the chunk ingress service)"
         );
-        ensure!(
-            self.mempool.max_control_plane_concurrent_tasks > 0,
-            "mempool.max_control_plane_concurrent_tasks must be > 0 (used as a Semaphore permit count; zero permits would stall control-plane messages)"
-        );
+        // The control-plane carve-out is optional. `0` means "no reserved
+        // lane" — chunk and control-plane messages share the chunk-ingress
+        // budget (legacy behaviour, kept so a single-permit config like
+        // `max_concurrent_chunk_ingress_tasks = 1` remains valid on upgrade).
+        // Any positive value reserves that many permits for control-plane
+        // work; the value must leave at least one permit for chunk handlers,
+        // so it stays strictly less than the total budget.
         ensure!(
             self.mempool.max_control_plane_concurrent_tasks
                 < self.mempool.max_concurrent_chunk_ingress_tasks,
@@ -160,6 +163,14 @@ impl Config {
             self.mempool.max_control_plane_concurrent_tasks,
             self.mempool.max_concurrent_chunk_ingress_tasks
         );
+        if self.mempool.max_control_plane_concurrent_tasks == 0 {
+            tracing::warn!(
+                total = self.mempool.max_concurrent_chunk_ingress_tasks,
+                "mempool.max_control_plane_concurrent_tasks = 0: control-plane messages \
+                 share the chunk-ingress budget (legacy single-lane mode). Chunk floods can \
+                 starve control-plane work. Set a positive value to reserve permits."
+            );
+        }
         ensure!(
             self.mempool.max_pending_chunk_items > 0,
             "mempool.max_pending_chunk_items must be > 0 (a zero-capacity pending chunk cache would silently drop all pre-header chunks)"
@@ -844,9 +855,10 @@ mod tests {
         expected_config.vdf.core_pinning = CorePinning::default();
         // TOML omits `max_control_plane_concurrent_tasks` to mirror operator
         // configs that pre-date the field; the serde fallback uses
-        // `MempoolNodeConfig::default()` which intentionally sets `1` for
-        // backward-compat with low-concurrency operator configs.
-        expected_config.mempool.max_control_plane_concurrent_tasks = 1;
+        // `MempoolNodeConfig::default()` which intentionally sets `0` (legacy
+        // single-lane mode) so a single-permit operator config remains valid
+        // on upgrade.
+        expected_config.mempool.max_control_plane_concurrent_tasks = 0;
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
@@ -1148,10 +1160,6 @@ mod validate_tests {
         |nc: &mut NodeConfig| { nc.mempool.max_concurrent_chunk_ingress_tasks = 0; },
         "max_concurrent_chunk_ingress_tasks"
     )]
-    #[case::max_control_plane_concurrent_tasks(
-        |nc: &mut NodeConfig| { nc.mempool.max_control_plane_concurrent_tasks = 0; },
-        "max_control_plane_concurrent_tasks"
-    )]
     #[case::max_pending_chunk_items(
         |nc: &mut NodeConfig| { nc.mempool.max_pending_chunk_items = 0; },
         "max_pending_chunk_items"
@@ -1195,14 +1203,15 @@ mod validate_tests {
 
     /// Backward-compat contract for `max_control_plane_concurrent_tasks`:
     /// existing operator configs that predate this field must continue to
-    /// parse and validate. The field's serde default (1) is supplied by
-    /// `MempoolNodeConfig`'s struct-level `#[serde(default)]`. The default
-    /// is intentionally the smallest non-zero value so it satisfies
-    /// `< max_concurrent_chunk_ingress_tasks` for any operator override
-    /// `≥ 2` — including small-host configs that pre-existed this PR.
+    /// parse and validate. The field's serde default (0 = legacy single-lane
+    /// mode, no carve-out) is supplied by `MempoolNodeConfig`'s struct-level
+    /// `#[serde(default)]`. The default is intentionally `0` so it satisfies
+    /// `< max_concurrent_chunk_ingress_tasks` for any positive override —
+    /// including the degenerate `max_concurrent_chunk_ingress_tasks = 1` case
+    /// where no carve-out is possible.
     ///
     /// If anyone removes the struct-level `#[serde(default)]` or changes the
-    /// `Default` impl to a value that conflicts with the strict-validation
+    /// `Default` impl to a value that conflicts with the strict-less-than
     /// invariant, this test fails — surfacing the regression at unit-test
     /// time rather than at operator-upgrade time.
     #[test]
@@ -1278,8 +1287,8 @@ mod validate_tests {
             .expect("Old mempool TOML missing the new field must still parse");
 
         assert_eq!(
-            nc.mempool.max_control_plane_concurrent_tasks, 1,
-            "missing field must take the documented default (1)"
+            nc.mempool.max_control_plane_concurrent_tasks, 0,
+            "missing field must take the documented default (0 = legacy single-lane mode)"
         );
         assert_eq!(
             nc.mempool.max_concurrent_chunk_ingress_tasks, 30,
@@ -1293,12 +1302,13 @@ mod validate_tests {
 
     /// Low-concurrency upgrade-path regression: an operator config that
     /// pre-dates `max_control_plane_concurrent_tasks` and tunes
-    /// `max_concurrent_chunk_ingress_tasks` to a small value (e.g. 2-4 on a
+    /// `max_concurrent_chunk_ingress_tasks` to a small value (1-4 on a
     /// constrained host) must still validate after upgrade. With the
-    /// pre-fix default of 4, `4 < 2` and `4 < 4` both failed validation,
-    /// breaking node startup. With the lowered default of 1, `1 < N` passes
-    /// for every `N ≥ 2`.
+    /// fallback default of 0 (legacy single-lane mode), `0 < N` passes
+    /// for every positive `N`, including the previously-broken
+    /// `max_concurrent_chunk_ingress_tasks = 1` case.
     #[rstest]
+    #[case::ingress_one(1)]
     #[case::ingress_two(2)]
     #[case::ingress_three(3)]
     #[case::ingress_four(4)]
@@ -1362,8 +1372,8 @@ mod validate_tests {
             .expect("Old TOML with low chunk-ingress concurrency must parse");
 
         assert_eq!(
-            nc.mempool.max_control_plane_concurrent_tasks, 1,
-            "missing field must take the documented default (1)"
+            nc.mempool.max_control_plane_concurrent_tasks, 0,
+            "missing field must take the documented default (0 = legacy single-lane mode)"
         );
         assert_eq!(
             nc.mempool.max_concurrent_chunk_ingress_tasks, chunk_ingress_tasks,

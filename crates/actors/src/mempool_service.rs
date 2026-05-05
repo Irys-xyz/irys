@@ -757,22 +757,18 @@ impl AtomicMempoolState {
     ///
     /// Complexity: O(n + m) where n is the number of requested IDs and m is the total
     /// number of transactions in the mempool.
-    #[must_use]
+    /// Returns `Err(MempoolError::LockContention)` when the read lock is
+    /// contended past `LOCK_TIMEOUT`. Callers that drive peer-attributed
+    /// validation (e.g. block_discovery, gossip handlers) MUST propagate this
+    /// error rather than treating an empty result as "tx absent" — a
+    /// contended local mempool would otherwise penalise an honest peer for
+    /// our own contention. See H3 for the divergence post-mortem.
     pub async fn get_commitment_txs(
         &self,
         commitment_tx_ids: &[IrysTransactionId],
-    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+    ) -> Result<HashMap<IrysTransactionId, CommitmentTransaction>, MempoolError> {
         const PRESUMED_PLEDGES_PER_ACCOUNT: usize = 4;
-        let mempool_state_guard = match self.read().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool read lock contention; get_commitment_txs returning empty"
-                );
-                return HashMap::new();
-            }
-        };
+        let mempool_state_guard = self.read().await?;
 
         // Build lookup map of ALL transactions in mempool - O(m)
         let mut all_txs = HashMap::with_capacity(
@@ -795,10 +791,10 @@ impl AtomicMempoolState {
         }
 
         // Lookup requested transactions - O(n)
-        commitment_tx_ids
+        Ok(commitment_tx_ids
             .iter()
             .filter_map(|tx_id| all_txs.get(tx_id).map(|tx| (*tx_id, (*tx).clone())))
-            .collect()
+            .collect())
     }
 
     /// Get specific data transactions by their IDs from the mempool
@@ -808,28 +804,21 @@ impl AtomicMempoolState {
     /// Returns a HashMap containing only the requested transactions that were found.
     ///
     /// Complexity: O(n) where n is the number of requested IDs.
-    #[must_use]
+    /// Returns `Err(MempoolError::LockContention)` when the read lock is
+    /// contended past `LOCK_TIMEOUT`. See `get_commitment_txs` for why this
+    /// must remain typed rather than collapsing to an empty result.
     pub async fn get_data_txs(
         &self,
         data_tx_ids: &[IrysTransactionId],
-    ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
-        let mempool_state_guard = match self.read().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool read lock contention; get_data_txs returning empty"
-                );
-                return HashMap::new();
-            }
-        };
+    ) -> Result<HashMap<IrysTransactionId, DataTransactionHeader>, MempoolError> {
+        let mempool_state_guard = self.read().await?;
         let mut results = HashMap::with_capacity(data_tx_ids.len());
         for tx_id in data_tx_ids {
             if let Some(tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
                 results.insert(*tx_id, tx.clone());
             }
         }
-        results
+        Ok(results)
     }
 
     // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
@@ -1432,19 +1421,26 @@ impl AtomicMempoolState {
         }
     }
 
-    pub async fn update_submit_transaction(&self, tx: DataTransactionHeader) {
-        self.state
-            .write()
-            .await
+    /// Merge incoming metadata into the existing submit-ledger entry under the
+    /// timeout-bounded write wrapper. Lock contention beyond `LOCK_TIMEOUT`
+    /// returns `Err(LockContention)` and triggers `signal_fatal_shutdown`;
+    /// callers in the reorg dual-publish path must propagate so the lifecycle
+    /// runs the controlled-shutdown sequence rather than wedging the
+    /// dispatcher on the inner `RwLock`.
+    pub async fn update_submit_transaction(
+        &self,
+        tx: DataTransactionHeader,
+    ) -> Result<(), MempoolError> {
+        let mut guard = self.write().await?;
+        guard
             .valid_submit_ledger_tx
             .entry(tx.id)
             .and_modify(|existing| {
-                // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
                 let merged_metadata = existing.metadata().merge(tx.metadata());
-
                 *existing = tx;
                 existing.set_metadata(merged_metadata);
             });
+        Ok(())
     }
 
     /// Clears `promoted_height` for a tx during reorg unpromotion.
@@ -2567,43 +2563,44 @@ impl MempoolService {
                                         }
                                     }.instrument(span));
                                 }
-                                Err(e) => {
-                                    match e {
-                                        tokio::sync::TryAcquireError::Closed => {
-                                            error!("Mempool message handler semaphore closed");
-                                            break;
-                                        }
-                                        tokio::sync::TryAcquireError::NoPermits => {
-                                            warn!("Mempool message handler semaphore at capacity, waiting for permit");
-                                        }
-                                    }
+                                Err(tokio::sync::TryAcquireError::Closed) => {
+                                    error!("Mempool message handler semaphore closed");
+                                    break;
+                                }
+                                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    // Spawn the wait+handle on a worker so the
+                                    // select! loop keeps polling reorg_rx and
+                                    // shutdown_future. Previously this arm
+                                    // awaited a 60s timeout inline, which let
+                                    // the broadcast channel fill (H1 trigger)
+                                    // and delayed shutdown by up to 60s.
+                                    warn!(
+                                        msg_type,
+                                        "Mempool message handler semaphore at capacity; spawning waiter"
+                                    );
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
-                                        Ok(permit_result) => {
-                                            match permit_result {
-                                                Ok(permit) => {
-                                                    runtime_handle.spawn(async move {
-                                                        let _permit = permit;
-                                                        let task_info = format!("Mempool message handler for {}", msg_type);
-                                                        if let Err(err) = wait_with_progress(
-                                                            inner.handle_message(msg),
-                                                            20,
-                                                            &task_info,
-                                                        ).await {
-                                                            error!("Error handling mempool message {}: {:?}", msg_type, err);
-                                                        }
-                                                    }.instrument(span));
-                                                }
-                                                Err(err) => {
-                                                    error!("Failed to acquire mempool message handler permit: {:?}", err);
+                                    runtime_handle.spawn(async move {
+                                        match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                            Ok(Ok(permit)) => {
+                                                let _permit = permit;
+                                                let task_info = format!("Mempool message handler for {}", msg_type);
+                                                if let Err(err) = wait_with_progress(
+                                                    inner.handle_message(msg),
+                                                    20,
+                                                    &task_info,
+                                                ).await {
+                                                    error!("Error handling mempool message {}: {:?}", msg_type, err);
                                                 }
                                             }
+                                            Ok(Err(err)) => {
+                                                error!("Failed to acquire mempool message handler permit: {:?}", err);
+                                            }
+                                            Err(_) => {
+                                                error!(msg_type, "Timed out waiting for mempool message handler permit");
+                                            }
                                         }
-                                        Err(_) => {
-                                            error!("Timed out waiting for mempool message handler permit");
-                                        }
-                                    }
+                                    }.instrument(span));
                                 }
                             }
                         }
@@ -2614,10 +2611,31 @@ impl MempoolService {
                     }
                 }
 
-                // Handle reorg events
+                // Handle reorg events. Unlike most broadcast channels, lagging
+                // here is unrecoverable: a missed `ReorgEvent` leaves the
+                // mempool's `included_height` / `promoted_height` desynced
+                // from fork choice, and `tx_selector` will subsequently drop
+                // orphaned txs from block-production candidates with no other
+                // signal that they should be re-considered. We treat Lagged
+                // as fatal and trigger a controlled shutdown so the node
+                // re-bootstraps cleanly rather than running on with a
+                // diverged mempool.
                 reorg_result = self.reorg_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(reorg_result, "Reorg") {
-                        self.inner.handle_reorg(event).await?;
+                    match reorg_result {
+                        Ok(event) => {
+                            self.inner.handle_reorg(event).await?;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::debug!("Reorg channel closed");
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::error!(
+                                lagged_by = n,
+                                "Reorg broadcast lagged; mempool may have missed canonical fork \
+                                 changes. Triggering controlled shutdown to avoid serving stale data"
+                            );
+                            self.inner.mempool_state.signal_fatal_shutdown("reorg_broadcast_lag");
+                        }
                     }
                 }
 

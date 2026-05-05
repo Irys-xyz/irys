@@ -3,6 +3,7 @@ use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
+use irys_actors::block_validation::PreValidationError;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -51,6 +52,12 @@ pub enum CriticalBlockPoolError {
     /// instead of running on with a broken cache.
     #[error("Fatal block-tree cache corruption: {0}")]
     FatalCacheCorruption(String),
+    /// Parent block is missing from the local cache. This is a local
+    /// prune/reorg race against the in-flight block, not bogus data from the
+    /// peer. Distinct from `BlockError` so the gossip server's peer-scoring
+    /// does not penalise an honest peer for our own cache pruning timing.
+    #[error("Parent block not in cache: {0}")]
+    ParentNotInCache(String),
     #[error("Block {0:?} is already being fast tracked")]
     AlreadyFastTracking(BlockHash),
     #[error("Block {0:?} is already being processed or has been processed")]
@@ -903,32 +910,52 @@ where
             .await
         {
             // Cache poisoning is unrecoverable; surface as critical so the
-            // service can escalate. All other pre-validation failures —
-            // including `ParentNotInCache` — are terminal: nothing in the
-            // current pipeline reliably re-invokes `process_block` after a
-            // parent-pruned race, so a "retry" path here would just leak
-            // entries until LRU eviction.
-            if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error
-                && pre_err.is_fatal_corruption()
-            {
-                error!(
-                    block.hash = ?block_hash,
-                    error = ?pre_err,
-                    "Block pool: fatal block-tree cache corruption; cannot continue"
-                );
-                self.blocks_cache
-                    .remove_block(
-                        &block_hash,
-                        BlockRemovalReason::FailedToProcess(
-                            FailureReason::BlockPrevalidationFailed,
-                        ),
-                    )
-                    .await;
-                self.sync_state
-                    .record_block_processing_error(pre_err.to_string());
-                return Err(
-                    CriticalBlockPoolError::FatalCacheCorruption(pre_err.to_string()).into(),
-                );
+            // service can escalate. `ParentNotInCache` is a local
+            // prune/reorg race — the peer is innocent — so it gets its own
+            // non-penalising variant. All other pre-validation failures
+            // remain `BlockError` (peer-attributed bogus data).
+            if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
+                if pre_err.is_fatal_corruption() {
+                    error!(
+                        block.hash = ?block_hash,
+                        error = ?pre_err,
+                        "Block pool: fatal block-tree cache corruption; cannot continue"
+                    );
+                    self.blocks_cache
+                        .remove_block(
+                            &block_hash,
+                            BlockRemovalReason::FailedToProcess(
+                                FailureReason::BlockPrevalidationFailed,
+                            ),
+                        )
+                        .await;
+                    self.sync_state
+                        .record_block_processing_error(pre_err.to_string());
+                    return Err(
+                        CriticalBlockPoolError::FatalCacheCorruption(pre_err.to_string()).into(),
+                    );
+                }
+
+                if matches!(pre_err, PreValidationError::ParentNotInCache { .. }) {
+                    warn!(
+                        block.hash = ?block_hash,
+                        error = ?pre_err,
+                        "Block pool: parent block not in cache (local prune/reorg race; peer not at fault)"
+                    );
+                    self.blocks_cache
+                        .remove_block(
+                            &block_hash,
+                            BlockRemovalReason::FailedToProcess(
+                                FailureReason::BlockPrevalidationFailed,
+                            ),
+                        )
+                        .await;
+                    self.sync_state
+                        .record_block_processing_error(pre_err.to_string());
+                    return Err(
+                        CriticalBlockPoolError::ParentNotInCache(pre_err.to_string()).into(),
+                    );
+                }
             }
 
             error!(

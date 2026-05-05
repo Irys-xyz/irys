@@ -177,9 +177,25 @@ impl VdfStateReadonly {
         self.0.clone()
     }
 
-    /// Read access to internal steps queue
+    /// Read access to internal steps queue.
+    ///
+    /// On `RwLock` poisoning (a prior writer panicked), recovers the inner
+    /// guard via `into_inner` and logs once at error level instead of
+    /// re-panicking. Readers cannot observably worsen a poisoned state, and
+    /// `run_vdf`'s shutdown handling already converts the underlying writer
+    /// panic into a controlled exit; surfacing a panic here would only
+    /// re-cascade through consensus-critical callers (mining, validation,
+    /// `wait_for_step`) whose only useful response is to drop work.
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
-        self.0.read().unwrap()
+        self.0.read().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "VDF state RwLock poisoned by a prior writer panic; \
+                 recovering inner guard for read-only access. The node \
+                 should be restarted once the lifecycle observes the \
+                 controlled-shutdown signal."
+            );
+            poisoned.into_inner()
+        })
     }
 
     /// Get steps in the given global steps numbers Interval
@@ -703,5 +719,33 @@ mod tests {
         let mut state = vdf_state_at(current);
         let returned = state.store_step(Seed(H256::zero()), proposed);
         assert_eq!(returned, expected);
+    }
+
+    /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,
+    /// so a writer panic that poisoned the lock cascaded into validation /
+    /// mining hot paths. The recovery path must surface the most recent
+    /// state instead of re-panicking.
+    #[test]
+    fn vdf_state_readonly_read_recovers_from_poisoned_lock() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let inner = Arc::new(RwLock::new(vdf_state_at(42)));
+
+        // Poison the lock by panicking inside a write guard.
+        let poison_inner = Arc::clone(&inner);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = poison_inner.write().unwrap();
+            panic!("writer panic to poison the VDF state lock");
+        }));
+        assert!(
+            inner.read().is_err(),
+            "test setup failed: lock should be poisoned after writer panic"
+        );
+
+        let readonly = VdfStateReadonly::new(inner);
+        let guard = readonly.read();
+        assert_eq!(
+            guard.global_step, 42,
+            "poison-recovery must surface the data the writer wrote before panicking"
+        );
     }
 }
