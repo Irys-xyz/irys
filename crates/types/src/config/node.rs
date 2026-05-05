@@ -1094,12 +1094,15 @@ impl NodeConfig {
             stake_pledge_drives: false,
             sync: SyncConfig {
                 min_active_peers: 1,
-                // 100ms was too aggressive: localhost handshake routinely
-                // takes longer than that, so peer-branch tests skipped the
-                // initial bootstrap before discovery completed and then had
-                // to wait the full 30s periodic-check window to re-engage.
-                // 2_000ms covers handshake comfortably without stalling.
-                peer_wait_timeout_millis: 2_000,
+                // 2_000ms was still too short on CI: peer-branch tests where
+                // genesis was restarted between phases skipped the initial
+                // bootstrap because the handshake hadn't completed in time,
+                // then had to wait the full 30s periodic-check window to
+                // re-engage — leaving too little budget to sync a long
+                // catch-up before per-test deadlines fired. 10_000ms matches
+                // `genesis_peer_discovery_timeout_millis` so handshake has
+                // the same headroom on both branches.
+                peer_wait_timeout_millis: 10_000,
                 ..SyncConfig::default()
             },
             run_mode: RunMode::Test,
@@ -1467,8 +1470,8 @@ mod run_mode_tests {
         let cfg = super::NodeConfig::testing();
         assert_eq!(cfg.sync.min_active_peers, 1, "testing override expected");
         assert_eq!(
-            cfg.sync.peer_wait_timeout_millis, 2_000,
-            "testing override: short timeout to fast-fail rather than stall 20s"
+            cfg.sync.peer_wait_timeout_millis, 10_000,
+            "testing override: matches genesis_peer_discovery_timeout_millis to give handshake the same headroom"
         );
     }
 

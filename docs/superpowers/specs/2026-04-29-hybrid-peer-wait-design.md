@@ -60,7 +60,7 @@ pub struct SyncConfig {
 | field | production default | testing override |
 |---|---|---|
 | `sync.min_active_peers` | 3 | 1 |
-| `sync.peer_wait_timeout_millis` | 20_000 | 2_000 |
+| `sync.peer_wait_timeout_millis` | 20_000 | 10_000 |
 
 `SyncConfig::default()` returns the production defaults. Tests using
 `NodeConfig::testing()` get the override via the existing testing-config
