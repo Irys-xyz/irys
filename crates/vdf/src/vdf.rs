@@ -12,6 +12,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+const PAUSED_VDF_LOOP_SLEEP: Duration = Duration::from_millis(200);
+const PAUSED_SYNC_FAST_FORWARD_SLEEP: Duration = Duration::from_millis(10);
+
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
     config: &irys_types::VdfConfig,
@@ -171,8 +174,19 @@ pub fn run_vdf<B: BlockProvider>(
                     global_step_number, canonical_global_step_number, vdf_reset_frequency
                 );
             }
-            info!("VDF Mining Paused, waiting 200ms");
-            std::thread::sleep(Duration::from_millis(200));
+            // During sync we pause local VDF mining, but trusted-peer catch-up
+            // still depends on this loop consuming fast-forward steps promptly.
+            // A 200ms sleep here limits that path to ~5 wakeups/sec.
+            let pause_duration = if !is_too_far_ahead
+                && !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                && chain_sync_state.is_syncing()
+            {
+                PAUSED_SYNC_FAST_FORWARD_SLEEP
+            } else {
+                PAUSED_VDF_LOOP_SLEEP
+            };
+            debug!("VDF mining paused, waiting {:?}", pause_duration);
+            std::thread::sleep(pause_duration);
             continue;
         }
 
@@ -580,6 +594,66 @@ mod tests {
         shutdown_token.cancel();
 
         // Wait for vdf thread to finish
+        vdf_thread_handler.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fast_forward_remains_responsive_while_syncing_with_mining_paused() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let current_seed = H256::random();
+        let reset_seed = H256::random();
+        let (ff_step_sender, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let vdf_state = mocked_vdf_service(&config);
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
+        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+        let chain_sync_state = ChainSyncState::new(true, false);
+        let shutdown_token = CancellationToken::new();
+
+        let vdf_thread_handler = std::thread::spawn({
+            let config = config.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            let vdf_state = vdf_state.clone();
+            let atomic_global_step_number = atomic_global_step_number.clone();
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    0,
+                    current_seed,
+                    reset_seed,
+                    ff_step_receiver,
+                    mining_state,
+                    MockMining,
+                    vdf_state,
+                    atomic_global_step_number,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        // Let the VDF loop enter its paused path before queuing a fast-forward step.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        ff_step_sender
+            .send_traced(VdfStep {
+                step: H256::random(),
+                global_step_number: 1,
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), vdf_steps_guard.wait_for_step(1))
+            .await
+            .expect("fast-forward step should be applied promptly while syncing");
+
+        shutdown_token.cancel();
         vdf_thread_handler.join().unwrap();
     }
 
