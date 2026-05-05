@@ -870,7 +870,13 @@ pub async fn get_commitment_tx_in_parallel(
         let guard = mempool_guard.clone();
         let tx_ids = commitment_tx_ids.to_vec();
         async move {
-            let mempool_map = guard.get_commitment_txs(&tx_ids).await;
+            // Propagate `MempoolError::LockContention` as an eyre error so
+            // peer-attribution paths upstream can distinguish "tx absent" from
+            // "local mempool contended" and avoid penalising the peer.
+            let mempool_map = guard
+                .get_commitment_txs(&tx_ids)
+                .await
+                .map_err(|e| eyre::eyre!("mempool commitment lookup failed: {e}"))?;
             Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(mempool_map)
         }
     };
@@ -907,7 +913,14 @@ pub async fn get_data_tx_in_parallel(
     > {
         let guard = guard.clone();
         Box::pin(async move {
-            let mempool_map = guard.get_data_txs(&tx_ids).await;
+            // Propagate `MempoolError::LockContention` so the caller can
+            // distinguish "tx absent" from "local mempool contended" — a
+            // contended lookup must not surface as InvalidData and penalise
+            // the peer for our own contention.
+            let mempool_map = guard
+                .get_data_txs(&tx_ids)
+                .await
+                .map_err(|e| eyre::eyre!("mempool data lookup failed: {e}"))?;
             let results: Vec<Option<DataTransactionHeader>> = tx_ids
                 .iter()
                 .map(|id| mempool_map.get(id).cloned())

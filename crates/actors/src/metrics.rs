@@ -7,6 +7,7 @@ irys_utils::define_metrics! {
     counter BLOCK_PRODUCER_RETRIES("irys.block_producer.retry_attempts_total", "Block production retry attempts");
     counter BLOCK_PRODUCER_REBUILDS("irys.block_producer.rebuilds_total", "Block production rebuilds due to parent changes");
     counter REORGS("irys.block_tree.reorgs_total", "Chain reorganization events");
+    gauge REORG_DEPTH("irys.block_tree.latest_reorg_depth", "Depth of the most recent reorg (blocks discarded from the canonical chain). Mirrors Reth's reth_blockchain_tree_latest_reorg_depth for side-by-side comparison.");
     gauge CANONICAL_TIP_HEIGHT("irys.block_tree.canonical_tip_height", "Height of the canonical chain tip");
     gauge VDF_PENDING("irys.validation.vdf_pending", "Pending VDF validation tasks");
     gauge CONCURRENT_ACTIVE("irys.validation.concurrent_active", "Active concurrent validation tasks");
@@ -51,6 +52,10 @@ pub(crate) fn record_block_producer_rebuild(count: u64) {
 
 pub(crate) fn record_reorg() {
     REORGS.add(1, &[]);
+}
+
+pub(crate) fn record_reorg_depth(depth: u64) {
+    REORG_DEPTH.record(depth, &[]);
 }
 
 pub(crate) fn record_canonical_tip_height(height: u64) {

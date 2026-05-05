@@ -77,7 +77,15 @@ async fn spiky_slow_heavy4_tip_updated_correctly_in_forks_with_variying_cumulati
     let num_blocks_in_epoch = 2;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
-    genesis_config.consensus.get_mut().block_migration_depth = 2;
+    // Larger than the deepest reorg this test triggers (3 blocks). The
+    // block_tree_service.rs migration-depth guard returns Err when
+    // `old_fork_blocks.len() > block_migration_depth`, which would shut the
+    // service down mid-test and time out the wait_for_block_event below.
+    // This test exercises mark_tip selectivity, not migration semantics, so
+    // keeping migration well clear of the fork point is the right scoping.
+    // block_tree_depth must remain strictly greater than migration_depth
+    // (config validation enforces this).
+    genesis_config.consensus.get_mut().block_migration_depth = 10;
     genesis_config.consensus.get_mut().block_tree_depth = 20;
     let test_signer = genesis_config.new_random_signer();
     let test_signer_2 = genesis_config.new_random_signer();

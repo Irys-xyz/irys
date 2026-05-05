@@ -2061,7 +2061,8 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .node_ctx
                 .mempool_guard
                 .get_commitment_txs(&to_fetch)
-                .await;
+                .await
+                .expect("mempool lookup should not be contended in tests");
 
             for found in fetched.keys() {
                 debug!("Fetched tx {} from mempool in {} retries", &found, &retry);
@@ -2386,7 +2387,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .node_ctx
             .mempool_guard
             .get_commitment_txs(&[*tx_id])
-            .await;
+            .await
+            .map_err(|e| eyre::eyre!("mempool commitment lookup failed: {e}"))?;
         fetched
             .get(tx_id)
             .cloned()

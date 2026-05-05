@@ -166,11 +166,30 @@ impl ChunkMigrationServiceInner {
 
         let block_height = block.height;
 
-        // Process transactions for all data ledgers present in the block
-        for (ledger, txs) in all_txs.iter() {
+        // Process transactions in the order the block encodes them
+        // (`block.data_ledgers: Vec<…>`), not HashMap iteration order. The
+        // block producer encodes the Vec as Publish → Submit → [OneYear,
+        // ThirtyDay] (see `block_producer.rs::data_ledgers`), and that order
+        // is part of the consensus-signed payload — every node sees the same
+        // sequence. Iterating the HashMap instead would give non-deterministic
+        // ordering across nodes and runs, which doesn't affect final storage
+        // state (each ledger writes into its own storage modules) but does
+        // produce divergent log/trace output and divergent intermediate
+        // crash-recovery state.
+        for ledger_entry in block.data_ledgers.iter() {
+            let Ok(ledger) = DataLedger::try_from(ledger_entry.ledger_id) else {
+                tracing::warn!(
+                    ledger_id = ledger_entry.ledger_id,
+                    "Skipping unknown DataLedger id during chunk migration"
+                );
+                continue;
+            };
+            let Some(txs) = all_txs.get(&ledger) else {
+                continue;
+            };
             process_ledger_transactions(
                 &block,
-                *ledger,
+                ledger,
                 txs,
                 &block_index,
                 chunk_size,

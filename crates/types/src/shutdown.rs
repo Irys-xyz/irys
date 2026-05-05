@@ -11,6 +11,7 @@ pub enum ShutdownReason {
     ServiceExited,
     RethTaskManager,
     RethExit,
+    VdfExited,
     ShutdownChannelClosed,
     ApiReadinessFailed,
 }
@@ -24,6 +25,7 @@ impl ShutdownReason {
             Self::ServiceExited
             | Self::RethTaskManager
             | Self::RethExit
+            | Self::VdfExited
             | Self::ShutdownChannelClosed
             | Self::ApiReadinessFailed => "lifecycle",
         }
@@ -42,6 +44,7 @@ impl std::fmt::Display for ShutdownReason {
             Self::ServiceExited => write!(f, "service exited"),
             Self::RethTaskManager => write!(f, "reth task manager exited"),
             Self::RethExit => write!(f, "reth node exited"),
+            Self::VdfExited => write!(f, "VDF thread exited"),
             Self::ShutdownChannelClosed => write!(f, "shutdown channel closed"),
             Self::ApiReadinessFailed => write!(f, "API readiness check failed"),
         }

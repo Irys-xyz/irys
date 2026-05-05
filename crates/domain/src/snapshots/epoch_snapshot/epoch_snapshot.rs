@@ -1155,8 +1155,11 @@ impl EpochSnapshot {
     /// This function creates [`StorageModuleInfo`] instances that link storage modules to specific
     /// partition assignments. It processes assignments in the following priority order:
     /// 1. Publish ledger partitions (first priority)
-    /// 2. Submit ledger partitions (second priority)
-    /// 3. Capacity partitions (used for remaining storage modules)
+    /// 2. Submit ledger partitions
+    /// 3. OneYear ledger partitions
+    /// 4. ThirtyDay ledger partitions
+    /// 5. Capacity partitions (with remaining slots limit)
+    /// 6. Unassigned modules and assignments from future epochs (passed through unmapped)
     ///
     /// The function respects the BTreeMap's deterministic ordering when processing assignments
     /// within each category, ensuring consistent mapping across node restarts.
@@ -1237,7 +1240,7 @@ impl EpochSnapshot {
             num_chunks,
         );
 
-        // STEP 4: Unassigned & assignments from the future
+        // STEP 6: Unassigned & assignments from the future
         for (original_idx, (path, _)) in
             sm_packing_info
                 .iter()
