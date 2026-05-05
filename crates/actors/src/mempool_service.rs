@@ -762,7 +762,7 @@ impl AtomicMempoolState {
     /// validation (e.g. block_discovery, gossip handlers) MUST propagate this
     /// error rather than treating an empty result as "tx absent" — a
     /// contended local mempool would otherwise penalise an honest peer for
-    /// our own contention. See H3 for the divergence post-mortem.
+    /// our own contention.
     pub async fn get_commitment_txs(
         &self,
         commitment_tx_ids: &[IrysTransactionId],

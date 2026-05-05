@@ -1654,9 +1654,8 @@ mod tests {
         // score crosses the active threshold (`PeerScore::ACTIVE_THRESHOLD`).
         // BogusData decrements by 5; INITIAL is 50; the threshold is 10; so
         // 9 decrements take the score from 50 → 5 (< 10). One decrement is
-        // not enough — the previous "single signal evicts" policy was changed
-        // during the divergence post-mortem so honest overload doesn't churn
-        // unstaked peers.
+        // not enough — the previous "single signal evicts" policy let an
+        // honest overload churn unstaked peers.
         for _ in 0..9 {
             peer_list
                 .decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));

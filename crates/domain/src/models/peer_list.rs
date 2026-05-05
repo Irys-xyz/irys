@@ -956,11 +956,9 @@ impl PeerListDataInner {
                         // Transient network errors should not drive purgatory
                         // eviction. An unstaked peer reachable now can become
                         // unreachable for seconds at a time during honest
-                        // overload (especially during the divergence-cascade
-                        // scenarios behind the 2026-04-15 post-mortem). Keep
-                        // the peer in purgatory and let the next successful
-                        // request re-confirm liveness instead of eroding the
-                        // reputation toward eviction.
+                        // overload. Keep the peer in purgatory and let the
+                        // next successful request re-confirm liveness instead
+                        // of eroding the reputation toward eviction.
                         ScoreDecreaseReason::NetworkError(message) => {
                             debug!(
                                 ?peer_id,
@@ -1506,11 +1504,10 @@ mod tests {
             assert!(peer_list.get_peer(&peer_id).is_some());
 
             // Unstaked peers are evicted from purgatory only after the
-            // reputation score crosses the active threshold (set during the
-            // 2026-04-15 divergence post-mortem so honest overload doesn't
-            // churn unstaked peers). Offline decrements by 3; INITIAL is 50;
-            // ACTIVE_THRESHOLD is 10; so (50 − 10) ÷ 3 = 14 decrements take
-            // the score to 8 (< 10).
+            // reputation score crosses the active threshold so honest
+            // overload doesn't churn unstaked peers. Offline decrements by 3;
+            // INITIAL is 50; ACTIVE_THRESHOLD is 10; so (50 − 10) ÷ 3 = 14
+            // decrements take the score to 8 (< 10).
             for _ in 0..14 {
                 peer_list.decrease_peer_score_by_peer_id(
                     &peer_id,

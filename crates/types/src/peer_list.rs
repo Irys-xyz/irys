@@ -25,9 +25,8 @@ impl PeerScore {
     pub const MAX: u16 = 100;
     pub const INITIAL: u16 = 50;
     /// Active threshold: below this the peer is excluded from gossip
-    /// propagation. Lowered from 20 to 10 during the 2026-04-15 devnet
-    /// divergence post-mortem: the cascade pushed peers below 20 within
-    /// seconds under honest overload, and the old threshold left no
+    /// propagation. Set to 10 (rather than 20) so honest overload does
+    /// not push peers below the threshold within seconds and leave no
     /// headroom before eviction.
     pub const ACTIVE_THRESHOLD: u16 = 10;
     /// Score threshold for unstaked peers to be persisted to the database
@@ -59,8 +58,8 @@ impl PeerScore {
     /// Decrease for a transient network error (timeout, connection refused).
     /// Distinct from `decrease_offline` because a network error against an
     /// overloaded-but-honest peer is not the same signal as a peer being
-    /// deliberately unreachable. Smaller penalty (-1) avoids the cascading
-    /// eviction observed during the 2026-04-15 devnet divergence.
+    /// deliberately unreachable. Smaller penalty (-1) avoids cascading
+    /// eviction under honest overload.
     pub fn decrease_network_error(&mut self, msg: &str) {
         debug!("Decreasing peer score due to network error: {}", msg);
         self.decrease_by(1);
