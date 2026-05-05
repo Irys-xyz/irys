@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777661973207,
+  "lastUpdate": 1778007480614,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2755,6 +2755,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000128,
             "range": "± 0.000012",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "43140be50e1f5e462e859716dc4a4a8a4f8eb3d7",
+          "message": "fix(chunk-ingress, p2p): divergence post-mortem fixes for overload cascades (#1394)\n\n* fix(chunk-ingress): reserve control-plane lane and fail fast on overload\n\n* refactor(chunk-ingress): typed overloaded error and configurable lane\n\n* fix(chunk-ingress): preserve pending-chunks drain and split lane budget\n\n* fix(peer-scoring): soften network penalty, lower active threshold\n\n* fix(config): reject control-plane lane exceeding chunk ingress budget\n\n* fix(p2p): classify ingress proof overload as rate_limited\n\n* refactor: drop chunk-ingress lower clamp, tighten bypass tests\n\n* refactor(chunk-ingress): unify overloaded handling for all message types\n\n* fix(peer-scoring): skip anchor penalty while syncing\n\n* fix(chunk-ingress): don't drop no-reply messages under overload\n\n* fix(peer-scoring): sync is_online with peer probe result\n\n* refactor(chunk-ingress): route proof-trigger through control plane\n\n* feat(block-tree): add latest reorg depth metric\n\n* fix(chunk-ingress): decouple shutdown flush from control-lane drain\n\n* feat(block-tree): log cache insert, remove and prune events\n\n* fix(error): log when a reorg is passed the migration boundary\n\n* fix(startup): surface real cause from node lifecycle init failures\n\n* fix(vdf): convert gap and lock-poison panics to graceful exits\n\n* fix: hybrid wait for peers (#1403)\n\n* docs: design spec for hybrid wait_for_active_peers (N peers or timeout)\n\n* docs: place new wait_for_active_peers fields in existing SyncConfig\n\n* docs: implementation plan for hybrid wait_for_active_peers\n\n* feat(config): add sync.min_active_peers and sync.peer_wait_timeout_millis\n\n* refactor(p2p): hybrid wait_for_active_peers (N peers or timeout)\n\n* test: align config TOML test with SyncConfig testing override\n\n* chore: fmt\n\n* refactor(p2p): route min_active_peers and peer_wait_timeout_millis through SyncParams\n\n* test(config): shorten testing peer_wait_timeout_millis to 100ms\n\n* fix(mempool): replace lock-timeout panics with graceful shutdown\n\n* fix(block-tree): convert panic sites to typed errors and graceful logs\n\n* fix(peer-list): sync inner peer_id field when migrating cache entry\n\n* fix: address review comments in chunk-ingress, p2p, chain, vdf\n\n* fix: route subsystem failures through controlled-shutdown path\n\n* fix: route contention, overload, and init-cause signals distinctly\n\n* fix: distinguish retry-races and contention from terminal failures\n\n* chore: tidy logging volume, iteration order, and comment numbering\n\n* fix: rework saturation, pre-validation, and peer-wait handling\n\n* fix: address review comments\n\n* fix(sync): extend test peer-wait timeout to cover handshake\n\n* fix: address review comments\n\n* fix: address review comments\n\n* fix: address review comments\n\n* test(peer-discovery): loop offline decrements past active threshold\n\n* docs(peer-scoring): scrub incident references from comments\n\n* feat: reduce VDF thread pause when actively syncing\n\nThis reduces the time the rest of the system needs to wait for VDF step fast-forwarding, which allows for more than 5 blocks/sec to be processed.\n\n* fix(sync): raise test peer-wait timeout to 10s for restart catch-up\n\n---------\n\nCo-authored-by: dmac <samuraidan@gmail.com>\nCo-authored-by: Jesse <20095347+JesseTheRobot@users.noreply.github.com>\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-05-05T19:38:56+01:00",
+          "tree_id": "48176d2b2f8b5765f34bcb3da43fcde03970d7fd",
+          "url": "https://github.com/Irys-xyz/irys/commit/43140be50e1f5e462e859716dc4a4a8a4f8eb3d7"
+        },
+        "date": 1778007478734,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078816,
+            "range": "± 0.001868",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 790.396018,
+            "range": "± 27.766595",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1001.206049,
+            "range": "± 13.049376",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120403,
+            "range": "± 0.001844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1227.950171,
+            "range": "± 18.30886",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1600.740762,
+            "range": "± 25.673045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.473665,
+            "range": "± 0.013503",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.322833,
+            "range": "± 1.5655",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.657418,
+            "range": "± 1.795556",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
