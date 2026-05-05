@@ -464,11 +464,17 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     let stopped_peer_1 = ctx_peer1_node.stop().await;
     info!("PEER1 stopped");
 
-    // Decreasing peer1 score just to speed up the pruning process
-    ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
-        &stopped_peer_1.cfg.miner_address(),
-        ScoreDecreaseReason::Offline("Test pruning".to_string()),
-    );
+    // Decrease peer1 score until it falls below `PeerScore::ACTIVE_THRESHOLD`,
+    // the gate the unstaked-purgatory eviction now waits for. A single Offline
+    // decrement (-3) used to evict immediately under the old single-signal
+    // policy but an honest overload shouldn't churn purgatory peers. INITIAL
+    // is 50, ACTIVE_THRESHOLD is 10, so 14 decrements take the score to 8.
+    for _ in 0..14 {
+        ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
+            &stopped_peer_1.cfg.miner_address(),
+            ScoreDecreaseReason::Offline("Test pruning".to_string()),
+        );
+    }
 
     // Wait for genesis to remove peer1 from its temp peer list
     elapsed = 0;
