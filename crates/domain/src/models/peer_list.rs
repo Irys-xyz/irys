@@ -940,17 +940,41 @@ impl PeerListDataInner {
                     peer: peer_clone,
                 });
             }
-        } else if let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
-            // Get mining_addr from the peer
-            let mining_addr = peer.mining_address;
-            self.gossip_addr_to_peer_id_map
-                .remove(&peer.address.gossip.ip());
-            self.api_addr_to_peer_id_map.remove(&peer.address.api);
-            self.miner_addr_to_peer_id_map.remove(&mining_addr);
-            self.peer_id_to_miner_addr_map.remove(peer_id);
-            self.known_peers_cache.remove(&peer.address);
-            debug!("Removed unstaked peer {:?} from all caches", peer_id);
-            self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
+        } else {
+            let should_evict =
+                if let Some(peer_item) = self.unstaked_peer_purgatory.get_mut(peer_id) {
+                    match reason {
+                        ScoreDecreaseReason::BogusData(message) => {
+                            peer_item.reputation_score.decrease_bogus_data(&message);
+                        }
+                        ScoreDecreaseReason::Offline(message) => {
+                            peer_item.reputation_score.decrease_offline(&message);
+                        }
+                        ScoreDecreaseReason::SlowResponse => {
+                            peer_item.reputation_score.decrease_slow();
+                        }
+                        ScoreDecreaseReason::NetworkError(message) => {
+                            peer_item.reputation_score.decrease_network_error(&message);
+                        }
+                    }
+                    !peer_item.reputation_score.is_active()
+                } else {
+                    false
+                };
+
+            if should_evict {
+                if let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
+                    let mining_addr = peer.mining_address;
+                    self.gossip_addr_to_peer_id_map
+                        .remove(&peer.address.gossip.ip());
+                    self.api_addr_to_peer_id_map.remove(&peer.address.api);
+                    self.miner_addr_to_peer_id_map.remove(&mining_addr);
+                    self.peer_id_to_miner_addr_map.remove(peer_id);
+                    self.known_peers_cache.remove(&peer.address);
+                    debug!("Removed unstaked peer {:?} from all caches", peer_id);
+                    self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
+                }
+            }
         }
     }
 

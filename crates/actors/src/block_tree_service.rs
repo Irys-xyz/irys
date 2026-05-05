@@ -588,16 +588,17 @@ impl BlockTreeServiceInner {
             // Get block info before mutable operations.
             // We just observed the block in cache when computing `height` above (under
             // the read lock), and mark_block_as_valid succeeded under this write lock.
-            // A missing entry means a concurrent prune raced these two locks — log
-            // and abort this validation pass instead of panicking.
-            let block_entry = cache.blocks.get(&block_hash).ok_or_else(|| {
-                error!(
+            // A missing entry means a concurrent prune raced these two locks — drop
+            // this stale validation result, mirroring the height-lookup `None` path
+            // earlier in the function rather than tearing down the service.
+            let Some(block_entry) = cache.blocks.get(&block_hash) else {
+                warn!(
                     block.hash = %block_hash,
                     block.height = height,
-                    "block entry pruned between height lookup and validation processing"
+                    "Ignoring validation result for block already pruned from cache"
                 );
-                eyre::eyre!("block entry {block_hash} pruned during validation processing")
-            })?;
+                return Ok(());
+            };
             let arc_block = block_entry.block.header().clone();
 
             let tip_changed = {
@@ -628,6 +629,29 @@ impl BlockTreeServiceInner {
                 )?;
                 let new_fcu_markers = Some(markers);
 
+                // Snapshot the orphaned-chain view BEFORE pruning so a deep new tip
+                // cannot evict `old_tip_block` from the cache mid-reorg and turn a
+                // valid reorg into a service-level error.
+                let orphaned_snapshot = if is_reorg {
+                    let mut orphaned_blocks =
+                        cache.get_fork_blocks(old_tip_block.previous_block_hash);
+                    let old_tip_entry =
+                        cache.blocks.get(&old_tip_block.block_hash).ok_or_else(|| {
+                            error!(
+                                old_tip = %old_tip_block.block_hash,
+                                "old tip pruned from cache before reorg fork-point snapshot"
+                            );
+                            eyre::eyre!(
+                                "old tip {} not in cache during reorg fork-point snapshot",
+                                old_tip_block.block_hash
+                            )
+                        })?;
+                    orphaned_blocks.push(old_tip_entry.block.clone());
+                    Some(orphaned_blocks)
+                } else {
+                    None
+                };
+
                 // Prune the cache after tip changes.
                 //
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
@@ -638,21 +662,8 @@ impl BlockTreeServiceInner {
                 if is_reorg {
                     // Handle blockchain reorganization
 
-                    // Collect all blocks that are being orphaned (from the prior canonical chain)
-                    let mut orphaned_blocks =
-                        cache.get_fork_blocks(old_tip_block.previous_block_hash);
-                    let old_tip_entry =
-                        cache.blocks.get(&old_tip_block.block_hash).ok_or_else(|| {
-                            error!(
-                                old_tip = %old_tip_block.block_hash,
-                                "old tip pruned from cache before reorg fork-point search"
-                            );
-                            eyre::eyre!(
-                                "old tip {} not in cache during reorg fork-point search",
-                                old_tip_block.block_hash
-                            )
-                        })?;
-                    orphaned_blocks.push(old_tip_entry.block.clone());
+                    let orphaned_blocks = orphaned_snapshot
+                        .expect("orphaned_snapshot is captured above when is_reorg");
 
                     // Find the fork point where the old and new chains diverged.
                     // orphaned_blocks must be non-empty: we just pushed the old tip above.

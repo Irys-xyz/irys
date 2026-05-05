@@ -1405,7 +1405,7 @@ impl GossipClient {
                     record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
-                        ScoreDecreaseReason::Offline(format!(
+                        ScoreDecreaseReason::NetworkError(format!(
                             "send_data_and_update_score_for_request resulted in an error: {:?}",
                             err
                         )),

@@ -1440,7 +1440,11 @@ where
             is_syncing,
             shutdown_token,
         );
-        error!("Failed to {}: {}", context, error);
+        if error.is_advisory() {
+            debug!(%error, context, "Gossip advisory error");
+        } else {
+            error!("Failed to {}: {}", context, error);
+        }
         HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
     }
 
