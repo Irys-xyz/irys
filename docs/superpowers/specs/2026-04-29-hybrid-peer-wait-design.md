@@ -60,7 +60,7 @@ pub struct SyncConfig {
 | field | production default | testing override |
 |---|---|---|
 | `sync.min_active_peers` | 3 | 1 |
-| `sync.peer_wait_timeout_millis` | 20_000 | 20_000 |
+| `sync.peer_wait_timeout_millis` | 20_000 | 100 |
 
 `SyncConfig::default()` returns the production defaults. Tests using
 `NodeConfig::testing()` get the override via the existing testing-config
@@ -130,9 +130,10 @@ if count == 0 {
 ```
 
 Note: genesis branch keeps using `genesis_peer_discovery_timeout_millis`
-(10s default), not the new `peer_wait_timeout_millis`. They are conceptually
-distinct windows: genesis is "how long do I wait before assuming I am
-cold-starting alone"; peer is "how long do I wait for N healthy neighbors".
+(20s default when omitted from config), not the new `peer_wait_timeout_millis`.
+They are conceptually distinct windows: genesis is "how long do I wait before
+assuming I am cold-starting alone"; peer is "how long do I wait for N healthy
+neighbors".
 
 **Peer branch (`chain_sync.rs:862`).** Replace bare await with the new call,
 ignore returned count beyond a warning log:

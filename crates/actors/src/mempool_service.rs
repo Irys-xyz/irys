@@ -930,19 +930,28 @@ impl AtomicMempoolState {
     }
 
     pub async fn mark_fingerprint_as_invalid(&self, fingerprint: H256) {
-        self.state
-            .write()
-            .await
-            .recent_invalid_payload_fingerprints
-            .put(fingerprint, ());
+        match self.write().await {
+            Ok(mut g) => {
+                g.recent_invalid_payload_fingerprints.put(fingerprint, ());
+            }
+            Err(e) => warn!(
+                ?e,
+                "Mempool write lock contention; skipping mark_fingerprint_as_invalid"
+            ),
+        }
     }
 
     pub async fn is_a_recent_invalid_fingerprint(&self, fingerprint: &H256) -> bool {
-        self.state
-            .read()
-            .await
-            .recent_invalid_payload_fingerprints
-            .contains(fingerprint)
+        match self.read().await {
+            Ok(g) => g.recent_invalid_payload_fingerprints.contains(fingerprint),
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; is_a_recent_invalid_fingerprint returning false"
+                );
+                false
+            }
+        }
     }
 
     pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {

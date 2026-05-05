@@ -231,9 +231,10 @@ impl ChunkIngressService {
         // enforces the real invariants (>0 and strict inequality with the
         // control-plane lane), so there is no lower clamp — operator intent
         // is honoured instead of silently overridden.
-        const MAX_PERMITS: usize = u32::MAX as usize;
+        let max_permits =
+            usize::try_from(u32::MAX).expect("u32::MAX fits in usize on supported targets");
         let raw_max_concurrent = mempool_config.max_concurrent_chunk_ingress_tasks;
-        let max_concurrent_chunk_ingress_tasks = raw_max_concurrent.min(MAX_PERMITS);
+        let max_concurrent_chunk_ingress_tasks = raw_max_concurrent.min(max_permits);
         if max_concurrent_chunk_ingress_tasks != raw_max_concurrent {
             warn!(
                 configured = raw_max_concurrent,
