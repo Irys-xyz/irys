@@ -1088,8 +1088,12 @@ impl NodeConfig {
             stake_pledge_drives: false,
             sync: SyncConfig {
                 min_active_peers: 1,
-                // 100ms — fast-fail to best-effort in tests rather than stalling 20s.
-                peer_wait_timeout_millis: 100,
+                // 100ms was too aggressive: localhost handshake routinely
+                // takes longer than that, so peer-branch tests skipped the
+                // initial bootstrap before discovery completed and then had
+                // to wait the full 30s periodic-check window to re-engage.
+                // 2_000ms covers handshake comfortably without stalling.
+                peer_wait_timeout_millis: 2_000,
                 ..SyncConfig::default()
             },
             run_mode: RunMode::Test,
@@ -1457,7 +1461,7 @@ mod run_mode_tests {
         let cfg = super::NodeConfig::testing();
         assert_eq!(cfg.sync.min_active_peers, 1, "testing override expected");
         assert_eq!(
-            cfg.sync.peer_wait_timeout_millis, 100,
+            cfg.sync.peer_wait_timeout_millis, 2_000,
             "testing override: short timeout to fast-fail rather than stall 20s"
         );
     }

@@ -878,13 +878,17 @@ async fn initialize_sync_mode(
         if count == 0 {
             // Without this skip the next call (`fetch_initial_block_index` →
             // `get_block_index`) bails on the empty peer set and aborts node
-            // startup — defeating the hybrid-peer-wait contract. Skipping sync
-            // best-effort lets the node start; the sync layer re-engages once
-            // peers come online via the normal gossip event flow.
+            // startup — defeating the hybrid-peer-wait contract. Skipping
+            // best-effort lets the node start; re-engagement happens via the
+            // periodic sync check (`SyncConfig::periodic_sync_check_interval_secs`,
+            // 30s default) which compares local height against trusted peers
+            // and spawns a fresh sync task when behind. Note: there is no
+            // peer-event-driven re-engagement here, so the worst-case wait
+            // before sync resumes is one periodic interval.
             warn!(
                 wanted = params.min_active_peers,
                 timeout_ms = params.peer_wait_timeout_millis,
-                "Sync task: peer node found 0 active peers within {}ms (wanted {}); skipping initial sync to let startup complete; sync will engage when peers connect",
+                "Sync task: peer node found 0 active peers within {}ms (wanted {}); skipping initial sync to let startup complete; sync will re-engage on next periodic check",
                 params.peer_wait_timeout_millis,
                 params.min_active_peers
             );
