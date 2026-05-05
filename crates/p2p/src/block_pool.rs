@@ -44,6 +44,13 @@ pub enum CriticalBlockPoolError {
     OtherInternal(String),
     #[error("Block error: {0}")]
     BlockError(String),
+    /// Local block-tree cache is unrecoverably corrupted (e.g. RwLock poisoned
+    /// by a prior caller's panic). Distinct from `BlockError` so the gossip
+    /// server does not penalise the peer who happened to deliver the next
+    /// block, and so the lifecycle can route this to a controlled shutdown
+    /// instead of running on with a broken cache.
+    #[error("Fatal block-tree cache corruption: {0}")]
+    FatalCacheCorruption(String),
     #[error("Block {0:?} is already being fast tracked")]
     AlreadyFastTracking(BlockHash),
     #[error("Block {0:?} is already being processed or has been processed")]
@@ -919,10 +926,9 @@ where
                     .await;
                 self.sync_state
                     .record_block_processing_error(pre_err.to_string());
-                return Err(CriticalBlockPoolError::BlockError(format!(
-                    "fatal cache corruption: {pre_err}"
-                ))
-                .into());
+                return Err(
+                    CriticalBlockPoolError::FatalCacheCorruption(pre_err.to_string()).into(),
+                );
             }
 
             error!(

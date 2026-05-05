@@ -842,11 +842,27 @@ where
         }
     }
 
+    /// Synchronous PullData path used by `handle_pull_data` / `handle_pull_data_v1`.
+    /// Consults the rate limiter before resolving so PullData honours the same
+    /// `RateLimited` contract as the gossip POST path; without this gate,
+    /// PullData would be unthrottled even though the HTTP layer advertises
+    /// `RejectionReason::RateLimited`.
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
         request: GossipRequestV2<GossipDataRequestV2>,
+        duplicate_request_milliseconds: u128,
     ) -> GossipResult<Option<GossipDataV2>> {
+        let check_result = self
+            .data_request_tracker
+            .check_request(&request.peer_id, duplicate_request_milliseconds);
+        if !check_result.should_serve() {
+            debug!(
+                "Node {}: Rate limiting peer {:?} for pull-data request",
+                self.gossip_client.mining_address, request.miner_address
+            );
+            return Err(GossipError::RateLimited);
+        }
         self.resolve_data_request(&request.data, request.miner_address)
             .await
     }

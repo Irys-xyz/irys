@@ -506,7 +506,7 @@ impl BlockTree {
             },
         );
 
-        info!(
+        debug!(
             block.hash = %block.header().block_hash,
             block.height = block.header().height,
             block.cumulative_diff = %block.header().cumulative_diff,
@@ -591,7 +591,7 @@ impl BlockTree {
             }
         }
 
-        info!(
+        debug!(
             block.hash = %block_hash,
             block.height = height,
             chain_state = ?chain_state,

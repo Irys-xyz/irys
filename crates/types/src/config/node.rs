@@ -887,7 +887,14 @@ impl Default for MempoolNodeConfig {
             max_commitments_per_address: 5,
             max_concurrent_mempool_tasks: 30,
             max_concurrent_chunk_ingress_tasks: 30,
-            max_control_plane_concurrent_tasks: 4,
+            // Backward-compat fallback for missing `max_control_plane_concurrent_tasks`
+            // in operator configs that pre-date the field. Validation requires
+            // `max_control_plane_concurrent_tasks < max_concurrent_chunk_ingress_tasks`,
+            // so the default must be the smallest non-zero value (1) to avoid
+            // rejecting upgrades on configs whose operator-tuned chunk-ingress
+            // budget is also small (e.g. `max_concurrent_chunk_ingress_tasks = 2`).
+            // Fresh testnet/mainnet configs override this to a higher value.
+            max_control_plane_concurrent_tasks: 1,
             chunk_writer_buffer_size: 4096,
         }
     }

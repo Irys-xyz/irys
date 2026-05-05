@@ -127,7 +127,7 @@ At the end of `crates/types/src/config/node.rs`, find the existing `#[cfg(test)]
 fn testing_node_config_overrides_sync_min_active_peers() {
     let cfg = NodeConfig::testing();
     assert_eq!(cfg.sync.min_active_peers, 1, "testing override expected");
-    assert_eq!(cfg.sync.peer_wait_timeout_millis, 20_000);
+    assert_eq!(cfg.sync.peer_wait_timeout_millis, 2_000);
 }
 
 #[test]

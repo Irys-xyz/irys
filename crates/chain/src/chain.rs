@@ -166,6 +166,7 @@ impl IrysNodeCtx {
                 .p2p_gossip
                 .max_concurrent_gossip_chunks,
             self.config.node_config.gossip.actix_workers,
+            self.shutdown_token.clone(),
         )
     }
 
@@ -1716,6 +1717,7 @@ impl IrysNode {
             block_index_guard.clone(),
             block_tree_guard.clone(),
             std::time::Instant::now(),
+            shutdown_token.clone(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)

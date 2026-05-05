@@ -31,6 +31,7 @@ use reth_ethereum_primitives::Block;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, debug, error, info, warn};
 use tracing_actix_web::TracingLogger;
 
@@ -48,6 +49,10 @@ where
     peer_list: PeerList,
     chunk_semaphore: Arc<tokio::sync::Semaphore>,
     actix_workers: usize,
+    /// Cancelling this token requests a controlled node shutdown. Used by the
+    /// `FatalCacheCorruption` path so a poisoned local cache stops serving
+    /// blocks instead of running on while penalising innocent peers.
+    shutdown_token: CancellationToken,
 }
 
 impl<M, B> Clone for GossipServer<M, B>
@@ -61,6 +66,7 @@ where
             peer_list: self.peer_list.clone(),
             chunk_semaphore: self.chunk_semaphore.clone(),
             actix_workers: self.actix_workers,
+            shutdown_token: self.shutdown_token.clone(),
         }
     }
 }
@@ -75,6 +81,7 @@ where
         peer_list: PeerList,
         max_concurrent_chunks: usize,
         actix_workers: usize,
+        shutdown_token: CancellationToken,
     ) -> Self {
         let effective_limit = if max_concurrent_chunks == 0 {
             warn!("max_concurrent_gossip_chunks is 0, treating as unlimited");
@@ -87,6 +94,7 @@ where
             peer_list,
             chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(effective_limit)),
             actix_workers,
+            shutdown_token,
         }
     }
 
@@ -138,6 +146,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send chunk",
+                &server.shutdown_token,
             );
         }
 
@@ -323,6 +332,7 @@ where
                         &error,
                         &server.peer_list,
                         is_syncing,
+                        &server.shutdown_token,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -400,6 +410,7 @@ where
                         &e,
                         &server.peer_list,
                         is_syncing,
+                        &server.shutdown_token,
                     );
                     error!(
                         "Node {:?}: Failed to process the block body {}: {:?}",
@@ -461,6 +472,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send execution payload",
+                &server.shutdown_token,
             );
         }
 
@@ -506,6 +518,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send transaction",
+                &server.shutdown_token,
             );
         }
 
@@ -550,6 +563,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send commitment transaction",
+                &server.shutdown_token,
             );
         }
 
@@ -592,6 +606,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send ingress proof",
+                &server.shutdown_token,
             );
         }
 
@@ -653,6 +668,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send chunk",
+                &server.shutdown_token,
             );
         }
 
@@ -724,6 +740,7 @@ where
                         &error,
                         &server.peer_list,
                         is_syncing,
+                        &server.shutdown_token,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -795,6 +812,7 @@ where
                         &error,
                         &server.peer_list,
                         is_syncing,
+                        &server.shutdown_token,
                     );
                     if !error.is_advisory() {
                         error!(
@@ -853,6 +871,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send execution payload",
+                &server.shutdown_token,
             );
         }
 
@@ -902,6 +921,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send data transaction header",
+                &server.shutdown_token,
             );
         }
 
@@ -950,6 +970,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send commitment transaction",
+                &server.shutdown_token,
             );
         }
 
@@ -996,6 +1017,7 @@ where
                 &server.peer_list,
                 is_syncing,
                 "send ingress proof",
+                &server.shutdown_token,
             );
         }
 
@@ -1404,13 +1426,20 @@ where
         peer_list: &PeerList,
         is_syncing: bool,
         context: &str,
+        shutdown_token: &CancellationToken,
     ) -> HttpResponse {
         if matches!(error, GossipError::RateLimited) {
             debug!(%error, context, "Gossip rate-limited");
             return HttpResponse::Ok()
                 .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
         }
-        Self::handle_invalid_data(peer_miner_address, error, peer_list, is_syncing);
+        Self::handle_invalid_data(
+            peer_miner_address,
+            error,
+            peer_list,
+            is_syncing,
+            shutdown_token,
+        );
         error!("Failed to {}: {}", context, error);
         HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
     }
@@ -1420,6 +1449,7 @@ where
         error: &GossipError,
         peer_list: &PeerList,
         is_syncing: bool,
+        shutdown_token: &CancellationToken,
     ) {
         match error {
             GossipError::InvalidData(invalid_data_error) => {
@@ -1446,6 +1476,18 @@ where
                         invalid_data_error
                     )),
                 );
+            }
+            GossipError::BlockPool(CriticalBlockPoolError::FatalCacheCorruption(msg)) => {
+                // Local fault: the block-tree cache is poisoned. Do NOT penalise
+                // the peer who happened to deliver the block that surfaced this.
+                // Cancel the lifecycle's shutdown token so the node winds down
+                // instead of repeatedly hitting the same poison and penalising
+                // a different peer each time.
+                error!(
+                    error = %msg,
+                    "Fatal block-tree cache corruption observed via gossip path; requesting controlled node shutdown"
+                );
+                shutdown_token.cancel();
             }
             GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
                 peer_list.decrease_peer_score(
@@ -1497,7 +1539,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
             .in_current_span()
             .await
         {
@@ -1623,7 +1665,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
             .in_current_span()
             .await
         {
@@ -1878,12 +1920,57 @@ mod tests {
     fn handle_invalid_block_penalizes_peer() {
         let (miner, peer_list, _dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
+        let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
-            &miner, &error, &peer_list, false,
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
         );
 
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
         assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
+        assert!(
+            !shutdown_token.is_cancelled(),
+            "BlockError must not trigger shutdown"
+        );
+    }
+
+    /// `FatalCacheCorruption` is a *local* fault. The peer who happened to
+    /// deliver the offending block must NOT be penalised, and the lifecycle's
+    /// shutdown token must be cancelled so the node winds down instead of
+    /// running on with a poisoned block-tree cache.
+    #[test]
+    fn handle_fatal_cache_corruption_triggers_shutdown_without_penalty() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let initial_score = peer_list
+            .peer_by_mining_address(&miner)
+            .unwrap()
+            .reputation_score
+            .get();
+        let error = GossipError::BlockPool(CriticalBlockPoolError::FatalCacheCorruption(
+            "block tree cache lock poisoned at: test_site".into(),
+        ));
+        let shutdown_token = CancellationToken::new();
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
+        );
+
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(
+            peer.reputation_score.get(),
+            initial_score,
+            "peer must not be penalised for a local cache fault"
+        );
+        assert!(
+            shutdown_token.is_cancelled(),
+            "FatalCacheCorruption must cancel the shutdown token"
+        );
     }
 
     #[rstest::rstest]
@@ -1921,8 +2008,13 @@ mod tests {
         #[case] expected_score: u16,
     ) {
         let (miner, peer_list, _dir) = setup_peer_list();
+        let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
-            &miner, &error, &peer_list, is_syncing,
+            &miner,
+            &error,
+            &peer_list,
+            is_syncing,
+            &shutdown_token,
         );
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
         assert_eq!(peer.reputation_score.get(), expected_score);

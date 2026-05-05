@@ -1,7 +1,6 @@
 use crate::block_tree_service::ReorgEvent;
 use crate::chunk_ingress_service::ChunkIngressMessage;
-use crate::mempool_service::Inner;
-use crate::mempool_service::TxIngressError;
+use crate::mempool_service::{Inner, MempoolError, TxIngressError};
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
@@ -223,8 +222,15 @@ impl Inner {
 
     /// Clears the promotion state (promoted_height) for a transaction in the mempool
     /// during reorg handling. Only affects in-memory state; does not persist to DB.
+    ///
+    /// Returns:
+    /// - `Ok(())` — tx cleared or absent (benign no-op)
+    /// - `Err(MempoolError::LockContention)` — write lock contended;
+    ///   `signal_fatal_shutdown` was already triggered. Caller MUST short-circuit
+    ///   any iterating loop instead of continuing to contend against the
+    ///   winding-down mempool.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
-    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
+    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> Result<(), MempoolError> {
         match self.mempool_state.clear_promoted_height(txid).await {
             Ok(true) => Ok(()),
             Ok(false) => {
@@ -232,18 +238,12 @@ impl Inner {
                 Ok(())
             }
             Err(e) => {
-                // `signal_fatal_shutdown` already triggered by the contended
-                // write — distinguishing this from the benign "tx absent"
-                // path matters: pre-fix it looked the same, leaving stale
-                // `promoted_height` after the canonical chain diverged.
-                // Returning Ok lets the lifecycle drive the wind-down
-                // instead of panicking via `start()`'s spawn wrapper.
                 warn!(
                     ?e,
                     tx.id = %txid,
-                    "Mempool contention during unpromote; signal_fatal_shutdown already triggered, skipping"
+                    "Mempool contention during unpromote; signal_fatal_shutdown already triggered, propagating to caller"
                 );
-                Ok(())
+                Err(e)
             }
         }
     }
@@ -747,13 +747,16 @@ impl Inner {
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
             debug!("reorging orphaned publish tx: {}", &tx_id);
-            // Clear promotion state for txs that were promoted on an orphaned fork
+            // Clear promotion state for txs that were promoted on an orphaned fork.
+            // On `LockContention`, `signal_fatal_shutdown` has already been triggered
+            // by the contended write — break out of the loop instead of continuing
+            // to contend against the winding-down mempool.
             if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
                 warn!(
-                    tx.id = %tx_id,
-                    tx.err = %e,
-                    "Failed to unpromote tx during reorg"
+                    ?e,
+                    "Mempool contention during reorg unpromote loop; aborting remaining orphan cleanup"
                 );
+                return Ok(());
             }
         }
 

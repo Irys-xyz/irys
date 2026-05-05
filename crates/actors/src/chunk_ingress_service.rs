@@ -60,27 +60,19 @@ impl ChunkIngressMessage {
 
     /// Returns true when the message carries a oneshot reply channel the caller
     /// is awaiting. Reply-bearing variants fast-fail on saturation so callers
-    /// can retry. Fire-and-forget variants are handled by their re-fire
-    /// strategy (drop for upstream-recoverable control-plane messages, park
-    /// for chunk-lane fallback chunks that have no upstream re-fire).
+    /// can retry. Fire-and-forget variants park the recv loop on saturation
+    /// instead — the upstream emit sites
+    /// (`mempool_service::data_txs::postprocess_data_ingress` for
+    /// `ProcessPendingChunks`, `mempool_service::lifecycle::handle_block_confirmed`
+    /// for `TryGenerateProofsForConfirmedRoots`, and the data_sync_service
+    /// SM-write fallback for `IngestChunk(_, None)`) emit each message once,
+    /// without retry, so dropping any of them silently strands work.
     pub fn has_reply_channel(&self) -> bool {
         match self {
             Self::IngestChunk(_, reply) => reply.is_some(),
             Self::IngestIngressProof(_, _) => true,
             Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_) => false,
         }
-    }
-
-    /// Returns true when the variant is recoverable upstream — the mempool
-    /// re-fires `ProcessPendingChunks` per data tx (`mempool_service::data_txs`)
-    /// and `TryGenerateProofsForConfirmedRoots` per block confirmation
-    /// (`mempool_service::lifecycle`). The recv loop drops these on saturation
-    /// rather than parking, since a re-fire will follow.
-    pub fn is_recoverable_upstream(&self) -> bool {
-        matches!(
-            self,
-            Self::ProcessPendingChunks(_) | Self::TryGenerateProofsForConfirmedRoots(_)
-        )
     }
 }
 
@@ -366,36 +358,27 @@ impl ChunkIngressService {
                                         Self::send_overloaded_errors(msg);
                                         continue 'service;
                                     }
-                                    if msg.is_recoverable_upstream() {
-                                        // Control-plane fire-and-forget the
-                                        // mempool re-emits (per-tx for
-                                        // ProcessPendingChunks, per-block-
-                                        // confirmation for
-                                        // TryGenerateProofsForConfirmedRoots).
-                                        // Drop rather than park the recv loop
-                                        // — proof generation is one of the
-                                        // longest control-plane tasks and
-                                        // parking here would HOL-block every
-                                        // subsequent reply-bearing chunk and
-                                        // ingress-proof request behind it.
-                                        warn!(
-                                            msg_type = %msg_type,
-                                            "Chunk ingress control plane saturated; dropping recoverable message (will be re-emitted by upstream)"
-                                        );
-                                        continue 'service;
-                                    }
-                                    // IngestChunk(_, None): the
-                                    // data_sync_service SM-write fallback has
-                                    // no caller to advise and no upstream
-                                    // re-fire. Park the recv loop until a
-                                    // permit frees so the chunk is not lost.
-                                    // HOL impact is bounded by chunk
-                                    // processing time (much shorter than
-                                    // proof generation), and the fallback
-                                    // path itself is rare.
+                                    // Fire-and-forget messages
+                                    // (`IngestChunk(_, None)`,
+                                    // `ProcessPendingChunks`,
+                                    // `TryGenerateProofsForConfirmedRoots`)
+                                    // have no upstream re-fire and no caller
+                                    // to advise. Park the recv loop on
+                                    // saturation rather than dropping —
+                                    // dropping would silently strand pending
+                                    // chunks for that data_root or skip the
+                                    // post-confirmation proof attempt for the
+                                    // affected block, with no automatic
+                                    // recovery path.
+                                    //
+                                    // HOL impact is bounded by the in-flight
+                                    // task on the chosen lane: a long
+                                    // proof-generation handler does delay
+                                    // subsequent control-plane work, but the
+                                    // alternative (silent loss) is worse.
                                     warn!(
                                         msg_type = %msg_type,
-                                        "Chunk ingress chunk lane saturated; awaiting permit (recv loop parked) to avoid dropping fire-and-forget chunk"
+                                        "Chunk ingress lane saturated; awaiting permit (recv loop parked) to avoid dropping fire-and-forget message"
                                     );
                                     tokio::select! {
                                         _ = &mut shutdown_future => {
@@ -470,20 +453,18 @@ impl ChunkIngressService {
             }
         }
 
-        // Phase 2: acquire all permits from both lanes to wait for in-flight
-        // and drain-spawned handlers. Use `acquire_many_owned` so the permits
-        // are not lifetime-tied to the semaphore arcs. The flush only needs
-        // chunk-lane quiescence, so we gate it on the chunk drain alone and
-        // best-effort drain the control lane within the remaining budget —
-        // a stuck proof-generation handler on the control lane must not
-        // skip the durability flush for completed chunk writes.
+        // Phase 2: drain BOTH lanes before flushing. `process_pending_chunks_for_root`
+        // runs on the control-plane lane and queues writes through `chunk_data_writer`,
+        // so an early flush before control-plane quiescence would race those writers
+        // and lose chunks on exit. Use `acquire_many_owned` so permits are not
+        // lifetime-tied to the semaphore arcs.
         let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let chunk_acquire = self
             .inner
             .message_handler_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_concurrent_tasks);
-        let handlers_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
+        let chunk_quiesced = match tokio::time::timeout_at(drain_deadline, chunk_acquire).await {
             Ok(Ok(permits)) => {
                 tracing::debug!("All chunk ingress handlers completed");
                 let _permits = permits;
@@ -494,7 +475,7 @@ impl ChunkIngressService {
                 false
             }
             Err(_) => {
-                warn!("Timed out waiting for in-flight chunk ingress handlers; skipping flush");
+                warn!("Timed out waiting for in-flight chunk ingress handlers");
                 false
             }
         };
@@ -504,21 +485,36 @@ impl ChunkIngressService {
             .control_plane_semaphore
             .clone()
             .acquire_many_owned(self.inner.max_control_plane_tasks);
-        match tokio::time::timeout_at(drain_deadline, control_acquire).await {
+        let control_quiesced = match tokio::time::timeout_at(drain_deadline, control_acquire).await
+        {
             Ok(Ok(permits)) => {
                 tracing::debug!("All control-plane handlers completed");
                 let _permits = permits;
+                true
             }
             Ok(Err(_)) => {
                 error!("Control-plane semaphore closed during chunk ingress shutdown drain");
+                false
             }
             Err(_) => {
                 warn!("Timed out waiting for in-flight control-plane handlers");
+                false
             }
-        }
+        };
 
-        if handlers_quiesced && let Err(e) = self.inner.chunk_data_writer.flush().await {
-            warn!("Failed to flush chunk writer on shutdown: {:?}", e);
+        // Flush only when both lanes are quiesced, otherwise an in-flight
+        // control-plane writer could queue chunk writes after the flush
+        // returns — losing those chunks on exit.
+        if chunk_quiesced && control_quiesced {
+            if let Err(e) = self.inner.chunk_data_writer.flush().await {
+                warn!("Failed to flush chunk writer on shutdown: {:?}", e);
+            }
+        } else {
+            warn!(
+                chunk_quiesced,
+                control_quiesced,
+                "Skipping chunk-writer flush; not all lanes quiesced before timeout"
+            );
         }
 
         info!("ChunkIngressService shut down");
@@ -654,16 +650,6 @@ mod overload_helpers_tests {
         ChunkIngressService::send_overloaded_errors(msg);
     }
 
-    /// `Overloaded` exposes its own `error_type()` string so dashboards can
-    /// distinguish it from other advisory errors.
-    #[test]
-    fn overloaded_error_type_is_distinct() {
-        assert_eq!(
-            AdvisoryChunkIngressError::Overloaded.error_type(),
-            "overloaded"
-        );
-    }
-
     /// `has_reply_channel` drives the fast-fail branch: any reply-bearing
     /// message returns `Overloaded` to its caller on saturation rather than
     /// parking the recv loop.
@@ -691,46 +677,6 @@ mod overload_helpers_tests {
                 [2_u8; 32]
             )])
             .has_reply_channel()
-        );
-    }
-
-    /// Regression: control-plane fire-and-forget variants must be classified
-    /// as recoverable upstream so the recv loop drops them on saturation
-    /// instead of parking. Pre-fix the loop awaited a permit inline, head-of-
-    /// line-blocking every reply-bearing chunk and ingress-proof request
-    /// behind a slow proof-generation task. `IngestChunk(_, None)` must NOT
-    /// be classified as recoverable: the data_sync_service SM-write fallback
-    /// has no upstream re-fire, so dropping it would lose the chunk.
-    #[test]
-    fn is_recoverable_upstream_only_for_control_plane_fire_and_forget() {
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        assert!(
-            !ChunkIngressMessage::IngestChunk(dummy_chunk(), Some(reply_tx))
-                .is_recoverable_upstream(),
-            "reply-bearing IngestChunk must fast-fail, not drop"
-        );
-        assert!(
-            !ChunkIngressMessage::IngestChunk(dummy_chunk(), None).is_recoverable_upstream(),
-            "fire-and-forget IngestChunk has no upstream re-fire — recv loop must park, not drop"
-        );
-
-        let (reply_tx, _reply_rx) = oneshot::channel();
-        assert!(
-            !ChunkIngressMessage::IngestIngressProof(dummy_ingress_proof(), reply_tx)
-                .is_recoverable_upstream(),
-            "reply-bearing IngestIngressProof must fast-fail, not drop"
-        );
-        assert!(
-            ChunkIngressMessage::ProcessPendingChunks(DataRoot::from([1_u8; 32]))
-                .is_recoverable_upstream(),
-            "ProcessPendingChunks re-fires from mempool data_txs per data tx"
-        );
-        assert!(
-            ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(vec![DataRoot::from(
-                [2_u8; 32]
-            )])
-            .is_recoverable_upstream(),
-            "TryGenerateProofsForConfirmedRoots re-fires from mempool lifecycle per block confirmation"
         );
     }
 }

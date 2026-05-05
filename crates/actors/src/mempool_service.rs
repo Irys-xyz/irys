@@ -685,6 +685,12 @@ impl AtomicMempoolState {
     /// `CachedDataRoots` invalidation when this returns Err, otherwise the
     /// cache would drop txid references that the mempool still retains.
     pub async fn batch_prune_data_txs(&self, expired: &[(H256, H256)]) -> Result<(), MempoolError> {
+        // Skip the lock entirely on an empty input so a benign no-op cannot
+        // race steady-state contention into a fatal-shutdown signal via
+        // `write()`'s timeout path.
+        if expired.is_empty() {
+            return Ok(());
+        }
         let mut g = self.write().await?;
         g.batch_prune_data_txs(expired);
         Ok(())
@@ -701,6 +707,12 @@ impl AtomicMempoolState {
         &self,
         expired: &[(H256, H256)],
     ) -> Result<(), MempoolError> {
+        // Skip the lock entirely on an empty input so a benign no-op cannot
+        // race steady-state contention into a fatal-shutdown signal via
+        // `write()`'s timeout path.
+        if expired.is_empty() {
+            return Ok(());
+        }
         let mut g = self.write().await?;
         g.batch_prune_commitment_txs(expired);
         Ok(())
@@ -3056,13 +3068,20 @@ mod bounded_mempool_tests {
     }
 }
 
+/// Shared mempool test fixtures. Three test modules in this file constructed
+/// the same `MempoolState` skeleton and the same `DataTransactionHeader` /
+/// `CommitmentTransaction` factories — extracting them here keeps the
+/// behavioural assertions in each test module easier to read and prevents
+/// drift when the underlying types change.
 #[cfg(test)]
-mod lock_contention_tests {
+mod test_helpers {
     use super::*;
-    use std::time::Instant;
-    use tokio::sync::RwLock as TokioRwLock;
+    use irys_types::{
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        DataTransactionMetadata, IrysSignature,
+    };
 
-    fn empty_state() -> MempoolState {
+    pub(super) fn empty_mempool_state() -> MempoolState {
         MempoolState {
             valid_submit_ledger_tx: HashMap::new(),
             max_submit_txs: 100,
@@ -3077,6 +3096,50 @@ mod lock_contention_tests {
         }
     }
 
+    pub(super) fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id,
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(1_u64).into(),
+                perm_fee: Some(U256::from(1_u64).into()),
+                ledger_id: DataLedger::Submit as u32,
+                metadata_format: 0,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
+        })
+    }
+
+    pub(super) fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id,
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(1_u64),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::test_helpers::empty_mempool_state;
+    use super::*;
+    use std::time::Instant;
+    use tokio::sync::RwLock as TokioRwLock;
+
     /// Construct an `AtomicMempoolState` with a short lock-contention timeout so
     /// the tests don't have to actually wait 10 seconds. We do this by hand
     /// because the production `LOCK_TIMEOUT` is intentionally constant.
@@ -3087,7 +3150,7 @@ mod lock_contention_tests {
     impl ShortTimeoutMempool {
         fn new() -> Self {
             Self {
-                inner: Arc::new(TokioRwLock::new(empty_state())),
+                inner: Arc::new(TokioRwLock::new(empty_mempool_state())),
             }
         }
 
@@ -3193,7 +3256,10 @@ mod lock_contention_tests {
         let me = MempoolError::LockContention { timeout };
         let tie: TxIngressError = me.into();
         match tie {
-            TxIngressError::Other(s) => assert!(s.contains("7s") || s.contains('7')),
+            TxIngressError::Other(s) => assert!(
+                s.contains("7s"),
+                "expected formatted Duration `7s` in error string; got: {s}"
+            ),
             other => panic!("expected TxIngressError::Other, got {:?}", other),
         }
     }
@@ -3205,7 +3271,7 @@ mod lock_contention_tests {
     /// finishes in milliseconds rather than 10 seconds.
     #[tokio::test]
     async fn read_contention_cancels_shutdown_token() {
-        let mempool_state = AtomicMempoolState::new(empty_state());
+        let mempool_state = AtomicMempoolState::new(empty_mempool_state());
         let token = CancellationToken::new();
         mempool_state.install_shutdown_token(token.clone());
 
@@ -3239,7 +3305,7 @@ mod lock_contention_tests {
     /// node lifecycle don't crash.
     #[test]
     fn signal_fatal_shutdown_is_noop_without_token() {
-        let mempool_state = AtomicMempoolState::new(empty_state());
+        let mempool_state = AtomicMempoolState::new(empty_mempool_state());
         // No install_shutdown_token call. Must not panic.
         mempool_state.signal_fatal_shutdown("test");
     }
@@ -3255,62 +3321,8 @@ mod lock_contention_tests {
 /// the confirmed canonical chain.
 #[cfg(test)]
 mod apply_block_confirmed_updates_tests {
+    use super::test_helpers::{commitment_tx_with_id, data_tx_with_id, empty_mempool_state};
     use super::*;
-    use irys_types::{
-        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
-        DataTransactionMetadata, IrysSignature,
-    };
-
-    fn empty_mempool_state() -> MempoolState {
-        MempoolState {
-            valid_submit_ledger_tx: HashMap::new(),
-            max_submit_txs: 100,
-            valid_commitment_tx: HashMap::new(),
-            max_commitment_addresses: 100,
-            max_commitments_per_address: 10,
-            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
-            stake_and_pledge_whitelist: HashSet::new(),
-        }
-    }
-
-    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
-        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                id,
-                anchor: H256::zero(),
-                signer: IrysAddress::random(),
-                data_root: H256::random(),
-                data_size: 1024,
-                header_size: 0,
-                term_fee: U256::from(1_u64).into(),
-                perm_fee: Some(U256::from(1_u64).into()),
-                ledger_id: DataLedger::Submit as u32,
-                metadata_format: 0,
-                signature: IrysSignature::default(),
-                chain_id: 1,
-            },
-            metadata: DataTransactionMetadata::new(),
-        })
-    }
-
-    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
-        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
-            tx: CommitmentTransactionV2 {
-                id,
-                anchor: H256::zero(),
-                signer,
-                signature: IrysSignature::default(),
-                fee: 100,
-                value: U256::from(1_u64),
-                commitment_type: CommitmentTypeV2::Stake,
-                chain_id: 1,
-            },
-            metadata: Default::default(),
-        })
-    }
 
     /// Success path: all three update phases (data tx included_height,
     /// commitment tx included_height, publish tx promoted_height) apply
@@ -3452,62 +3464,8 @@ mod apply_block_confirmed_updates_tests {
 /// publish candidates.
 #[cfg(test)]
 mod batch_prune_result_tests {
+    use super::test_helpers::{commitment_tx_with_id, data_tx_with_id, empty_mempool_state};
     use super::*;
-    use irys_types::{
-        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
-        DataTransactionMetadata, IrysSignature,
-    };
-
-    fn empty_mempool_state() -> MempoolState {
-        MempoolState {
-            valid_submit_ledger_tx: HashMap::new(),
-            max_submit_txs: 100,
-            valid_commitment_tx: HashMap::new(),
-            max_commitment_addresses: 100,
-            max_commitments_per_address: 10,
-            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
-            stake_and_pledge_whitelist: HashSet::new(),
-        }
-    }
-
-    fn data_tx_with_id(id: H256) -> DataTransactionHeader {
-        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                id,
-                anchor: H256::zero(),
-                signer: IrysAddress::random(),
-                data_root: H256::random(),
-                data_size: 1024,
-                header_size: 0,
-                term_fee: U256::from(1_u64).into(),
-                perm_fee: Some(U256::from(1_u64).into()),
-                ledger_id: DataLedger::Submit as u32,
-                metadata_format: 0,
-                signature: IrysSignature::default(),
-                chain_id: 1,
-            },
-            metadata: DataTransactionMetadata::new(),
-        })
-    }
-
-    fn commitment_tx_with_id(id: H256, signer: IrysAddress) -> CommitmentTransaction {
-        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
-            tx: CommitmentTransactionV2 {
-                id,
-                anchor: H256::zero(),
-                signer,
-                signature: IrysSignature::default(),
-                fee: 100,
-                value: U256::from(1_u64),
-                commitment_type: CommitmentTypeV2::Stake,
-                chain_id: 1,
-            },
-            metadata: Default::default(),
-        })
-    }
 
     /// Success path: data tx prune returns Ok, mempool state is updated, and
     /// the txid moves from valid → invalid sets so subsequent ingress rejects
