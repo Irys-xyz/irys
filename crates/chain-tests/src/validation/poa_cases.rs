@@ -57,7 +57,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             data.extend_from_slice(chunk);
         }
         let tx = genesis_node
-            .create_signed_data_tx(&genesis_signer, data)
+            .create_signed_data_tx(genesis_signer, data)
             .await
             .expect("to create a signed data tx");
         txs.push(tx);

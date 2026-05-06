@@ -34,11 +34,8 @@ async fn peer_discovery() -> eyre::Result<()> {
         0x88, 0x99,
     ];
     let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
-    let signer = IrysSigner {
-        signer: signing_key,
-        chain_id: config.consensus_config().chain_id,
-        chunk_size: config.consensus_config().chunk_size,
-    };
+    let consensus = config.consensus_config();
+    let signer = IrysSigner::new(signing_key, consensus.chain_id, consensus.chunk_size);
     config.consensus.extend_genesis_accounts(vec![(
         signer.address(),
         GenesisAccount {
@@ -73,7 +70,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
     let mut version_request = HandshakeRequestV2 {
-        chain_id: miner_signer_1.chain_id,
+        chain_id: miner_signer_1.chain_id(),
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
             api: "127.0.0.1:8081".parse().expect("valid socket address"),
@@ -206,7 +203,7 @@ async fn peer_discovery() -> eyre::Result<()> {
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V2",
-        "chain_id": miner_signer_2.chain_id,
+        "chain_id": miner_signer_2.chain_id(),
         "address": {
             "gossip": "127.0.0.2:8080",
             "api": "127.0.0.2:8081",
@@ -247,7 +244,7 @@ async fn peer_discovery() -> eyre::Result<()> {
 
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
     let mut version_request = HandshakeRequestV2 {
-        chain_id: miner_signer_3.chain_id,
+        chain_id: miner_signer_3.chain_id(),
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
             api: "127.0.0.3:8081".parse().expect("valid socket address"),

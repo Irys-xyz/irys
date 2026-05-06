@@ -48,7 +48,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
 
     // Compose a valid transaction with all of the chunks and accurate data_size
     let valid_tx = genesis_node
-        .create_signed_data_tx(&genesis_signer, data.clone())
+        .create_signed_data_tx(genesis_signer, data.clone()) // clone: data reused in later assertions
         .await?;
 
     // Use the data_root of that transaction to compose another with a single chunk data_size

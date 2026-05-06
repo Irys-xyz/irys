@@ -624,7 +624,7 @@ impl InnerCacheTask {
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
-                    &signer,
+                    signer,
                     proof,
                     &self.gossip_broadcast,
                     &self.cache_sender,
