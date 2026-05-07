@@ -350,12 +350,32 @@ impl BlockTree {
         // Load transactions for the start block from DB and construct SealedBlock
         let start_block_commitment_txs = load_commitment_transactions(&start_block, &db)?;
         let start_block_data_txs = load_data_transactions(&start_block, &db)?;
-        let start_block_body = BlockBody {
-            block_hash: start_block.block_hash,
-            data_transactions: start_block_data_txs.into_values().flatten().collect(),
-            commitment_transactions: start_block_commitment_txs,
+        let sealed_start_block = if start_block.height == 0 {
+            // DEPLOYMENT/TESTNET HACK: when restoring from a DB whose start
+            // block is the genesis block, the persisted commitments carry the
+            // hardcoded signer/signature pair from
+            // `system_ledger::get_genesis_commitments`, which pre-dates the
+            // current V1 RLP signing format. The standard `SealedBlock::new`
+            // path's `verify_tx_signatures` would reject them, so we go
+            // through the deployment-only constructor that still validates
+            // the header signature and tx ordering. Mirrors the bypass used
+            // in `IrysNode::persist_genesis_block_and_commitments`.
+            eyre::ensure!(
+                start_block_data_txs.is_empty(),
+                "genesis start block unexpectedly has data ledger transactions"
+            );
+            Arc::new(SealedBlock::new_genesis_skipping_tx_sigs(
+                start_block.clone(),
+                &start_block_commitment_txs,
+            )?)
+        } else {
+            let start_block_body = BlockBody {
+                block_hash: start_block.block_hash,
+                data_transactions: start_block_data_txs.into_values().flatten().collect(),
+                commitment_transactions: start_block_commitment_txs,
+            };
+            Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?)
         };
-        let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
 
         // Initialize cache with start block
         let entry = make_block_tree_entry(Arc::clone(&sealed_start_block));

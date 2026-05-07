@@ -1420,6 +1420,86 @@ impl SealedBlock {
         }
     }
 
+    /// DEPLOYMENT/TESTNET HACK — DO NOT MERGE TO MASTER.
+    ///
+    /// Builds the `SealedBlock` for the genesis block while skipping commitment
+    /// transaction signature validation. The hardcoded commitments in
+    /// `irys_database::system_ledger::get_genesis_commitments` carry a
+    /// signer/signature pair that does not match the current V1 RLP signing
+    /// pre-image, so the standard `new` path's `verify_tx_signatures` check
+    /// rejects them at boot. We still validate the block header signature and
+    /// that the commitments referenced by the header's system ledgers are all
+    /// present in the supplied list, in the header-specified order. The
+    /// genesis block carries no data ledger transactions, so `data_txs` is
+    /// always empty.
+    ///
+    /// Used at boot in two places:
+    /// - `IrysNode::persist_genesis_block_and_commitments` (initial genesis
+    ///   index entry).
+    /// - `BlockTree::restore_from_db` when the start block is the genesis
+    ///   block.
+    pub fn new_genesis_skipping_tx_sigs(
+        genesis_block: IrysBlockHeader,
+        commitments: &[CommitmentTransaction],
+    ) -> eyre::Result<Self> {
+        eyre::ensure!(
+            genesis_block.is_signature_valid(),
+            "genesis block header signature is invalid (block_hash={:?})",
+            genesis_block.block_hash,
+        );
+        eyre::ensure!(
+            genesis_block.height == 0,
+            "new_genesis_skipping_tx_sigs called on a non-genesis block (height={})",
+            genesis_block.height,
+        );
+
+        // Build a lookup so we can pull commitments out in header-specified order.
+        let mut by_id: HashMap<H256, CommitmentTransaction> =
+            HashMap::with_capacity(commitments.len());
+        for c in commitments {
+            by_id.insert(c.id(), c.clone());
+        }
+
+        // Order system-ledger commitments per the header.
+        let mut system_txs: HashMap<SystemLedger, Vec<CommitmentTransaction>> = HashMap::new();
+        for ledger in &genesis_block.system_ledgers {
+            let ledger_type = SystemLedger::try_from(ledger.ledger_id).map_err(|_| {
+                eyre::eyre!(
+                    "unknown system ledger_id {} in genesis block",
+                    ledger.ledger_id,
+                )
+            })?;
+            let mut ordered = Vec::with_capacity(ledger.tx_ids.0.len());
+            for expected_id in &ledger.tx_ids.0 {
+                let tx = by_id.remove(expected_id).ok_or_else(|| {
+                    eyre::eyre!(
+                        "genesis system ledger {:?} references missing commitment tx {}",
+                        ledger_type,
+                        expected_id,
+                    )
+                })?;
+                ordered.push(tx);
+            }
+            system_txs.insert(ledger_type, ordered);
+        }
+        if !by_id.is_empty() {
+            let extras: Vec<_> = by_id.keys().collect();
+            eyre::bail!(
+                "genesis commitments contain {} tx(s) not referenced by any header system ledger: {:?}",
+                extras.len(),
+                extras,
+            );
+        }
+
+        Ok(Self {
+            header: Arc::new(genesis_block),
+            transactions: Arc::new(BlockTransactions {
+                system_txs,
+                data_txs: HashMap::new(),
+            }),
+        })
+    }
+
     pub fn header(&self) -> &Arc<IrysBlockHeader> {
         &self.header
     }
