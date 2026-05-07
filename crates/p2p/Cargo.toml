@@ -15,6 +15,7 @@ irys-utils.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry.workspace = true

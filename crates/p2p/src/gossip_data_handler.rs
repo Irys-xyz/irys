@@ -7,7 +7,7 @@ use crate::{
         record_gossip_inbound_error,
     },
     rate_limiting::{DataRequestTracker, RequestCheckResult},
-    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
+    types::{InternalGossipError, InvalidDataError},
 };
 use core::net::SocketAddr;
 use irys_actors::block_discovery::{
@@ -15,8 +15,8 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
-    block_discovery::BlockDiscoveryFacade, chunk_ingress_service::facade::ChunkIngressFacadeImpl,
+    MempoolFacade, block_discovery::BlockDiscoveryFacade,
+    chunk_ingress_service::facade::ChunkIngressFacadeImpl,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -142,38 +142,11 @@ where
             }
             Err(error) => {
                 record_gossip_inbound_error(error.error_type(), error.is_advisory());
-
-                Err(match error {
-                    ChunkIngressError::Critical(err) => match err {
-                        CriticalChunkIngressError::InvalidProof => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof)
-                        }
-                        CriticalChunkIngressError::InvalidDataHash => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash)
-                        }
-                        CriticalChunkIngressError::InvalidChunkSize => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
-                        }
-                        CriticalChunkIngressError::InvalidDataSize => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize)
-                        }
-                        CriticalChunkIngressError::InvalidOffset(msg) => {
-                            GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
-                        }
-                        CriticalChunkIngressError::DatabaseError => GossipError::Internal(
-                            InternalGossipError::Database("Chunk ingress database error".into()),
-                        ),
-                        CriticalChunkIngressError::ServiceUninitialized => {
-                            GossipError::Internal(InternalGossipError::ServiceUninitialized)
-                        }
-                        CriticalChunkIngressError::Other(other) => {
-                            GossipError::Internal(InternalGossipError::Unknown(other))
-                        }
-                    },
-                    ChunkIngressError::Advisory(err) => {
-                        GossipError::Advisory(AdvisoryGossipError::ChunkIngress(err))
-                    }
-                })
+                // The conversion lives on `impl From<ChunkIngressError> for
+                // GossipError` (types.rs) so the Advisory(Overloaded) ->
+                // RateLimited mapping is testable in isolation and shared
+                // with any future caller.
+                Err(error.into())
             }
         }
     }
@@ -869,11 +842,27 @@ where
         }
     }
 
+    /// Synchronous PullData path used by `handle_pull_data` / `handle_pull_data_v1`.
+    /// Consults the rate limiter before resolving so PullData honours the same
+    /// `RateLimited` contract as the gossip POST path; without this gate,
+    /// PullData would be unthrottled even though the HTTP layer advertises
+    /// `RejectionReason::RateLimited`.
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
         request: GossipRequestV2<GossipDataRequestV2>,
+        duplicate_request_milliseconds: u128,
     ) -> GossipResult<Option<GossipDataV2>> {
+        let check_result = self
+            .data_request_tracker
+            .check_request(&request.peer_id, duplicate_request_milliseconds);
+        if !check_result.should_serve() {
+            debug!(
+                "Node {}: Rate limiting peer {:?} for pull-data request",
+                self.gossip_client.mining_address, request.miner_address
+            );
+            return Err(GossipError::RateLimited);
+        }
         self.resolve_data_request(&request.data, request.miner_address)
             .await
     }

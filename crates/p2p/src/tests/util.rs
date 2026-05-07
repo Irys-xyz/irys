@@ -444,6 +444,7 @@ impl GossipServiceTestFixture {
                         self.config.consensus.clone(),
                     )))),
                     std::time::Instant::now(),
+                    tokio_util::sync::CancellationToken::new(),
                 )
                 .expect("failed to run the gossip service");
 

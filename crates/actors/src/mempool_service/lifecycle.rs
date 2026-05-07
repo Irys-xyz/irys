@@ -1,7 +1,6 @@
 use crate::block_tree_service::ReorgEvent;
 use crate::chunk_ingress_service::ChunkIngressMessage;
-use crate::mempool_service::Inner;
-use crate::mempool_service::TxIngressError;
+use crate::mempool_service::{Inner, MempoolError, TxIngressError};
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
@@ -50,14 +49,32 @@ impl Inner {
             .chain(thirty_day_txids.iter())
             .copied()
             .collect();
-        self.mempool_state
+        if let Err(e) = self
+            .mempool_state
             .apply_block_confirmed_updates(
                 &all_data_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
             )
-            .await;
+            .await
+        {
+            // `apply_block_confirmed_updates` -> `write` already triggered
+            // `signal_fatal_shutdown`. Short-circuit the rest of confirmation:
+            // proceeding would update the DB's `CachedDataRoots`, notify chunk
+            // ingress, and prune pending txs while the mempool itself still
+            // reflects pre-confirmation state — the exact partial application
+            // (DB/cache moved forward, mempool stale) this fix is meant to
+            // prevent. Returning Ok lets the lifecycle drive the wind-down
+            // instead of panicking via `handle_message`'s spawn wrapper.
+            warn!(
+                ?e,
+                block.hash = %block.block_hash,
+                block.height = block.height,
+                "Mempool contention applying block-confirmed updates; signal_fatal_shutdown already triggered, aborting confirmation work for this block"
+            );
+            return Ok(());
+        }
 
         // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
         // Track which roots were successfully cached so we only trigger proof generation
@@ -152,7 +169,23 @@ impl Inner {
         // Hold write lock only for the revalidation itself, then release before
         // sending the cache-service message (avoids holding the lock across a channel send).
         let expired_by_data_root = {
-            let mut state = self.mempool_state.write_for_reorg().await;
+            let mut state = match self.mempool_state.write_for_reorg().await {
+                Ok(g) => g,
+                Err(e) => {
+                    // `write_for_reorg` -> `write` already called
+                    // `signal_fatal_shutdown`, which cancelled the lifecycle's
+                    // shutdown token. Propagating Err here would bubble through
+                    // `start()` into the spawn wrapper's `.expect(...)` and
+                    // panic — short-circuiting the graceful shutdown that was
+                    // just signaled. Skip this revalidation and let the
+                    // lifecycle drive the wind-down.
+                    warn!(
+                        ?e,
+                        "mempool reorg write lock contention; graceful shutdown already signaled, skipping reorg revalidation"
+                    );
+                    return Ok(());
+                }
+            };
 
             // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
             let expired_by_data_root =
@@ -189,15 +222,30 @@ impl Inner {
 
     /// Clears the promotion state (promoted_height) for a transaction in the mempool
     /// during reorg handling. Only affects in-memory state; does not persist to DB.
+    ///
+    /// Returns:
+    /// - `Ok(())` — tx cleared or absent (benign no-op)
+    /// - `Err(MempoolError::LockContention)` — write lock contended;
+    ///   `signal_fatal_shutdown` was already triggered. Caller MUST short-circuit
+    ///   any iterating loop instead of continuing to contend against the
+    ///   winding-down mempool.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
-    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
-        // Try fast-path: clear in-place if present in the mempool
-        if self.mempool_state.clear_promoted_height(txid).await {
-            return Ok(());
+    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> Result<(), MempoolError> {
+        match self.mempool_state.clear_promoted_height(txid).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
+                Ok(())
+            }
+            Err(e) => {
+                warn!(
+                    ?e,
+                    tx.id = %txid,
+                    "Mempool contention during unpromote; signal_fatal_shutdown already triggered, propagating to caller"
+                );
+                Err(e)
+            }
         }
-
-        tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
-        Ok(())
     }
 
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
@@ -285,19 +333,53 @@ impl Inner {
             }
         }
 
-        // Phase 3: Batch-remove under a single write lock each
-        if !expired_data.is_empty() {
-            self.mempool_state.batch_prune_data_txs(&expired_data).await;
-        }
-        if !expired_commits.is_empty() {
-            self.mempool_state
+        // Phase 3a: Batch-remove expired data txs under a single write lock.
+        //
+        // The `data_txs_pruned` flag gates Phase 4 (cache invalidation): if this
+        // write fails, the mempool still holds the txs, so notifying the cache
+        // to remove their entries from `CachedDataRoot.txid_set` would create a
+        // desync where the cache says "no such tx for this data_root" while
+        // the mempool still has it — silently dropping txs from publish
+        // candidate selection until the next prune cycle.
+        let data_txs_pruned = if expired_data.is_empty() {
+            true
+        } else {
+            match self.mempool_state.batch_prune_data_txs(&expired_data).await {
+                Ok(()) => true,
+                Err(e) => {
+                    // `batch_prune_data_txs` -> `write` already triggered
+                    // `signal_fatal_shutdown`. Skip cache invalidation to keep
+                    // mempool ⇄ CachedDataRoots in sync; the lifecycle drives
+                    // the wind-down.
+                    warn!(
+                        ?e,
+                        "Mempool contention pruning expired data txs; skipping CachedDataRoots invalidation to preserve cache invariant"
+                    );
+                    false
+                }
+            }
+        };
+
+        // Phase 3b: Batch-remove expired commitment txs under a single write lock.
+        // Independent of Phase 3a / Phase 4: commitment txs do not appear in
+        // `CachedDataRoots`, so contention here cannot desync that cache.
+        if !expired_commits.is_empty()
+            && let Err(e) = self
+                .mempool_state
                 .batch_prune_commitment_txs(&expired_commits)
-                .await;
+                .await
+        {
+            warn!(
+                ?e,
+                "Mempool contention pruning expired commitment txs; lifecycle wind-down in flight"
+            );
         }
 
         // Phase 4: Ask the cache service to remove pruned txids from CachedDataRoot.txid_set.
-        // This prevents stale txid references from blocking publish candidate selection.
-        if !expired_by_data_root.is_empty()
+        // Only fires when Phase 3a actually pruned the mempool — otherwise we'd
+        // tell the cache to forget txids the mempool still serves.
+        if data_txs_pruned
+            && !expired_by_data_root.is_empty()
             && let Err(e) = self.service_senders.chunk_cache.send_traced(
                 crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
                     expired_by_data_root,
@@ -416,20 +498,53 @@ impl Inner {
             }
         }
 
-        eyre::ensure!(
-            orphaned_full_commitment_txs.iter().len() == orphaned_commitment_tx_ids.iter().len(),
-            "Should always be able to get all orphaned commitment transactions"
-        );
+        // A commitment tx may be on the orphan-id list yet absent from any
+        // epoch snapshot — for example, a stake/pledge tx confirmed in the
+        // old fork before its first epoch boundary. That is a legitimate
+        // condition during reorg cleanup; previously a hard assert here took
+        // the entire mempool service down via `?`, triggering controlled
+        // shutdown for what is recoverable. Continue with the partial set;
+        // any txs we could not resolve will retry through the normal
+        // mempool ingress paths if the peer or the dual-publish flow re-
+        // submits them.
+        if orphaned_full_commitment_txs.len() != orphaned_commitment_tx_ids.len() {
+            let resolved: HashSet<H256> = orphaned_full_commitment_txs.keys().copied().collect();
+            let missing: Vec<H256> = orphaned_commitment_tx_ids
+                .iter()
+                .filter(|id| !resolved.contains(id))
+                .copied()
+                .collect();
+            warn!(
+                resolved = orphaned_full_commitment_txs.len(),
+                expected = orphaned_commitment_tx_ids.len(),
+                ?missing,
+                "Some orphaned commitment txs were not present in any epoch snapshot; \
+                 continuing cleanup with the partial set"
+            );
+        }
 
         // Clear in-memory included_height for orphaned commitment transactions before resubmitting.
         // DB metadata is already cleared by BlockMigrationService::persist_metadata() in BlockTreeService.
+        // On contention we abort the cleanup loop: signal_fatal_shutdown is in flight,
+        // and continuing would queue more contended writes against a winding-down mempool.
         for id in orphaned_commitment_tx_ids.iter() {
-            if self
+            match self
                 .mempool_state
                 .clear_commitment_tx_included_height(*id)
                 .await
             {
-                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %id,
+                        "Mempool contention during commitment reorg cleanup; aborting cleanup, lifecycle will drive shutdown"
+                    );
+                    return Ok(());
+                }
             }
         }
 
@@ -566,14 +681,27 @@ impl Inner {
             );
         }
 
-        // Clear included_height for orphaned term transactions
+        // Clear included_height for orphaned term transactions. On contention,
+        // abort: signal_fatal_shutdown is in flight and continuing would queue
+        // more contended writes.
         for tx_id in orphaned_term_txs.iter().copied() {
-            if self
+            match self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned term tx");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %tx_id,
+                        "Mempool contention during term-tx reorg cleanup; aborting"
+                    );
+                    return Ok(());
+                }
             }
         }
 
@@ -613,27 +741,42 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
-        // Clear included_height for orphaned publish transactions
+        // Clear included_height for orphaned publish transactions. Same
+        // contention semantics as the term-tx loop above.
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
-            if self
+            match self
                 .mempool_state
                 .clear_data_tx_included_height(tx_id)
                 .await
             {
-                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+                Ok(true) => {
+                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        tx.id = %tx_id,
+                        "Mempool contention during publish-tx reorg cleanup; aborting"
+                    );
+                    return Ok(());
+                }
             }
         }
 
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
             debug!("reorging orphaned publish tx: {}", &tx_id);
-            // Clear promotion state for txs that were promoted on an orphaned fork
+            // Clear promotion state for txs that were promoted on an orphaned fork.
+            // On `LockContention`, `signal_fatal_shutdown` has already been triggered
+            // by the contended write — break out of the loop instead of continuing
+            // to contend against the winding-down mempool.
             if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
                 warn!(
-                    tx.id = %tx_id,
-                    tx.err = %e,
-                    "Failed to unpromote tx during reorg"
+                    ?e,
+                    "Mempool contention during reorg unpromote loop; aborting remaining orphan cleanup"
                 );
+                return Ok(());
             }
         }
 
@@ -679,8 +822,17 @@ impl Inner {
 
                 // Set promoted_height in metadata (in-memory only)
                 tx.metadata_mut().promoted_height = Some(header.height);
-                // update entry
-                self.mempool_state.update_submit_transaction(tx).await;
+                // update entry — propagate LockContention so the lifecycle
+                // shutdown signal is observed; signal_fatal_shutdown is
+                // already triggered by the wrapper, just stop iterating.
+                if let Err(e) = self.mempool_state.update_submit_transaction(tx).await {
+                    warn!(
+                        ?e,
+                        ?txid,
+                        "Reorg dual-publish update aborted: mempool wind-down already in progress"
+                    );
+                    return Ok(());
+                }
                 debug!(
                     "Reorged dual-published tx with {} proofs for {}",
                     &tx_proofs.len(),

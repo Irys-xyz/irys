@@ -7,7 +7,7 @@ use crate::types::GossipRoutes;
 use crate::wire_types::{self, GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
-    types::{GossipError, GossipResult, InternalGossipError},
+    types::{GossipError, GossipResult, InternalGossipError, InvalidDataError},
 };
 use actix_web::dev::HttpServiceFactory;
 use actix_web::{
@@ -31,6 +31,7 @@ use reth_ethereum_primitives::Block;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, debug, error, info, warn};
 use tracing_actix_web::TracingLogger;
 
@@ -48,6 +49,10 @@ where
     peer_list: PeerList,
     chunk_semaphore: Arc<tokio::sync::Semaphore>,
     actix_workers: usize,
+    /// Cancelling this token requests a controlled node shutdown. Used by the
+    /// `FatalCacheCorruption` path so a poisoned local cache stops serving
+    /// blocks instead of running on while penalising innocent peers.
+    shutdown_token: CancellationToken,
 }
 
 impl<M, B> Clone for GossipServer<M, B>
@@ -61,6 +66,7 @@ where
             peer_list: self.peer_list.clone(),
             chunk_semaphore: self.chunk_semaphore.clone(),
             actix_workers: self.actix_workers,
+            shutdown_token: self.shutdown_token.clone(),
         }
     }
 }
@@ -75,6 +81,7 @@ where
         peer_list: PeerList,
         max_concurrent_chunks: usize,
         actix_workers: usize,
+        shutdown_token: CancellationToken,
     ) -> Self {
         let effective_limit = if max_concurrent_chunks == 0 {
             warn!("max_concurrent_gossip_chunks is 0, treating as unlimited");
@@ -87,6 +94,7 @@ where
             peer_list,
             chunk_semaphore: Arc::new(tokio::sync::Semaphore::new(effective_limit)),
             actix_workers,
+            shutdown_token,
         }
     }
 
@@ -125,14 +133,21 @@ where
             }
         };
 
+        // Snapshot is_syncing before the await so the anchor-penalty decision
+        // reflects node state at message acceptance, not at error observation.
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         let result = server.data_handler.handle_chunk(v2_request).await;
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send chunk: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send chunk",
+                &server.shutdown_token,
+            );
         }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -296,6 +311,9 @@ where
 
         let block_header = Arc::new(block_header);
         let runtime_handle = server.data_handler.runtime_handle.clone();
+        // Snapshot before spawn so the anchor-penalty decision reflects node
+        // state at message acceptance, not at error observation.
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         runtime_handle.spawn(
             async move {
                 if let Err(error) = server
@@ -309,7 +327,13 @@ where
                     .in_current_span()
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        is_syncing,
+                        &server.shutdown_token,
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process the block {} height {}: {:?}",
@@ -372,13 +396,22 @@ where
         let handler = server.data_handler.clone();
         let runtime_handle = handler.runtime_handle.clone();
 
+        // Snapshot before spawn so the anchor-penalty decision reflects node
+        // state at message acceptance, not at error observation.
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         runtime_handle.spawn(
             async move {
                 if let Err(e) = handler
                     .handle_block_body(v2_request, source_socket_addr)
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &e,
+                        &server.peer_list,
+                        is_syncing,
+                        &server.shutdown_token,
+                    );
                     error!(
                         "Node {:?}: Failed to process the block body {}: {:?}",
                         this_node_id, block_hash, e
@@ -427,15 +460,20 @@ where
 
         let v2_request = v1_request.into_v2(peer.peer_id);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server
             .data_handler
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send execution payload",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip execution payload handled");
@@ -472,11 +510,16 @@ where
 
         let v2_request = v1_request.into_v2(peer.peer_id);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send transaction",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -512,11 +555,16 @@ where
 
         let v2_request = v1_request.into_v2(peer.peer_id);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send commitment transaction",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -550,11 +598,16 @@ where
 
         let v2_request = v1_request.into_v2(peer.peer_id);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send ingress proof",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -604,14 +657,19 @@ where
             }
         };
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         let result = server.data_handler.handle_chunk(v2_request).await;
         drop(permit);
 
         if let Err(error) = result {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send chunk: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send chunk",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -664,6 +722,7 @@ where
         let block_header = Arc::new(block_header);
 
         let runtime_handle = server.data_handler.runtime_handle.clone();
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         runtime_handle.spawn(
             async move {
                 if let Err(error) = server
@@ -676,7 +735,13 @@ where
                     )
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        is_syncing,
+                        &server.shutdown_token,
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process the block {} height {}: {:?}",
@@ -734,6 +799,7 @@ where
         let block_hash = v2_request.data.block_hash;
 
         let runtime_handle = server.data_handler.runtime_handle.clone();
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         runtime_handle.spawn(
             async move {
                 if let Err(error) = server
@@ -741,7 +807,13 @@ where
                     .handle_block_body(v2_request, source_socket_addr)
                     .await
                 {
-                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    Self::handle_invalid_data(
+                        &source_miner_address,
+                        &error,
+                        &server.peer_list,
+                        is_syncing,
+                        &server.shutdown_token,
+                    );
                     if !error.is_advisory() {
                         error!(
                             "Node {:?}: Failed to process block body {}: {:?}",
@@ -787,15 +859,20 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server
             .data_handler
             .handle_execution_payload(v2_request)
             .await
         {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send execution payload: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send execution payload",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -836,11 +913,16 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send data transaction header: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send data transaction header",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -880,11 +962,16 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send commitment transaction: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send commitment transaction",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -922,11 +1009,16 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        let is_syncing = server.data_handler.sync_state.is_syncing();
         if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
-            Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-            error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::Ok()
-                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+            return Self::rejection_response_for_error(
+                &error,
+                &source_miner_address,
+                &server.peer_list,
+                is_syncing,
+                "send ingress proof",
+                &server.shutdown_token,
+            );
         }
 
         debug!("Gossip data handled");
@@ -1320,19 +1412,95 @@ where
         HttpResponse::Ok().json(irys_types::ProtocolVersion::supported_versions_u32())
     }
 
+    /// Convert a gossip-handler error into the appropriate `HttpResponse`,
+    /// preserving the retryable-backpressure signal.
+    ///
+    /// `RateLimited` (and the chunk-ingress overload signal that gets mapped
+    /// to it in `gossip_data_handler`) returns `RejectionReason::RateLimited`
+    /// and applies no peer penalty — the peer is fine, we are saturated.
+    /// Everything else routes through `handle_invalid_data` (which decides
+    /// whether to penalise based on the variant) and surfaces as `InvalidData`.
+    fn rejection_response_for_error(
+        error: &GossipError,
+        peer_miner_address: &IrysAddress,
+        peer_list: &PeerList,
+        is_syncing: bool,
+        context: &str,
+        shutdown_token: &CancellationToken,
+    ) -> HttpResponse {
+        if matches!(error, GossipError::RateLimited) {
+            debug!(%error, context, "Gossip rate-limited");
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited));
+        }
+        Self::handle_invalid_data(
+            peer_miner_address,
+            error,
+            peer_list,
+            is_syncing,
+            shutdown_token,
+        );
+        if error.is_advisory() {
+            debug!(%error, context, "Gossip advisory error");
+        } else {
+            error!("Failed to {}: {}", context, error);
+        }
+        HttpResponse::Ok().json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+    }
+
     fn handle_invalid_data(
         peer_miner_address: &IrysAddress,
         error: &GossipError,
         peer_list: &PeerList,
+        is_syncing: bool,
+        shutdown_token: &CancellationToken,
     ) {
         match error {
             GossipError::InvalidData(invalid_data_error) => {
+                // Anchor errors during sync are caused by the receiver being behind,
+                // not by sender misbehavior — suppress the penalty in that window.
+                if is_syncing
+                    && matches!(
+                        invalid_data_error,
+                        InvalidDataError::TransactionAnchor(_)
+                            | InvalidDataError::IngressProofAnchor(_)
+                    )
+                {
+                    debug!(
+                        ?peer_miner_address,
+                        ?invalid_data_error,
+                        "Skipping anchor penalty while syncing",
+                    );
+                    return;
+                }
                 peer_list.decrease_peer_score(
                     peer_miner_address,
                     ScoreDecreaseReason::BogusData(format!(
                         "Invalid data: {:?}",
                         invalid_data_error
                     )),
+                );
+            }
+            GossipError::BlockPool(CriticalBlockPoolError::FatalCacheCorruption(msg)) => {
+                // Local fault: the block-tree cache is poisoned. Do NOT penalise
+                // the peer who happened to deliver the block that surfaced this.
+                // Cancel the lifecycle's shutdown token so the node winds down
+                // instead of repeatedly hitting the same poison and penalising
+                // a different peer each time.
+                error!(
+                    error = %msg,
+                    "Fatal block-tree cache corruption observed via gossip path; requesting controlled node shutdown"
+                );
+                shutdown_token.cancel();
+            }
+            GossipError::BlockPool(CriticalBlockPoolError::ParentNotInCache(msg)) => {
+                // Local prune/reorg race: our cache evicted the parent before
+                // this peer's child block arrived. The peer is innocent — do
+                // NOT decrement reputation. The block is dropped; the peer
+                // will resend on the next gossip round if they still have it.
+                debug!(
+                    error = %msg,
+                    "Block pool: parent not in cache (local prune/reorg race); peer not penalised"
                 );
             }
             GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
@@ -1385,7 +1553,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
             .in_current_span()
             .await
         {
@@ -1407,6 +1575,11 @@ where
                 None => HttpResponse::Ok()
                     .json(GossipResponse::Accepted(None::<wire_types::GossipDataV1>)),
             },
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited data request from peer");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
+            }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::Ok()
@@ -1506,13 +1679,18 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
             .in_current_span()
             .await
         {
             Ok(maybe_data) => {
                 let wire_data: Option<wire_types::GossipDataV2> = maybe_data.map(Into::into);
                 HttpResponse::Ok().json(GossipResponse::Accepted(wire_data))
+            }
+            Err(GossipError::RateLimited) => {
+                debug!("Rate limited pull data request from peer");
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
             }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
@@ -1711,9 +1889,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    #[tokio::test]
-    // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
-    async fn handle_invalid_block_penalizes_peer() {
+    fn setup_peer_list() -> (IrysAddress, PeerList, tempfile::TempDir) {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -1750,13 +1926,148 @@ mod tests {
             protocol_version: ProtocolVersion::default(),
         };
         peer_list.add_or_update_peer(test_peer, true);
+        (miner, peer_list, temp_dir)
+    }
 
+    #[test]
+    // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
+    fn handle_invalid_block_penalizes_peer() {
+        let (miner, peer_list, _dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
+        let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
-            &miner, &error, &peer_list,
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
         );
 
         let peer = peer_list.peer_by_mining_address(&miner).unwrap();
         assert_eq!(peer.reputation_score.get(), PeerScore::INITIAL - 5);
+        assert!(
+            !shutdown_token.is_cancelled(),
+            "BlockError must not trigger shutdown"
+        );
+    }
+
+    /// `ParentNotInCache` is a *local* prune/reorg race — our cache evicted
+    /// the parent before the peer's child block arrived. The peer is innocent;
+    /// reputation must not move. The lifecycle's shutdown token must NOT be
+    /// cancelled either (the node continues running normally and re-requests
+    /// the block on the next gossip round if it is still relevant).
+    #[test]
+    fn handle_parent_not_in_cache_does_not_penalize_peer() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let initial_score = peer_list
+            .peer_by_mining_address(&miner)
+            .unwrap()
+            .reputation_score
+            .get();
+        let error = GossipError::BlockPool(CriticalBlockPoolError::ParentNotInCache(
+            "parent block 0xabc..def not in cache (expected at height 42)".into(),
+        ));
+        let shutdown_token = CancellationToken::new();
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
+        );
+
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(
+            peer.reputation_score.get(),
+            initial_score,
+            "ParentNotInCache must not penalise the peer (local prune/reorg race)"
+        );
+        assert!(
+            !shutdown_token.is_cancelled(),
+            "ParentNotInCache must not trigger shutdown"
+        );
+    }
+
+    /// `FatalCacheCorruption` is a *local* fault. The peer who happened to
+    /// deliver the offending block must NOT be penalised, and the lifecycle's
+    /// shutdown token must be cancelled so the node winds down instead of
+    /// running on with a poisoned block-tree cache.
+    #[test]
+    fn handle_fatal_cache_corruption_triggers_shutdown_without_penalty() {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let initial_score = peer_list
+            .peer_by_mining_address(&miner)
+            .unwrap()
+            .reputation_score
+            .get();
+        let error = GossipError::BlockPool(CriticalBlockPoolError::FatalCacheCorruption(
+            "block tree cache lock poisoned at: test_site".into(),
+        ));
+        let shutdown_token = CancellationToken::new();
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            false,
+            &shutdown_token,
+        );
+
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(
+            peer.reputation_score.get(),
+            initial_score,
+            "peer must not be penalised for a local cache fault"
+        );
+        assert!(
+            shutdown_token.is_cancelled(),
+            "FatalCacheCorruption must cancel the shutdown token"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::syncing_skips_tx_anchor(
+        GossipError::InvalidData(crate::types::InvalidDataError::TransactionAnchor(
+            irys_types::H256::zero(),
+        )),
+        true,
+        PeerScore::INITIAL
+    )]
+    #[case::syncing_skips_ingress_proof_anchor(
+        GossipError::InvalidData(crate::types::InvalidDataError::IngressProofAnchor(
+            irys_types::BlockHash::default(),
+        )),
+        true,
+        PeerScore::INITIAL
+    )]
+    #[case::syncing_penalises_non_anchor(
+        GossipError::InvalidData(crate::types::InvalidDataError::TransactionSignature(
+            IrysAddress::new([2_u8; 20]),
+        )),
+        true,
+        PeerScore::INITIAL - 5,
+    )]
+    #[case::synced_penalises_tx_anchor(
+        GossipError::InvalidData(crate::types::InvalidDataError::TransactionAnchor(
+            irys_types::H256::zero(),
+        )),
+        false,
+        PeerScore::INITIAL - 5,
+    )]
+    fn handle_invalid_data_anchor_penalty_suppression(
+        #[case] error: GossipError,
+        #[case] is_syncing: bool,
+        #[case] expected_score: u16,
+    ) {
+        let (miner, peer_list, _dir) = setup_peer_list();
+        let shutdown_token = CancellationToken::new();
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
+            &miner,
+            &error,
+            &peer_list,
+            is_syncing,
+            &shutdown_token,
+        );
+        let peer = peer_list.peer_by_mining_address(&miner).unwrap();
+        assert_eq!(peer.reputation_score.get(), expected_score);
     }
 }

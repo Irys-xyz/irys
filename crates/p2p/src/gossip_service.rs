@@ -176,6 +176,7 @@ impl P2PService {
         block_index: BlockIndexReadGuard,
         block_tree: BlockTreeReadGuard,
         started_at: Instant,
+        shutdown_token: tokio_util::sync::CancellationToken,
     ) -> GossipResult<(
         Server,
         ServerHandle,
@@ -233,6 +234,7 @@ impl P2PService {
             peer_list.clone(),
             config.node_config.p2p_gossip.max_concurrent_gossip_chunks,
             config.node_config.gossip.actix_workers,
+            shutdown_token,
         );
 
         let server = server.run(listener)?;

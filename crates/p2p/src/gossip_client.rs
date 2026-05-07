@@ -1405,7 +1405,7 @@ impl GossipClient {
                     record_gossip_outbound_error(gossip_error_type(err));
                     peer_list.decrease_peer_score_by_peer_id(
                         &peer_id,
-                        ScoreDecreaseReason::Offline(format!(
+                        ScoreDecreaseReason::NetworkError(format!(
                             "send_data_and_update_score_for_request resulted in an error: {:?}",
                             err
                         )),
@@ -2815,10 +2815,13 @@ mod tests {
             );
 
             let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
+            // NetworkError penalty is -1, not -3. A transient timeout against
+            // an overloaded-but-honest peer is not the same signal as an
+            // offline peer.
             assert_eq!(
                 updated_score,
-                initial_score - 3,
-                "Failed response should decrease by 3"
+                initial_score - 1,
+                "Failed response should decrease by 1 (NetworkError penalty)"
             );
         }
 
@@ -2829,6 +2832,10 @@ mod tests {
             let (peer_id, _, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(peer, true);
 
+            // Sequence: 50 (initial) → +1 (fast Ok) → +1 (normal Ok) → -1 (slow Ok)
+            // → -1 (NetworkError). NetworkError carries a smaller penalty than
+            // Offline since transient network errors are not the same signal as
+            // a peer being deliberately unreachable.
             let operations = vec![
                 (Duration::from_millis(100), Ok(()), 51),
                 (Duration::from_millis(1500), Ok(()), 52),
@@ -2836,7 +2843,7 @@ mod tests {
                 (
                     Duration::from_millis(500),
                     Err(GossipError::Network("error".to_string())),
-                    48,
+                    50,
                 ),
             ];
 
