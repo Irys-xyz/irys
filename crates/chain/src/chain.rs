@@ -56,7 +56,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::BlockHash;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
-    BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
+    CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
     SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
@@ -738,13 +738,14 @@ impl IrysNode {
         }
 
         // Insert the genesis block index entry.
-        // Use full sealing here so we verify genesis commitments match the header.
-        let genesis_body = BlockBody {
-            block_hash: genesis_block.block_hash,
-            data_transactions: vec![],
-            commitment_transactions: genesis_commitments.to_vec(),
-        };
-        let genesis_sealed = SealedBlock::new(genesis_block.clone(), genesis_body)?;
+        // DEPLOYMENT/TESTNET HACK: the hardcoded genesis commitments in
+        // `system_ledger::get_genesis_commitments` have signer/signature pairs
+        // that pre-date the current V1 RLP signing format, so the standard
+        // `SealedBlock::new` would reject them via `verify_tx_signatures`.
+        // Use the deployment-only constructor that still validates the header
+        // signature and tx ordering against the header.
+        let genesis_sealed =
+            SealedBlock::new_genesis_skipping_tx_sigs(genesis_block.clone(), genesis_commitments)?;
         BlockIndex::push_block(&write_tx, &genesis_sealed, self.config.consensus.chunk_size)?;
 
         // Commit the database transaction
