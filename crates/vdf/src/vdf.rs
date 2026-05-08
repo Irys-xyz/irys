@@ -649,9 +649,14 @@ mod tests {
             })
             .unwrap();
 
-        tokio::time::timeout(Duration::from_millis(100), vdf_steps_guard.wait_for_step(1))
-            .await
-            .expect("fast-forward step should be applied promptly while syncing");
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            vdf_steps_guard.wait_for_step(1, cancel, Duration::from_secs(30)),
+        )
+        .await
+        .expect("fast-forward step should be applied promptly while syncing")
+        .expect("wait_for_step should not error");
 
         shutdown_token.cancel();
         vdf_thread_handler.join().unwrap();

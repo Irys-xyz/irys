@@ -212,22 +212,66 @@ impl VdfStateReadonly {
             .ok_or(eyre!("Step not found"))
     }
 
-    /// Wait for a specific step to be available for n seconds. This doesn't have the timeout.
-    /// Instead, we should check that the `desired_step_number` is a reasonable number of steps
-    /// to wait for. This should be ensured before calling this function
-    pub async fn wait_for_step(&self, desired_step_number: u64) {
+    /// Wait until `desired_step_number` is reached.
+    ///
+    /// Polls `global_step` at 20 Hz, bailing if:
+    /// - the cancel signal is set (e.g., shutdown, preemption), or
+    /// - `global_step` does not advance for `progress_timeout`.
+    ///
+    /// The progress check guards against a dead/stuck VDF writer thread:
+    /// callers can wait for legitimately long step ranges, but a stalled
+    /// state surfaces as a typed error instead of an indefinite hang.
+    pub async fn wait_for_step(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+    ) -> eyre::Result<()> {
+        use tokio::time::Instant;
+
         let retries_per_second = 20;
-        let mut attempts = 0;
+        let mut last_observed_step = self.read().global_step;
+        let mut last_progress_at = Instant::now();
+        let mut attempts = 0_u32;
+
         loop {
-            if self.read().global_step >= desired_step_number {
-                debug!("Step {} is available", desired_step_number);
-                return;
+            if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                warn!(
+                    vdf.desired_step = desired_step_number,
+                    vdf.current_step = last_observed_step,
+                    "VDF wait cancelled"
+                );
+                bail!("Cancelled");
             }
-            if attempts % retries_per_second == 0 {
-                debug!("Waiting for step {}", &desired_step_number);
+
+            let current_step = self.read().global_step;
+
+            if current_step >= desired_step_number {
+                debug!(vdf.desired_step = desired_step_number, "VDF step available");
+                return Ok(());
             }
-            attempts += 1;
-            sleep(Duration::from_millis(1000 / retries_per_second)).await;
+
+            if current_step > last_observed_step {
+                last_observed_step = current_step;
+                last_progress_at = Instant::now();
+            } else if last_progress_at.elapsed() >= progress_timeout {
+                bail!(
+                    "VDF state did not advance for {:?} (current={}, desired={})",
+                    progress_timeout,
+                    current_step,
+                    desired_step_number
+                );
+            }
+
+            if attempts.is_multiple_of(retries_per_second) {
+                debug!(
+                    vdf.desired_step = desired_step_number,
+                    vdf.current_step = current_step,
+                    "Waiting for VDF step"
+                );
+            }
+            attempts = attempts.wrapping_add(1);
+            sleep(Duration::from_millis(1000 / retries_per_second as u64)).await;
         }
     }
 }
@@ -747,5 +791,68 @@ mod tests {
             guard.global_step, 42,
             "poison-recovery must surface the data the writer wrote before panicking"
         );
+    }
+
+    /// Progress check fires when `global_step` does not advance within the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_bails_when_no_progress() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+
+        let result = readonly
+            .wait_for_step(200, Arc::clone(&cancel), std::time::Duration::from_secs(30))
+            .await;
+
+        assert!(result.is_err(), "stalled state must bail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("did not advance") || err.contains("stalled"),
+            "error must explain stall, got: {err}"
+        );
+    }
+
+    /// Cancel signal causes immediate exit even if `global_step` is below desired.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_bails_on_cancel() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Cancelled as u8));
+
+        let result = readonly
+            .wait_for_step(200, Arc::clone(&cancel), std::time::Duration::from_secs(30))
+            .await;
+
+        assert!(result.is_err(), "cancelled wait must bail");
+        assert!(
+            result.unwrap_err().to_string().contains("Cancelled"),
+            "error must indicate cancellation"
+        );
+    }
+
+    /// Happy path: each step advance resets the progress timer; wait completes
+    /// when `global_step` reaches the desired number.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_completes_when_state_advances() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(Arc::clone(&inner));
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+
+        let advancer = {
+            let inner = Arc::clone(&inner);
+            tokio::spawn(async move {
+                for step in 101_u64..=110 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    inner.write().unwrap().global_step = step;
+                }
+            })
+        };
+
+        let result = readonly
+            .wait_for_step(110, Arc::clone(&cancel), std::time::Duration::from_secs(30))
+            .await;
+
+        advancer.await.unwrap();
+        assert!(result.is_ok(), "wait should succeed when state advances");
     }
 }

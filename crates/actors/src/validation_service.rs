@@ -522,7 +522,14 @@ impl ValidationServiceInner {
 
         // Fast forward VDF steps
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        vdf_state.wait_for_step(vdf_info.global_step_number).await;
+        // TODO(Task 4): plumb cancel + configured progress_timeout to this site.
+        vdf_state
+            .wait_for_step(
+                vdf_info.global_step_number,
+                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+                Duration::from_secs(30),
+            )
+            .await?;
         Ok(())
     }
 }
