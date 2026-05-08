@@ -422,7 +422,7 @@ impl ValidationService {
 impl ValidationServiceInner {
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
-    #[tracing::instrument(level = "trace", err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
+    #[tracing::instrument(err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,
@@ -432,11 +432,20 @@ impl ValidationServiceInner {
         debug!("Verifying VDF info");
 
         let vdf_info = block.vdf_limiter_info.clone();
-
-        // First, wait for the previous VDF step to be available
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
         let progress_timeout = Duration::from_secs(self.config.vdf.progress_timeout_secs);
+
+        info!(
+            vdf.first_step_number = first_step_number,
+            vdf.global_step_number = vdf_info.global_step_number,
+            vdf.prev_output_step_number = prev_output_step_number,
+            vdf.local_step = self.vdf_state.read().global_step,
+            "ensure_vdf_is_valid: entered"
+        );
+
+        // Stage A: wait for the previous VDF step to be available locally
+        debug!(stage = "wait_prev_step", "ensure_vdf_is_valid: waiting for previous step");
         self.vdf_state
             .wait_for_step(
                 prev_output_step_number,
@@ -444,6 +453,7 @@ impl ValidationServiceInner {
                 progress_timeout,
             )
             .await?;
+
         let stored_previous_step = self
             .vdf_state
             .get_step(prev_output_step_number)
@@ -456,9 +466,9 @@ impl ValidationServiceInner {
             vdf_info.prev_output,
         );
 
-        // Spawn VDF validation task unless skipping
-        // Early guard: validate seeds against parent before heavy VDF work
+        // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
+        debug!(stage = "validate_seeds", "ensure_vdf_is_valid: validating seed data against parent");
         {
             let binding = self.block_tree_guard.read();
             let previous_block = binding
@@ -473,32 +483,35 @@ impl ValidationServiceInner {
             );
         }
 
-        // Spawn VDF validation task
+        // Stage C: VDF step validation (heavy SHA work in rayon pool)
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
         if !skip_vdf_validation {
+            debug!(stage = "vdf_steps_are_valid", "ensure_vdf_is_valid: validating VDF steps");
             let vdf_info = vdf_info.clone();
             let this_inner = Arc::clone(&self);
-            let cancel = Arc::clone(&cancel);
+            let cancel_for_blocking = Arc::clone(&cancel);
             tokio::task::spawn_blocking(move || {
                 vdf_steps_are_valid(
                     &this_inner.pool,
                     &vdf_info,
                     &this_inner.config.vdf,
                     &this_inner.vdf_state,
-                    cancel,
+                    cancel_for_blocking,
                 )
             })
             .await??;
         } else {
             debug!(
-                block.hash = ?block.block_hash,
-                "Skipping vdf_steps_are_valid for block"
+                stage = "vdf_steps_are_valid",
+                "ensure_vdf_is_valid: skipping vdf_steps_are_valid"
             );
         }
 
-        // Fast forward VDF steps
+        // Stage D: fast-forward + wait for global_step to catch up
+        debug!(stage = "fast_forward", "ensure_vdf_is_valid: fast-forwarding VDF steps");
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
+        debug!(stage = "wait_global_step", "ensure_vdf_is_valid: waiting for fast-forward to complete");
         vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
@@ -506,6 +519,11 @@ impl ValidationServiceInner {
                 progress_timeout,
             )
             .await?;
+
+        info!(
+            vdf.global_step_number = vdf_info.global_step_number,
+            "ensure_vdf_is_valid: completed successfully"
+        );
         Ok(())
     }
 }
