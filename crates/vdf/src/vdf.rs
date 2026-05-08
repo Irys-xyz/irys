@@ -118,6 +118,10 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
                 ) else {
+                    error!(
+                        vdf.proposed_step = proposed_ff_step.global_step_number,
+                        "VDF thread exiting: store_step failed during fast-forward (lock poisoned)"
+                    );
                     return;
                 };
                 if returned == prev_step {
@@ -222,6 +226,10 @@ pub fn run_vdf<B: BlockProvider>(
             global_step_number + 1,
             canonical_global_step_number,
         ) else {
+            error!(
+                vdf.global_step_number = global_step_number,
+                "VDF thread exiting: store_step failed during local stepping (lock poisoned)"
+            );
             return;
         };
         global_step_number = returned;
