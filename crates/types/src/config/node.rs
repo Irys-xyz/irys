@@ -788,6 +788,12 @@ pub struct VdfNodeConfig {
     /// Bail out of a VDF wait if the local `global_step` has not advanced for
     /// this many seconds. Detects a dead/stuck VDF thread without imposing a
     /// wall-clock cap on legitimate long waits.
+    ///
+    /// `ensure_vdf_is_valid` calls `wait_for_step` twice (Stage A before VDF
+    /// step validation, Stage D after fast-forward), each with its own
+    /// progress timer. Worst-case detection latency for a fully stalled
+    /// state is therefore `2 × progress_timeout_secs` plus the rayon SHA
+    /// work between the two waits.
     #[serde(default = "default_vdf_progress_timeout_secs")]
     pub progress_timeout_secs: u64,
 }
