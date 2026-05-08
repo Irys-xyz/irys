@@ -50,9 +50,7 @@
 //! prerequisites lands.
 
 use crate::utils::IrysNodeTest;
-use irys_actors::{
-    block_tree_service::ValidationResult, block_validation::ValidationError,
-};
+use irys_actors::{block_tree_service::ValidationResult, block_validation::ValidationError};
 use irys_types::NodeConfig;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -443,7 +443,10 @@ impl ValidationServiceInner {
         );
 
         // Stage A: wait for the previous VDF step to be available locally
-        debug!(stage = "wait_prev_step", "ensure_vdf_is_valid: waiting for previous step");
+        debug!(
+            stage = "wait_prev_step",
+            "ensure_vdf_is_valid: waiting for previous step"
+        );
         self.vdf_state
             .wait_for_step(
                 prev_output_step_number,
@@ -466,7 +469,10 @@ impl ValidationServiceInner {
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
-        debug!(stage = "validate_seeds", "ensure_vdf_is_valid: validating seed data against parent");
+        debug!(
+            stage = "validate_seeds",
+            "ensure_vdf_is_valid: validating seed data against parent"
+        );
         {
             let binding = self.block_tree_guard.read();
             let previous_block = binding
@@ -485,7 +491,10 @@ impl ValidationServiceInner {
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
         if !skip_vdf_validation {
-            debug!(stage = "vdf_steps_are_valid", "ensure_vdf_is_valid: validating VDF steps");
+            debug!(
+                stage = "vdf_steps_are_valid",
+                "ensure_vdf_is_valid: validating VDF steps"
+            );
             let vdf_info = vdf_info.clone();
             let this_inner = Arc::clone(&self);
             let cancel_for_blocking = Arc::clone(&cancel);
@@ -507,9 +516,15 @@ impl ValidationServiceInner {
         }
 
         // Stage D: fast-forward + wait for global_step to catch up
-        debug!(stage = "fast_forward", "ensure_vdf_is_valid: fast-forwarding VDF steps");
+        debug!(
+            stage = "fast_forward",
+            "ensure_vdf_is_valid: fast-forwarding VDF steps"
+        );
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        debug!(stage = "wait_global_step", "ensure_vdf_is_valid: waiting for fast-forward to complete");
+        debug!(
+            stage = "wait_global_step",
+            "ensure_vdf_is_valid: waiting for fast-forward to complete"
+        );
         vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
