@@ -331,11 +331,6 @@ pub fn init_telemetry() -> Result<()> {
     opentelemetry::global::set_meter_provider(meter_provider);
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // NOTE: We do NOT install a metrics recorder here because Reth's internal
-    // EngineNodeLauncher calls install_prometheus_recorder() and will panic
-    // if a recorder is already set. Reth metrics will need to be exposed via
-    // a /metrics HTTP endpoint for Prometheus to scrape.
-
     setup_tracing_subscriber(&tracer_provider, &logger_provider, &config.service_name);
     install_panic_hook();
 

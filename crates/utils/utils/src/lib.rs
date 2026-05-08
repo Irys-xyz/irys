@@ -5,6 +5,21 @@ pub mod listener;
 pub mod shutdown;
 pub mod signal;
 
+/// Installs Reth's prometheus recorder as the global `metrics` recorder.
+///
+/// Must run before any DB is opened: `DatabaseEnvMetrics` registers per-table
+/// counter/histogram handles eagerly at construction, and handles bound while a
+/// no-op recorder is active stay no-op forever — including the per-tx commit
+/// latency histograms (`reth_database_transaction_commit_*_duration_seconds`)
+/// that surface MDBX write-lock contention.
+///
+/// Idempotent: backed by an `OnceLock` inside Reth, so a later call from
+/// `EngineNodeLauncher::start_prometheus_endpoint` is a no-op.
+#[cfg(feature = "telemetry")]
+pub fn install_metrics_recorder() {
+    reth_node_metrics::recorder::install_prometheus_recorder();
+}
+
 /// Extension trait for converting [`std::time::Instant`] elapsed time to milliseconds.
 pub trait ElapsedMs {
     fn elapsed_ms(&self) -> f64;

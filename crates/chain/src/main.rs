@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 #[cfg(feature = "telemetry")]
-use irys_utils::init_telemetry;
+use irys_utils::{init_telemetry, install_metrics_recorder};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -46,6 +46,9 @@ async fn main() -> eyre::Result<()> {
 
     #[cfg(feature = "telemetry")]
     {
+        // Must run before any DB opens — see `install_metrics_recorder` docs.
+        install_metrics_recorder();
+
         let telemetry_enabled = std::env::var("ENABLE_TELEMETRY")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false)

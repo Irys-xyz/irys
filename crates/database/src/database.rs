@@ -84,8 +84,9 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     tables: &[T],
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    // Note: Metrics recorder should be installed via init_telemetry() before this is called.
-    // The OpenTelemetryRecorder bridges `metrics` crate to OTEL for push-based export.
+    // `with_metrics_and_tables` registers per-table counter/histogram handles
+    // eagerly. A metrics recorder must be installed first; handles bound while
+    // the no-op recorder is active stay no-op for the process lifetime.
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
 
     Ok(db)

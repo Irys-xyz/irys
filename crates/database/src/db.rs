@@ -1,4 +1,5 @@
 use crate::reth_db::DatabaseError;
+use metrics::Label;
 use reth_db::mdbx::TransactionKind;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
@@ -164,7 +165,35 @@ impl IrysDatabaseExt for DatabaseEnv {
     }
 }
 
-impl DatabaseMetrics for RethDbWrapper {}
+impl RethDbWrapper {
+    fn with_inner<R: Default>(&self, f: impl FnOnce(&DatabaseEnv) -> R) -> R {
+        self.db
+            .read()
+            .ok()
+            .as_deref()
+            .and_then(Option::as_ref)
+            .map(f)
+            .unwrap_or_default()
+    }
+}
+
+impl DatabaseMetrics for RethDbWrapper {
+    fn report_metrics(&self) {
+        self.with_inner(DatabaseMetrics::report_metrics);
+    }
+
+    fn gauge_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
+        self.with_inner(DatabaseMetrics::gauge_metrics)
+    }
+
+    fn counter_metrics(&self) -> Vec<(&'static str, u64, Vec<Label>)> {
+        self.with_inner(DatabaseMetrics::counter_metrics)
+    }
+
+    fn histogram_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
+        self.with_inner(DatabaseMetrics::histogram_metrics)
+    }
+}
 
 pub trait IrysDupCursorExt<T: DupSort> {
     /// Count the number of dupilicates.

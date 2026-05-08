@@ -19,6 +19,7 @@ irys-types.workspace = true
 tracing.workspace = true
 irys-testing-utils.workspace = true
 test-fuzz.workspace = true
+metrics.workspace = true
 reth-db.workspace = true
 reth-db-api.workspace = true
 reth-codecs.workspace = true
