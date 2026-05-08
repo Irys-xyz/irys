@@ -522,7 +522,11 @@ impl ValidationServiceInner {
 
         // Fast forward VDF steps
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        // TODO(Task 4): plumb cancel + configured progress_timeout to this site.
+        // TODO(Task 4): plumb the surrounding `cancel` and the configured
+        // `progress_timeout_secs` into this site. Until Task 4 lands, this site
+        // cannot be cancelled by shutdown — the 30s progress timeout is the only
+        // escape hatch from a stalled VDF state. See docs/superpowers/plans/
+        // 2026-05-08-vdf-validation-progress-check.md (Task 4).
         vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
