@@ -248,6 +248,7 @@ impl From<&NodeConfig> for VdfConfig {
             max_allowed_vdf_fork_steps: consensus.max_allowed_vdf_fork_steps,
             sha_1s_difficulty: consensus.sha_1s_difficulty,
             throttle: value.vdf.throttle,
+            progress_timeout_secs: value.vdf.progress_timeout_secs,
         }
     }
 }
@@ -308,6 +309,9 @@ pub struct VdfConfig {
     /// When true, enforce a minimum step duration to prevent VDF from
     /// outrunning block production when sha_1s_difficulty is low.
     pub throttle: bool,
+
+    /// See `VdfNodeConfig::progress_timeout_secs`.
+    pub progress_timeout_secs: u64,
 }
 
 impl VdfConfig {

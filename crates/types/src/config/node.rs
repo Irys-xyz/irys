@@ -784,6 +784,16 @@ pub struct VdfNodeConfig {
     /// outrunning block production when sha_1s_difficulty is low.
     #[serde(default)]
     pub throttle: bool,
+
+    /// Bail out of a VDF wait if the local `global_step` has not advanced for
+    /// this many seconds. Detects a dead/stuck VDF thread without imposing a
+    /// wall-clock cap on legitimate long waits.
+    #[serde(default = "default_vdf_progress_timeout_secs")]
+    pub progress_timeout_secs: u64,
+}
+
+fn default_vdf_progress_timeout_secs() -> u64 {
+    30
 }
 
 impl Default for VdfNodeConfig {
@@ -793,6 +803,7 @@ impl Default for VdfNodeConfig {
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
             throttle: false,
+            progress_timeout_secs: default_vdf_progress_timeout_secs(),
         }
     }
 }
@@ -1085,6 +1096,7 @@ impl NodeConfig {
                 parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
                 throttle: true,
+                progress_timeout_secs: default_vdf_progress_timeout_secs(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -1257,6 +1269,7 @@ impl NodeConfig {
                 parallel_verification_thread_limit: 4,
                 core_pinning: CorePinning::Auto,
                 throttle: false,
+                progress_timeout_secs: default_vdf_progress_timeout_secs(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
