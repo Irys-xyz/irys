@@ -15,6 +15,10 @@ eyre.workspace = true
 dashmap = "6.1.0"
 irys-types.workspace = true
 socket2.workspace = true
+# Unconditional: install_metrics_recorder() must run in every build because
+# reth-node-bridge always exposes Reth's /metrics endpoint regardless of the
+# `telemetry` feature, and DB metric handles bind eagerly at DB-open time.
+reth-node-metrics.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
@@ -22,7 +26,6 @@ tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry-semantic-conventions = { workspace = true, optional = true }
 opentelemetry-appender-tracing = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
-reth-node-metrics = { workspace = true, optional = true }
 # Unconditional: make_fmt_layer() is a public API that must be available
 # independent of the telemetry feature to support IRYS_LOG_FORMAT=json.
 tracing-subscriber.workspace = true
@@ -43,7 +46,6 @@ telemetry = [
   "opentelemetry-semantic-conventions",
   "opentelemetry-appender-tracing",
   "rand",
-  "reth-node-metrics",
 ]
 
 

@@ -13,9 +13,13 @@ pub mod signal;
 /// latency histograms (`reth_database_transaction_commit_*_duration_seconds`)
 /// that surface MDBX write-lock contention.
 ///
+/// Unconditional (not gated by the `telemetry` feature): Reth's prometheus
+/// `/metrics` endpoint is exposed by `reth-node-bridge` regardless of our
+/// telemetry feature, and the recorder is what makes that endpoint emit DB
+/// metrics rather than only Reth's engine counters.
+///
 /// Idempotent: backed by an `OnceLock` inside Reth, so a later call from
 /// `EngineNodeLauncher::start_prometheus_endpoint` is a no-op.
-#[cfg(feature = "telemetry")]
 pub fn install_metrics_recorder() {
     reth_node_metrics::recorder::install_prometheus_recorder();
 }

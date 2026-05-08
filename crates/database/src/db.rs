@@ -166,32 +166,39 @@ impl IrysDatabaseExt for DatabaseEnv {
 }
 
 impl RethDbWrapper {
-    fn with_inner<R: Default>(&self, f: impl FnOnce(&DatabaseEnv) -> R) -> R {
-        self.db
-            .read()
-            .ok()
-            .as_deref()
-            .and_then(Option::as_ref)
-            .map(f)
-            .unwrap_or_default()
+    fn with_inner<R: Default>(&self, op: &'static str, f: impl FnOnce(&DatabaseEnv) -> R) -> R {
+        let guard = match self.db.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::warn!(op, "RethDbWrapper metrics unavailable: read lock poisoned");
+                return R::default();
+            }
+        };
+        match guard.as_ref() {
+            Some(db) => f(db),
+            None => {
+                tracing::warn!(op, "RethDbWrapper metrics unavailable: inner DB closed");
+                R::default()
+            }
+        }
     }
 }
 
 impl DatabaseMetrics for RethDbWrapper {
     fn report_metrics(&self) {
-        self.with_inner(DatabaseMetrics::report_metrics);
+        self.with_inner("report_metrics", DatabaseMetrics::report_metrics);
     }
 
     fn gauge_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
-        self.with_inner(DatabaseMetrics::gauge_metrics)
+        self.with_inner("gauge_metrics", DatabaseMetrics::gauge_metrics)
     }
 
     fn counter_metrics(&self) -> Vec<(&'static str, u64, Vec<Label>)> {
-        self.with_inner(DatabaseMetrics::counter_metrics)
+        self.with_inner("counter_metrics", DatabaseMetrics::counter_metrics)
     }
 
     fn histogram_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
-        self.with_inner(DatabaseMetrics::histogram_metrics)
+        self.with_inner("histogram_metrics", DatabaseMetrics::histogram_metrics)
     }
 }
 

@@ -1,7 +1,7 @@
 use irys_chain::{IrysNode, utils::load_config};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
-use irys_utils::shutdown::spawn_shutdown_watchdog;
+use irys_utils::{install_metrics_recorder, shutdown::spawn_shutdown_watchdog};
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 #[cfg(feature = "telemetry")]
-use irys_utils::{init_telemetry, install_metrics_recorder};
+use irys_utils::init_telemetry;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -44,11 +44,11 @@ async fn main() -> eyre::Result<()> {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
     }
 
+    // Must run before any DB opens — see `install_metrics_recorder` docs.
+    install_metrics_recorder();
+
     #[cfg(feature = "telemetry")]
     {
-        // Must run before any DB opens — see `install_metrics_recorder` docs.
-        install_metrics_recorder();
-
         let telemetry_enabled = std::env::var("ENABLE_TELEMETRY")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false)
