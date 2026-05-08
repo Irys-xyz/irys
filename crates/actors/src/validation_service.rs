@@ -17,7 +17,7 @@ use crate::{
     metrics,
     services::ServiceSenders,
 };
-use eyre::{bail, ensure};
+use eyre::ensure;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache,
     chain_sync_state::ChainSyncState,
@@ -420,36 +420,6 @@ impl ValidationService {
 }
 
 impl ValidationServiceInner {
-    #[tracing::instrument(level = "trace", skip_all, fields(%step=desired_step_number))]
-    async fn wait_for_step_with_cancel(
-        &self,
-        desired_step_number: u64,
-        cancel: Arc<AtomicU8>,
-    ) -> eyre::Result<()> {
-        let retries_per_second = 20;
-        let started = std::time::Instant::now();
-        loop {
-            if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
-                warn!(
-                    vdf.desired_step = desired_step_number,
-                    vdf.current_step = self.vdf_state.read().global_step,
-                    "VDF validation cancelled while waiting for step"
-                );
-                metrics::record_vdf_step_wait_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
-                bail!("Cancelled");
-            }
-            let read = self.vdf_state.read().global_step;
-
-            if read >= desired_step_number {
-                debug!("VDF Step is available");
-                metrics::record_vdf_step_wait_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
-                return Ok(());
-            }
-            debug!("Waiting for step");
-            tokio::time::sleep(Duration::from_millis(1000 / retries_per_second)).await;
-        }
-    }
-
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
     #[tracing::instrument(level = "trace", err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
@@ -466,7 +436,13 @@ impl ValidationServiceInner {
         // First, wait for the previous VDF step to be available
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
-        self.wait_for_step_with_cancel(prev_output_step_number, Arc::clone(&cancel))
+        let progress_timeout = Duration::from_secs(self.config.vdf.progress_timeout_secs);
+        self.vdf_state
+            .wait_for_step(
+                prev_output_step_number,
+                Arc::clone(&cancel),
+                progress_timeout,
+            )
             .await?;
         let stored_previous_step = self
             .vdf_state
