@@ -429,8 +429,6 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
-        debug!("Verifying VDF info");
-
         let vdf_info = block.vdf_limiter_info.clone();
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
