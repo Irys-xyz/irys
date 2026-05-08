@@ -28,7 +28,7 @@ use irys_types::{
     app_state::DatabaseProvider,
 };
 use irys_vdf::rayon;
-use irys_vdf::state::{CancelEnum, VdfStateReadonly, vdf_steps_are_valid};
+use irys_vdf::state::{VdfStateReadonly, vdf_steps_are_valid};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::{
@@ -479,6 +479,7 @@ impl ValidationServiceInner {
         if !skip_vdf_validation {
             let vdf_info = vdf_info.clone();
             let this_inner = Arc::clone(&self);
+            let cancel = Arc::clone(&cancel);
             tokio::task::spawn_blocking(move || {
                 vdf_steps_are_valid(
                     &this_inner.pool,
@@ -498,16 +499,11 @@ impl ValidationServiceInner {
 
         // Fast forward VDF steps
         fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
-        // TODO(Task 4): plumb the surrounding `cancel` and the configured
-        // `progress_timeout_secs` into this site. Until Task 4 lands, this site
-        // cannot be cancelled by shutdown — the 30s progress timeout is the only
-        // escape hatch from a stalled VDF state. See docs/superpowers/plans/
-        // 2026-05-08-vdf-validation-progress-check.md (Task 4).
         vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
-                Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-                Duration::from_secs(30),
+                Arc::clone(&cancel),
+                progress_timeout,
             )
             .await?;
         Ok(())
