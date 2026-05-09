@@ -977,6 +977,7 @@ impl IrysNode {
             let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();
             let chunk_ingress_state = ctx.chunk_ingress_state.clone();
+            let irys_db_for_metrics = ctx.db.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn_task(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -1036,6 +1037,15 @@ impl IrysNode {
                     metrics::record_storage_modules_total(total);
                     metrics::record_partitions_assigned(assigned);
                     metrics::record_partitions_unassigned(total - assigned);
+
+                    // Counterpart to Reth's metrics_hooks() throttled
+                    // report_metrics() — that hook only covers Reth's DB.
+                    // Surfaces freelist, table sizes, and timed-out-reader
+                    // gauges so MDBX contention shows up alongside the per-tx
+                    // commit-latency histograms.
+                    irys_database::db_metrics::report_irys_consensus_db_gauges(
+                        irys_db_for_metrics.0.as_ref(),
+                    );
                 }
             });
         }

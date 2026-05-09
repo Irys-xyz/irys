@@ -177,7 +177,7 @@ impl RethDbWrapper {
         match guard.as_ref() {
             Some(db) => f(db),
             None => {
-                tracing::warn!(op, "RethDbWrapper metrics unavailable: inner DB closed");
+                tracing::debug!(op, "RethDbWrapper metrics unavailable: inner DB closed");
                 R::default()
             }
         }
