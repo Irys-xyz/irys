@@ -144,7 +144,19 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        let tx = self.tx_mut()?;
+        // Time tx_mut() acquisition. MDBX serializes all writers on a single
+        // global writer lock, so this histogram surfaces contention caused by
+        // any writer — including Database::update(...) callers we can't
+        // intercept directly. Both successful and failed acquires are recorded
+        // so genuinely-slow-then-failed waits are visible.
+        let start = std::time::Instant::now();
+        let tx_result = self.tx_mut();
+        metrics::histogram!(
+            "db.tx_mut_acquire_duration_seconds",
+            "scope" => "irys-consensus"
+        )
+        .record(start.elapsed().as_secs_f64());
+        let tx = tx_result?;
 
         let res = f(&tx)?;
         tx.commit()?;
