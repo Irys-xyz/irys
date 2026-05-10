@@ -10,7 +10,15 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::sync::{Arc, PoisonError, RwLockReadGuard};
-use tracing::info;
+use tracing::{info, info_span};
+
+// Span name and `db_scope` field values must match the canonical scopes
+// recognised by `irys_utils::mdbx_lock_metrics_layer`. Mismatched values are
+// silently downgraded to `db_scope=unknown` in the stall counter, so keep
+// these literals in sync with `crates/utils/utils/src/mdbx_metrics.rs`.
+const MDBX_RW_TX_SPAN: &str = "mdbx_rw_tx";
+const DB_SCOPE_RETH_EVM: &str = "reth-evm";
+const DB_SCOPE_IRYS_CONSENSUS: &str = "irys-consensus";
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -66,6 +74,10 @@ impl reth_db::Database for RethDbWrapper {
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
+        // Active span carries the EVM scope so any libmdbx writer-lock stall
+        // warning fired during begin_rw_txn lands under
+        // libmdbx_rw_tx_lock_stalls_total{scope="reth-evm"}.
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -88,6 +100,8 @@ impl reth_db::Database for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
+        // See tx_mut() above — same scope attribution for Database::update.
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -144,6 +158,12 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
+        // Active span carries the consensus scope so any libmdbx writer-lock
+        // stall warning fired during begin_rw_txn lands under
+        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}. Direct
+        // tx_mut() callers that bypass update_eyre fall back to scope=unknown.
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
+
         // Time tx_mut() acquisition. MDBX serializes all writers on a single
         // global writer lock, so this histogram surfaces contention caused by
         // any writer — including Database::update(...) callers we can't

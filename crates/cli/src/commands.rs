@@ -18,7 +18,7 @@ use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, DatabaseProvider, NodeConfig};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn};
 use zeroize::Zeroizing;
 
 fn signing_key_from_hex(hex_str: Zeroizing<String>) -> eyre::Result<k256::ecdsa::SigningKey> {
@@ -158,6 +158,10 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             );
 
             use irys_database::reth_db::transaction::DbTxMut as _;
+            // Span attributes any libmdbx writer-lock stall warning fired
+            // during begin_rw_txn to
+            // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
+            let _span = info_span!("mdbx_rw_tx", db_scope = "irys-consensus").entered();
             let rw_tx = db.tx_mut()?;
 
             for h in (target_height + 1)..=latest {

@@ -87,7 +87,7 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, debug, error, info, instrument, warn};
+use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -711,7 +711,11 @@ impl IrysNode {
             // Continue even if saving to disk fails - not critical
         }
 
-        // Open a database transaction
+        // Open a database transaction. Span attributes any libmdbx writer-lock
+        // stall warning fired during begin_rw_txn to
+        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}
+        // (see crates/utils/utils/src/mdbx_metrics.rs).
+        let _span = info_span!("mdbx_rw_tx", db_scope = "irys-consensus").entered();
         let write_tx = irys_db.tx_mut()?;
 
         // Insert the genesis block header

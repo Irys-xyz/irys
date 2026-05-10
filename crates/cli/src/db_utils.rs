@@ -11,6 +11,7 @@ use std::{
 };
 
 use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
+use tracing::info_span;
 
 /// Load NodeConfig from the CONFIG env var (default "config.toml").
 ///
@@ -122,6 +123,9 @@ Use an empty/reset database before importing.",
     };
     let genesis_sealed = SealedBlock::new((*genesis_block).clone(), genesis_body)?;
 
+    // Span attributes any libmdbx writer-lock stall warning fired during
+    // begin_rw_txn to libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
+    let _span = info_span!("mdbx_rw_tx", db_scope = "irys-consensus").entered();
     let write_tx = db.tx_mut()?;
     database::insert_block_header(&write_tx, &genesis_block)?;
     for commitment_tx in &commitments {
