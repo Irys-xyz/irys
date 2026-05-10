@@ -241,6 +241,7 @@ fn setup_tracing_subscriber(
     let subscriber = subscriber
         .with(filter)
         .with(ErrorLayer::default())
+        .with(crate::mdbx_lock_metrics_layer())
         .with(crate::make_fmt_layer());
 
     let tracer = tracer_provider.tracer(service_name.to_string());

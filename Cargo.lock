@@ -5691,6 +5691,7 @@ dependencies = [
  "dashmap",
  "eyre",
  "irys-types",
+ "metrics",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

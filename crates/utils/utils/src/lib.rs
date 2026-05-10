@@ -1,9 +1,12 @@
+mod mdbx_metrics;
 mod metric_macros;
 
 pub mod circuit_breaker;
 pub mod listener;
 pub mod shutdown;
 pub mod signal;
+
+pub use mdbx_metrics::{MDBX_RW_TX_LOCK_STALLS_TOTAL, mdbx_lock_metrics_layer};
 
 /// Installs Reth's prometheus recorder as the global `metrics` recorder.
 ///
@@ -22,6 +25,7 @@ pub mod signal;
 /// `EngineNodeLauncher::start_prometheus_endpoint` is a no-op.
 pub fn install_metrics_recorder() {
     reth_node_metrics::recorder::install_prometheus_recorder();
+    mdbx_metrics::describe_mdbx_metrics();
 }
 
 /// Extension trait for converting [`std::time::Instant`] elapsed time to milliseconds.

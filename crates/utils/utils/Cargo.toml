@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 tokio = { workspace = true, features = ["signal", "sync", "time", "rt"] }
 tracing.workspace = true
+metrics.workspace = true
 eyre.workspace = true
 dashmap = "6.1.0"
 irys-types.workspace = true

@@ -22,6 +22,7 @@ fn init_tracing() -> eyre::Result<()> {
     Registry::default()
         .with(filter)
         .with(ErrorLayer::default())
+        .with(irys_utils::mdbx_lock_metrics_layer())
         .with(irys_utils::make_fmt_layer())
         .init();
 
