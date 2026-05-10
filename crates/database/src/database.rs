@@ -12,6 +12,7 @@ use crate::tables::{
     IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
 
+use crate::db::IrysDatabaseExt as _;
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
@@ -33,7 +34,6 @@ use reth_db::{
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
 };
-use reth_db_api::Database as _;
 use tracing::{debug, warn};
 
 /// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
@@ -569,7 +569,7 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    db.update(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
+    db.update_scoped(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
 }
 
 pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(

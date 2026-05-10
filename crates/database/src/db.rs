@@ -125,6 +125,17 @@ pub trait IrysDatabaseExt: reth_db::Database {
     fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
         F: FnOnce(&Self::TX) -> eyre::Result<T>;
+
+    /// Drop-in replacement for [`reth_db::Database::update`] that attributes any
+    /// libmdbx writer-lock stall warning fired during `begin_rw_txn` to the
+    /// caller's database scope via a tracing span. Without this wrapper, the
+    /// stall counter records `scope="unknown"` because Reth's `Database::update`
+    /// impl on `DatabaseEnv` lives upstream and cannot be intercepted directly.
+    /// Use this for every consensus-DB write that doesn't return an
+    /// `eyre::Result` (those can use [`update_eyre`] instead).
+    fn update_scoped<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&Self::TXMut) -> T;
 }
 
 impl IrysDatabaseExt for RethDbWrapper {
@@ -150,6 +161,16 @@ impl IrysDatabaseExt for RethDbWrapper {
             .as_ref()
             .ok_or_else(db_connection_closed_error)?
             .view_eyre(f)
+    }
+
+    fn update_scoped<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&Self::TXMut) -> T,
+    {
+        // RethDbWrapper's own Database::update impl already wraps the call in
+        // an `mdbx_rw_tx` span carrying `db_scope=reth-evm` (see line 104), so
+        // this trait method just delegates — no second span needed.
+        <Self as Database>::update(self, f)
     }
 }
 
@@ -194,6 +215,14 @@ impl IrysDatabaseExt for DatabaseEnv {
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
+    }
+
+    fn update_scoped<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&Self::TXMut) -> T,
+    {
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
+        <Self as Database>::update(self, f)
     }
 }
 
