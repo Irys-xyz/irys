@@ -983,19 +983,18 @@ impl ChunkCacheService {
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, database, open_or_create_db,
-        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
+        DatabaseProviderTestExt as _, database,
+        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots},
     };
     use irys_domain::{BlockIndex, BlockTree};
-    use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
+    use irys_testing_utils::{initialize_tracing, new_mock_signed_header, utils::TempDirBuilder};
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, NodeConfig, TxChunkOffset,
         UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
-    use reth_db::mdbx::DatabaseArguments;
-    use std::sync::{Arc, RwLock};
+    use std::sync::RwLock;
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
     // are pruned once prune_height > 0 and they should not be pruned!
@@ -1003,13 +1002,10 @@ mod tests {
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1090,13 +1086,10 @@ mod tests {
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1176,13 +1169,10 @@ mod tests {
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create tx header + data root + chunk
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1273,13 +1263,10 @@ mod tests {
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -1351,13 +1338,10 @@ mod tests {
     // Chunks older than threshold should be deleted while newer ones should remain.
     #[tokio::test]
     async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create two data roots: one "old" and one "new"
         let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1492,13 +1476,10 @@ mod tests {
         node_config.cache.max_cache_size_bytes = 96;
         let config_below = Config::new_with_random_peer_id(node_config.clone());
 
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create one data root with two chunks and mark them old to be eligible
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -1615,13 +1596,10 @@ mod tests {
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -1684,13 +1662,10 @@ mod tests {
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
 
         // Create a data root cached via mempool path
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {

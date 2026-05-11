@@ -1,13 +1,9 @@
 use std::sync::{Arc, RwLock};
 
-use irys_database::{
-    IrysDatabaseArgs as _, db::IrysDatabaseExt as _, insert_block_header, open_or_create_db,
-    tables::IrysTables,
-};
+use irys_database::{DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_block_header};
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
-use reth_db::mdbx::DatabaseArguments;
 
 use super::get_anchor_height;
 
@@ -28,16 +24,15 @@ fn mock_header(height: u64, block_hash: H256) -> IrysBlockHeader {
     header
 }
 
-fn test_db() -> (irys_testing_utils::tempfile::TempDir, DatabaseProvider) {
+fn test_db() -> (
+    irys_testing_utils::tempfile::TempDir,
+    irys_testing_utils::tempfile::TempDir,
+    DatabaseProvider,
+) {
     let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db = open_or_create_db(
-        tmp.path(),
-        IrysTables::ALL,
-        DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let provider = DatabaseProvider(Arc::new(db));
-    (tmp, provider)
+    let cache_tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+    let provider = DatabaseProvider::for_testing(tmp.path(), cache_tmp.path()).unwrap();
+    (tmp, cache_tmp, provider)
 }
 
 fn test_block_tree(genesis: &IrysBlockHeader) -> BlockTreeReadGuard {
@@ -64,7 +59,7 @@ fn write_canonical_entry(db: &DatabaseProvider, height: u64, block_hash: H256) {
 fn canonical_block_in_tree_returns_height() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), true).unwrap();
     assert_eq!(result, Some(0));
@@ -74,7 +69,7 @@ fn canonical_block_in_tree_returns_height() {
 fn non_canonical_block_in_tree_returns_height_when_canonical_false() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let result = get_anchor_height(&block_tree, &db, genesis.block_hash(), false).unwrap();
     assert_eq!(result, Some(0));
@@ -84,7 +79,7 @@ fn non_canonical_block_in_tree_returns_height_when_canonical_false() {
 fn unknown_block_returns_none() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let result = get_anchor_height(&block_tree, &db, H256::random(), true).unwrap();
     assert_eq!(result, None);
@@ -94,7 +89,7 @@ fn unknown_block_returns_none() {
 fn canonical_block_in_db_with_migrated_entry_returns_height() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let old_block_hash = H256::random();
     let old_block = mock_header(5, old_block_hash);
@@ -109,7 +104,7 @@ fn canonical_block_in_db_with_migrated_entry_returns_height() {
 fn orphan_block_in_db_without_migrated_entry_returns_none_when_canonical() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let orphan_hash = H256::random();
     let orphan_block = mock_header(5, orphan_hash);
@@ -126,7 +121,7 @@ fn orphan_block_in_db_without_migrated_entry_returns_none_when_canonical() {
 fn orphan_block_at_height_with_different_canonical_returns_none() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let orphan_hash = H256::random();
     let canonical_hash = H256::random();
@@ -147,7 +142,7 @@ fn orphan_block_at_height_with_different_canonical_returns_none() {
 fn orphan_block_in_db_returns_height_when_canonical_false() {
     let genesis = signed_genesis();
     let block_tree = test_block_tree(&genesis);
-    let (_tmp, db) = test_db();
+    let (_tmp, _cache_tmp, db) = test_db();
 
     let orphan_hash = H256::random();
     write_header_to_db(&db, &mock_header(5, orphan_hash));
