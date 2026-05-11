@@ -19,6 +19,7 @@ pub mod metadata;
 pub mod migration;
 /// Extension traits for custom tables
 pub mod reth_ext;
+pub mod scoped_tx;
 /// Online MDBX env copy + node-local table stripping for snapshot export
 pub mod snapshot;
 /// Tables & methods specific to submodule databases
@@ -32,6 +33,7 @@ pub mod tx_path_derive;
 pub use data_ledger::*;
 pub use database::*;
 pub use db_index::*;
+pub use scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, DbScope, ScopedTx, ScopedTxMut};
 pub use system_ledger::*;
 
 pub mod reth_db {
