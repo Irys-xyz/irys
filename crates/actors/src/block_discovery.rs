@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
-    db::IrysDatabaseExt as _, tx_header_by_txid,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    tx_header_by_txid,
 };
 use irys_domain::{
     BlockTreeReadGuard, CommitmentSnapshotStatus, block_index_guard::BlockIndexReadGuard,
@@ -421,7 +422,9 @@ impl BlockDiscoveryServiceInner {
                     // Check to see if we have a confirmed data_size for the data_root
                     let cdr = self
                         .db
-                        .view_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+                        .view_cache_eyre(|tx| {
+                            cached_data_root_by_data_root(tx, tx_header.data_root)
+                        })
                         .map_err(BlockDiscoveryInternalError::DatabaseError)?;
 
                     // If so, compare it with the data_size in the tx

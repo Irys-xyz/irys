@@ -1,7 +1,7 @@
 use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
 use irys_database::{
     block_header_by_hash, cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     tx_header_by_txid,
 };
@@ -405,7 +405,7 @@ fn get_cached_chunk(
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
+    db.view_cache_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
 fn find_storage_module(

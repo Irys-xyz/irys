@@ -8,7 +8,10 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
+use irys_database::scoped_tx::{Cache, ScopedTx};
+use irys_database::{
+    cached_data_root_by_data_root, db::DatabaseProviderCacheExt as _, tx_header_by_txid_canonical,
+};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -2739,9 +2742,11 @@ pub async fn data_txs_are_valid(
                 let expected_chunk_count =
                     tx_header.data_size.div_ceil(config.consensus.chunk_size);
 
-                let ro_tx = db.tx().map_err(|e| PreValidationError::DatabaseError {
-                    error: e.to_string(),
-                })?;
+                let ro_tx = ScopedTx::<Cache>::new(db.cache().tx().map_err(|e| {
+                    PreValidationError::DatabaseError {
+                        error: e.to_string(),
+                    }
+                })?);
 
                 let mut chunks: Vec<irys_types::ChunkBytes> =
                     Vec::with_capacity(expected_chunk_count as usize);
@@ -2890,10 +2895,11 @@ pub async fn data_txs_are_valid(
                             }
 
                             // Re-open a fresh read tx to observe the write
-                            let ro_tx2 =
-                                db.tx().map_err(|e| PreValidationError::DatabaseError {
+                            let ro_tx2 = ScopedTx::<Cache>::new(db.cache().tx().map_err(|e| {
+                                PreValidationError::DatabaseError {
                                     error: e.to_string(),
-                                })?;
+                                }
+                            })?);
                             maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
                                 &ro_tx2,
                                 tx_header.data_root,
@@ -3307,7 +3313,7 @@ pub fn get_assigned_ingress_proofs(
 
     //  a) Get the block hashes from the cached data_root (invariant across all proofs)
     let block_hashes = db
-        .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+        .view_cache(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
         .map_err(|e| PreValidationError::DatabaseError {
             error: format!(
                 "Failed to open DB read tx for data_root {} (tx_id {}): {}",
