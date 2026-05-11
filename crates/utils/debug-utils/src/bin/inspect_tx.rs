@@ -10,7 +10,6 @@
 //! a live node if needed (peer-2 is currently offline so we get exclusive access
 //! anyway).
 
-use bs58;
 use eyre::{Context as _, eyre};
 use irys_database::reth_db::{
     Database as _, DatabaseEnv, DatabaseEnvKind, mdbx::DatabaseArguments, transaction::DbTx as _,
@@ -41,7 +40,7 @@ fn main() -> eyre::Result<()> {
             tx_bytes.len()
         ));
     }
-    let mut arr = [0u8; 32];
+    let mut arr = [0_u8; 32];
     arr.copy_from_slice(&tx_bytes);
     let tx_id = H256(arr);
 
