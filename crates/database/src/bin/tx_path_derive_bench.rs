@@ -24,7 +24,7 @@ use irys_database::submodule::tables::{
     TxPathIntervalByStart, unrecognised_rocks_layout,
 };
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
-use irys_database::tables::{IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
+use irys_database::tables::{CacheTables, IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
 use irys_database::tx_path_derive::{
     LedgerSpan, collect_data_spans, derive_tx_path_at_offset_with, derive_tx_path_synthetic_with,
     read_stored_tx_data_path, tx_header_schema, tx_path_hash,
@@ -60,8 +60,9 @@ stored read. Mining does not call this binary.
 --synthetic LIST          Tree widths. Default 10,100,1000,10000.
 --cold-only | --warm-only Default is both. Passing both flags is an error.
 --index-span START:END    Exclusive end. RocksDB harvest window. Default 0:10000000.
---migrate-copy            Rewrite a consensus copy up to schema V3. The directory
-                          name must contain \"copy\". Not timed.
+--migrate-copy            Rewrite a consensus copy to the current schema. The directory
+                          name must contain \"copy\". Cache rows move into its
+                          cache.copy subdirectory. Not timed.
 --migrate-index           Migrate a v1 MDBX submodule copy in place. The directory
                           name must contain \"copy\". Not timed.
 --prepare DIR             Write a small V3 fixture and exit. DIR's name must
@@ -920,12 +921,19 @@ fn one_block_hash(db: &DatabaseEnv) -> eyre::Result<H256> {
 
 fn migrate_consensus(path: &Path) -> eyre::Result<()> {
     require_copy_dir(path, "consensus database")?;
+    let cache_path = path.join("cache.copy");
+    require_copy_dir(&cache_path, "cache database")?;
+    let cache = open_or_create_db(
+        &cache_path,
+        CacheTables::ALL,
+        DatabaseArguments::irys_cache(DbSyncMode::Durable)?.with_exclusive(Some(true)),
+    )?;
     let db = open_or_create_db(
         path,
         IrysTables::ALL,
         DatabaseArguments::irys_default(DbSyncMode::Durable)?.with_exclusive(Some(true)),
     )?;
-    ensure_db_version_compatible(&db)?;
+    ensure_db_version_compatible(&db, &cache)?;
     Ok(())
 }
 
