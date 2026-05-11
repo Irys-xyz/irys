@@ -7,7 +7,7 @@ use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
@@ -772,9 +772,9 @@ async fn get_publish_txs_and_proofs(
     {
         let (publish_txids, cached_data_roots) = ctx
             .db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 let mut read_cursor = tx
-                    .new_cursor::<IngressProofs>()
+                    .cursor_read::<IngressProofs>()
                     .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
 
                 let walker = read_cursor
@@ -906,7 +906,9 @@ async fn get_publish_txs_and_proofs(
             // Get all the proofs for this tx
             let mut all_proofs = ctx
                 .db
-                .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
+                .view_cache_eyre(|read_tx| {
+                    ingress_proofs_by_data_root(read_tx, tx_header.data_root)
+                })?
                 .into_iter()
                 .filter(|(_root, cached_proof)| {
                     let expired = ChunkIngressServiceInner::is_ingress_proof_expired_static(
