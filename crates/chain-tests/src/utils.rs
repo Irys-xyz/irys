@@ -1282,8 +1282,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             let chunk_cache_count = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| {
-                    get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+                .view_cache_eyre(|tx| {
+                    get_cache_size::<CachedChunks, _>(
+                        tx.inner(),
+                        self.node_ctx.config.consensus.chunk_size,
+                    )
                 })?
                 .0;
 
