@@ -7,7 +7,7 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
+    CacheMetadata, CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
     CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
     IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
@@ -829,6 +829,31 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
             )
         })?;
 
+        Ok(Some(u32::from_le_bytes(arr)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Set the schema version in the cache database's `CacheMetadata` table.
+pub fn set_cache_database_schema_version<T: DbTxMut>(
+    tx: &T,
+    version: DatabaseVersion,
+) -> Result<(), DatabaseError> {
+    tx.put::<CacheMetadata>(
+        MetadataKey::DBSchemaVersion,
+        (version as u32).to_le_bytes().to_vec(),
+    )
+}
+
+/// Read the schema version from the cache database's `CacheMetadata` table.
+pub fn cache_database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
+    if let Some(bytes) = tx.get::<CacheMetadata>(MetadataKey::DBSchemaVersion)? {
+        let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other(
+                "Cache DB schema version metadata does not have exactly 4 bytes".to_string(),
+            )
+        })?;
         Ok(Some(u32::from_le_bytes(arr)))
     } else {
         Ok(None)

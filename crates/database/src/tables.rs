@@ -307,7 +307,7 @@ impl_cache_tables!(
 #[cfg(test)]
 mod tables_names {
     use super::*;
-    use reth_db::table::Table;
+    use reth_db::table::Table as _;
 
     #[test]
     fn table_names_match_struct_idents() {

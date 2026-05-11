@@ -595,26 +595,48 @@ mod v2_to_v3 {
 }
 
 /// Checks the database schema version on startup and either:
-/// - Migrates forward from V0/V1/V2 through to CURRENT
-/// - Returns an error if the DB version is newer than the binary (rollback not supported)
-/// - No-ops if versions match
+/// - Migrates forward from V0/V1/V2/V3 through to CURRENT
+/// - Returns an error if either DB version is newer than the binary (rollback not supported)
+/// - No-ops if both versions match
 ///
-/// A database without a version stamp is treated as V0 (the versioning system
+/// A consensus database without a version stamp is treated as V0 (the versioning system
 /// didn't exist yet). The V0→V1 transition is purely "add the stamp" — no data
-/// format change — so we unconditionally stamp V1 and then run V1→V2 and V2→V3.
+/// format change — so we unconditionally stamp V1 and then run V1→V2, V2→V3, V3→V4.
 /// On a truly fresh (empty) database the per-step migrations are no-ops.
-pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
+///
+/// The V3→V4 migration moves cache tables from the consensus env to the separate cache env.
+/// A missing cache version stamp after consensus is at V4 is acceptable: the operator may
+/// have intentionally deleted the cache database.
+pub fn ensure_db_version_compatible(
+    consensus: &DatabaseEnv,
+    cache: &DatabaseEnv,
+) -> eyre::Result<()> {
+    use crate::db::IrysDatabaseExt as _;
     use reth_db::Database as _;
 
-    let raw_version = db.view(crate::database_schema_version)??;
+    // -- Fail fast if the cache DB is from a newer binary --
+    // Check before any consensus migration so we don't partially mutate state.
+    if let Some(cache_v) = cache.view(crate::cache_database_schema_version)??
+        && cache_v > DatabaseVersion::CURRENT as u32
+    {
+        eyre::bail!(
+            "Cache database schema version {} is newer than this binary supports \
+             (version {}). Use the newer binary or restore from backup.",
+            cache_v,
+            DatabaseVersion::CURRENT as u32
+        );
+    }
+
+    // -- consensus side: drive forward through V1/V2/V3/V4 --
+    let raw_consensus = consensus.view(crate::database_schema_version)??;
 
     // No version stamp → V0 database (or brand-new). Stamp V1 so the
     // migration chain below handles it uniformly.
-    let raw = match raw_version {
+    let raw = match raw_consensus {
         Some(v) => v,
         None => {
-            debug!("No database version stamp found — treating as V0, stamping V1.");
-            db.update_eyre(|tx| {
+            debug!("No consensus DB version stamp found — treating as V0, stamping V1.");
+            consensus.update_eyre(|tx| {
                 crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
                 Ok(())
             })?;
@@ -624,11 +646,10 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
 
     // Try to convert the stored u32 into a known DatabaseVersion variant.
     // If the conversion fails the DB was written by a newer binary.
-    let Some(version) = DatabaseVersion::from_u32(raw) else {
+    let Some(mut version) = DatabaseVersion::from_u32(raw) else {
         eyre::bail!(
-            "Database schema version {} is newer than this binary supports \
-             (version {}). Running an older binary against a newer database is not \
-             supported. Use the newer binary or restore the database from a backup.",
+            "Consensus database schema version {} is newer than this binary supports \
+             (version {}). Use the newer binary or restore from backup.",
             raw,
             DatabaseVersion::CURRENT
         );
@@ -637,14 +658,13 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
     // Migrate forward one version at a time until we reach CURRENT.
     // The match enumerates every variant so the compiler forces an update
     // when a new DatabaseVersion is added.
-    let mut version = version;
     loop {
         match version {
             DatabaseVersion::V0 => {
                 // Shouldn't happen (we stamp V1 above for unstamped DBs), but
                 // handle defensively in case a V0 value was written explicitly.
                 debug!("Explicit V0 stamp found — upgrading to V1.");
-                db.update_eyre(|tx| {
+                consensus.update_eyre(|tx| {
                     crate::set_database_schema_version(tx, DatabaseVersion::V1)?;
                     Ok(())
                 })?;
@@ -652,7 +672,7 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
             }
             DatabaseVersion::V1 => {
                 debug!("Applying migration from V1 to V2");
-                db.update_eyre(|tx| {
+                consensus.update_eyre(|tx| {
                     v1_to_v2::migrate(tx)?;
                     Ok(())
                 })?;
@@ -660,15 +680,20 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
             }
             DatabaseVersion::V2 => {
                 debug!("Applying migration from V2 to V3");
-                db.update_eyre(|tx| {
+                consensus.update_eyre(|tx| {
                     v2_to_v3::migrate(tx)?;
                     Ok(())
                 })?;
                 version = DatabaseVersion::V3;
             }
+            DatabaseVersion::V3 => {
+                debug!("Applying migration from V3 to V4: cache DB split");
+                v3_to_v4::migrate(consensus, cache)?;
+                version = DatabaseVersion::V4;
+            }
             DatabaseVersion::CURRENT => {
                 debug!(
-                    "Database schema is up-to-date (V{})",
+                    "Consensus database schema is up-to-date (V{})",
                     DatabaseVersion::CURRENT
                 );
                 break;
@@ -676,12 +701,238 @@ pub fn ensure_db_version_compatible(db: &DatabaseEnv) -> eyre::Result<()> {
         }
     }
 
+    // -- cache side: stamp V4 if missing; reject newer versions --
+    // A missing cache stamp after consensus reaches V4 is not an error: the
+    // operator may have intentionally deleted the cache database.
+    let raw_cache = cache.view(crate::cache_database_schema_version)??;
+    match raw_cache {
+        None => {
+            debug!(
+                "Stamping fresh cache DB as V{}",
+                DatabaseVersion::CURRENT as u32
+            );
+            cache.update_eyre(|tx| {
+                crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
+                Ok(())
+            })?;
+        }
+        Some(v) if v == DatabaseVersion::CURRENT as u32 => {
+            // Up to date — no-op.
+        }
+        Some(v) if v < DatabaseVersion::CURRENT as u32 => {
+            // The only value < CURRENT that can appear here is one written by
+            // a partial earlier migration. v3_to_v4 above is idempotent and
+            // has just re-run, so stamp CURRENT now.
+            debug!(
+                "Cache DB at V{}, advancing to V{}",
+                v,
+                DatabaseVersion::CURRENT as u32
+            );
+            cache.update_eyre(|tx| {
+                crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
+                Ok(())
+            })?;
+        }
+        Some(v) => {
+            eyre::bail!(
+                "Cache database schema version {} is newer than this binary supports \
+                 (version {}). Use the newer binary or restore from backup.",
+                v,
+                DatabaseVersion::CURRENT as u32
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// V3 → V4: cache DB split.
+///
+/// Moves the four cache tables out of the consensus env into the cache env.
+/// Idempotent and resumable: copies rows not yet in cache, then clears the
+/// consensus side. Stamps both envs V4 before returning.
+mod v3_to_v4 {
+    use super::*;
+    use crate::tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs};
+    use reth_db::cursor::DbCursorRO as _;
+    use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+    const BATCH_SIZE: usize = 10_000;
+
+    pub(super) fn migrate(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<()> {
+        copy_table::<CachedDataRoots>(consensus, cache)?;
+        clear_consensus::<CachedDataRoots>(consensus)?;
+
+        copy_dup_table::<CachedChunksIndex>(consensus, cache)?;
+        clear_consensus::<CachedChunksIndex>(consensus)?;
+
+        copy_table::<CachedChunks>(consensus, cache)?;
+        clear_consensus::<CachedChunks>(consensus)?;
+
+        copy_dup_table::<IngressProofs>(consensus, cache)?;
+        clear_consensus::<IngressProofs>(consensus)?;
+
+        // Stamp both sides V4. The consensus stamp is also written here so that
+        // if the process dies between v3_to_v4::migrate and the outer loop
+        // resuming, a re-run will skip the copy (cache already has the rows)
+        // and arrive at a consistent state.
+        cache.update_eyre(|tx| {
+            crate::set_cache_database_schema_version(tx, DatabaseVersion::V4)?;
+            Ok(())
+        })?;
+        consensus.update_eyre(|tx| {
+            crate::set_database_schema_version(tx, DatabaseVersion::V4)?;
+            Ok(())
+        })?;
+        debug!("V3 → V4 migration complete");
+        Ok(())
+    }
+
+    /// Copy a non-dupsort table row-by-row from consensus into cache, skipping
+    /// rows already present in cache (idempotent on re-run).
+    ///
+    /// Returns Ok(0) if the table doesn't exist in the consensus DB (e.g. a
+    /// fresh DB that was never opened with the old combined table set).
+    fn copy_table<T>(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<usize>
+    where
+        T: reth_db::table::Table + 'static,
+        T::Key: Clone,
+    {
+        let mut total = 0_usize;
+        let mut last_key: Option<T::Key> = None;
+        loop {
+            // Read up to BATCH_SIZE rows starting after last_key.
+            let batch_result: eyre::Result<Vec<(T::Key, T::Value)>> = consensus.view_eyre(|tx| {
+                let mut cursor = tx.cursor_read::<T>()?;
+                let mut walker = match last_key.clone() {
+                    Some(ref k) => cursor.walk(Some(k.clone()))?,
+                    None => cursor.walk(None)?,
+                };
+                // When resuming, the first element is the resume point itself — skip it.
+                if last_key.is_some() {
+                    let _ = walker.next();
+                }
+                let mut out = Vec::with_capacity(BATCH_SIZE);
+                for _ in 0..BATCH_SIZE {
+                    match walker.next() {
+                        Some(Ok(row)) => out.push(row),
+                        Some(Err(e)) => return Err(eyre::eyre!(e)),
+                        None => break,
+                    }
+                }
+                Ok(out)
+            });
+            let batch = match batch_result {
+                Ok(b) => b,
+                Err(e) => {
+                    // If the table doesn't exist in this DB (e.g. a fresh consensus DB
+                    // opened with ConsensusTables::ALL that never had cache tables),
+                    // treat it as empty and stop.
+                    if is_table_open_error(&e) {
+                        debug!(table = T::NAME, "table not found in consensus DB, skipping");
+                        break;
+                    }
+                    return Err(e);
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            last_key = batch.last().map(|(k, _)| k.clone());
+            let batch_len = batch.len();
+            cache.update_eyre(|tx| {
+                for (k, v) in batch {
+                    // Skip if already present (idempotent on resume).
+                    if tx.get::<T>(k.clone())?.is_some() {
+                        continue;
+                    }
+                    tx.put::<T>(k, v)?;
+                }
+                Ok(())
+            })?;
+            total += batch_len;
+        }
+        debug!(table = T::NAME, total, "copied table");
+        Ok(total)
+    }
+
+    /// Copy a DupSort table from consensus into cache.
+    ///
+    /// Reads all rows in a single pass rather than paginating:
+    ///   1. The cache size is bounded by the operator's config (typically
+    ///      single-digit GBs at most). CachedChunksIndex and IngressProofs
+    ///      are small relative to the cache itself.
+    ///   2. The migration runs at startup before any service starts, so
+    ///      memory pressure is bounded to this one task. A future refactor
+    ///      could page the dupsort scan; until we see real problems on
+    ///      production-scale DBs, the simple version wins.
+    ///   3. Idempotency is provided by MDBX's UPSERT semantics: reinserting
+    ///      an exact (key, value) pair is a no-op, so re-runs are cheap.
+    ///
+    /// Returns Ok(0) if the table doesn't exist in the consensus DB.
+    fn copy_dup_table<T>(consensus: &DatabaseEnv, cache: &DatabaseEnv) -> eyre::Result<usize>
+    where
+        T: reth_db::table::DupSort + 'static,
+        T::Key: Clone,
+        T::Value: Clone,
+    {
+        let all_rows_result: eyre::Result<Vec<(T::Key, T::Value)>> = consensus.view_eyre(|tx| {
+            let mut cursor = tx.cursor_dup_read::<T>()?;
+            let walker = cursor.walk(None)?;
+            walker
+                .map(|r| r.map_err(|e| eyre::eyre!(e)))
+                .collect::<eyre::Result<Vec<_>>>()
+        });
+        let all_rows = match all_rows_result {
+            Ok(r) => r,
+            Err(e) => {
+                if is_table_open_error(&e) {
+                    debug!(table = T::NAME, "table not found in consensus DB, skipping");
+                    return Ok(0);
+                }
+                return Err(e);
+            }
+        };
+        let total = all_rows.len();
+        if total == 0 {
+            debug!(table = T::NAME, "nothing to copy");
+            return Ok(0);
+        }
+        cache.update_eyre(|tx| {
+            for (k, v) in all_rows {
+                // MDBX UPSERT: re-inserting an existing exact (key, value) is a no-op.
+                tx.put::<T>(k, v)?;
+            }
+            Ok(())
+        })?;
+        debug!(table = T::NAME, total, "copied dupsort table");
+        Ok(total)
+    }
+
+    fn clear_consensus<T: reth_db::table::Table + 'static>(
+        consensus: &DatabaseEnv,
+    ) -> eyre::Result<()> {
+        // If the table doesn't exist in the consensus DB, clearing is a no-op.
+        match consensus.update_eyre(|tx| {
+            tx.clear::<T>()?;
+            Ok(())
+        }) {
+            Err(e) if is_table_open_error(&e) => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Returns true if the error indicates a named database doesn't exist in the
+    /// MDBX file (i.e. the table was never created in this environment).
+    fn is_table_open_error(e: &eyre::Error) -> bool {
+        e.downcast_ref::<DatabaseError>()
+            .is_some_and(|db_err| matches!(db_err, DatabaseError::Open(_)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tables::{IrysBlockHeaders, IrysDataTxHeaders, IrysTables};
+    use crate::tables::{CacheTables, IrysBlockHeaders, IrysDataTxHeaders, IrysTables};
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{H256, IrysBlockHeader};
@@ -690,6 +941,20 @@ mod tests {
     use reth_db_api::{Database as _, DatabaseError};
 
     use irys_types::DatabaseVersion;
+
+    use super::DatabaseEnv;
+
+    /// Open a fresh cache DB for use alongside a consensus DB in migration tests.
+    fn open_test_cache_db() -> (DatabaseEnv, irys_testing_utils::utils::tempfile::TempDir) {
+        let dir = TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            dir.path(),
+            CacheTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        (db, dir)
+    }
 
     // Test ensures v1→v2 migration correctly moves promoted_height to IrysDataTxMetadata
     #[test]
@@ -1139,7 +1404,8 @@ mod tests {
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
-        ensure_db_version_compatible(&db).unwrap();
+        let (cache, _cache_dir) = open_test_cache_db();
+        ensure_db_version_compatible(&db, &cache).unwrap();
         let version = db
             .view(|tx| crate::database_schema_version(tx).unwrap())
             .unwrap();
@@ -1163,7 +1429,15 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        ensure_db_version_compatible(&db).unwrap();
+        let (cache, _cache_dir) = open_test_cache_db();
+        // Stamp cache as CURRENT so no mismatch.
+        cache
+            .update_eyre(|tx| {
+                crate::set_cache_database_schema_version(tx, DatabaseVersion::CURRENT)?;
+                Ok(())
+            })
+            .unwrap();
+        ensure_db_version_compatible(&db, &cache).unwrap();
     }
 
     #[test]
@@ -1190,7 +1464,8 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let result = ensure_db_version_compatible(&db);
+        let (cache, _cache_dir) = open_test_cache_db();
+        let result = ensure_db_version_compatible(&db, &cache);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("newer than this binary supports"));
@@ -1209,8 +1484,9 @@ mod tests {
         .unwrap();
 
         // No schema version set — simulates a V0 / fresh database.
-        // Should stamp V1 then migrate V1 → V2.
-        ensure_db_version_compatible(&db).unwrap();
+        // Should stamp V1 then migrate V1 → V2 → V3 → V4.
+        let (cache, _cache_dir) = open_test_cache_db();
+        ensure_db_version_compatible(&db, &cache).unwrap();
 
         let version = db
             .view(|tx| crate::database_schema_version(tx).unwrap())
@@ -1259,7 +1535,9 @@ mod tests {
         .unwrap();
 
         // Should stamp V1 then migrate V1 → V2 (tx header rewrite + metadata back-fill)
-        ensure_db_version_compatible(&db).unwrap();
+        // then V2 → V3 → V4 (no-ops on this DB).
+        let (cache, _cache_dir) = open_test_cache_db();
+        ensure_db_version_compatible(&db, &cache).unwrap();
 
         // Verify schema version is CURRENT.
         let version = db
@@ -1302,10 +1580,213 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        ensure_db_version_compatible(&db).unwrap();
+        let (cache, _cache_dir) = open_test_cache_db();
+        ensure_db_version_compatible(&db, &cache).unwrap();
         let version = db
             .view(|tx| crate::database_schema_version(tx).unwrap())
             .unwrap();
         assert_eq!(version, Some(DatabaseVersion::CURRENT as u32));
+    }
+
+    mod v3_to_v4_tests {
+        use super::*;
+        use crate::db::IrysDatabaseExt as _;
+        use crate::metadata::MetadataKey;
+        use crate::migration::ensure_db_version_compatible;
+        use crate::tables::{CacheMetadata, CachedDataRoots, ConsensusTables};
+
+        /// Open consensus + cache DB pair for V3→V4 migration tests.
+        /// The consensus DB is opened with legacy cache tables included so that
+        /// V3 cache data can be seeded before running the migration.
+        fn open_v3_pair() -> (
+            DatabaseEnv,
+            DatabaseEnv,
+            irys_testing_utils::utils::tempfile::TempDir,
+            irys_testing_utils::utils::tempfile::TempDir,
+        ) {
+            let c_dir = TempDirBuilder::new().build();
+            let k_dir = TempDirBuilder::new().build();
+            let mut consensus = open_or_create_db(
+                c_dir.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            // Ensure the old cache table named DBs exist in the consensus MDBX file
+            // so that V3 test data can be inserted and then read by v3_to_v4::migrate.
+            consensus
+                .create_and_track_tables_for::<CacheTables>()
+                .unwrap();
+            let cache = open_or_create_db(
+                k_dir.path(),
+                CacheTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            (consensus, cache, c_dir, k_dir)
+        }
+
+        #[test]
+        fn fresh_install_stamps_both_v4() {
+            let dir = TempDirBuilder::new().build();
+            let consensus = open_or_create_db(
+                dir.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            let (cache, _cache_dir) = open_test_cache_db();
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+
+            let cv = consensus
+                .view(|tx| crate::database_schema_version(tx).unwrap())
+                .unwrap()
+                .unwrap();
+            let kv = cache
+                .view(|tx| crate::cache_database_schema_version(tx).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(cv, DatabaseVersion::V4 as u32);
+            assert_eq!(kv, DatabaseVersion::V4 as u32);
+        }
+
+        #[test]
+        fn v3_consensus_with_cache_rows_migrates_to_v4() {
+            use crate::db_cache::CachedDataRoot;
+
+            let (consensus, cache, _c, _k) = open_v3_pair();
+
+            // Seed consensus as V3 with a cache row.
+            consensus
+                .update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+                    tx.put::<CachedDataRoots>(
+                        irys_types::H256::from([1_u8; 32]),
+                        CachedDataRoot::default(),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+
+            // Cache now has the row.
+            let key1 = irys_types::H256::from([1_u8; 32]);
+            let got = cache
+                .view(|tx| tx.get::<CachedDataRoots>(key1))
+                .unwrap()
+                .unwrap();
+            assert!(got.is_some(), "row should have been copied to cache");
+
+            // Consensus cache copy is cleared.
+            let consensus_count = consensus
+                .view(|tx| tx.entries::<CachedDataRoots>())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                consensus_count, 0,
+                "consensus cache table must be empty after migration"
+            );
+
+            // Both stamped V4.
+            let cv = consensus
+                .view(|tx| crate::database_schema_version(tx).unwrap())
+                .unwrap()
+                .unwrap();
+            let kv = cache
+                .view(|tx| crate::cache_database_schema_version(tx).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(cv, DatabaseVersion::V4 as u32);
+            assert_eq!(kv, DatabaseVersion::V4 as u32);
+        }
+
+        #[test]
+        fn migration_is_idempotent() {
+            use crate::db_cache::CachedDataRoot;
+
+            let (consensus, cache, _c, _k) = open_v3_pair();
+
+            // Seed and run first migration.
+            consensus
+                .update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
+                    tx.put::<CachedDataRoots>(
+                        irys_types::H256::from([1_u8; 32]),
+                        CachedDataRoot::default(),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+            // Run again — must not error and counts must remain stable.
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+
+            let cache_count = cache
+                .view(|tx| tx.entries::<CachedDataRoots>())
+                .unwrap()
+                .unwrap();
+            assert_eq!(cache_count, 1, "idempotent re-run must not duplicate rows");
+        }
+
+        #[test]
+        fn newer_cache_version_errors() {
+            let dir = TempDirBuilder::new().build();
+            let consensus = open_or_create_db(
+                dir.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            let (cache, _cache_dir) = open_test_cache_db();
+
+            // Stamp the cache with a version newer than CURRENT.
+            cache
+                .update_eyre(|tx| {
+                    tx.put::<CacheMetadata>(
+                        MetadataKey::DBSchemaVersion,
+                        (DatabaseVersion::CURRENT as u32 + 1).to_le_bytes().to_vec(),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+
+            let err = ensure_db_version_compatible(&consensus, &cache).unwrap_err();
+            assert!(
+                err.to_string().contains("Cache database schema version"),
+                "error should mention cache DB version: {err}"
+            );
+        }
+
+        #[test]
+        fn v4_consensus_with_missing_cache_stamp_is_accepted() {
+            use crate::db::IrysDatabaseExt as _;
+
+            let dir = TempDirBuilder::new().build();
+            let consensus = open_or_create_db(
+                dir.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            // Stamp consensus V4 (already at current).
+            consensus
+                .update_eyre(|tx| {
+                    crate::set_database_schema_version(tx, DatabaseVersion::V4)?;
+                    Ok(())
+                })
+                .unwrap();
+            // Cache has no stamp (simulates operator deleting cache DB).
+            let (cache, _cache_dir) = open_test_cache_db();
+
+            ensure_db_version_compatible(&consensus, &cache).unwrap();
+
+            // Cache should now be stamped V4.
+            let kv = cache
+                .view(|tx| crate::cache_database_schema_version(tx).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(kv, DatabaseVersion::V4 as u32);
+        }
     }
 }
