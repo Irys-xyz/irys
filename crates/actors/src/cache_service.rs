@@ -7,8 +7,9 @@ use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
 };
 use irys_database::{
-    db::IrysDatabaseExt as _,
+    db::DatabaseProviderCacheExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
+    scoped_tx::{Cache, ScopedTx, ScopedTxMut},
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
@@ -20,8 +21,6 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
-use reth_db::transaction::DbTx as _;
-use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Sender;
@@ -30,7 +29,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{Instrument as _, debug, error, info, info_span, trace, warn};
+use tracing::{Instrument as _, debug, error, info, trace, warn};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -212,9 +211,12 @@ impl InnerCacheTask {
         );
 
         let ((chunk_cache_count, chunk_cache_size), ingress_proof_count) =
-            self.db.view_eyre(|tx| {
+            self.db.view_cache_eyre(|tx| {
                 Ok((
-                    get_cache_size::<CachedChunks, _>(tx, self.config.consensus.chunk_size)?,
+                    get_cache_size::<CachedChunks, _>(
+                        tx.inner(),
+                        self.config.consensus.chunk_size,
+                    )?,
                     tx.entries::<IngressProofs>()?,
                 ))
             })?;
@@ -270,7 +272,7 @@ impl InnerCacheTask {
         let delete_chunks_older_than =
             UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
 
-        let tx = self.db.tx()?;
+        let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
 
         // Collect candidate data roots from CachedDataRoots
         let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
@@ -320,15 +322,7 @@ impl InnerCacheTask {
 
             // Commit a small batch to avoid large transactions
             if pending_roots.len() >= 256 {
-                // Span attributes any libmdbx writer-lock stall warning fired
-                // during begin_rw_txn to libmdbx_rw_tx_lock_stalls_total
-                // {scope="irys-consensus"} (see crates/utils/utils/src/mdbx_metrics.rs).
-                let _span = info_span!(
-                    irys_utils::MDBX_RW_TX_SPAN,
-                    db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-                )
-                .entered();
-                let write_tx = self.db.tx_mut()?;
+                let write_tx = ScopedTxMut::<Cache>::new(self.db.cache().tx_mut()?);
                 for root in pending_roots.drain(..) {
                     trace!(
                         chunk.data_root = ?root,
@@ -350,12 +344,7 @@ impl InnerCacheTask {
 
         // Flush any remaining pending deletions
         if !pending_roots.is_empty() {
-            let _span = info_span!(
-                irys_utils::MDBX_RW_TX_SPAN,
-                db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-            )
-            .entered();
-            let write_tx = self.db.tx_mut()?;
+            let write_tx = ScopedTxMut::<Cache>::new(self.db.cache().tx_mut()?);
             for root in pending_roots.drain(..) {
                 let pruned = delete_cached_chunks_by_data_root_older_than(
                     &write_tx,
@@ -383,94 +372,93 @@ impl InnerCacheTask {
         let local_addr = signer.address();
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
-        let _span = info_span!(
-            irys_utils::MDBX_RW_TX_SPAN,
-            db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-        )
-        .entered();
-        let write_tx = self.db.tx_mut()?;
-        let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
-        let mut walker = cursor.walk(None)?;
-        while let Some((data_root, cached)) = walker.next().transpose()? {
-            if eviction_count >= MAX_EVICTIONS_PER_RUN {
-                warn!(
-                    evictions_performed = eviction_count,
-                    "Hit max eviction limit in prune_data_root_cache, will continue next cycle"
-                );
-                break;
-            }
-            // Pruning horizon priority: block inclusion > expiry height > skip
-            // Rationale: Confirmed blocks provide the most reliable pruning point.
-            // Unconfirmed mempool entries use expiry_height as a conservative fallback.
-            // Entries without either metadata are likely still active and should not be pruned.
-            let mut inclusion_max_height: Option<u64> = None;
-            for block_hash in cached.block_set.iter() {
-                if let Some(block_header) =
-                    irys_database::block_header_by_hash(&write_tx, block_hash, false)?
-                {
-                    inclusion_max_height = Some(
-                        inclusion_max_height
-                            .map_or(block_header.height, |h| h.max(block_header.height)),
+        // Consensus read tx for block header lookups; cache write tx for cache table mutations.
+        let consensus_rtx = self.db.tx()?;
+        let write_tx = ScopedTxMut::<Cache>::new(self.db.cache().tx_mut()?);
+        {
+            let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
+            let mut walker = cursor.walk(None)?;
+            while let Some((data_root, cached)) = walker.next().transpose()? {
+                if eviction_count >= MAX_EVICTIONS_PER_RUN {
+                    warn!(
+                        evictions_performed = eviction_count,
+                        "Hit max eviction limit in prune_data_root_cache, will continue next cycle"
                     );
+                    break;
                 }
-            }
-            let horizon = match (inclusion_max_height, cached.expiry_height) {
-                (Some(h), _) => Some(h),
-                (None, Some(e)) => Some(e),
-                (None, None) => None,
-            };
-            let max_height: u64 = match horizon {
-                Some(h) => h,
-                None => {
-                    trace!(
-                        data_root.data_root = ?data_root,
-                        "Skipping prune for data root without inclusion or expiry"
-                    );
-                    continue;
-                }
-            };
-
-            trace!(
-                "Processing data root {} max height: {}, prune height: {}",
-                &data_root, &max_height, &prune_height
-            );
-
-            if max_height < prune_height {
-                // Check for locally generated ingress proof
-                let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
-                let mut has_local_proof = false;
-                let mut proof_walker = proofs_cursor.walk(Some(data_root))?;
-                while let Some((key, compact)) = proof_walker.next().transpose()? {
-                    if key != data_root {
-                        break;
-                    }
-                    if compact.0.address == local_addr {
-                        has_local_proof = true;
-                        break;
+                // Pruning horizon priority: block inclusion > expiry height > skip
+                // Rationale: Confirmed blocks provide the most reliable pruning point.
+                // Unconfirmed mempool entries use expiry_height as a conservative fallback.
+                // Entries without either metadata are likely still active and should not be pruned.
+                let mut inclusion_max_height: Option<u64> = None;
+                for block_hash in cached.block_set.iter() {
+                    if let Some(block_header) =
+                        irys_database::block_header_by_hash(&consensus_rtx, block_hash, false)?
+                    {
+                        inclusion_max_height = Some(
+                            inclusion_max_height
+                                .map_or(block_header.height, |h| h.max(block_header.height)),
+                        );
                     }
                 }
+                let horizon = match (inclusion_max_height, cached.expiry_height) {
+                    (Some(h), _) => Some(h),
+                    (None, Some(e)) => Some(e),
+                    (None, None) => None,
+                };
+                let max_height: u64 = match horizon {
+                    Some(h) => h,
+                    None => {
+                        trace!(
+                            data_root.data_root = ?data_root,
+                            "Skipping prune for data root without inclusion or expiry"
+                        );
+                        continue;
+                    }
+                };
 
-                if has_local_proof {
-                    trace!(
-                        data_root.data_root = ?data_root,
-                        "Skipping prune for data root with locally generated ingress proof"
-                    );
-                    continue;
-                }
-
-                debug!(
-                    data_root.data_root = ?data_root,
-                    data_root.max_height = ?max_height,
-                    data_root.prune_height = ?prune_height,
-                    "expiring cached data for data root",
+                trace!(
+                    "Processing data root {} max height: {}, prune height: {}",
+                    &data_root, &max_height, &prune_height
                 );
-                write_tx.delete::<IngressProofs>(data_root, None)?;
-                chunks_pruned = chunks_pruned
-                    .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
-                write_tx.delete::<CachedDataRoots>(data_root, None)?;
-                eviction_count += 1;
+
+                if max_height < prune_height {
+                    // Check for locally generated ingress proof
+                    let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
+                    let mut has_local_proof = false;
+                    let mut proof_walker = proofs_cursor.walk(Some(data_root))?;
+                    while let Some((key, compact)) = proof_walker.next().transpose()? {
+                        if key != data_root {
+                            break;
+                        }
+                        if compact.0.address == local_addr {
+                            has_local_proof = true;
+                            break;
+                        }
+                    }
+
+                    if has_local_proof {
+                        trace!(
+                            data_root.data_root = ?data_root,
+                            "Skipping prune for data root with locally generated ingress proof"
+                        );
+                        continue;
+                    }
+
+                    debug!(
+                        data_root.data_root = ?data_root,
+                        data_root.max_height = ?max_height,
+                        data_root.prune_height = ?prune_height,
+                        "expiring cached data for data root",
+                    );
+                    write_tx.delete::<IngressProofs>(data_root, None)?;
+                    chunks_pruned = chunks_pruned
+                        .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
+                    write_tx.delete::<CachedDataRoots>(data_root, None)?;
+                    eviction_count += 1;
+                }
             }
-        }
+        } // cursor and walker dropped here, releasing borrow on write_tx
         debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
 
@@ -488,9 +476,9 @@ impl InnerCacheTask {
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let result = clone.db.update_eyre(|db_tx| {
+            let result = clone.db.update_cache_eyre(|db_tx| {
                 for (data_root, txids_to_remove) in &by_data_root {
-                    let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                    let Some(mut cached) = db_tx.get::<CachedDataRoots>(*data_root)? else {
                         continue;
                     };
 
@@ -535,8 +523,10 @@ impl InnerCacheTask {
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
-        let tx = self.db.tx()?;
-        let mut cursor = tx.cursor_read::<IngressProofs>()?;
+        // Cache read tx for cache table operations; consensus read tx for tx header lookups.
+        let cache_tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+        let consensus_rtx = self.db.tx()?;
+        let mut cursor = cache_tx.cursor_read::<IngressProofs>()?;
         // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
         // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
@@ -548,7 +538,7 @@ impl InnerCacheTask {
 
         // Determine if cache is at capacity based on the CachedChunks table
         let (chunk_count, chunk_cache_size) =
-            get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+            get_cache_size::<CachedChunks, _>(cache_tx.inner(), self.config.consensus.chunk_size)?;
         let at_capacity = chunk_cache_size >= *max_cache_size_bytes;
         debug!(
             "Cache is {} at capacity - capacity: {}B, size {}B ({} chunks)",
@@ -566,7 +556,8 @@ impl InnerCacheTask {
             let CachedIngressProof { address, proof } = compact.0;
 
             // Associated txids
-            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
+            let Some(cached_data_root) = cached_data_root_by_data_root(&cache_tx, data_root)?
+            else {
                 debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
                 to_delete.push(data_root);
                 continue;
@@ -583,7 +574,7 @@ impl InnerCacheTask {
             }
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
-                if let Some(tx_header) = tx_header_by_txid(&tx, txid)?
+                if let Some(tx_header) = tx_header_by_txid(&consensus_rtx, txid)?
                     && tx_header.promoted_height().is_none()
                 {
                     any_unpromoted = true;
@@ -1015,7 +1006,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
@@ -1027,12 +1018,12 @@ mod tests {
             bytes: Base64(vec![0_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             eyre::Ok(())
         })??;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots missing before prune");
             Ok(())
@@ -1071,7 +1062,7 @@ mod tests {
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
         service.cache_task.prune_data_root_cache(1)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots was prematurely pruned");
             Ok(())
@@ -1099,13 +1090,13 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
 
         // Set expiry_height to 5 (arbitrary) so prune_height > expiry will trigger deletion
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut cdr = wtx
                 .get::<CachedDataRoots>(tx_header.data_root)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
@@ -1115,7 +1106,7 @@ mod tests {
         })??;
 
         // Sanity: it exists
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(has_root, "CachedDataRoots missing before prune");
             Ok(())
@@ -1155,7 +1146,7 @@ mod tests {
         service.cache_task.prune_data_root_cache(6)?;
 
         // Verify it was pruned
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(!has_root, "CachedDataRoots should have been pruned");
             Ok(())
@@ -1182,7 +1173,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
@@ -1193,13 +1184,13 @@ mod tests {
             bytes: Base64(vec![1_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             eyre::Ok(())
         })??;
 
         // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut ingress_proof = IngressProof::default();
             ingress_proof.data_root = tx_header.data_root;
             irys_database::store_external_ingress_proof_checked(
@@ -1233,7 +1224,7 @@ mod tests {
         service_task.prune_chunks_without_active_ingress_proofs()?;
 
         // Verify chunk still exists
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
             let has_index = walk.next().transpose()?.is_some();
@@ -1274,7 +1265,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
@@ -1285,7 +1276,7 @@ mod tests {
             bytes: Base64(vec![2_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             // Mark the cached chunk as very old so it qualifies for age-based pruning
             let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
@@ -1322,7 +1313,7 @@ mod tests {
         service_task.prune_chunks_without_active_ingress_proofs()?;
 
         // Verify chunk removed
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
             let index_entry = walk.next().transpose()?;
@@ -1360,7 +1351,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
             database::cache_data_root(wtx, &tx_header_new, None)?;
             eyre::Ok(())
@@ -1374,7 +1365,7 @@ mod tests {
             tx_offset: TxChunkOffset::from(offset),
         };
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             // Manually insert index and chunk entries with controlled timestamps
             let chunk_old = mk_chunk(tx_header_old.data_root, 0, 10);
             let hash_old = chunk_old.chunk_path_hash();
@@ -1411,7 +1402,7 @@ mod tests {
 
         // Directly exercise the DB helper with a controlled cutoff time.
         // Use cutoff=5s so 0s is pruned and 10s is retained.
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
             let mut eligible = 0;
@@ -1428,7 +1419,7 @@ mod tests {
             Ok(())
         })??;
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let pruned = delete_cached_chunks_by_data_root_older_than(
                 wtx,
                 tx_header_old.data_root,
@@ -1438,7 +1429,7 @@ mod tests {
             eyre::Ok(())
         })??;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Old root should have no entries
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
@@ -1490,7 +1481,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             let c0 = UnpackedChunk {
                 data_root: tx_header.data_root,
@@ -1543,7 +1534,7 @@ mod tests {
         };
         task_below.prune_cache(0)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Expect both indices still present
             let m0 = irys_database::cached_chunk_meta_by_offset(
                 rtx,
@@ -1577,7 +1568,7 @@ mod tests {
         };
         task_above.prune_cache(0)?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             // Expect indices pruned now that we're above capacity
             let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = cur.walk(Some(tx_header.data_root))?;
@@ -1607,7 +1598,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
@@ -1618,7 +1609,7 @@ mod tests {
             bytes: Base64(vec![3_u8; 8]),
             tx_offset: TxChunkOffset::from(0_u32),
         };
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
             eyre::Ok(())
         })??;
@@ -1645,7 +1636,7 @@ mod tests {
 
         service_task.prune_chunks_without_active_ingress_proofs()?;
 
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
             let still_present = walk.next().transpose()?.is_some();
@@ -1675,13 +1666,13 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             eyre::Ok(())
         })??;
 
         // Set expiry_height to 5 so prune_height > expiry would trigger deletion
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut cdr = wtx
                 .get::<CachedDataRoots>(tx_header.data_root)?
                 .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
@@ -1694,7 +1685,7 @@ mod tests {
         let signer = config.irys_signer();
         let local_addr = signer.address();
 
-        db.update(|wtx| {
+        db.update_cache(|wtx| {
             let mut ingress_proof = IngressProof::default();
             ingress_proof.data_root = tx_header.data_root;
             irys_database::store_external_ingress_proof_checked(
@@ -1729,7 +1720,7 @@ mod tests {
         service_task.prune_data_root_cache(6)?;
 
         // Verify it was NOT pruned
-        db.view(|rtx| -> eyre::Result<()> {
+        db.view_cache(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
             eyre::ensure!(
                 has_root,
