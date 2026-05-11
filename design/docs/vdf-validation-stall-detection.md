@@ -32,7 +32,7 @@ The budget is calibrated against the worst-case legitimate batch: VDF difficulty
 - `WaitForStepError::Cancelled` — the cancel atomic was set (preemption by a higher-priority block, or shutdown). `PreemptibleVdfTask::execute` maps this to `VdfValidationResult::Cancelled` and the service requeues the same task with refreshed priority.
 - `WaitForStepError::Stalled` — `global_step` did not advance for `progress_timeout`. The classifier maps this to `VdfValidationResult::Invalid(e)`, surfacing to the block tree as `BlockValidationFinished(Invalid(VdfValidationFailed))`.
 
-Collapsing the two into a single `Err` would re-introduce the original failure mode: requeueing a stalled block is wrong (local VDF state is the bottleneck, retrying won't help) and dropping it on cooperative cancel is wrong (the block is still potentially valid, just deprioritised). They must be different code paths.
+Collapsing the two into a single `Err` would re-introduce the original failure mode: requeuing a stalled block is wrong (local VDF state is the bottleneck, retrying won't help) and dropping it on cooperative cancel is wrong (the block is still potentially valid, just deprioritised). They must be different code paths.
 
 ### Non-cooperative: stage watchdog with process abort
 
