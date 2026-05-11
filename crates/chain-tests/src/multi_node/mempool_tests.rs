@@ -1319,15 +1319,12 @@ async fn heavy3_mempool_publish_fork_recovery_test(
         a_blk1_tx1.header.id
     );
 
-    let a_blk1_tx1_proof1 = a_node
-        .node_ctx
-        .db
-        .view_cache_eyre(|tx| {
-            // Get the ingress proof from the cache database
-            Ok(tx
-                .get::<IngressProofs>(a_blk1_tx1.header.data_root)?
-                .expect("Able to get a_blk1_tx1’s ingress proof from DB"))
-        })?;
+    let a_blk1_tx1_proof1 = a_node.node_ctx.db.view_cache_eyre(|tx| {
+        // Get the ingress proof from the cache database
+        Ok(tx
+            .get::<IngressProofs>(a_blk1_tx1.header.data_root)?
+            .expect("Able to get a_blk1_tx1’s ingress proof from DB"))
+    })?;
 
     let a_blk1_tx1_mempool = {
         // Use mempool-only lookup (no DB fallback) to verify the tx was orphaned back into mempool state

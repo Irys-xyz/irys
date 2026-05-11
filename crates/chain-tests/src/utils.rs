@@ -1426,10 +1426,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .unwrap()
                 .unwrap()
                 .into_iter()
-                .fold(HashMap::new(), |mut map: HashMap<_, Vec<_>>, (data_root, proof)| {
-                    map.entry(data_root).or_default().push(proof);
-                    map
-                });
+                .fold(
+                    HashMap::new(),
+                    |mut map: HashMap<_, Vec<_>>, (data_root, proof)| {
+                        map.entry(data_root).or_default().push(proof);
+                        map
+                    },
+                );
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
