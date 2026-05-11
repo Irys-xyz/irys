@@ -28,7 +28,7 @@ use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
     cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
     tx_header_by_txid,
@@ -3019,13 +3019,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                     for i in 0..expected_chunks {
                         // Read chunk directly from sender's DB cache by data_root + tx-relative offset
                         let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
-                        if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
-                            irys_database::cached_chunk_by_chunk_offset(
-                                tx,
-                                tx_header.data_root,
-                                tx_chunk_offset,
-                            )
-                        }) && let Some(bytes) = cached_chunk.chunk
+                        if let Ok(Some((_meta, cached_chunk))) =
+                            self.node_ctx.db.view_cache_eyre(|tx| {
+                                irys_database::cached_chunk_by_chunk_offset(
+                                    tx,
+                                    tx_header.data_root,
+                                    tx_chunk_offset,
+                                )
+                            })
+                            && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
                                 data_root: tx_header.data_root,
@@ -3058,7 +3060,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                     let got = peer
                                         .node_ctx
                                         .db
-                                        .view_eyre(|tx| {
+                                        .view_cache_eyre(|tx| {
                                             irys_database::cached_chunk_by_chunk_offset(
                                                 tx,
                                                 verify_data_root,
@@ -3289,7 +3291,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             let cached = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
+                .view_cache_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, tx_offset))?;
             if cached.is_some() {
                 return Ok(());
             }
