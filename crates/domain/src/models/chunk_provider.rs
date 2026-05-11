@@ -1,4 +1,4 @@
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
@@ -553,7 +553,7 @@ impl ChunkProvider {
             return Err(eyre::eyre!("injected cache read error"));
         }
         let chunk_size = self.config.consensus.chunk_size;
-        self.db.view_eyre(|tx| {
+        self.db.view_cache_eyre(|tx| {
             let Some(cdr) = cached_data_root_by_data_root(tx, data_root)? else {
                 return Ok(None);
             };
@@ -926,7 +926,7 @@ mod tests {
         cache_chunks(&db, &tx, &chunks);
         // Distinct data_path so the cache does not treat this as a duplicate
         // of a real chunk and skip the out-of-range index entry.
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_chunk(
                 wtx,
                 &UnpackedChunk {
@@ -1137,16 +1137,9 @@ mod tests {
     }
 
     fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
-        use reth_db::mdbx::DatabaseArguments;
+        use irys_database::DatabaseProviderTestExt as _;
 
-        let db = open_or_create_db(
-            path,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        DatabaseProvider(Arc::new(db))
+        DatabaseProvider::for_testing(path, &path.join("cache")).unwrap()
     }
 
     fn testing_config(base: std::path::PathBuf, num_chunks: u64) -> Config {
@@ -1205,7 +1198,7 @@ mod tests {
     }
 
     fn cache_chunks(db: &DatabaseProvider, tx: &DataTransaction, chunks: &[UnpackedChunk]) {
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None)?;
             for chunk in chunks {
                 cache_chunk(wtx, chunk)?;

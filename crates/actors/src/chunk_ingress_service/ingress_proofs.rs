@@ -1,5 +1,5 @@
 use super::ChunkIngressServiceInner;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
 use irys_database::{
@@ -12,7 +12,6 @@ use irys_types::{
     BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
     SendTraced as _, Traced,
 };
-use reth_db::DatabaseError;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -227,23 +226,18 @@ impl ChunkIngressServiceInner {
         }
 
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
-        let res = self
-            .irys_db
-            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
+        self.irys_db
+            .update_cache_eyre(|rw_tx| {
                 irys_database::store_external_ingress_proof_checked(rw_tx, &ingress_proof, address)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                Ok(())
             })
-            .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?;
-
-        if let Err(e) = res {
-            tracing::error!(
-                ingress_proof.data_root = ?ingress_proof.data_root,
-                "Failed to store ingress proof data root: {:?}",
-                e
-            );
-            return Err(IngressProofError::DatabaseError(e.to_string()));
-        }
+            .map_err(|e| {
+                tracing::error!(
+                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    "Failed to store ingress proof data root: {:?}",
+                    e
+                );
+                IngressProofError::DatabaseError(e.to_string())
+            })?;
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let data_root = ingress_proof.data_root;
@@ -623,9 +617,11 @@ pub fn load_complete_ingress_leaves(
     chunk_size: u64,
 ) -> Result<Vec<IngressMerkleLeaf>, IngressProofGenerationError> {
     let data_size = cached_data_size(db, data_root, chunk_size)?;
-    db.view_eyre(|tx| complete_ingress_leaves(tx, data_root, address, data_size, chunk_size))
-        .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
-        .ok_or(IngressProofGenerationError::IncompleteLeaves)
+    db.view_cache_eyre(|tx| {
+        complete_ingress_leaves(tx.inner(), data_root, address, data_size, chunk_size)
+    })
+    .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
+    .ok_or(IngressProofGenerationError::IncompleteLeaves)
 }
 
 /// [`load_complete_ingress_leaves`] without rebuilding the leaves: the same
@@ -638,7 +634,9 @@ fn require_complete_ingress_leaf_count(
 ) -> Result<(), IngressProofGenerationError> {
     let data_size = cached_data_size(db, data_root, chunk_size)?;
     let complete = db
-        .view_eyre(|tx| ingress_leaf_count_complete(tx, data_root, address, data_size, chunk_size))
+        .view_cache_eyre(|tx| {
+            ingress_leaf_count_complete(tx.inner(), data_root, address, data_size, chunk_size)
+        })
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?;
     if complete {
         Ok(())
@@ -654,7 +652,7 @@ fn cached_data_size(
     chunk_size: u64,
 ) -> Result<u64, IngressProofGenerationError> {
     let cdr = db
-        .view_eyre(|tx| cached_data_root_by_data_root(tx, data_root))
+        .view_cache_eyre(|tx| cached_data_root_by_data_root(tx, data_root))
         .map_err(|error| IngressProofGenerationError::GenerationFailed(error.to_string()))?
         .ok_or(IngressProofGenerationError::DataRootUnavailable)?;
     data_size_to_chunk_count(cdr.data_size, chunk_size)

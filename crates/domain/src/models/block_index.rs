@@ -854,7 +854,7 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("get_block_bounds_at_height_uniform")
             .build();
-        let db = create_test_db(&tmp_dir.path().join("db"));
+        let db = create_test_db(&tmp_dir.path().join("db"), &tmp_dir.path().join("cache"));
         let block_index = BlockIndex::new_for_testing(db);
 
         for h in 0..n {
@@ -918,7 +918,7 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("get_block_bounds_at_height_late_publish")
             .build();
-        let db = create_test_db(&tmp_dir.path().join("db"));
+        let db = create_test_db(&tmp_dir.path().join("db"), &tmp_dir.path().join("cache"));
         let block_index = BlockIndex::new_for_testing(db);
 
         let mut items = Vec::with_capacity(n as usize);
