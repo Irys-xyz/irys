@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_testing_utils::initialize_tracing;
@@ -472,7 +472,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
             .await,
         "overflow pre-header chunk must not remain parked"
     );
-    let overflow_cached = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    let overflow_cached = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         irys_database::cached_chunk_by_chunk_offset(
             db_tx,
             tx.header.data_root,

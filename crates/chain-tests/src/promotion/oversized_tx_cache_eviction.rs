@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::CachedChunksIndex;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -11,8 +11,8 @@ use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 
 fn cached_chunk_count(db: &DatabaseProvider, data_root: DataRoot) -> eyre::Result<u32> {
-    db.view_eyre(|tx| {
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+    db.view_cache_eyre(|tx| {
+        let mut cursor = tx.inner().cursor_dup_read::<CachedChunksIndex>()?;
         Ok(cursor.dup_count(data_root)?.unwrap_or(0))
     })
 }
@@ -23,12 +23,17 @@ fn ingress_leaf_count(
     address: IrysAddress,
     expected_chunks: u32,
 ) -> eyre::Result<usize> {
-    db.view_eyre(|tx| {
+    db.view_cache_eyre(|tx| {
         (0..expected_chunks).try_fold(0_usize, |count, offset| {
             Ok(count
                 + usize::from(
-                    irys_database::cached_ingress_leaf(tx, data_root, address, offset.into())?
-                        .is_some(),
+                    irys_database::cached_ingress_leaf(
+                        tx.inner(),
+                        data_root,
+                        address,
+                        offset.into(),
+                    )?
+                    .is_some(),
                 ))
         })
     })

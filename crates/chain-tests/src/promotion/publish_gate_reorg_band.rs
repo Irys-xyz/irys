@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::{CachedDataRoots, MigratedBlockHashes};
 use irys_database::{insert_block_header, insert_tx_header, set_data_tx_included_height};
@@ -73,8 +73,10 @@ async fn make_publish_candidate(
     // The tx is never posted to the mempool; the publish-candidate lookup falls
     // back to the DB, so the header must be resolvable there (otherwise the
     // stale-txid debug_assert in get_publish_txs_and_proofs hard-fails).
-    node.node_ctx.db.update_eyre(|db_tx| {
-        insert_tx_header(db_tx, &data_tx.header)?;
+    node.node_ctx
+        .db
+        .update_eyre(|db_tx| insert_tx_header(db_tx, &data_tx.header))?;
+    node.node_ctx.db.update_cache_eyre(|db_tx| {
         let cached = CachedDataRoot {
             data_size: data_tx.header.data_size,
             data_size_confirmed: true,
@@ -95,7 +97,7 @@ async fn make_publish_candidate(
         config.consensus_config().chain_id,
         anchor,
     )?;
-    node.node_ctx.db.update_eyre(|db_tx| {
+    node.node_ctx.db.update_cache_eyre(|db_tx| {
         irys_database::store_ingress_proof_checked(db_tx, &ingress_proof, signer)
     })?;
 
