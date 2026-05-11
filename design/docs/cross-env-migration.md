@@ -55,4 +55,4 @@ See also: [Cache DB Split](cache-db-split.md), [Database Schema Versioning and M
 - `copy_dup_table` loads each DupSort table's row set in batches without explicit pagination of the dupsort key space. This is acceptable because (a) the cache tables are bounded by the operator's configured cache size (typically single-digit GBs), (b) the migration runs before any services start so peak memory pressure is bounded to this one task, and (c) MDBX UPSERT keeps reruns cheap. Future work could page the dupsort scan if production-scale evidence motivates it.
 
 ## Source
-Branch `feat/cache-db`; design spec `docs/superpowers/specs/2026-05-11-cache-db-split-design.md`.
+Branch `feat/cache-db`.
