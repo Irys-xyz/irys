@@ -1287,8 +1287,8 @@ mod tests {
     use super::*;
     use crate::block_reward::reward_curve_from_config;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db, read_block_stream_from,
-        tables::{CachedDataRoots, IrysTables},
+        DatabaseProviderTestExt as _, cache_data_root, read_block_stream_from,
+        tables::CachedDataRoots,
     };
     use irys_domain::{BlockTree, ChunkType, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -1300,7 +1300,6 @@ mod tests {
         partition_chunk_offset_ii,
     };
     use reth_db::Database as _;
-    use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
@@ -1373,12 +1372,8 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
     )> {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        Ok((DatabaseProvider(Arc::new(env)), tmp))
+        let env = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        Ok((env, tmp))
     }
 
     /// Build a signed block header with the given Submit-ledger `tx_ids`

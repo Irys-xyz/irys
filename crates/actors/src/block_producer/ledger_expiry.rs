@@ -1964,6 +1964,7 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{CommitmentState, PartitionAssignments, StakeEntry};
     use irys_types::{
         CommitmentStatus, DataTransactionHeaderV1, H256List, NodeConfig, UnixTimestamp,
@@ -2546,10 +2547,8 @@ mod tests {
     /// it (live vs. catching up) — a consensus divergence.
     #[test]
     fn find_block_range_bounds_by_parent_not_index_tip() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2560,12 +2559,7 @@ mod tests {
         // chunks [0,10). At height 2 (the "parent") slot 0 is only 7/10 full;
         // heights 3-4 grew the index past the slot boundary into slot 1.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         for (height, submit_total) in [0_u64, 4, 7, 12, 15].into_iter().enumerate() {
             block_index.push_item(
@@ -2679,10 +2673,8 @@ mod tests {
     #[test]
     fn find_block_range_resolves_term_ledger_offset_across_preactivation_index() -> eyre::Result<()>
     {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2690,12 +2682,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
 
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         // Heights 0-2: PRE-Cascade — only Publish + Submit, no OneYear entry.
@@ -2812,13 +2799,11 @@ mod tests {
     /// un-migrated height 3 and errored "previous block must exist".
     #[tokio::test]
     async fn find_block_range_resolves_unmigrated_tail() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
@@ -2881,12 +2866,7 @@ mod tests {
 
         // Migrated index: heights 0..=2 only (Submit totals 0,8,14).
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         for (height, submit_total) in [0_u64, 8, 14].into_iter().enumerate() {
             block_index.push_item(
@@ -2989,15 +2969,12 @@ mod tests {
     /// fee-accounting bug invisible to the single-miner heavy fixtures.
     #[tokio::test]
     async fn collect_attributes_each_tx_to_its_start_offset_slot_miners() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, tables::IrysTables,
-        };
+        use irys_database::insert_tx_header;
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, DataTransactionHeaderV1, H256List, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // chunk_size = 1 ⇒ data_size N occupies N chunks. Partition = 4 chunks, so
@@ -3072,12 +3049,7 @@ mod tests {
 
         // DB: seeded tx headers + a migrated index agreeing with the tree.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             for t in &txs {
                 insert_tx_header(wtx, t)?;
@@ -3179,13 +3151,11 @@ mod tests {
     /// tests, which need no heavy tree fixture.)
     #[test]
     fn resolve_submit_inclusion_slow_path_walks_untracked_tree() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // A header with one Submit ledger entry: cumulative chunk total + tx_ids.
@@ -3250,12 +3220,7 @@ mod tests {
 
         // Empty db ⇒ canonical_submit_height returns None ⇒ the SLOW path runs.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let block_index = BlockIndex::new_for_testing(db.clone());
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
 
@@ -3306,11 +3271,9 @@ mod tests {
     }
 
     fn unmigrated_inclusion_fixture() -> eyre::Result<UnmigratedInclusionFixture> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, CommitmentSnapshot, dummy_ema_snapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockBody, IrysTransactionCommon as _, irys::IrysSigner};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         let mut node_config = NodeConfig::testing();
@@ -3381,13 +3344,12 @@ mod tests {
         }
 
         let db_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env =
-            open_or_create_db(&db_dir, IrysTables::ALL, DatabaseArguments::irys_testing()?)?;
+        let db = DatabaseProvider::for_testing(db_dir.path(), &db_dir.path().join("cache"))?;
 
         Ok(UnmigratedInclusionFixture {
             config,
             guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(tree))),
-            db: DatabaseProvider(Arc::new(db_env)),
+            db,
             _db_dir: db_dir,
             sealed_inclusion_block,
             parent_hash: parent.block_hash,
@@ -3532,13 +3494,11 @@ mod tests {
     /// matching (branch-determined) refund sets regardless of any local hint.
     #[test]
     fn resolve_promoted_on_branch_reads_only_the_blocks_own_branch() -> eyre::Result<()> {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{BlockTransactions, SealedBlock};
-        use reth_db::mdbx::DatabaseArguments;
         use std::sync::RwLock;
 
         // A header carrying `publish_tx_ids` in its Publish ledger (the promotion
@@ -3611,12 +3571,7 @@ mod tests {
         // Empty db ⇒ the finalized `canonical_promoted_height` fallback finds
         // nothing; the by-hash branch walk is the sole decider.
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
 
         // Walking the promoting fork → `target` IS promoted (refund suppressed).
@@ -3653,9 +3608,8 @@ mod tests {
     #[test]
     fn resolve_promoted_on_branch_ignores_in_window_node_local_hint() -> eyre::Result<()> {
         use irys_database::{
-            IrysDatabaseArgs as _, canonical_promoted_height, insert_block_header,
-            insert_tx_header, open_or_create_db, set_data_tx_included_height,
-            set_data_tx_promoted_height, tables::IrysTables, tables::MigratedBlockHashes,
+            canonical_promoted_height, insert_block_header, insert_tx_header,
+            set_data_tx_included_height, set_data_tx_promoted_height, tables::MigratedBlockHashes,
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -3663,7 +3617,7 @@ mod tests {
             BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionLedger, DataTransactionMetadata, H256List, SealedBlock,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         // Submit-only headers ⇒ `target` is NEVER in a Publish ledger on this
@@ -3716,12 +3670,7 @@ mod tests {
         };
 
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         // Divergent sibling at height 1: `h1_alt` is a *second* child of h0 that
         // DOES carry `target` in its Publish ledger, and is the node-local
@@ -3863,17 +3812,14 @@ mod tests {
     /// never held canonical data at all.
     #[tokio::test]
     async fn submit_expiry_skips_canonical_unwritten_slots() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height, tables::IrysTables,
-        };
+        use irys_database::{insert_block_header, insert_tx_header, set_data_tx_included_height};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};
 
         fn submit_chain_header(
@@ -3963,12 +3909,7 @@ mod tests {
         inclusion_block.test_sign();
 
         let temp_dir = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_slot_0)?;
             insert_tx_header(wtx, &tx_slot_1)?;
@@ -4316,17 +4257,14 @@ mod tests {
     /// users charged, non-promotable, and unsettled.
     #[test_log::test(tokio::test)]
     async fn empty_partition_expired_slot_still_refunds_unpromoted_txs() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            tables::IrysTables,
-        };
+        use irys_database::{insert_block_header, insert_tx_header};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};
 
         fn submit_chain_header(
@@ -4433,12 +4371,7 @@ mod tests {
         inclusion_block.test_sign();
 
         let temp_dir = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_a)?;
             insert_tx_header(wtx, &tx_b)?;
@@ -4621,10 +4554,7 @@ mod tests {
     /// branch-invariant).
     #[test]
     fn resolve_promoted_below_walk_window_uses_finalized_fallback() -> eyre::Result<()> {
-        use irys_database::{
-            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
-            tables::IrysTables,
-        };
+        use irys_database::{insert_block_header, insert_tx_header};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
         };
@@ -4633,7 +4563,7 @@ mod tests {
             BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
             DataTransactionMetadata, SealedBlock,
         };
-        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         fn with_publish(height: u64, publish_tx_ids: Vec<H256>) -> IrysBlockHeader {
@@ -4722,12 +4652,7 @@ mod tests {
             metadata: DataTransactionMetadata::new(),
         });
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         db.update_eyre(|wtx| {
             insert_tx_header(wtx, &tx_header)?;
             // promoted_height requires the Submit inclusion height to exist first.

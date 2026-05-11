@@ -1191,7 +1191,7 @@ mod assignment_reset_tests {
     use super::*;
     use crate::services::ServiceSenders;
     use irys_config::StorageSubmodulesConfig;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{
         BlockIndex, BlockTree, BlockTreeReadGuard, StorageModule, StorageModuleInfo,
         block_index_guard::BlockIndexReadGuard,
@@ -1202,7 +1202,6 @@ mod assignment_reset_tests {
         NodeMode, PartitionChunkOffset, ii, partition::PartitionAssignment,
         partition_chunk_offset_ie,
     };
-    use reth_db::mdbx::DatabaseArguments;
     use std::{
         sync::{
             Arc, RwLock,
@@ -1273,13 +1272,12 @@ mod assignment_reset_tests {
         let paths = submodules.submodule_paths;
         let path = paths[0].clone();
 
-        let db_env = open_or_create_db(
-            tmp.path().join("chain-db"),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("db args"),
+        let db_env = DatabaseProvider::for_testing(
+            &(tmp.path().join("chain-db")),
+            &(tmp.path().join("chain-db")).join("cache"),
         )
         .expect("chain db");
-        let block_index = BlockIndex::new_for_testing(DatabaseProvider(Arc::new(db_env)));
+        let block_index = BlockIndex::new_for_testing(db_env);
         let block_index_guard = BlockIndexReadGuard::new(block_index);
         let block_tree = BlockTree::new(&new_mock_signed_header(), config.consensus.clone());
         let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
