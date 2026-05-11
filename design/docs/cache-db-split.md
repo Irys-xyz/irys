@@ -47,4 +47,4 @@ See also: [Scoped Transaction Types](scoped-transaction-types.md), [Cross-Env Mi
 - A subset of test setups and pre-existing `DatabaseProvider` consumers that wrapped non-consensus envs (e.g., `StorageSubmodule`, the CLI `RollbackBlocks` command) now construct `DatabaseProvider::new(env.clone(), env)` to satisfy the two-env constructor while only using the Deref→consensus path. This is pre-existing misuse of `DatabaseProvider` as a generic single-env wrapper, flagged for follow-up cleanup.
 
 ## Source
-Branch `feat/cache-db`; design spec `docs/superpowers/specs/2026-05-11-cache-db-split-design.md`.
+Branch `feat/cache-db`.
