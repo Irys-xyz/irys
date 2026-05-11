@@ -61,11 +61,25 @@ pub enum DatabaseVersion {
     /// Replaces the inline `bundle_format: Option<u64>` field on
     /// `DataTransactionHeaderV1` with `metadata_format: u8`.
     V3 = 3,
+
+    /// Cache DB split migration.
+    ///
+    /// Splits the four cache tables (`CachedDataRoots`, `CachedChunksIndex`,
+    /// `CachedChunks`, `IngressProofs`) out of the single MDBX environment at
+    /// `<base>/irys_consensus_data/` into a sibling environment at
+    /// `<base>/irys_cache_data/`. The cache environment carries its own
+    /// `CacheMetadata` table with an independent `DBSchemaVersion` stamp.
+    ///
+    /// The migration is idempotent and resumable: each cache table is copied
+    /// row-by-row into the cache env (skipping rows already present), then the
+    /// consensus copy is cleared. A crash mid-migration replays cleanly on
+    /// next startup.
+    V4 = 4,
 }
 
 impl DatabaseVersion {
     /// The current schema version that this binary expects.
-    pub const CURRENT: Self = Self::V3;
+    pub const CURRENT: Self = Self::V4;
 
     /// Returns `Some(version)` if the raw value corresponds to a known variant,
     /// or `None` if the value was written by a newer binary.
@@ -75,6 +89,7 @@ impl DatabaseVersion {
             1 => Some(Self::V1),
             2 => Some(Self::V2),
             3 => Some(Self::V3),
+            4 => Some(Self::V4),
             _ => None,
         }
     }
