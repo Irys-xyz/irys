@@ -1413,24 +1413,20 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             }
 
-            // Snapshot ingress proofs from DB into a map by data_root and drop the read transaction
-            let ingress_proofs_by_root = {
-                let ro_tx = self
-                    .node_ctx
-                    .db
-                    .as_ref()
-                    .tx()
-                    .map_err(|e| {
-                        tracing::error!("Failed to create mdbx transaction: {}", e);
-                    })
-                    .unwrap();
-                let proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
-                let mut map: HashMap<_, Vec<_>> = HashMap::new();
-                for (data_root, proof) in proofs {
+            // Snapshot ingress proofs from the cache DB into a map by data_root.
+            // IngressProofs lives in the cache env after the V3->V4 split, so
+            // we open a read transaction against the cache env explicitly.
+            let ingress_proofs_by_root = self
+                .node_ctx
+                .db
+                .view_cache(|tx| walk_all::<IngressProofs, _>(tx.inner()))
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .fold(HashMap::new(), |mut map: HashMap<_, Vec<_>>, (data_root, proof)| {
                     map.entry(data_root).or_default().push(proof);
-                }
-                map
-            };
+                    map
+                });
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
