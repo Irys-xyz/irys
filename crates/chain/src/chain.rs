@@ -52,7 +52,9 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
+use irys_storage::irys_consensus_data_db::{
+    open_or_create_irys_cache_data_db_with_args, open_or_create_irys_consensus_data_db_with_args,
+};
 use irys_types::BlockHash;
 use irys_types::ToBase58 as _;
 use irys_types::chainspec::irys_chain_spec;
@@ -2917,15 +2919,20 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env = open_or_create_irys_consensus_data_db_with_args(
+    let consensus = open_or_create_irys_consensus_data_db_with_args(
         node_config.irys_consensus_data_dir(),
         // Args (incl. the test geometry cap) derived from the node's DatabaseConfig.
         irys_database::consensus_db_args(&node_config.database)?,
     )?;
-    irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
-    let irys_db = DatabaseProvider(Arc::new(irys_db_env));
-    debug!("Irys DB initialized");
-    Ok(irys_db)
+    let cache = open_or_create_irys_cache_data_db_with_args(
+        node_config.irys_cache_data_dir(),
+        // Cache env: `cache_sync_mode` plus the same geometry cap.
+        irys_database::cache_db_args(&node_config.database)?,
+    )?;
+    irys_database::migration::ensure_db_version_compatible(&consensus, &cache)?;
+    let db = DatabaseProvider::new(Arc::new(consensus), Arc::new(cache));
+    debug!("Irys DB initialized (consensus + cache)");
+    Ok(db)
 }
 
 /// Gets the peer_id from the peer key file, or generates a new keypair and stores it.

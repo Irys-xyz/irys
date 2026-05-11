@@ -105,7 +105,7 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
     }
 
     let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
-    let db = DatabaseProvider(db_env);
+    let db = DatabaseProvider::new(db_env.clone(), db_env);
     let block_index = BlockIndex::new(&config.node_config, db.clone())?;
 
     if block_index.num_blocks() > 0 {
@@ -225,10 +225,14 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 }
 
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
+    use irys_storage::irys_consensus_data_db::{
+        open_or_create_irys_cache_data_db_with_args,
+        open_or_create_irys_consensus_data_db_with_args,
+    };
 
     let config = load_node_config_from_env()?;
     let db_path = config.irys_consensus_data_dir();
+    let cache_path = config.irys_cache_data_dir();
 
     let db_env = match access {
         DatabaseEnvKind::RW => {
@@ -238,7 +242,15 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
                 &db_path,
                 irys_database::consensus_db_args(&config.database)?,
             )?;
-            irys_database::migration::ensure_db_version_compatible(&db)?;
+            // Open the cache env (creating it if needed) so the migration
+            // function can verify/stamp both env's schema versions together.
+            // CLI sub-commands operate on the consensus env, so we drop the
+            // cache handle after the migration check.
+            let cache = open_or_create_irys_cache_data_db_with_args(
+                &cache_path,
+                irys_database::cache_db_args(&config.database)?,
+            )?;
+            irys_database::migration::ensure_db_version_compatible(&db, &cache)?;
             db
         }
         DatabaseEnvKind::RO => {
@@ -251,8 +263,15 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
                 .with_log_level(None)
                 .with_exclusive(Some(false));
             let db = DatabaseEnv::open(&db_path, access, args)?;
+            // Open the cache env in RO too (it must exist on disk —
+            // any RW invocation prior would have created it). If the
+            // cache env is missing, the migration will create it.
+            let cache_args = irys_database::cache_db_args(&config.database)?
+                .with_log_level(None)
+                .with_exclusive(Some(false));
+            let cache = DatabaseEnv::open(&cache_path, access, cache_args)?;
             //note: any migrations will fail, as this is RO env, but if they needed to run the database was out of date and you should open it as RW and migrate it first before continuing.
-            irys_database::migration::ensure_db_version_compatible(&db)?;
+            irys_database::migration::ensure_db_version_compatible(&db, &cache)?;
             db
         }
     };
