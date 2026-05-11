@@ -1052,7 +1052,7 @@ impl IrysNode {
                     // gauges so MDBX contention shows up alongside the per-tx
                     // commit-latency histograms.
                     irys_database::db_metrics::report_irys_consensus_db_gauges(
-                        irys_db_for_metrics.0.as_ref(),
+                        irys_db_for_metrics.consensus().as_ref(),
                     );
                 }
             });

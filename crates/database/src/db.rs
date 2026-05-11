@@ -310,6 +310,70 @@ where
     ))
 }
 
+pub trait DatabaseProviderCacheExt {
+    fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>;
+
+    fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> eyre::Result<T>;
+
+    fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T;
+
+    fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> T;
+}
+
+impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
+    fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>,
+    {
+        let inner = self.cache().tx_mut()?;
+        let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> eyre::Result<T>,
+    {
+        let inner = self.cache().tx()?;
+        let tx = crate::scoped_tx::ScopedTx::<crate::scoped_tx::Cache>::new(inner);
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T,
+    {
+        let inner = self.cache().tx_mut()?;
+        let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
+    }
+
+    fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> T,
+    {
+        let inner = self.cache().tx()?;
+        let tx = crate::scoped_tx::ScopedTx::<crate::scoped_tx::Cache>::new(inner);
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
+    }
+}
+
 use reth_db::cursor::DbCursorRO as _;
 
 impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
