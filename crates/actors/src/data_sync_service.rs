@@ -16,7 +16,7 @@ use crate::{
 use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use futures::FutureExt as _;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
@@ -1872,7 +1872,7 @@ impl DataSyncServiceInner {
         for data_root in data_roots {
             let proofs = match self
                 .db
-                .view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
+                .view_cache_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -2713,7 +2713,7 @@ mod ingress_proof_peer_tests {
     use super::DataSyncServiceInner;
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
-    use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::db::DatabaseProviderCacheExt as _;
     use irys_database::{
         DatabaseProviderTestExt as _, cache_data_root, store_external_ingress_proof_checked,
     };
@@ -2781,15 +2781,12 @@ mod ingress_proof_peer_tests {
         .expect("index");
 
         // Main DB: CDR + ingress proof from prover (non-assignee).
-        let db = {
-            let env = DatabaseProvider::for_testing(
-                &(tmp.path().join("irys_db")),
-                &(tmp.path().join("irys_db")).join("cache"),
-            )
-            .unwrap();
-            env
-        };
-        db.update_eyre(|wtx| {
+        let db = DatabaseProvider::for_testing(
+            &tmp.path().join("irys_db"),
+            &tmp.path().join("irys_db").join("cache"),
+        )
+        .unwrap();
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None)?;
             let proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
                 signature: Default::default(),
@@ -4107,9 +4104,7 @@ mod assignment_follow_tests {
     }
 
     fn open_db(base: &std::path::Path) -> DatabaseProvider {
-        let env = DatabaseProvider::for_testing(&base.join("db"), &base.join("db").join("cache"))
-            .expect("db");
-        env
+        DatabaseProvider::for_testing(&base.join("db"), &base.join("db").join("cache")).expect("db")
     }
 
     fn module(

@@ -1,7 +1,7 @@
 use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
 use irys_database::{
     block_header_by_hash, cached_chunk_by_chunk_offset,
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     db_cache::{CachedChunk, CachedChunkIndexMetadata},
     tx_header_by_txid,
 };
@@ -779,7 +779,7 @@ fn get_cached_chunk(
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
-    db.view_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
+    db.view_cache_eyre(|tx| cached_chunk_by_chunk_offset(tx, data_root, chunk_offset))
 }
 
 #[cfg(test)]
@@ -1252,7 +1252,7 @@ mod tests {
 
         /// Put every chunk body of the tx into the node's chunk cache.
         fn seed_cache(&self) -> eyre::Result<()> {
-            self.db.update_eyre(|wtx| {
+            self.db.update_cache_eyre(|wtx| {
                 cache_data_root(wtx, &self.tx.header, None)?;
                 for (i, node) in self.tx.chunks.iter().enumerate() {
                     let chunk = UnpackedChunk {
@@ -2210,7 +2210,7 @@ mod tests {
             let signer = IrysSigner::random_signer(&f.config.consensus);
             let tx =
                 signer.sign_transaction(signer.create_transaction(data.clone(), H256::zero())?)?;
-            f.db.update_eyre(|wtx| {
+            f.db.update_cache_eyre(|wtx| {
                 cache_data_root(wtx, &tx.header, None)?;
                 let node = &tx.chunks[0];
                 cache_chunk(
@@ -2787,7 +2787,7 @@ mod tests {
         f.sm.write_data_chunk(&unpacked_at(&f, 19))
             .map_err(|err| eyre::eyre!("write chunk 19: {err:?}"))?;
         f.sm.force_sync_pending_chunks()?;
-        f.db.update_eyre(|wtx| {
+        f.db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &f.tx.header, None)?;
             cache_chunk(wtx, &unpacked_at(&f, 18))?;
             Ok(())

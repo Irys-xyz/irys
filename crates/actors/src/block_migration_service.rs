@@ -3,7 +3,8 @@ use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
 use irys_database::{
-    append_block_stream_event, block_header_by_hash, db::IrysDatabaseExt as _,
+    append_block_stream_event, block_header_by_hash,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     insert_commitment_tx, insert_tx_header, prune_block_stream_below, tx_header_by_txid,
 };
 use irys_domain::{
@@ -331,10 +332,10 @@ impl BlockMigrationService {
     ///
     /// For normal blocks: `blocks_to_clear` is empty, `blocks_to_confirm` contains just the tip.
     /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
-    /// the new canonical fork blocks. Both operations happen in a single DB transaction to
-    /// prevent inconsistent hint state.
+    /// the new canonical fork blocks. Hint removals and additions share one cache
+    /// transaction, after the consensus metadata and stream transaction commits.
     ///
-    /// Invariant established at every commit boundary: if a Submit-ledger tx
+    /// Invariant established at every cache commit boundary: if a Submit-ledger tx
     /// in `blocks_to_confirm` has a [`CachedDataRoot`] entry, its `block_set`
     /// contains the confirming block hash and `expiry_height` is `None`.
     /// Orphan block hashes from `blocks_to_clear` are scrubbed from any
@@ -351,9 +352,9 @@ impl BlockMigrationService {
     ///     populated `block_set` and proceeds.  It may fabricate a CDR row
     ///     for a data_root the node has no chunks for yet; the entry is
     ///     harmless until either chunks arrive or the prune pass evicts it.
-    ///   - `persist_metadata` (this function) runs at confirmation: Phase 1
+    ///   - `persist_metadata` (this function) runs at confirmation: it
     ///     scrubs orphan block_hashes from any retained `block_set`, and
-    ///     Phase 3's `update_data_root_block_set` is update-only — it never
+    ///     `update_data_root_block_set` is update-only — it never
     ///     fabricates, because by confirmation any data_root the node cares
     ///     about already has a CDR (either chunks have arrived, or the mempool
     ///     BlockConfirmed path put one there).
@@ -366,7 +367,7 @@ impl BlockMigrationService {
     /// Reorg invariant: if a Publish-promotion remains canonical, the
     /// underlying Submit inclusion must also be present in `blocks_to_confirm`
     /// — otherwise the Publish block itself would be in `blocks_to_clear`.
-    /// Phase 1's clears only ever hit rows for orphaned blocks that had already
+    /// Metadata clears only ever hit rows for orphaned blocks that had already
     /// *migrated* (a deep reorg past `block_migration_depth`); orphaned
     /// unmigrated blocks never wrote canonical metadata, so the clears are a
     /// no-op for them. Re-canonical blocks on the new fork get their metadata
@@ -380,13 +381,13 @@ impl BlockMigrationService {
         blocks_to_confirm: &[Arc<SealedBlock>],
         stream: StreamEmission<'_>,
     ) -> eyre::Result<Vec<StreamFrame>> {
-        // Phase 1 scrub and Phase 3 append both iterate
+        // Hint removals and additions both iterate
         // `block.transactions().get_ledger_txs(Submit)`.  The in-memory
         // block-tree path always carries full transactions, but future code
         // paths (e.g. blocks hydrated from disk without their body) could
         // regress this without any error.  Surface the divergence in every
         // build so the caller fails loudly rather than committing partial
-        // state.  Checked across all data ledgers because Phase 1 clears
+        // state.  Checked across all data ledgers because metadata cleanup clears
         // orphaned metadata from `header.data_ledgers` for every ledger.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
             ensure_header_body_consistent(block)?;
@@ -490,9 +491,6 @@ impl BlockMigrationService {
 
         let (stream_frames, prune_interval_reached) =
             self.db.update_eyre_at("persist_metadata", |tx| {
-                // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
-                // block_hash from any CachedDataRoot.block_set that retained it.
-                //
                 // Per-ledger semantics:
                 //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
                 //     The reorg invariant guarantees the matching Publish block is
@@ -504,8 +502,6 @@ impl BlockMigrationService {
                 //     `{Some, None}`).
                 for block in blocks_to_clear {
                     let header = block.header();
-                    let orphan_block_hash = header.block_hash;
-
                     for dl in &header.data_ledgers {
                         let tx_ids = &dl.tx_ids.0;
                         if tx_ids.is_empty() {
@@ -519,7 +515,38 @@ impl BlockMigrationService {
                         }
                     }
                     self.clear_commitment_inclusions(tx, header)?;
+                }
+                let mut frames = Vec::with_capacity(prepared_stream.len());
+                for (event, payload) in prepared_stream {
+                    let seq = append_block_stream_event(tx, payload)?;
+                    frames.push(StreamFrame { seq, event });
+                }
+                // Writer-side retention: prune even if the producer has halted.
+                let mut prune_interval_reached = false;
+                if let Some(last) = frames.last() {
+                    let n = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+                    prune_interval_reached = self.maybe_prune_stream_in_tx(tx, last.seq, n)?;
+                }
+                Ok((frames, prune_interval_reached))
+            })?;
+        // Note only after commit succeeds (update_eyre_at returned Ok), reusing the
+        // guard held across check+append. `Disabled` produced no frames to note.
+        if let Some(ref mut dedup) = stream_dedup {
+            Self::note_stream_frames_locked(dedup, &stream_frames);
+        }
+        self.note_stream_appends(
+            u64::try_from(stream_frames.len()).unwrap_or(u64::MAX),
+            prune_interval_reached,
+        );
 
+        // Cache hints may lag consensus across a crash. Canonical metadata and
+        // durable stream frames have already committed together; note that commit
+        // before the cache write so a cache failure cannot lose stream dedup state.
+        self.db
+            .update_cache_eyre_at("persist_metadata", |cache_tx| {
+                let tx = cache_tx.inner();
+                for block in blocks_to_clear {
+                    let orphan_block_hash = block.header().block_hash;
                     for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                         irys_database::remove_data_root_block_set_entry(
                             tx,
@@ -528,11 +555,6 @@ impl BlockMigrationService {
                         )?;
                     }
                 }
-                // Phase 3: Maintain the CachedDataRoot.block_set hint for the
-                //          canonical Submit-ledger txs we just confirmed (update-only,
-                //          does not create cache entries for data_roots the node
-                //          never tracked chunks for).
-                //
                 // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
                 // is deliberately NOT written here. It is written only at migration
                 // (`persist_block`), atomically with `MigratedBlockHashes` and the
@@ -558,30 +580,8 @@ impl BlockMigrationService {
                         )?;
                     }
                 }
-
-                // Phase 4: append pre-serialized durable stream frames in this same RW txn.
-                let mut frames = Vec::with_capacity(prepared_stream.len());
-                for (event, payload) in prepared_stream {
-                    let seq = append_block_stream_event(tx, payload)?;
-                    frames.push(StreamFrame { seq, event });
-                }
-                // Writer-side retention: prune even if the producer has halted.
-                let mut prune_interval_reached = false;
-                if let Some(last) = frames.last() {
-                    let n = u64::try_from(frames.len()).unwrap_or(u64::MAX);
-                    prune_interval_reached = self.maybe_prune_stream_in_tx(tx, last.seq, n)?;
-                }
-                Ok((frames, prune_interval_reached))
+                Ok(())
             })?;
-        // Note only after commit succeeds (update_eyre_at returned Ok), reusing the
-        // guard held across check+append. `Disabled` produced no frames to note.
-        if let Some(ref mut dedup) = stream_dedup {
-            Self::note_stream_frames_locked(dedup, &stream_frames);
-        }
-        self.note_stream_appends(
-            u64::try_from(stream_frames.len()).unwrap_or(u64::MAX),
-            prune_interval_reached,
-        );
 
         info!(
             cleared_blocks = blocks_to_clear.len(),
@@ -1300,7 +1300,6 @@ mod tests {
         partition_chunk_offset_ii,
     };
     use reth_db::Database as _;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
@@ -1443,7 +1442,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache_eyre(|tx| {
             cache_data_root(tx, &tx_header, None)?;
             let mut cdr = tx
                 .get::<CachedDataRoots>(data_root)?
@@ -1453,7 +1452,6 @@ mod tests {
             tx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
         })
-        .unwrap()
         .unwrap();
     }
 
@@ -1461,7 +1459,7 @@ mod tests {
         db: &DatabaseProvider,
         data_root: H256,
     ) -> Option<irys_database::db_cache::CachedDataRoot> {
-        db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+        db.view_cache(|tx| tx.get::<CachedDataRoots>(data_root))
             .unwrap()
             .unwrap()
     }

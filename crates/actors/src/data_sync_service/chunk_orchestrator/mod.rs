@@ -11,7 +11,7 @@ use crate::{
     metrics,
     services::ServiceSenders,
 };
-use irys_database::{cached_chunk_by_chunk_offset, db::IrysDatabaseExt as _};
+use irys_database::{cached_chunk_by_chunk_offset, db::DatabaseProviderCacheExt as _};
 use irys_domain::{
     BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule,
     WriteDataChunkError,
@@ -1637,7 +1637,7 @@ impl ChunkOrchestrator {
             }
         };
 
-        let looked_up = self.db.view_eyre(|tx| {
+        let looked_up = self.db.view_cache_eyre(|tx| {
             let mut rows = Vec::with_capacity(placements.len());
             for placement in &placements {
                 let row = match placement {
