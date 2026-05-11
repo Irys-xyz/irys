@@ -113,9 +113,7 @@ fn open_test_db(config: &Config) -> DatabaseProvider {
         .node_config
         .base_directory
         .join(format!("orchestrator-db-{n}"));
-    let env = DatabaseProvider::for_testing(&path, &path.join("cache"))
-        .expect("open orchestrator test db");
-    env
+    DatabaseProvider::for_testing(&path, &path.join("cache")).expect("open orchestrator test db")
 }
 
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
@@ -1854,7 +1852,7 @@ fn index_and_settle(sm: &StorageModule, tx: &DataTransaction, last_inclusive: u6
 }
 
 fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], offsets: &[usize]) {
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         cache_data_root(wtx, &tx.header, None)?;
         for &i in offsets {
             let node = &tx.chunks[i];
@@ -1875,10 +1873,9 @@ fn cache_bodies_at(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8], off
 fn strip_cached_body(db: &DatabaseProvider, tx: &DataTransaction) {
     use irys_database::db_cache::CachedChunk;
     use irys_database::tables::CachedChunks;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
-    db.update_eyre(|wtx| {
+    db.update_cache_eyre(|wtx| {
         let existing = wtx
             .get::<CachedChunks>(path_hash)?
             .expect("cached chunk row");

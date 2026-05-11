@@ -14,7 +14,8 @@ use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::{
     block_header_by_hash, canonical_promoted_height, canonical_submit_height,
-    db::IrysDatabaseExt as _, tables::MigratedBlockHashes,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    tables::MigratedBlockHashes,
 };
 use irys_domain::{
     BlockBounds, BlockBoundsError, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard,
@@ -6594,7 +6595,7 @@ async fn ingress_proof_chunk_bytes_from_local(
     tx_offset: irys_types::TxChunkOffset,
 ) -> Result<(Option<Vec<u8>>, bool), PreValidationError> {
     let cached = db
-        .view_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
+        .view_cache_eyre(|tx| irys_database::cached_chunk_by_chunk_offset(tx, data_root, tx_offset))
         .map_err(|error| PreValidationError::DatabaseError {
             error: error.to_string(),
         })?;
@@ -10267,10 +10268,10 @@ mod tests {
             expiry_height: Some(0),
             cached_at: UnixTimestamp::from_secs(0),
         };
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache_eyre(|tx| {
             tx.put::<CachedDataRoots>(data_root, corrupt_cdr)?;
             Ok(())
-        })??;
+        })?;
 
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
@@ -10683,7 +10684,7 @@ mod ingress_proof_local_bytes_tests {
     }
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
-        DatabaseProvider::for_testing(&path, &path.join("cache")).unwrap()
+        DatabaseProvider::for_testing(path, &path.join("cache")).unwrap()
     }
 
     fn one_chunk(config: &Config) -> (DataTransaction, Vec<u8>) {
@@ -10696,7 +10697,7 @@ mod ingress_proof_local_bytes_tests {
     }
 
     fn cache_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             cache_data_root(wtx, &tx.header, None)?;
             cache_chunk(
                 wtx,
@@ -10716,10 +10717,9 @@ mod ingress_proof_local_bytes_tests {
     fn strip_body(db: &DatabaseProvider, tx: &DataTransaction) {
         use irys_database::db_cache::CachedChunk;
         use irys_database::tables::CachedChunks;
-        use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
         let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
                 path_hash,
@@ -11241,10 +11241,9 @@ mod ingress_proof_local_bytes_tests {
     fn put_cached_body(db: &DatabaseProvider, tx: &DataTransaction, data: &[u8]) {
         use irys_database::db_cache::CachedChunk;
         use irys_database::tables::CachedChunks;
-        use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
         let path_hash = UnpackedChunk::hash_data_path(&tx.proofs[0].proof);
-        db.update_eyre(|wtx| {
+        db.update_cache_eyre(|wtx| {
             let existing = wtx.get::<CachedChunks>(path_hash)?.expect("cached chunk");
             wtx.put::<CachedChunks>(
                 path_hash,

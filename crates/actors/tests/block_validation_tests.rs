@@ -423,7 +423,7 @@ fn empty_poa_guards(
     config: &ConsensusConfig,
     db_dir: &std::path::Path,
 ) -> (DatabaseProvider, BlockIndexReadGuard, BlockTreeReadGuard) {
-    let db = DatabaseProvider::for_testing(&db_dir, &db_dir.join("cache")).unwrap();
+    let db = DatabaseProvider::for_testing(db_dir, &db_dir.join("cache")).unwrap();
     let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),

@@ -870,6 +870,7 @@ mod tests {
     /// accidentally re-introducing a CDR read into a canonical-truth path.
     #[test_log::test(tokio::test)]
     async fn corrupt_cdr_does_not_affect_canonical_range_lookup() -> eyre::Result<()> {
+        use irys_database::db::DatabaseProviderCacheExt as _;
         use irys_database::db_cache::CachedDataRoot;
         use irys_database::tables::CachedDataRoots;
         use irys_types::UnixTimestamp;
@@ -895,7 +896,7 @@ mod tests {
         // entries would foul the lookup; if it consulted `data_size`, the
         // u64::MAX value would alias an absurd chunk range.  Any read would
         // produce a different (or Err) result than the baseline.
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache_eyre(|tx| {
             let cdr = CachedDataRoot {
                 data_size: u64::MAX,
                 data_size_confirmed: true,
@@ -906,7 +907,7 @@ mod tests {
             };
             tx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
-        })??;
+        })?;
 
         let guard = empty_block_tree_guard();
         let range = find_canonical_ledger_range(

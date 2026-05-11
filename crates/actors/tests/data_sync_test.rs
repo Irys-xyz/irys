@@ -1039,7 +1039,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
 
     let db = {
         use irys_types::app_state::DatabaseProvider;
-        let env = DatabaseProvider::for_testing(
+        DatabaseProvider::for_testing(
             &config.node_config.base_directory.join("orchestrator-db"),
             &config
                 .node_config
@@ -1047,8 +1047,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
                 .join("orchestrator-db")
                 .join("cache"),
         )
-        .expect("open orchestrator test db");
-        env
+        .expect("open orchestrator test db")
     };
     let orchestrator = ChunkOrchestrator::new(
         storage_module.clone(),
