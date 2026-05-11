@@ -353,7 +353,10 @@ impl StorageModule {
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
-                        db: DatabaseProvider(Arc::new(submodule_db)),
+                        db: DatabaseProvider::new(
+                            Arc::new(submodule_db.clone()),
+                            Arc::new(submodule_db),
+                        ),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
                     },
                 )

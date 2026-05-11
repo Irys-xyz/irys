@@ -110,7 +110,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
         Commands::RollbackBlocks { mode } => {
             let node_config: NodeConfig = load_config()?;
             let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
-            let db = DatabaseProvider(db_env);
+            let db = DatabaseProvider::new(db_env.clone(), db_env);
 
             let block_index = irys_domain::BlockIndex::new(&node_config, db.clone())?;
 
