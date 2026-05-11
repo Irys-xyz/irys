@@ -1892,13 +1892,10 @@ mod tests {
     #[test]
     fn corrupt_packing_file_is_a_restore_error() -> eyre::Result<()> {
         use crate::{BlockIndex, BlockIndexReadGuard, EpochReplayData, PACKING_PARAMS_FILE_NAME};
-        use irys_database::tables::IrysTables;
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::{BlockIndexItem, NodeConfig};
-        use reth_db::mdbx::DatabaseArguments;
         use std::path::PathBuf;
-        use std::sync::Arc;
 
         let tmp = TempDirBuilder::new()
             .prefix("corrupt-packing-restore")
@@ -1917,11 +1914,8 @@ mod tests {
 
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("index"),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?));
+        let db =
+            DatabaseProvider::for_testing(&tmp.path().join("index"), &tmp.path().join("cache"))?;
         let index = BlockIndex::new_for_testing(db.clone());
         index.push_item(
             &BlockIndexItem {
