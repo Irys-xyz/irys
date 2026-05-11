@@ -1875,12 +1875,12 @@ mod tests {
         use super::*;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysBlockHeader, IrysPeerId,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1891,10 +1891,9 @@ mod tests {
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir"),
-            ));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let block_requests = Arc::new(Mutex::new(vec![]));
             let block_requests_clone = block_requests.clone();
@@ -2068,10 +2067,9 @@ mod tests {
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir"),
-            ));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let mut node_config = NodeConfig::testing();
             node_config.node_mode = NodeMode::Genesis;
@@ -2143,12 +2141,12 @@ mod tests {
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, DbSyncMode, IrysAddress, NodeConfig, NodeInfo, PeerAddress,
-            PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
+            Config, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -2214,10 +2212,9 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
-            let db_env =
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -2345,10 +2342,9 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
-            let db_env =
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();

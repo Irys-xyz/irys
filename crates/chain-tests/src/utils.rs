@@ -2494,7 +2494,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
         info!("Stopping node with state: {}", pre_stop_state);
-        let db_inner = Arc::clone(&self.node_ctx.db.0);
+        let db_inner = Arc::clone(self.node_ctx.db.consensus());
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))

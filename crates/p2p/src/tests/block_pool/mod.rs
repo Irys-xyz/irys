@@ -11,15 +11,15 @@ use futures::{FutureExt as _, future};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{AtomicMempoolState, create_state};
 use irys_actors::services::ServiceSenders;
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, MempoolConfig,
-    NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
-    RethPeerInfo, SealedBlock,
+    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
+    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
+    SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -60,17 +60,17 @@ struct MockedServices {
     mempool_stub: MempoolStub,
     service_senders: ServiceSenders,
     is_vdf_mining_enabled: Arc<AtomicBool>,
+    _cache_dir: irys_testing_utils::tempfile::TempDir,
 }
 
 impl MockedServices {
     fn new(config: &Config) -> Self {
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("can't open temp dir"),
-        ));
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = irys_types::DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            _cache_dir.path(),
+        )
+        .expect("test db setup");
 
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
 
@@ -148,6 +148,7 @@ impl MockedServices {
             mempool_stub,
             service_senders,
             is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
+            _cache_dir,
         }
     }
 }
@@ -165,6 +166,7 @@ async fn should_process_block() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
+        ..
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -235,6 +237,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
+        ..
     } = MockedServices::new(&config);
 
     // Create three blocks in a chain: block1 -> block2 -> block3
@@ -406,6 +409,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
+        ..
     } = MockedServices::new(&config);
 
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
@@ -612,6 +616,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
+        ..
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -696,6 +701,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
+        ..
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -872,6 +878,7 @@ async fn should_not_fast_track_block_already_in_index() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
+        ..
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service

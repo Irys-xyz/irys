@@ -1879,24 +1879,26 @@ where
 mod tests {
     use super::*;
     use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Config, DatabaseProvider, DbSyncMode, IrysPeerId, NodeConfig, PeerAddress,
-        PeerNetworkSender, PeerScore, RethPeerInfo,
+        Config, IrysPeerId, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore, RethPeerInfo,
     };
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    fn setup_peer_list() -> (IrysAddress, PeerList, tempfile::TempDir) {
+    fn setup_peer_list() -> (
+        IrysAddress,
+        PeerList,
+        irys_testing_utils::tempfile::TempDir,
+        irys_testing_utils::tempfile::TempDir,
+    ) {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
+        let cache_dir = TempDirBuilder::new().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let db_env =
-            open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                .expect("db");
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), cache_dir.path())
+            .expect("test db setup");
         let (tx, _rx) = mpsc::unbounded_channel();
         let peer_network_sender = PeerNetworkSender::new(tx);
         let peer_list = PeerList::new(
@@ -1926,13 +1928,13 @@ mod tests {
             protocol_version: ProtocolVersion::default(),
         };
         peer_list.add_or_update_peer(test_peer, true);
-        (miner, peer_list, temp_dir)
+        (miner, peer_list, temp_dir, cache_dir)
     }
 
     #[test]
     // test that handle_invalid_data subtracts from peerscore in the case of GossipError::BlockPool(BlockPoolError::BlockError(_)))
     fn handle_invalid_block_penalizes_peer() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
@@ -1958,7 +1960,7 @@ mod tests {
     /// the block on the next gossip round if it is still relevant).
     #[test]
     fn handle_parent_not_in_cache_does_not_penalize_peer() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let initial_score = peer_list
             .peer_by_mining_address(&miner)
             .unwrap()
@@ -1994,7 +1996,7 @@ mod tests {
     /// running on with a poisoned block-tree cache.
     #[test]
     fn handle_fatal_cache_corruption_triggers_shutdown_without_penalty() {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let initial_score = peer_list
             .peer_by_mining_address(&miner)
             .unwrap()
@@ -2058,7 +2060,7 @@ mod tests {
         #[case] is_syncing: bool,
         #[case] expected_score: u16,
     ) {
-        let (miner, peer_list, _dir) = setup_peer_list();
+        let (miner, peer_list, _dir, _cache_dir) = setup_peer_list();
         let shutdown_token = CancellationToken::new();
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
             &miner,
