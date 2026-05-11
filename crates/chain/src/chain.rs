@@ -82,7 +82,7 @@ use tokio::{
     runtime::Handle,
     sync::{
         mpsc,
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
 };
@@ -2018,7 +2018,7 @@ impl IrysNode {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
+        vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
