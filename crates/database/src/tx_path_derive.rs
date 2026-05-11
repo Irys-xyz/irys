@@ -34,7 +34,7 @@ use crate::{
 /// Whether this binary can decode `IrysDataTxHeaders` for a schema stamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxHeaderSchema {
-    /// `true` only for schema V3, the layout this binary decodes.
+    /// `true` for schemas V3 and V4, which share the tx-header layout this binary decodes.
     pub readable: bool,
     /// Why the stamp is accepted or refused.
     pub message: String,
@@ -96,19 +96,21 @@ pub struct LedgerSpan {
 
 /// Classify a consensus schema stamp without reading a tx header.
 ///
-/// V3 is the only readable layout. Older stamps still use `bundle_format` or an
-/// inline `promoted_height`. Decoding those bytes with this binary panics.
+/// V3 and V4 share the readable tx-header layout. Older stamps still use
+/// `bundle_format` or an inline `promoted_height`. Decoding those bytes with
+/// this binary panics.
 pub fn tx_header_schema(version: Option<u32>) -> TxHeaderSchema {
     match version {
-        Some(3) => TxHeaderSchema {
+        Some(version @ (3 | 4)) => TxHeaderSchema {
             readable: true,
-            message: "schema V3: tx headers use metadata_format and decode with this binary"
-                .to_owned(),
+            message: format!(
+                "schema V{version}: tx headers use metadata_format and decode with this binary"
+            ),
         },
-        Some(version) if version > 3 => TxHeaderSchema {
+        Some(version) if version > 4 => TxHeaderSchema {
             readable: false,
             message: format!(
-                "schema {version} is newer than V3. This binary refuses it. A read-only open does not migrate."
+                "schema {version} is newer than V4. This binary refuses it. A read-only open does not migrate."
             ),
         },
         other => {
@@ -1588,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_header_schema_gates_v3() {
+    fn tx_header_schema_accepts_v3_and_v4() {
         for version in [None, Some(0), Some(1), Some(2)] {
             let schema = tx_header_schema(version);
             assert!(!schema.readable);
@@ -1603,9 +1605,11 @@ mod tests {
                 schema.message
             );
         }
-        let current = tx_header_schema(Some(3));
-        assert!(current.readable);
-        let newer = tx_header_schema(Some(4));
+        for version in [3, 4] {
+            let schema = tx_header_schema(Some(version));
+            assert!(schema.readable);
+        }
+        let newer = tx_header_schema(Some(5));
         assert!(!newer.readable);
         assert!(newer.message.contains("newer"));
     }
