@@ -32,6 +32,7 @@ pub mod tx_path_derive;
 
 pub use data_ledger::*;
 pub use database::*;
+pub use db::DatabaseProviderCacheExt;
 pub use db_index::*;
 pub use scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, DbScope, ScopedTx, ScopedTxMut};
 pub use system_ledger::*;
