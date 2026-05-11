@@ -104,6 +104,12 @@ fn vdf_task_progress_timeout(config: &Config) -> Duration {
     Duration::from_secs(config.vdf.progress_timeout_secs.max(1))
 }
 
+/// Mark the VDF task as having moved to a new stage and reset its progress
+/// clock. Call this **only at real stage transitions** — never inside a loop
+/// or as a "heartbeat" during work, because the pipeline watchdog
+/// (`abort_stalled_current`) treats `progress_signal.elapsed() < timeout` as
+/// proof that the task is making forward progress. Periodic calls inside a
+/// stuck stage would silently defeat the watchdog.
 fn record_vdf_task_progress(
     stage_signal: &Arc<AtomicU8>,
     progress_signal: &Arc<Mutex<Instant>>,
@@ -453,10 +459,20 @@ impl ValidationService {
                         .vdf_scheduler
                         .abort_stalled_current(vdf_task_progress_timeout(&self.inner.config))
                     {
-                        // Watchdog firing means a VDF validation task made no progress for
-                        // longer than the configured timeout. With the batch-size clamp this
-                        // should be unreachable in healthy operation; treat it as a fatal
-                        // protocol-level bug rather than silently requeuing.
+                        // Watchdog firing means a VDF task made no progress for
+                        // `progress_timeout_secs` (default 15s). VDF difficulty is calibrated
+                        // to ~1s/step/thread and a batch is clamped to 2×thread_count steps
+                        // parallelised over thread_count rayon workers — so the legitimate
+                        // worst case per batch is ~2s, leaving ~7× headroom. A trip here
+                        // means a deadlock, a poisoned lock, or a runaway loop, not slow
+                        // hardware.
+                        //
+                        // We panic instead of marking the block Invalid because:
+                        //   1. A process-wide panic hook turns this into an abort, so the
+                        //      supervisor restarts the node and the operator gets a loud
+                        //      crash signal.
+                        //   2. Marking the block Invalid would mask the underlying bug as
+                        //      a data-level failure — the next block would re-trigger it.
                         let current_vdf = coordinator
                             .vdf_scheduler
                             .current

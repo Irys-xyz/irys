@@ -114,13 +114,18 @@ impl PreemptibleVdfTask {
         {
             Ok(()) => VdfValidationResult::Valid,
             Err(e) => {
-                // Check if we were cancelled by inspecting the AtomicU8
-                if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8
-                    || e.downcast_ref::<WaitForStepError>().is_some()
-                {
-                    VdfValidationResult::Cancelled
-                } else {
-                    VdfValidationResult::Invalid(e)
+                // Distinguish cooperative cancellation from a stalled VDF: Cancelled
+                // requeues, Stalled (and other errors) surface as Invalid.
+                match e.downcast_ref::<WaitForStepError>() {
+                    Some(WaitForStepError::Cancelled) => VdfValidationResult::Cancelled,
+                    Some(WaitForStepError::Stalled { .. }) => VdfValidationResult::Invalid(e),
+                    None => {
+                        if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                            VdfValidationResult::Cancelled
+                        } else {
+                            VdfValidationResult::Invalid(e)
+                        }
+                    }
                 }
             }
         };

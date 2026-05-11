@@ -31,6 +31,14 @@ pub async fn fast_forward_validated_steps(
             Ok(Ok(())) => {}
             Ok(Err(err)) => return Err(err.into()),
             Err(_) => {
+                // Send timeout means the bounded vdf_fast_forward channel stayed full
+                // for `send_timeout` (the configured progress_timeout, default 15s).
+                // `run_vdf` fully drains this channel between every ~1s SHA step
+                // (see crates/vdf/src/vdf.rs:99), so a healthy consumer cannot fall
+                // this far behind — a trip here means run_vdf is dead (poisoned-lock
+                // exit) or deadlocked. The panic + global panic hook aborts the
+                // process so the supervisor can restart cleanly; returning Err here
+                // would only mask the underlying VDF-thread failure.
                 panic!(
                     "VDF fast-forward channel remained full for {:?} while sending step {}",
                     send_timeout,

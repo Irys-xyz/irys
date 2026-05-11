@@ -118,6 +118,10 @@ impl Config {
             self.vdf.validation_batch_size > 0,
             "vdf.validation_batch_size must be > 0"
         );
+        ensure!(
+            self.vdf.progress_timeout_secs > 0,
+            "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
+        );
 
         // ensure that prune_at_capacity_percent is a sane value
         let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;

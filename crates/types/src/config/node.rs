@@ -789,11 +789,20 @@ pub struct VdfNodeConfig {
     /// this many seconds. Detects a dead/stuck VDF thread without imposing a
     /// wall-clock cap on legitimate long waits.
     ///
-    /// `ensure_vdf_is_valid` calls `wait_for_step` twice (Stage A before VDF
-    /// step validation and then after each validated fast-forward batch.
-    /// Detection latency for a fully stalled state is therefore bounded by
-    /// one batch-validation cycle plus `progress_timeout_secs`, not by the
-    /// total number of steps in the block.
+    /// Used in three places, all in the validation pipeline:
+    ///   1. `wait_for_step` — `ensure_vdf_is_valid` calls it once at the start
+    ///      (waiting for the previous VDF step) and once at the end (waiting
+    ///      for `global_step` to reach the block's `global_step_number` after
+    ///      all batches have been enqueued). If `global_step` does not advance
+    ///      for this many seconds at either site, the wait returns
+    ///      `WaitForStepError::Stalled` and the block is marked Invalid.
+    ///   2. `fast_forward_validated_steps` — per-step send timeout into the
+    ///      bounded `vdf_fast_forward` channel. A consumer that stays stuck
+    ///      for this long panics (process abort) — see the call site for why.
+    ///   3. The pipeline watchdog — every 5s tick the validation loop force-
+    ///      aborts a VDF task whose stage signal has been idle for this long,
+    ///      panicking the service (and the process) on the assumption that
+    ///      something is genuinely broken, not slow.
     #[serde(default = "default_vdf_progress_timeout_secs")]
     pub progress_timeout_secs: u64,
 
@@ -805,7 +814,7 @@ pub struct VdfNodeConfig {
 }
 
 fn default_vdf_progress_timeout_secs() -> u64 {
-    30
+    15
 }
 
 fn default_vdf_validation_batch_size() -> usize {
