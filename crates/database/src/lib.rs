@@ -19,6 +19,7 @@ pub mod metadata;
 pub mod migration;
 /// Extension traits for custom tables
 pub mod reth_ext;
+pub mod scoped_tx;
 /// Tables & methods specific to submodule databases
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables
@@ -27,6 +28,7 @@ pub mod tables;
 pub use data_ledger::*;
 pub use database::*;
 pub use db_index::*;
+pub use scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, DbScope, ScopedTx, ScopedTxMut};
 pub use system_ledger::*;
 
 pub mod reth_db {
