@@ -317,3 +317,24 @@ mod tables_names {
         assert_eq!(CacheMetadata::NAME, "CacheMetadata");
     }
 }
+
+#[cfg(test)]
+mod marker_trait_sanity {
+    use super::*;
+    use crate::scoped_tx::{CacheTable, ConsensusTable};
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
+
+    // Consensus tables
+    assert_impl_all!(IrysBlockHeaders: ConsensusTable);
+    assert_not_impl_any!(IrysBlockHeaders: CacheTable);
+    assert_impl_all!(Metadata: ConsensusTable);
+    assert_not_impl_any!(Metadata: CacheTable);
+
+    // Cache tables
+    assert_impl_all!(CachedChunks: CacheTable);
+    assert_not_impl_any!(CachedChunks: ConsensusTable);
+    assert_impl_all!(IngressProofs: CacheTable);
+    assert_not_impl_any!(IngressProofs: ConsensusTable);
+    assert_impl_all!(CacheMetadata: CacheTable);
+    assert_not_impl_any!(CacheMetadata: ConsensusTable);
+}
