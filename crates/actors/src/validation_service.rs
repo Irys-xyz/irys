@@ -25,16 +25,18 @@ use irys_domain::{
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
-    app_state::DatabaseProvider,
+    VDFLimiterInfo, app_state::DatabaseProvider,
 };
 use irys_vdf::rayon;
-use irys_vdf::state::{VdfStateReadonly, vdf_steps_are_valid};
-use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;
+use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};
+use irys_vdf::vdf_utils::fast_forward_validated_steps;
 use reth::tasks::shutdown::Shutdown;
+use std::ops::Range;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
+use std::time::Instant;
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
     time::Duration,
@@ -49,6 +51,87 @@ pub enum VdfValidationResult {
     Valid,
     Invalid(eyre::Report),
     Cancelled,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VdfTaskStage {
+    Starting = 0,
+    WaitPrevStep = 1,
+    ValidateSeeds = 2,
+    ValidateBatch = 3,
+    FastForwardBatch = 4,
+    WaitFinalCatchUp = 5,
+    Completed = 6,
+}
+
+impl VdfTaskStage {
+    pub(crate) fn from_raw(raw: u8) -> Self {
+        match raw {
+            x if x == Self::WaitPrevStep as u8 => Self::WaitPrevStep,
+            x if x == Self::ValidateSeeds as u8 => Self::ValidateSeeds,
+            x if x == Self::ValidateBatch as u8 => Self::ValidateBatch,
+            x if x == Self::FastForwardBatch as u8 => Self::FastForwardBatch,
+            x if x == Self::WaitFinalCatchUp as u8 => Self::WaitFinalCatchUp,
+            x if x == Self::Completed as u8 => Self::Completed,
+            _ => Self::Starting,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::WaitPrevStep => "wait_prev_step",
+            Self::ValidateSeeds => "validate_seeds",
+            Self::ValidateBatch => "validate_batch",
+            Self::FastForwardBatch => "fast_forward_batch",
+            Self::WaitFinalCatchUp => "wait_final_catch_up",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+fn vdf_task_progress_timeout(config: &Config) -> Duration {
+    Duration::from_secs(config.vdf.progress_timeout_secs.max(1))
+}
+
+fn record_vdf_task_progress(
+    stage_signal: &Arc<AtomicU8>,
+    progress_signal: &Arc<Mutex<Instant>>,
+    stage: VdfTaskStage,
+) {
+    stage_signal.store(stage as u8, Ordering::Relaxed);
+    *progress_signal
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+}
+
+fn validate_vdf_batch(
+    pool: &rayon::ThreadPool,
+    vdf_info: &VDFLimiterInfo,
+    vdf_config: &irys_types::VdfConfig,
+    vdf_state: &VdfStateReadonly,
+    batch_range: Range<usize>,
+    cancel: Arc<AtomicU8>,
+) -> eyre::Result<u64> {
+    let batch_start_step_number = vdf_info.first_step_number() + batch_range.start as u64;
+    let batch_steps = vdf_info
+        .steps
+        .0
+        .get(batch_range.clone())
+        .ok_or_else(|| eyre::eyre!("VDF batch range {:?} is out of bounds", batch_range))?;
+    let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
+
+    vdf_step_batch_is_valid(
+        pool,
+        vdf_info,
+        vdf_config,
+        vdf_state,
+        batch_range,
+        batch_end_step_number == vdf_info.global_step_number,
+        cancel,
+    )?;
+    Ok(batch_end_step_number)
 }
 
 /// Messages that the validation service supports
@@ -275,17 +358,22 @@ impl ValidationService {
                                     task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
                                 );
                             }
+                            let panic = join_error.into_panic();
                             error!(
                                 block.hash = %current.hash,
-                                custom.error = %join_error,
-                                "VDF validation task panicked"
+                                "VDF validation task panicked; aborting"
                             );
-                            self.send_validation_result(current.hash, ValidationResult::Invalid(
-                                ValidationError::TaskPanicked {
-                                    task: "vdf_validation".to_string(),
-                                    details: join_error.to_string(),
-                                },
-                            ));
+                            std::panic::resume_unwind(panic);
+                        } else if let Some(watchdog_abort) = current.watchdog_abort.as_ref() {
+                            warn!(
+                                block.hash = %current.hash,
+                                vdf.stage = watchdog_abort.stage.as_str(),
+                                vdf.stalled_for = ?watchdog_abort.stalled_for,
+                                "VDF task was force-aborted by watchdog; requeuing"
+                            );
+                            if let Some(task) = current.requeue_task {
+                                coordinator.submit_task(task);
+                            }
                         } else {
                             // JoinError::Cancelled — the spawned future was aborted
                             // without going through the cooperative cancel signal.
@@ -360,22 +448,60 @@ impl ValidationService {
 
                 // Periodic pipeline state logging
                 _ = pipeline_log_interval.tick() => {
+                    if let Some(watchdog_abort) = coordinator
+                        .vdf_scheduler
+                        .abort_stalled_current(vdf_task_progress_timeout(&self.inner.config))
+                    {
+                        if let Some(current_vdf) = coordinator.vdf_scheduler.current.as_ref() {
+                            error!(
+                                block.hash = %current_vdf.hash,
+                                block.height = current_vdf.sealed_block.header().height,
+                                vdf.stage = watchdog_abort.stage.as_str(),
+                                vdf.stalled_for = ?watchdog_abort.stalled_for,
+                                "Validation watchdog force-aborted stalled VDF task"
+                            );
+                            metrics::record_validation_task_force_aborted();
+                        }
+                    }
+
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
                     let (by_priority, oldest_age_ms) = coordinator.pipeline_snapshot();
 
                     // Extract VDF task details if running
-                    let (vdf_running, vdf_block_hash, vdf_block_height) =
+                    let (vdf_running, vdf_block_hash, vdf_block_height, vdf_stage, vdf_elapsed_ms, vdf_idle_ms) =
                         if let Some(current_vdf) = &coordinator.vdf_scheduler.current {
-                            (1, Some(current_vdf.hash), Some(current_vdf.sealed_block.header().height))
+                            (
+                                1,
+                                Some(current_vdf.hash),
+                                Some(current_vdf.sealed_block.header().height),
+                                Some(
+                                    VdfTaskStage::from_raw(
+                                        current_vdf.stage_signal.load(Ordering::Relaxed),
+                                    )
+                                    .as_str(),
+                                ),
+                                Some(current_vdf.started_at.elapsed().as_millis() as u64),
+                                Some(
+                                    current_vdf
+                                        .last_progress_at
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .elapsed()
+                                        .as_millis() as u64,
+                                ),
+                            )
                         } else {
-                            (0, None, None)
+                            (0, None, None, None, None, None)
                         };
 
                     info!(
                         vdf.running = vdf_running,
                         vdf.vdf_block_hash = ?vdf_block_hash,
                         vdf.vdf_block_height = ?vdf_block_height,
+                        vdf.stage = ?vdf_stage,
+                        vdf.elapsed_ms = ?vdf_elapsed_ms,
+                        vdf.idle_ms = ?vdf_idle_ms,
                         vdf.pending = vdf_pending,
                         vdf.concurrent_active = concurrent_active,
                         vdf.queue_oldest_age_ms = oldest_age_ms,
@@ -427,12 +553,15 @@ impl ValidationServiceInner {
         self: Arc<Self>,
         block: &IrysBlockHeader,
         cancel: Arc<AtomicU8>,
+        stage_signal: Arc<AtomicU8>,
+        progress_signal: Arc<Mutex<Instant>>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
         let vdf_info = block.vdf_limiter_info.clone();
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
         let progress_timeout = Duration::from_secs(self.config.vdf.progress_timeout_secs);
+        let validation_batch_size = self.config.vdf.validation_batch_size.max(1);
 
         info!(
             vdf.first_step_number = first_step_number,
@@ -443,6 +572,7 @@ impl ValidationServiceInner {
         );
 
         // Stage A: wait for the previous VDF step to be available locally
+        record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::WaitPrevStep);
         debug!(
             stage = "wait_prev_step",
             "ensure_vdf_is_valid: waiting for previous step"
@@ -469,61 +599,151 @@ impl ValidationServiceInner {
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
+        record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::ValidateSeeds);
         debug!(
             stage = "validate_seeds",
             "ensure_vdf_is_valid: validating seed data against parent"
         );
         {
-            let binding = self.block_tree_guard.read();
-            let previous_block = binding
-                .get_block(&block.previous_block_hash)
-                .expect("previous block should exist");
-            ensure!(
-                matches!(
-                    is_seed_data_valid(block, previous_block, vdf_reset_frequency),
-                    crate::block_tree_service::ValidationResult::Valid
-                ),
-                "Seed data is invalid"
-            );
+            let block_tree_guard = self.block_tree_guard.clone();
+            let block_header = block.clone();
+            tokio::task::spawn_blocking(move || {
+                let binding = block_tree_guard.read();
+                let previous_block = binding
+                    .get_block(&block_header.previous_block_hash)
+                    .expect("previous block should exist");
+                ensure!(
+                    matches!(
+                        is_seed_data_valid(&block_header, previous_block, vdf_reset_frequency),
+                        crate::block_tree_service::ValidationResult::Valid
+                    ),
+                    "Seed data is invalid"
+                );
+                Ok::<(), eyre::Report>(())
+            })
+            .await??;
         }
 
-        // Stage C: VDF step validation (heavy SHA work in rayon pool)
+        // Stage C/D: validate VDF steps in bounded batches and fast-forward
+        // each validated prefix immediately.
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let vdf_state = self.vdf_state.clone();
         if !skip_vdf_validation {
-            debug!(
-                stage = "vdf_steps_are_valid",
-                "ensure_vdf_is_valid: validating VDF steps"
-            );
-            let vdf_info = vdf_info.clone();
-            let this_inner = Arc::clone(&self);
-            let cancel_for_blocking = Arc::clone(&cancel);
-            tokio::task::spawn_blocking(move || {
-                vdf_steps_are_valid(
-                    &this_inner.pool,
-                    &vdf_info,
-                    &this_inner.config.vdf,
-                    &this_inner.vdf_state,
-                    cancel_for_blocking,
+            let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
+            for (batch_index, batch_steps) in
+                vdf_info.steps.0.chunks(validation_batch_size).enumerate()
+            {
+                let batch_start_index = batch_index * validation_batch_size;
+                let batch_end_index = batch_start_index + batch_steps.len();
+                let batch_start_step_number = first_step_number + batch_start_index as u64;
+                let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
+
+                record_vdf_task_progress(
+                    &stage_signal,
+                    &progress_signal,
+                    VdfTaskStage::ValidateBatch,
+                );
+                info!(
+                    stage = VdfTaskStage::ValidateBatch.as_str(),
+                    vdf.batch_index = batch_index + 1,
+                    vdf.total_batches = total_batches,
+                    vdf.batch_start_step = batch_start_step_number,
+                    vdf.batch_end_step = batch_end_step_number,
+                    "ensure_vdf_is_valid: validating VDF batch"
+                );
+
+                let batch_range = batch_start_index..batch_end_index;
+                let vdf_info = vdf_info.clone();
+                let vdf_state_for_batch = vdf_state.clone();
+                let vdf_config = self.config.vdf.clone();
+                let this_inner = Arc::clone(&self);
+                let cancel_for_blocking = Arc::clone(&cancel);
+                let validated_batch_end = tokio::task::spawn_blocking(move || {
+                    validate_vdf_batch(
+                        &this_inner.pool,
+                        &vdf_info,
+                        &vdf_config,
+                        &vdf_state_for_batch,
+                        batch_range,
+                        cancel_for_blocking,
+                    )
+                })
+                .await??;
+
+                record_vdf_task_progress(
+                    &stage_signal,
+                    &progress_signal,
+                    VdfTaskStage::FastForwardBatch,
+                );
+                debug!(
+                    stage = VdfTaskStage::FastForwardBatch.as_str(),
+                    vdf.batch_index = batch_index + 1,
+                    vdf.total_batches = total_batches,
+                    vdf.batch_end_step = validated_batch_end,
+                    "ensure_vdf_is_valid: validated VDF batch sent to fast-forward"
+                );
+                fast_forward_validated_steps(
+                    batch_start_step_number,
+                    batch_steps,
+                    &vdf_ff,
+                    progress_timeout,
                 )
-            })
-            .await??;
+                .await?;
+                info!(
+                    stage = VdfTaskStage::FastForwardBatch.as_str(),
+                    vdf.batch_index = batch_index + 1,
+                    vdf.total_batches = total_batches,
+                    vdf.batch_end_step = validated_batch_end,
+                    "ensure_vdf_is_valid: validated VDF batch enqueued for fast-forward"
+                );
+            }
         } else {
-            debug!(
-                stage = "vdf_steps_are_valid",
-                "ensure_vdf_is_valid: skipping vdf_steps_are_valid"
-            );
+            let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
+            for (batch_index, batch_steps) in
+                vdf_info.steps.0.chunks(validation_batch_size).enumerate()
+            {
+                let batch_start_index = batch_index * validation_batch_size;
+                let batch_start_step_number = first_step_number + batch_start_index as u64;
+                let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
+
+                record_vdf_task_progress(
+                    &stage_signal,
+                    &progress_signal,
+                    VdfTaskStage::ValidateBatch,
+                );
+                debug!(
+                    stage = VdfTaskStage::ValidateBatch.as_str(),
+                    vdf.batch_index = batch_index + 1,
+                    vdf.total_batches = total_batches,
+                    vdf.batch_start_step = batch_start_step_number,
+                    vdf.batch_end_step = batch_end_step_number,
+                    "ensure_vdf_is_valid: skipping VDF batch validation"
+                );
+
+                record_vdf_task_progress(
+                    &stage_signal,
+                    &progress_signal,
+                    VdfTaskStage::FastForwardBatch,
+                );
+                fast_forward_validated_steps(
+                    batch_start_step_number,
+                    batch_steps,
+                    &vdf_ff,
+                    progress_timeout,
+                )
+                .await?;
+            }
         }
 
-        // Stage D: fast-forward + wait for global_step to catch up
-        debug!(
-            stage = "fast_forward",
-            "ensure_vdf_is_valid: fast-forwarding VDF steps"
+        record_vdf_task_progress(
+            &stage_signal,
+            &progress_signal,
+            VdfTaskStage::WaitFinalCatchUp,
         );
-        fast_forward_vdf_steps_from_block(&vdf_info, &vdf_ff)?;
         debug!(
-            stage = "wait_global_step",
-            "ensure_vdf_is_valid: waiting for fast-forward to complete"
+            stage = VdfTaskStage::WaitFinalCatchUp.as_str(),
+            vdf.global_step_number = vdf_info.global_step_number,
+            "ensure_vdf_is_valid: waiting for fast-forward to reach block end"
         );
         vdf_state
             .wait_for_step(
@@ -533,6 +753,7 @@ impl ValidationServiceInner {
             )
             .await?;
 
+        record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::Completed);
         info!(
             vdf.global_step_number = vdf_info.global_step_number,
             "ensure_vdf_is_valid: completed successfully"
@@ -558,5 +779,120 @@ fn handle_broadcast_recv<T>(
             }
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_types::{H256, H256List, NodeConfig, U256};
+    use irys_vdf::state::{CancelEnum, test_helpers::mocked_vdf_service};
+    use irys_vdf::{VdfStep, step_number_to_salt_number, vdf_sha};
+
+    fn build_vdf_info(num_steps: usize) -> (Config, VDFLimiterInfo) {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        node_config
+            .consensus
+            .get_mut()
+            .vdf
+            .num_checkpoints_in_vdf_step = 4;
+        node_config.consensus.get_mut().vdf.reset_frequency = 10_000;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let prev_output = H256::from_low_u64_be(42);
+        let mut seed = prev_output;
+        let mut steps = Vec::with_capacity(num_steps);
+        let mut last_step_checkpoints =
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        for step_number in 1..=num_steps as u64 {
+            let salt = U256::from(step_number_to_salt_number(&config.vdf, step_number));
+            let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+            vdf_sha(
+                salt,
+                &mut seed,
+                config.vdf.num_checkpoints_in_vdf_step,
+                config.vdf.num_iterations_per_checkpoint(),
+                &mut checkpoints,
+            );
+            steps.push(seed);
+            last_step_checkpoints = checkpoints;
+        }
+
+        (
+            config,
+            VDFLimiterInfo {
+                output: *steps.last().expect("at least one step"),
+                global_step_number: num_steps as u64,
+                seed: H256::from_low_u64_be(7),
+                next_seed: H256::from_low_u64_be(8),
+                prev_output,
+                last_step_checkpoints: H256List(last_step_checkpoints),
+                steps: H256List(steps),
+                vdf_difficulty: Some(1),
+                next_vdf_difficulty: Some(1),
+            },
+        )
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn invalid_batch_does_not_fast_forward_any_steps() {
+        let (config, mut vdf_info) = build_vdf_info(2);
+        vdf_info.steps.0[1] = H256::from_low_u64_be(999);
+        vdf_info.output = vdf_info.steps[1];
+
+        let vdf_state = VdfStateReadonly::new(mocked_vdf_service(&config));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("thread pool");
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+
+        let result = validate_vdf_batch(
+            &pool,
+            &vdf_info,
+            &config.vdf,
+            &vdf_state,
+            0..vdf_info.steps.len(),
+            cancel,
+        );
+
+        assert!(result.is_err(), "invalid batch must fail validation");
+        assert!(
+            rx.try_recv().is_err(),
+            "no fast-forward steps should be emitted for an invalid batch"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn valid_batch_fast_forwards_only_validated_prefix() {
+        let (config, vdf_info) = build_vdf_info(3);
+        let vdf_state = VdfStateReadonly::new(mocked_vdf_service(&config));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("thread pool");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+
+        let batch_end = validate_vdf_batch(&pool, &vdf_info, &config.vdf, &vdf_state, 0..1, cancel)
+            .expect("valid prefix should be accepted");
+
+        assert_eq!(batch_end, 1);
+        fast_forward_validated_steps(1, &vdf_info.steps.0[..1], &tx, Duration::from_secs(1))
+            .await
+            .expect("validated prefix should fast-forward");
+        let (ff_step, _span) = rx
+            .recv()
+            .await
+            .expect("validated prefix should emit one fast-forward step")
+            .into_parts();
+        assert_eq!(ff_step.global_step_number, 1);
+        assert_eq!(ff_step.step, vdf_info.steps[0]);
+        assert!(
+            rx.try_recv().is_err(),
+            "only the validated prefix should be emitted"
+        );
     }
 }

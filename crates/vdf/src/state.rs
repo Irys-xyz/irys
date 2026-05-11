@@ -13,10 +13,25 @@ use reth_db::Database as _;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::{
     collections::VecDeque,
+    ops::Range,
     sync::{Arc, RwLock, RwLockReadGuard},
 };
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, thiserror::Error)]
+pub enum WaitForStepError {
+    #[error("Cancelled")]
+    Cancelled,
+    #[error(
+        "VDF state did not advance for {progress_timeout:?} (current={current}, desired={desired})"
+    )]
+    Stalled {
+        progress_timeout: Duration,
+        current: u64,
+        desired: u64,
+    },
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct VdfState {
@@ -241,7 +256,7 @@ impl VdfStateReadonly {
                     vdf.current_step = last_observed_step,
                     "VDF wait cancelled"
                 );
-                bail!("Cancelled");
+                return Err(WaitForStepError::Cancelled.into());
             }
 
             let current_step = self.read().global_step;
@@ -255,12 +270,12 @@ impl VdfStateReadonly {
                 last_observed_step = current_step;
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
-                bail!(
-                    "VDF state did not advance for {:?} (current={}, desired={})",
+                return Err(WaitForStepError::Stalled {
                     progress_timeout,
-                    current_step,
-                    desired_step_number
-                );
+                    current: current_step,
+                    desired: desired_step_number,
+                }
+                .into());
             }
 
             if attempts.is_multiple_of(retries_per_second) {
@@ -364,70 +379,79 @@ pub enum CancelEnum {
 
 /// Validate the steps from the `nonce_info` to see if they are valid.
 /// Verifies each step in parallel across as many cores as are available.
-pub fn vdf_steps_are_valid(
+pub fn vdf_step_batch_is_valid(
     pool: &rayon::ThreadPool,
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
     vdf_steps_guard: &VdfStateReadonly,
-    cancel: Arc<AtomicU8>, // fun fact: AtomicBool is the same thing as AtomicU8 (UnsafeCell around a u8)
-                           // but we use AtomicU8 to signal *why* we need to stop (cancellation vs actual error)
+    batch_range: Range<usize>,
+    verify_last_step_checkpoints: bool,
+    cancel: Arc<AtomicU8>,
 ) -> eyre::Result<()> {
-    let reset_seed = vdf_info.seed;
-    info!(
-        "Checking seed {:?} reset_seed {:?}",
-        vdf_info.prev_output, reset_seed
-    );
+    if batch_range.start >= batch_range.end {
+        bail!("VDF batch range must be non-empty");
+    }
+    if batch_range.end > vdf_info.steps.len() {
+        bail!(
+            "VDF batch range {:?} exceeds {} available steps",
+            batch_range,
+            vdf_info.steps.len()
+        );
+    }
 
-    let start = vdf_info.first_step_number();
-    let end: u64 = vdf_info.global_step_number;
+    let batch_steps = &vdf_info.steps.0[batch_range.clone()];
+    let batch_start_step_number = vdf_info.first_step_number() + batch_range.start as u64;
+    let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
 
-    match vdf_steps_guard.read().get_steps(ii(start, end)) {
+    match vdf_steps_guard
+        .read()
+        .get_steps(ii(batch_start_step_number, batch_end_step_number))
+    {
         Ok(steps) => {
-            tracing::debug!("Validating VDF steps from VdfStepsReadGuard!");
-            if steps != vdf_info.steps {
-                warn_mismatches(&steps, &vdf_info.steps);
+            tracing::debug!(
+                vdf.batch_start = batch_start_step_number,
+                vdf.batch_end = batch_end_step_number,
+                "Validating VDF steps from VdfStepsReadGuard!"
+            );
+            if steps.0.as_slice() != batch_steps {
+                let expected = H256List(batch_steps.to_vec());
+                warn_mismatches(&steps, &expected);
                 return Err(eyre::eyre!("VDF steps are invalid!"));
-            } else {
-                // Do not need to check last step checkpoints here, were checked in pre validation
-                return Ok(());
             }
+            return Ok(());
         }
         Err(err) => tracing::debug!(
-            "Unable to get full steps range from VdfStepsReadGuard: {:?} so calculating vdf steps for validation",
+            vdf.batch_start = batch_start_step_number,
+            vdf.batch_end = batch_end_step_number,
+            "Unable to get full steps range from VdfStepsReadGuard: {:?} so calculating vdf batch for validation",
             err.to_string()
         ),
     };
 
-    let mut step_hashes = vdf_info.steps.clone();
+    let previous_seed = if batch_range.start == 0 {
+        vdf_info.prev_output
+    } else {
+        vdf_info.steps[batch_range.start - 1]
+    };
 
-    // Add the seed from the previous nonce info to the steps
-    let previous_seed = vdf_info.prev_output;
-    step_hashes.0.insert(0, previous_seed);
-
-    // Make a read only copy for parallel iterating
-    let steps = step_hashes.clone();
-
-    // Calculate the step number of the first step in the blocks sequence
-    let start_step_number: u64 = vdf_info.global_step_number - vdf_info.steps.len() as u64;
+    let mut step_hashes = Vec::with_capacity(batch_steps.len() + 1);
+    step_hashes.push(previous_seed);
+    step_hashes.extend(batch_steps.iter().copied());
 
     let last_step_checkpoints = Arc::new(RwLock::new(None::<H256List>));
 
     if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
         bail!("Cancelled");
     }
-    // We must calculate the checkpoint iterations for each step sequentially
-    // because we only have the first and last checkpoint of each step, but we
-    // can calculate each of the steps in parallel
-    // Limit threads number to avoid overloading the system using configuration limit
+
     pool.install(|| {
-        (0..steps.len() - 1).into_par_iter().try_for_each(|i| {
-            // Check for a cancel reason
+        (0..batch_steps.len()).into_par_iter().try_for_each(|i| {
             match cancel.load(Ordering::Relaxed) {
                 x if x == CancelEnum::Continue as u8 => {}
                 x if x == CancelEnum::InvalidStep as u8 => {
                     return Err(eyre::eyre!(
-                    "One of the previous threads found a mismatch, stopping further calculations"
-                ));
+                        "One of the previous threads found a mismatch, stopping further calculations"
+                    ));
                 }
                 x if x == CancelEnum::Cancelled as u8 => {
                     bail!("Cancelled");
@@ -435,22 +459,20 @@ pub fn vdf_steps_are_valid(
                 _ => {}
             }
 
-            let salt = U256::from(step_number_to_salt_number(
-                config,
-                start_step_number + i as u64,
-            ));
-            let mut seed = steps[i];
+            let previous_step_number = batch_start_step_number - 1 + i as u64;
+            let salt = U256::from(step_number_to_salt_number(config, previous_step_number));
+            let mut seed = step_hashes[i];
             let mut checkpoints: Vec<H256> =
                 vec![H256::default(); config.num_checkpoints_in_vdf_step];
-            if start_step_number + i as u64 > 0
-                && (start_step_number + i as u64).is_multiple_of(config.reset_frequency as u64)
+            if previous_step_number > 0
+                && previous_step_number.is_multiple_of(config.reset_frequency as u64)
             {
                 info!(
                     "Applying reset seed {:?} to step number {}",
-                    reset_seed,
-                    start_step_number + i as u64
+                    vdf_info.seed,
+                    previous_step_number
                 );
-                seed = apply_reset_seed(seed, reset_seed);
+                seed = apply_reset_seed(seed, vdf_info.seed);
             }
             vdf_sha(
                 salt,
@@ -459,21 +481,18 @@ pub fn vdf_steps_are_valid(
                 config.num_iterations_per_checkpoint(),
                 &mut checkpoints,
             );
-            let computed_step = seed;
 
-            // Compare immediately and signal others to stop if mismatch
-            if computed_step != vdf_info.steps[i] {
+            if seed != batch_steps[i] {
                 cancel.store(CancelEnum::InvalidStep as u8, Ordering::Relaxed);
                 return Err(eyre::eyre!(
                     "VDF step {} is invalid! Expected: {:?}, got: {:?}",
-                    start_step_number + i as u64,
-                    vdf_info.steps[i],
-                    computed_step
+                    previous_step_number,
+                    batch_steps[i],
+                    seed
                 ));
             }
 
-            // Store checkpoints if this is the last step
-            if i == steps.len() - 2 {
+            if verify_last_step_checkpoints && i == batch_steps.len() - 1 {
                 *last_step_checkpoints.write().unwrap() = Some(H256List(checkpoints));
             }
 
@@ -481,22 +500,47 @@ pub fn vdf_steps_are_valid(
         })
     })?;
 
-    let checkpoints_guard = last_step_checkpoints.read().unwrap();
-    let last_step_checkpoints: Option<H256List> = checkpoints_guard.clone();
+    if verify_last_step_checkpoints {
+        let checkpoints_guard = last_step_checkpoints.read().unwrap();
+        let computed_checkpoints = checkpoints_guard.clone();
+        let last_step_checkpoints_are_valid = computed_checkpoints
+            .as_ref()
+            .is_some_and(|cks| *cks == vdf_info.last_step_checkpoints);
 
-    let last_step_checkpoints_are_valid = last_step_checkpoints
-        .as_ref()
-        .is_some_and(|cks| *cks == vdf_info.last_step_checkpoints);
-
-    if !last_step_checkpoints_are_valid {
-        // Compare the original list with the calculated one
-        if let Some(cks) = last_step_checkpoints {
-            warn_mismatches(&cks, &vdf_info.last_step_checkpoints)
+        if !last_step_checkpoints_are_valid {
+            if let Some(cks) = computed_checkpoints {
+                warn_mismatches(&cks, &vdf_info.last_step_checkpoints)
+            }
+            return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
         }
-        return Err(eyre::eyre!("VDF last step checkpoints are invalid!"));
     }
 
     Ok(())
+}
+
+/// Validate the steps from the `nonce_info` to see if they are valid.
+/// Verifies each step in parallel across as many cores as are available.
+pub fn vdf_steps_are_valid(
+    pool: &rayon::ThreadPool,
+    vdf_info: &VDFLimiterInfo,
+    config: &VdfConfig,
+    vdf_steps_guard: &VdfStateReadonly,
+    cancel: Arc<AtomicU8>, // fun fact: AtomicBool is the same thing as AtomicU8 (UnsafeCell around a u8)
+                           // but we use AtomicU8 to signal *why* we need to stop (cancellation vs actual error)
+) -> eyre::Result<()> {
+    info!(
+        "Checking seed {:?} reset_seed {:?}",
+        vdf_info.prev_output, vdf_info.seed
+    );
+    vdf_step_batch_is_valid(
+        pool,
+        vdf_info,
+        config,
+        vdf_steps_guard,
+        0..vdf_info.steps.len(),
+        true,
+        cancel,
+    )
 }
 
 pub mod test_helpers {

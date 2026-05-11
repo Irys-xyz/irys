@@ -5730,6 +5730,7 @@ dependencies = [
  "rstest",
  "sha2",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",

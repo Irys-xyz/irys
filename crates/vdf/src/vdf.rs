@@ -8,7 +8,7 @@ use irys_types::{
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -57,7 +57,7 @@ pub fn run_vdf<B: BlockProvider>(
     global_step_number: u64,
     current_vdf_hash: H256,
     initial_reset_seed: H256,
-    mut fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
+    mut fast_forward_receiver: Receiver<Traced<VdfStep>>,
     is_mining_enabled: Arc<AtomicBool>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
@@ -390,7 +390,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -508,7 +508,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -614,7 +614,7 @@ mod tests {
 
         let current_seed = H256::random();
         let reset_seed = H256::random();
-        let (ff_step_sender, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (ff_step_sender, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
         let is_mining_enabled = Arc::new(AtomicBool::new(false));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -651,10 +651,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         ff_step_sender
-            .send_traced(VdfStep {
+            .send(Traced::new(VdfStep {
                 step: H256::random(),
                 global_step_number: 1,
-            })
+            }))
+            .await
             .unwrap();
 
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
@@ -691,7 +692,7 @@ mod tests {
             "lock must be poisoned to exercise the path"
         );
 
-        let (_ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let atomic_step = Arc::new(AtomicU64::new(0));
         let chain_sync_state = ChainSyncState::new(false, false);
@@ -745,12 +746,13 @@ mod tests {
         let bad_ff_seed = H256::repeat_byte(0xAA);
         let gap_target_step: u64 = 100;
 
-        let (ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
         ff_tx
             .send(Traced::new(VdfStep {
                 step: bad_ff_seed,
                 global_step_number: gap_target_step,
             }))
+            .await
             .unwrap();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));

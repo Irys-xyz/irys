@@ -790,16 +790,26 @@ pub struct VdfNodeConfig {
     /// wall-clock cap on legitimate long waits.
     ///
     /// `ensure_vdf_is_valid` calls `wait_for_step` twice (Stage A before VDF
-    /// step validation, Stage D after fast-forward), each with its own
-    /// progress timer. Worst-case detection latency for a fully stalled
-    /// state is therefore `2 × progress_timeout_secs` plus the rayon SHA
-    /// work between the two waits.
+    /// step validation and then after each validated fast-forward batch.
+    /// Detection latency for a fully stalled state is therefore bounded by
+    /// one batch-validation cycle plus `progress_timeout_secs`, not by the
+    /// total number of steps in the block.
     #[serde(default = "default_vdf_progress_timeout_secs")]
     pub progress_timeout_secs: u64,
+
+    /// Number of VDF steps to validate before fast-forwarding that validated
+    /// prefix and waiting for local progress. Smaller batches surface liveness
+    /// problems sooner; larger batches reduce coordination overhead.
+    #[serde(default = "default_vdf_validation_batch_size")]
+    pub validation_batch_size: usize,
 }
 
 fn default_vdf_progress_timeout_secs() -> u64 {
     30
+}
+
+fn default_vdf_validation_batch_size() -> usize {
+    32
 }
 
 impl Default for VdfNodeConfig {
@@ -810,6 +820,7 @@ impl Default for VdfNodeConfig {
             core_pinning: CorePinning::default(),
             throttle: false,
             progress_timeout_secs: default_vdf_progress_timeout_secs(),
+            validation_batch_size: default_vdf_validation_batch_size(),
         }
     }
 }
@@ -1103,6 +1114,7 @@ impl NodeConfig {
                 core_pinning: CorePinning::Disabled,
                 throttle: true,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
+                validation_batch_size: default_vdf_validation_batch_size(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -1276,6 +1288,7 @@ impl NodeConfig {
                 core_pinning: CorePinning::Auto,
                 throttle: false,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
+                validation_batch_size: default_vdf_validation_batch_size(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
