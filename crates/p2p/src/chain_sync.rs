@@ -2782,12 +2782,12 @@ mod tests {
         use super::*;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysBlockHeader, IrysPeerId,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -2798,10 +2798,9 @@ mod tests {
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir"),
-            ));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let block_requests = Arc::new(Mutex::new(vec![]));
             let block_requests_clone = block_requests.clone();
@@ -2987,10 +2986,9 @@ mod tests {
             let start_from = 10;
             let sync_state = ChainSyncState::new(true, false);
 
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir"),
-            ));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let mut node_config = NodeConfig::testing();
             node_config.node_mode = NodeMode::Genesis;
@@ -3063,12 +3061,12 @@ mod tests {
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, DbSyncMode, IrysAddress, NodeConfig, NodeInfo, PeerAddress,
-            PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
+            Config, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -3134,10 +3132,9 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
-            let db_env =
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -3267,10 +3264,9 @@ mod tests {
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
-            let db_env =
-                open_or_create_irys_consensus_data_db(temp_dir.path(), DbSyncMode::UtterlyNoSync)
-                    .expect("can't open temp dir");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let _cache_dir = TempDirBuilder::new().build();
+            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -3521,10 +3517,10 @@ mod tests {
         use super::*;
         use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::BlockIndex;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig, PeerListItem};
+        use irys_types::{DatabaseProvider, NodeConfig, PeerListItem};
         use std::sync::atomic::AtomicUsize;
 
         /// The first height that the sync needs. Our index has the main chain
@@ -3552,10 +3548,7 @@ mod tests {
         }
 
         fn local_index(dir: &std::path::Path) -> BlockIndexReadGuard {
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(dir, DbSyncMode::UtterlyNoSync)
-                    .expect("open test db"),
-            ));
+            let db = DatabaseProvider::for_testing(dir, &dir.join("cache")).expect("open test db");
             let index = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db));
             for (height, item) in entries(MAIN_CHAIN, 0, START as u64 - 1)
                 .into_iter()
@@ -4175,12 +4168,12 @@ mod tests {
         use super::*;
         use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::BlockIndex;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::{
-            DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, NodeInfo,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            DatabaseProvider, IrysAddress, IrysPeerId, NodeConfig, NodeInfo, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore,
         };
         use irys_utils::circuit_breaker::CircuitBreakerConfig;
         use std::sync::Arc;
@@ -4216,10 +4209,7 @@ mod tests {
         }
 
         fn empty_index(dir: &std::path::Path) -> BlockIndexReadGuard {
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(dir, DbSyncMode::UtterlyNoSync)
-                    .expect("open test db"),
-            ));
+            let db = DatabaseProvider::for_testing(dir, &dir.join("cache")).expect("open test db");
             BlockIndexReadGuard::new(BlockIndex::new_for_testing(db))
         }
 
@@ -4844,23 +4834,21 @@ mod tests {
             VdfController,
         ) {
             use crate::tests::util::data_handler_stub;
+            use irys_database::DatabaseProviderTestExt as _;
             use irys_domain::PeerList;
             use irys_domain::chain_sync_state::ChainSyncState;
-            use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
             use irys_testing_utils::utils::TempDirBuilder;
-            use irys_types::{Config, DatabaseProvider, DbSyncMode, NodeConfig};
+            use irys_types::{Config, DatabaseProvider, NodeConfig};
 
             let dir = TempDirBuilder::new().with_tracing().build();
             let mut node_config = NodeConfig::testing();
             node_config.base_directory = dir.path().to_path_buf();
             let config = Config::new_with_random_peer_id(node_config);
-            let db = DatabaseProvider(Arc::new(
-                open_or_create_irys_consensus_data_db(
-                    &config.node_config.base_directory,
-                    DbSyncMode::UtterlyNoSync,
-                )
-                .expect("open test db"),
-            ));
+            let db = DatabaseProvider::for_testing(
+                &config.node_config.base_directory,
+                &config.node_config.irys_cache_data_dir(),
+            )
+            .expect("open test db");
             let peer_list = PeerList::test_mock().expect("peer list");
             let handler =
                 data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
@@ -4940,14 +4928,12 @@ mod tests {
     #[tokio::test]
     async fn failed_parent_request_keeps_a_block_another_path_stored() {
         use crate::tests::util::data_handler_stub;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::PeerList;
         use irys_domain::chain_sync_state::ChainSyncState;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{
-            BlockBody, Config, DatabaseProvider, DbSyncMode, H256, NodeConfig, SealedBlock,
-        };
+        use irys_types::{BlockBody, Config, DatabaseProvider, H256, NodeConfig, SealedBlock};
         use irys_vdf::state::VdfController;
         use std::sync::atomic::AtomicBool;
 
@@ -4955,13 +4941,11 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
 
@@ -5019,14 +5003,12 @@ mod tests {
     #[tokio::test]
     async fn failed_parent_request_keeps_a_block_stored_during_cleanup() {
         use crate::tests::util::data_handler_stub;
+        use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::PeerList;
         use irys_domain::chain_sync_state::ChainSyncState;
-        use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{
-            BlockBody, Config, DatabaseProvider, DbSyncMode, H256, NodeConfig, SealedBlock,
-        };
+        use irys_types::{BlockBody, Config, DatabaseProvider, H256, NodeConfig, SealedBlock};
         use irys_vdf::state::VdfController;
         use std::sync::atomic::AtomicBool;
 
@@ -5034,13 +5016,11 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = dir.path().to_path_buf();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(
-                &config.node_config.base_directory,
-                DbSyncMode::UtterlyNoSync,
-            )
-            .expect("open test db"),
-        ));
+        let db = DatabaseProvider::for_testing(
+            &config.node_config.base_directory,
+            &config.node_config.irys_cache_data_dir(),
+        )
+        .expect("open test db");
         let peer_list = PeerList::test_mock().expect("peer list");
         let handler = data_handler_stub(&config, &peer_list, db, ChainSyncState::new(false, false));
 

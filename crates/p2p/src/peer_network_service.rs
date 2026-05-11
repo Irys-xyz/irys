@@ -1364,13 +1364,11 @@ mod tests {
     use super::*;
     use futures::FutureExt as _;
     use irys_database::reth_db::Database as _;
-    use irys_database::{tables::PeerListItems, walk_all};
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_database::{DatabaseProviderTestExt as _, tables::PeerListItems, walk_all};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        Config, DbSyncMode, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage,
-        RethPeerInfo,
+        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
     };
     use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
     use std::collections::{HashMap, HashSet};
@@ -1414,17 +1412,20 @@ mod tests {
         (mining_addr, peer)
     }
 
-    fn open_db(path: &std::path::Path) -> DatabaseProvider {
-        DatabaseProvider(Arc::new(
-            open_or_create_irys_consensus_data_db(path, DbSyncMode::UtterlyNoSync)
-                .expect("open test database"),
-        ))
+    fn open_db(
+        path: &std::path::Path,
+    ) -> (DatabaseProvider, irys_testing_utils::tempfile::TempDir) {
+        let cache_dir = TempDirBuilder::new().build();
+        let db = irys_types::DatabaseProvider::for_testing(path, cache_dir.path())
+            .expect("open test database");
+        (db, cache_dir)
     }
 
     struct TestHarness {
         config: Config,
         inner: Arc<PeerNetworkServiceInner>,
         service: PeerNetworkService,
+        _cache_dir: irys_testing_utils::tempfile::TempDir,
     }
 
     impl TestHarness {
@@ -1441,7 +1442,7 @@ mod tests {
             config: Config,
             circuit_breaker: CircuitBreakerManager<IrysPeerId>,
         ) -> Self {
-            let db = open_db(temp_dir);
+            let (db, _cache_dir) = open_db(temp_dir);
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let reth_sender = { Arc::new(move |_info: RethPeerInfo| async move {}.boxed()) };
             let peer_list = PeerList::new(
@@ -1466,6 +1467,7 @@ mod tests {
                 config,
                 inner,
                 service,
+                _cache_dir,
             }
         }
 
@@ -1666,7 +1668,7 @@ mod tests {
     async fn test_add_peer() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
             &config,
@@ -1695,7 +1697,7 @@ mod tests {
     async fn test_active_peers_request() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
             &config,
@@ -1951,7 +1953,7 @@ mod tests {
     async fn test_periodic_flush() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
         let reth_sender = {
@@ -2003,7 +2005,7 @@ mod tests {
     async fn test_load_from_database() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
         let reth_sender = { Arc::new(move |_info: RethPeerInfo| async {}.boxed()) };
@@ -2071,7 +2073,7 @@ mod tests {
     async fn test_wait_for_active_peer() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
             &config,
@@ -2105,7 +2107,7 @@ mod tests {
     async fn test_wait_for_active_peer_no_peers() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
             &config,
@@ -2165,7 +2167,7 @@ mod tests {
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
         let temp_dir = TempDirBuilder::new().with_tracing().build();
         let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
             &config,
