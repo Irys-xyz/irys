@@ -7,12 +7,11 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 
 use irys_api_server::routes::tx::TxOffset;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::tables::IngressProofs;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::{IrysAddress, NodeConfig, irys::IrysSigner};
 use k256::ecdsa::SigningKey;
-use reth_db::Database as _;
-use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -150,8 +149,13 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     // now we wait for an ingress proof to be generated for this tx (automatic once all chunks have been uploaded)
     let ingress_proof = loop {
         // don't reuse the tx! it has read isolation (won't see anything committed after it's creation)
-        let ro_tx = &node.node_ctx.db.0.tx().unwrap();
-        match ro_tx.get::<IngressProofs>(recv_tx.data_root).unwrap() {
+        let result = node
+            .node_ctx
+            .db
+            .view_cache(|tx| tx.get::<IngressProofs>(recv_tx.data_root))
+            .unwrap()
+            .unwrap();
+        match result {
             Some(ip) => break ip,
             None => sleep(Duration::from_millis(100)).await,
         }

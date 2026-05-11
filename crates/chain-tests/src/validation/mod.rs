@@ -840,11 +840,12 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
 #[test_log::test(tokio::test)]
 async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
     use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+    use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
     use irys_types::{
         IngressProofsList, U256,
         ingress::{CachedIngressProof, generate_ingress_proof},
     };
-    use reth_db::{Database as _, transaction::DbTxMut as _};
+    use reth_db::transaction::DbTxMut as _;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -995,25 +996,29 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
         },
     ];
 
-    // First, add the data transaction and ingress proofs to the database so discovery can find them
-    genesis_node.node_ctx.db.update(|tx| {
+    // First, add the data transaction and ingress proofs to the database so discovery can find them.
+    // Consensus tables (IrysDataTxHeaders) and cache tables (CachedDataRoots, IngressProofs)
+    // are in separate envs — write them in two separate transactions.
+    {
         use irys_database::tables::{CompactTxHeader, IrysDataTxHeaders};
-
-        // Store the data transaction
-        tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx, None)?;
-
-        // Store the ingress proofs (with duplicates from same address)
-        for cached_proof in &duplicate_proofs {
-            irys_database::store_external_ingress_proof_checked(
-                tx,
-                &cached_proof.proof,
-                cached_proof.address,
-            )?;
-        }
-
-        Ok::<_, eyre::Report>(())
-    })??;
+        genesis_node.node_ctx.db.update_eyre(|tx| {
+            tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
+            Ok(())
+        })?;
+    }
+    {
+        genesis_node.node_ctx.db.update_cache_eyre(|tx| {
+            irys_database::cache_data_root(tx, &data_tx, None)?;
+            for cached_proof in &duplicate_proofs {
+                irys_database::store_external_ingress_proof_checked(
+                    tx,
+                    &cached_proof.proof,
+                    cached_proof.address,
+                )?;
+            }
+            Ok(())
+        })?;
+    }
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
