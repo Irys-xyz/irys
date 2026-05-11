@@ -534,6 +534,17 @@ pub fn consensus_db_args(
     Ok(args)
 }
 
+/// Builds [`DatabaseArguments`] for the **cache** database from a
+/// [`irys_types::DatabaseConfig`]: the `irys_cache` preset with `cache_sync_mode`,
+/// capped by `geometry_max_size` exactly as [`consensus_db_args`] is.
+pub fn cache_db_args(db_config: &irys_types::DatabaseConfig) -> eyre::Result<DatabaseArguments> {
+    let mut args = DatabaseArguments::irys_cache(db_config.cache_sync_mode)?;
+    if let Some(max_size) = db_config.geometry_max_size {
+        args = args.with_geometry_max_size(Some(max_size));
+    }
+    Ok(args)
+}
+
 // MDBX-SUBMODULE-INDEX: delete this function with the MDBX submodule engine. Consensus keeps consensus_db_args.
 /// Builds [`DatabaseArguments`] for a **storage submodule** database from a
 /// [`irys_types::DatabaseConfig`]. Production reserves 2 TiB; `geometry_max_size`

@@ -1,11 +1,11 @@
 use irys_database::open_or_create_db;
-use irys_database::tables::IrysTables;
+use irys_database::tables::{CacheTables, IrysTables};
 use reth_db::DatabaseEnv;
 use reth_db::mdbx::DatabaseArguments;
 use std::path::Path;
 
-// Only the test-gated convenience fn below needs these; keep them out of
-// production builds where that fn is `cfg`-compiled away (avoids unused-import).
+// Only the test-gated convenience fns below need these; keep them out of
+// production builds where those fns are `cfg`-compiled away (avoids unused-import).
 #[cfg(any(test, feature = "test-utils"))]
 use irys_database::IrysDatabaseArgs as _;
 #[cfg(any(test, feature = "test-utils"))]
@@ -43,4 +43,33 @@ pub fn open_or_create_irys_consensus_data_db_with_args(
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
     open_or_create_db(path, IrysTables::ALL, args)
+}
+
+/// Test-oriented convenience for opening the cache-side MDBX environment, with the
+/// same [`irys_types::TEST_DB_GEOMETRY_MAX_SIZE`] cap as
+/// [`open_or_create_irys_consensus_data_db`]. **Production** opens the cache DB via
+/// [`irys_database::cache_db_args`] + [`open_or_create_irys_cache_data_db_with_args`],
+/// which honors the configured `cache_sync_mode` and `geometry_max_size`.
+///
+/// Uses the wider growth/shrink geometry from `DatabaseArguments::irys_cache`
+/// because the cache tables churn in large batches during pruning.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn open_or_create_irys_cache_data_db(
+    path: impl AsRef<Path>,
+    sync_mode: DbSyncMode,
+) -> eyre::Result<DatabaseEnv> {
+    open_or_create_irys_cache_data_db_with_args(
+        path,
+        DatabaseArguments::irys_cache(sync_mode)?
+            .with_geometry_max_size(Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE)),
+    )
+}
+
+/// Like [`open_or_create_irys_cache_data_db`] but the caller supplies fully-built
+/// [`DatabaseArguments`] — typically via [`irys_database::cache_db_args`].
+pub fn open_or_create_irys_cache_data_db_with_args(
+    path: impl AsRef<Path>,
+    args: DatabaseArguments,
+) -> eyre::Result<DatabaseEnv> {
+    open_or_create_db(path, CacheTables::ALL, args)
 }
