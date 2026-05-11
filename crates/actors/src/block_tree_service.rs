@@ -1981,6 +1981,7 @@ pub fn get_block_header(
 mod tests {
     use super::*;
     use crate::block_validation::PreValidationError;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_types::BlockTransactions;
     use rstest::rstest;
 
@@ -2222,20 +2223,13 @@ mod tests {
             configure: impl FnOnce(&mut irys_types::NodeConfig),
             live_step: u64,
         ) -> Self {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
             use irys_types::{ConsensusConfig, NodeConfig};
-            use reth_db::mdbx::DatabaseArguments;
 
             let tmp = TempDirBuilder::new().build();
-            let db_env = open_or_create_db(
-                tmp.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().expect("irys_testing db args"),
-            )
-            .expect("open temp MDBX env");
-            let db = DatabaseProvider(Arc::new(db_env));
+            let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+                .expect("open temp MDBX env");
 
             let block_index = BlockIndex::new_for_testing(db.clone());
             let block_index_guard = BlockIndexReadGuard::new(block_index);

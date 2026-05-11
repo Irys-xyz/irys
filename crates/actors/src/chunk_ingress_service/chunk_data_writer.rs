@@ -251,24 +251,17 @@ impl BackgroundWriter {
 mod tests {
     use super::*;
     use irys_database::{
-        cached_chunk_by_chunk_offset, cached_ingress_leaf, complete_ingress_leaves,
-        database::{IrysDatabaseArgs as _, open_or_create_db},
-        db_cache::CachedDataRoot,
-        tables::{CachedDataRoots, IrysTables},
+        DatabaseProviderTestExt as _, cached_chunk_by_chunk_offset, cached_ingress_leaf,
+        complete_ingress_leaves, db_cache::CachedDataRoot, tables::CachedDataRoots,
     };
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{Base64, H256, TxChunkOffset};
-    use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+    use reth_db::transaction::DbTxMut as _;
 
     #[test_log::test(tokio::test)]
     async fn validated_leaf_is_persisted_without_a_storage_assignment() -> eyre::Result<()> {
         let dir = TempDirBuilder::new().with_tracing().build();
-        let env = open_or_create_db(
-            dir.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(dir.path(), &dir.path().join("cache"))?;
         let data_root = H256::random();
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0_u32);
@@ -319,12 +312,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn every_write_in_a_failed_auto_drain_batch_receives_the_error() -> eyre::Result<()> {
         let dir = TempDirBuilder::new().with_tracing().build();
-        let env = open_or_create_db(
-            dir.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(dir.path(), &dir.path().join("cache"))?;
         let data_root = H256::random();
         let address = IrysAddress::random();
         let tx_offset = TxChunkOffset::from(0_u32);

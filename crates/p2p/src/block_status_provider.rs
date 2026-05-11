@@ -520,7 +520,6 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{DatabaseProvider, NodeConfig};
     use rstest::rstest;
-    use std::sync::Arc;
 
     fn mock_provider() -> (BlockStatusProvider, IrysBlockHeader, tempfile::TempDir) {
         let tmp_dir = TempDirBuilder::new()

@@ -1253,6 +1253,7 @@ where
 #[cfg(test)]
 mod data_tx_lookup_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::insert_tx_header;
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{ConsensusConfig, H256};
@@ -1260,12 +1261,7 @@ mod data_tx_lookup_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn db_lookup_finds_stored_txs_and_reports_missing() -> eyre::Result<()> {
         let tmp_dir = TempDirBuilder::new().prefix("data_tx_lookup").build();
-        let db = DatabaseProvider(Arc::new(
-            irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-                tmp_dir.path(),
-                irys_types::DbSyncMode::UtterlyNoSync,
-            )?,
-        ));
+        let db = DatabaseProvider::for_testing(tmp_dir.path(), &tmp_dir.path().join("cache"))?;
         let mut stored = DataTransactionHeader::new(&ConsensusConfig::testing());
         stored.id = H256::repeat_byte(1);
         db.update_eyre(|tx| insert_tx_header(tx, &stored))?;

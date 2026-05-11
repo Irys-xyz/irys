@@ -675,13 +675,12 @@ mod generation_state_tests {
 #[cfg(test)]
 mod unknown_anchor_tests {
     use super::*;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
         ConsensusConfig, IrysBlockHeader, IrysSignature, NodeConfig, ingress::IngressProofV1,
     };
-    use reth_db::mdbx::DatabaseArguments;
     use std::sync::RwLock as StdRwLock;
 
     fn signed_genesis() -> IrysBlockHeader {
@@ -708,13 +707,7 @@ mod unknown_anchor_tests {
         let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
         let block_tree = BlockTreeReadGuard::new(Arc::new(StdRwLock::new(tree)));
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        let db = DatabaseProvider(Arc::new(db));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache")).unwrap();
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
 
         let err = ChunkIngressServiceInner::validate_ingress_proof_anchor_static(

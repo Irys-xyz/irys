@@ -2,7 +2,7 @@ use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, poa_ledger_matches_assignment,
     poa_partition_is_owned_by_miner, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
-use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, EpochSnapshot};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_testing_utils::new_mock_signed_header;
@@ -89,13 +89,8 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     ];
 
     let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db_env = open_or_create_db(
-        _tmp_dir.path(),
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db =
+        DatabaseProvider::for_testing(_tmp_dir.path(), &_tmp_dir.path().join("cache")).unwrap();
     let block_index = BlockIndex::new_for_testing(db.clone());
     for (height, item) in block_index_items.iter().enumerate() {
         block_index.push_item(item, height as u64).unwrap();
@@ -161,13 +156,8 @@ fn poa_chunk_longer_than_chunk_size_is_too_long() {
     let config = ConsensusConfig::testing();
     let chunk_size = usize::try_from(config.chunk_size).unwrap();
     let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db_env = open_or_create_db(
-        _tmp_dir.path(),
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db =
+        DatabaseProvider::for_testing(_tmp_dir.path(), &_tmp_dir.path().join("cache")).unwrap();
     let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),
@@ -433,13 +423,7 @@ fn empty_poa_guards(
     config: &ConsensusConfig,
     db_dir: &std::path::Path,
 ) -> (DatabaseProvider, BlockIndexReadGuard, BlockTreeReadGuard) {
-    let db_env = open_or_create_db(
-        db_dir,
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let db = DatabaseProvider::for_testing(&db_dir, &db_dir.join("cache")).unwrap();
     let block_index_guard = BlockIndexReadGuard::new(BlockIndex::new_for_testing(db.clone()));
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
         &new_mock_signed_header(),

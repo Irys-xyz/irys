@@ -1082,8 +1082,8 @@ mod tests {
     use super::body_worker::{BodyMigrationWorker, MAX_BODY_MIGRATION_ATTEMPTS};
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_chunk, cache_data_root, insert_block_header, insert_tx_header,
-        open_or_create_db, submodule::tables::PendingBodyMigration, tables::IrysTables,
+        DatabaseProviderTestExt as _, cache_chunk, cache_data_root, insert_block_header,
+        insert_tx_header, submodule::tables::PendingBodyMigration,
     };
     use irys_domain::{ChunkType, StorageModuleInfo};
     use irys_storage::{ie, ii};
@@ -1179,11 +1179,10 @@ mod tests {
         )?);
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
 
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let data = vec![7_u8; (chunk_size * num_chunks) as usize];
@@ -2421,11 +2420,10 @@ mod tests {
         )?;
 
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
         let (senders, _receivers) = ServiceSenders::new();
         let worker = BodyMigrationWorker::new(
@@ -2519,11 +2517,10 @@ mod tests {
         )?;
 
         let guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![sm.clone()])));
-        let db = DatabaseProvider(Arc::new(open_or_create_db(
-            tmp.path().join("irys_db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing()?,
-        )?));
+        let db = DatabaseProvider::for_testing(
+            &(tmp.path().join("irys_db")),
+            &(tmp.path().join("irys_db")).join("cache"),
+        )?;
         let (_shutdown_signal, shutdown) = reth::tasks::shutdown::signal();
         let (senders, _receivers) = ServiceSenders::new();
         let worker = BodyMigrationWorker::new(

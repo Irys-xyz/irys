@@ -264,8 +264,8 @@ fn compute_submit_range(
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, set_data_tx_included_height,
-        tables::{IrysBlockHeaders, IrysTables},
+        DatabaseProviderTestExt as _, insert_tx_header, set_data_tx_included_height,
+        tables::IrysBlockHeaders,
     };
     use irys_domain::{
         BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,
@@ -278,18 +278,13 @@ mod tests {
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
         IrysBlockHeader, SealedBlock, U256, app_state::DatabaseProvider,
     };
-    use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::DbTxMut as _;
     use std::sync::{Arc, RwLock};
 
     fn open_db() -> eyre::Result<(DatabaseProvider, tempfile::TempDir)> {
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        Ok((DatabaseProvider(Arc::new(env)), tmp))
+        let env = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        Ok((env, tmp))
     }
 
     /// Build a signed block header with custom Submit-ledger totals and tx_ids.

@@ -6,6 +6,7 @@ use irys_actors::{
     peer_bandwidth_manager::PeerBandwidthManager,
     services::{ServiceReceivers, ServiceSenders},
 };
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{
     BlockTree, BlockTreeReadGuard, ChunkType, PeerList, StorageModule, StorageModuleInfo,
 };
@@ -174,17 +175,8 @@ impl DataSyncServiceTestHarness {
         // (no residual-hole proof-signer expansion).
         let db_path = config.node_config.base_directory.join("data_sync_test_db");
         let db = {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_types::app_state::DatabaseProvider;
-            use reth_db::mdbx::DatabaseArguments;
-            use std::sync::Arc;
-            let env = open_or_create_db(
-                db_path,
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().unwrap(),
-            )
-            .expect("test db");
-            DatabaseProvider(Arc::new(env))
+            DatabaseProvider::for_testing(&db_path, &db_path.join("cache")).expect("test db")
         };
 
         let inner = DataSyncServiceInner::new(
@@ -1046,15 +1038,17 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     ));
 
     let db = {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_types::app_state::DatabaseProvider;
-        let env = open_or_create_db(
-            config.node_config.base_directory.join("orchestrator-db"),
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
+        let env = DatabaseProvider::for_testing(
+            &config.node_config.base_directory.join("orchestrator-db"),
+            &config
+                .node_config
+                .base_directory
+                .join("orchestrator-db")
+                .join("cache"),
         )
         .expect("open orchestrator test db");
-        DatabaseProvider(Arc::new(env))
+        env
     };
     let orchestrator = ChunkOrchestrator::new(
         storage_module.clone(),

@@ -143,6 +143,7 @@ pub(crate) fn ancestor_commitment_tx_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockTree;
     use irys_testing_utils::{IrysBlockHeaderTestExt as _, mock_header_with_commitments};
     use irys_types::ConsensusConfig;
@@ -166,16 +167,9 @@ mod tests {
     }
 
     fn test_db() -> (irys_testing_utils::tempfile::TempDir, DatabaseProvider) {
-        use irys_database::IrysDatabaseArgs as _;
-
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db = irys_database::open_or_create_db(
-            tmp.path(),
-            irys_database::tables::IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        (tmp, DatabaseProvider(Arc::new(db)))
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache")).unwrap();
+        (tmp, db)
     }
 
     // Full behavioral coverage is in the integration tests (Tasks A3, A5); this

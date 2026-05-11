@@ -1491,7 +1491,7 @@ mod tests {
     async fn network_mismatch_rejection_evicts_from_cache_and_returns_id() {
         let temp_dir = TempDirBuilder::new().build();
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let peer_list = build_peer_list(&config, &db);
 
         let (_mining, peer) = create_test_peer(
@@ -1527,7 +1527,7 @@ mod tests {
     async fn non_network_rejection_retains_peer() {
         let temp_dir = TempDirBuilder::new().build();
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let peer_list = build_peer_list(&config, &db);
 
         let (_mining, peer) = create_test_peer(
@@ -1607,7 +1607,7 @@ mod tests {
 
         let temp_dir = TempDirBuilder::new().build();
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
-        let db = open_db(temp_dir.path());
+        let (db, _cache_dir) = open_db(temp_dir.path());
         let mining = IrysAddress::from([0x4A; 20]);
         let v1_id = IrysPeerId::from(mining);
         let v2_id = IrysPeerId::from([0xB2; 20]);

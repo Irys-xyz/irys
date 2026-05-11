@@ -4,9 +4,7 @@ use crate::{
     metrics,
     test_helpers::build_test_service_senders,
 };
-use irys_database::{
-    IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
-};
+use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
 use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
 use irys_testing_utils::TempDirBuilder;
@@ -115,13 +113,9 @@ fn open_test_db(config: &Config) -> DatabaseProvider {
         .node_config
         .base_directory
         .join(format!("orchestrator-db-{n}"));
-    let env = open_or_create_db(
-        path,
-        IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().expect("mdbx testing args"),
-    )
-    .expect("open orchestrator test db");
-    DatabaseProvider(Arc::new(env))
+    let env = DatabaseProvider::for_testing(&path, &path.join("cache"))
+        .expect("open orchestrator test db");
+    env
 }
 
 fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {

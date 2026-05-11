@@ -1380,6 +1380,7 @@ enum PendingDrainRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::db_cache::CachedDataRoot;
     use irys_types::TxChunkOffset;
     use irys_types::UnixTimestamp;
@@ -3075,12 +3076,10 @@ mod tests {
         max_chunks_per_item: usize,
         preheader_cap: usize,
     ) -> (ChunkIngressServiceInner, crate::services::ServiceReceivers) {
-        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{BlockTree, BlockTreeReadGuard, StorageModulesReadGuard};
         use irys_testing_utils::new_mock_signed_header;
         use irys_types::{Config, NodeConfig};
         use reth::tasks::TaskExecutor;
-        use reth_db::mdbx::DatabaseArguments;
         use std::num::NonZeroUsize;
 
         let mut node_config = NodeConfig::testing();
@@ -3094,13 +3093,11 @@ mod tests {
         node_config.mempool.max_preheader_chunks_per_item = preheader_cap;
         let config = Config::new_with_random_peer_id(node_config);
 
-        let db_env = open_or_create_db(
-            tmp.as_ref().join("db"),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("testing database arguments"),
+        let irys_db = DatabaseProvider::for_testing(
+            &(tmp.as_ref().join("db")),
+            &(tmp.as_ref().join("db")).join("cache"),
         )
         .expect("open test database");
-        let irys_db = DatabaseProvider(std::sync::Arc::new(db_env));
 
         let (service_senders, receivers) = crate::test_helpers::build_test_service_senders();
         let block_tree_read_guard =

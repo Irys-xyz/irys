@@ -2059,11 +2059,11 @@ mod tests {
     }
 
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::{
-        IrysDatabaseArgs as _, database,
+        database,
         db_cache::CachedDataRoot,
-        open_or_create_db,
-        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
+        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots},
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::{
@@ -2075,7 +2075,6 @@ mod tests {
         NodeConfig, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
-    use reth_db::mdbx::DatabaseArguments;
     use std::sync::{Arc, RwLock};
 
     /// `cache_data_root(_, _, None)` leaves expiry unset. Mempool ingress sets
@@ -2093,12 +2092,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -2229,12 +2223,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: 64,
@@ -2596,12 +2585,7 @@ mod tests {
         node_config.cache.max_cache_size_bytes = max_cache_size_bytes;
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let data_size = 32_u64.saturating_mul(u64::from(chunk_count.max(1)));
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -2741,12 +2725,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: chunk_size,
@@ -2936,12 +2915,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let cached = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -3233,12 +3207,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let chunk_size = config.consensus.chunk_size;
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 data_size: chunk_size,
@@ -3472,12 +3441,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
         let local_address = config.irys_signer().address();
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
         let data_root = H256::random();
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -3594,12 +3558,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_only_migrated_chunks_older_than_threshold() -> eyre::Result<()> {
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create two data roots: one "old" and one "new"
         let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3745,12 +3704,7 @@ mod tests {
         let ingress_address = config_below.irys_signer().address();
 
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create one data root with two chunks and mark them old to be eligible
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3900,12 +3854,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Create a data root cached via mempool path
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
@@ -3994,12 +3943,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Construct a CDR with empty txid_set directly — the only state
         // reachable by `(horizon=None, all_txs_confirmed=true)` after the
@@ -4068,12 +4012,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -4160,12 +4099,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let confirmed_tx_id = H256::random();
@@ -4248,12 +4182,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // A shared data_root for all three proofs.
         let data_root = H256::random();
@@ -4381,12 +4310,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let low = H256::from([0x01; 32]);
         let high = H256::from([0xFE; 32]);
@@ -4484,12 +4408,7 @@ mod tests {
         node_config.cache.max_cache_size_bytes = 0;
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let txid = H256::random();
@@ -4611,12 +4530,7 @@ mod tests {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &_temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), &_temp_dir.path().join("cache"))?;
 
         // Shared data_root for all three proofs.
         let data_root = H256::random();
@@ -4839,12 +4753,7 @@ mod tests {
     )> {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let cdr = CachedDataRoot {
@@ -4870,12 +4779,7 @@ mod tests {
         let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let local_addr = config.irys_signer().address();
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            &temp_dir,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(temp_dir.path(), &temp_dir.path().join("cache"))?;
 
         let data_root = H256::random();
         let cdr = CachedDataRoot {

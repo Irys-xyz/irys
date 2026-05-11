@@ -3384,6 +3384,7 @@ mod height_tests {
 #[cfg(test)]
 mod c1_side_fork_regression_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{
         BlockIndex, BlockMetadata, BlockState, BlockTree, ChainState, EmaSnapshot,
         dummy_epoch_snapshot,
@@ -3392,8 +3393,8 @@ mod c1_side_fork_regression_tests {
     use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, DbSyncMode, H256,
-        H256List, IrysBlockHeader, LedgerIndexItem, SealedBlock,
+        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, H256, H256List,
+        IrysBlockHeader, LedgerIndexItem, SealedBlock,
     };
     use std::sync::{Arc, RwLock};
     use std::time::SystemTime;
@@ -3491,12 +3492,11 @@ mod c1_side_fork_regression_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("c1_side_fork_regression")
             .build();
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        let db = irys_types::DatabaseProvider::for_testing(
             tmp_dir.path(),
-            DbSyncMode::UtterlyNoSync,
+            &tmp_dir.path().join("cache"),
         )
         .expect("open db");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let canonical_genesis_hash = BlockHash::random();
@@ -3665,10 +3665,11 @@ mod c1_side_fork_regression_tests {
 #[cfg(test)]
 mod poa_bounds_snapshot_tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockIndex, BlockTree};
     use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{BlockHash, BlockIndexItem, DataLedger, DbSyncMode, H256, LedgerIndexItem};
+    use irys_types::{BlockHash, BlockIndexItem, DataLedger, H256, LedgerIndexItem};
     use std::sync::{Arc, RwLock};
 
     #[test]
@@ -3676,12 +3677,11 @@ mod poa_bounds_snapshot_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("poa_bounds_snapshot_hash")
             .build();
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+        let db = irys_types::DatabaseProvider::for_testing(
             tmp_dir.path(),
-            DbSyncMode::UtterlyNoSync,
+            &tmp_dir.path().join("cache"),
         )
         .expect("open db");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
         let block_index = BlockIndex::new_for_testing(db.clone());
 
         let genesis_hash = BlockHash::random();
@@ -4124,12 +4124,11 @@ mod fork_local_window_tests {
 #[cfg(test)]
 mod recall_range_buffer_authority_tests {
     use super::*;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockTree;
     use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
     use irys_types::block_production::Seed;
     use irys_vdf::state::VdfState;
-    use reth_db::mdbx::DatabaseArguments;
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicBool;
 
@@ -4198,13 +4197,8 @@ mod recall_range_buffer_authority_tests {
         // Real (empty-beyond-genesis) tree + DB: the self-contained block never
         // consults them; the ancestry-miss test relies on them resolving nothing.
         let tmp = TempDirBuilder::new().build();
-        let db_env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().expect("irys_testing db args"),
-        )
-        .expect("open temp MDBX env");
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))
+            .expect("open temp MDBX env");
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
         genesis.test_sign();
@@ -7915,6 +7909,7 @@ mod tests {
     use super::*;
 
     use irys_config::StorageSubmodulesConfig;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_database::add_genesis_commitments;
     use irys_domain::{
         BlockIndex, BlockTree, EpochSnapshot, block_index_guard::BlockIndexReadGuard,
@@ -7923,9 +7918,9 @@ mod tests {
     use irys_testing_utils::tempfile::TempDir;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger,
-        DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
+        Base64, BlockHash, DataTransaction, DataTransactionHeader, DataTransactionLedger, H256,
+        H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256, hash_sha256,
+        irys::IrysSigner, partition::PartitionAssignment,
     };
     use std::sync::{Arc, RwLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8205,21 +8200,12 @@ mod tests {
     #[tokio::test]
     async fn get_previous_tx_inclusions_finds_prior_submit_in_reorg_window_band() -> eyre::Result<()>
     {
-        use irys_database::{
-            IrysDatabaseArgs as _, open_or_create_db,
-            tables::{IrysBlockHeaders, IrysTables},
-        };
+        use irys_database::tables::IrysBlockHeaders;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let tx_id = H256::random();
 
@@ -8429,12 +8415,9 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-            data_dir.path(),
-            DbSyncMode::UtterlyNoSync,
-        )
-        .expect("to create DB");
-        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = irys_types::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
+            .expect("test db setup");
         let block_index = BlockIndex::new_for_testing(db);
 
         let storage_submodules_config = StorageSubmodulesConfig::load(
@@ -10086,9 +10069,8 @@ mod tests {
     async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height,
-            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10098,17 +10080,11 @@ mod tests {
             DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10213,10 +10189,9 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn corrupt_cdr_does_not_affect_assigned_ingress_proofs() -> eyre::Result<()> {
         use irys_database::{
-            IrysDatabaseArgs as _,
             db_cache::CachedDataRoot,
-            insert_tx_header, open_or_create_db, set_data_tx_included_height,
-            tables::{CachedDataRoots, IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{CachedDataRoots, IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10227,17 +10202,11 @@ mod tests {
             UnixTimestamp,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10348,9 +10317,8 @@ mod tests {
     async fn assigned_ingress_proofs_classifies_intersecting_proof() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height,
-            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+            insert_tx_header, set_data_tx_included_height,
+            tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
@@ -10363,17 +10331,11 @@ mod tests {
             irys::IrysSigner,
         };
         use reth_db::Database as _;
-        use reth_db::mdbx::DatabaseArguments;
         use reth_db::transaction::DbTxMut as _;
         use std::sync::RwLock;
 
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
-        )?;
-        let db = DatabaseProvider(Arc::new(env));
+        let db = DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
 
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
@@ -10694,9 +10656,7 @@ mod commitment_version_tests {
 #[cfg(test)]
 mod ingress_proof_local_bytes_tests {
     use super::*;
-    use irys_database::{
-        IrysDatabaseArgs as _, cache_chunk, cache_data_root, open_or_create_db, tables::IrysTables,
-    };
+    use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
     use irys_domain::{BlockTree, ChunkType, StorageModule, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_testing_utils::TempDirBuilder;
@@ -10723,13 +10683,7 @@ mod ingress_proof_local_bytes_tests {
     }
 
     fn open_db(path: &std::path::Path) -> DatabaseProvider {
-        let env = open_or_create_db(
-            path,
-            IrysTables::ALL,
-            reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        DatabaseProvider(Arc::new(env))
+        DatabaseProvider::for_testing(&path, &path.join("cache")).unwrap()
     }
 
     fn one_chunk(config: &Config) -> (DataTransaction, Vec<u8>) {
