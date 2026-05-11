@@ -12,7 +12,6 @@ use crate::tables::{
     IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
 
-use crate::db::IrysDatabaseExt as _;
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
@@ -262,8 +261,8 @@ pub fn commitment_tx_by_txid<T: DbTx>(
 ///
 /// Updates the entry with the proven data size extracted from the last leaf's merkle proof.
 /// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
-pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn confirm_data_size_for_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: &H256,
     data_size: u64,
 ) -> eyre::Result<Option<CachedDataRoot>> {
@@ -282,8 +281,8 @@ pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
 
 /// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
-pub fn cache_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn cache_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     tx_header: &DataTransactionHeader,
     block_header: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
@@ -335,8 +334,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 }
 
 /// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
-pub fn cached_data_root_by_data_root<T: DbTx>(
-    tx: &T,
+pub fn cached_data_root_by_data_root(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_root)?)
@@ -347,7 +346,10 @@ type IsDuplicate = bool;
 /// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
+pub fn cache_chunk(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
+    chunk: &UnpackedChunk,
+) -> eyre::Result<IsDuplicate> {
     if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
@@ -370,14 +372,14 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 /// callers (e.g. the write-behind writer) that have already validated the data root.
 /// Returns `true` if the chunk was a duplicate and was not inserted.
 #[tracing::instrument(level = "trace", skip_all)]
-pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn cache_chunk_verified(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     chunk: &UnpackedChunk,
 ) -> eyre::Result<IsDuplicate> {
     let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
 
-    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
+    if tx.get::<CachedChunks>(chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
             &chunk_path_hash, &data_root
@@ -405,8 +407,8 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 }
 
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
-pub fn cached_chunk_meta_by_offset<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_meta_by_offset(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
@@ -418,8 +420,8 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .map(|index_entry| index_entry.meta))
 }
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
-pub fn cached_chunk_by_chunk_offset<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_by_chunk_offset(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
@@ -442,8 +444,8 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
 }
 
 /// Retrieves a [`CachedChunk`] from [`CachedChunks`] using its [`ChunkPathHash`]
-pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_by_chunk_path_hash(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     key: &ChunkPathHash,
 ) -> Result<Option<CachedChunk>, DatabaseError> {
     tx.get::<CachedChunks>(*key)
@@ -451,8 +453,8 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
 
 /// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
 /// It also removes the index values
-pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
-    tx: &T,
+pub fn delete_cached_chunks_by_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<u64> {
     let mut chunks_pruned = 0;
@@ -471,8 +473,8 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 
 /// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
 /// It also removes the index values
-pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
-    tx: &T,
+pub fn delete_cached_chunks_by_data_root_older_than(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
@@ -531,8 +533,8 @@ pub fn insert_peer_list_item<T: DbTxMut>(
 
 /// Gets all ingress proofs associated with a specific data_root
 ///
-pub fn ingress_proofs_by_data_root<TX: DbTx>(
-    read_tx: &TX,
+pub fn ingress_proofs_by_data_root(
+    read_tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<Vec<(DataRoot, CompactCachedIngressProof)>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
@@ -543,8 +545,8 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
     Ok(proofs)
 }
 
-pub fn ingress_proof_by_data_root_address<TX: DbTx>(
-    read_tx: &TX,
+pub fn ingress_proof_by_data_root_address(
+    read_tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
@@ -560,7 +562,10 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
-pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
+pub fn delete_ingress_proof(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
+    data_root: DataRoot,
+) -> eyre::Result<bool> {
     Ok(tx.delete::<IngressProofs>(data_root, None)?)
 }
 
@@ -569,11 +574,12 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    db.update_scoped(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
+    use crate::db::DatabaseProviderCacheExt as _;
+    db.update_cache_eyre(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))
 }
 
-pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn store_ingress_proof_checked(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
@@ -590,9 +596,13 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     // Delete all existing proofs for this signer before inserting, as DupSort
     // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    let mut cursor = tx.cursor_dup_read::<IngressProofs>()?;
+    let walker = cursor.walk_dup(Some(ingress_proof.data_root), None)?;
+    let existing_proofs: Vec<(DataRoot, CompactCachedIngressProof)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+    for (_, existing) in existing_proofs
         .into_iter()
-        .filter(|(_, proof)| proof.address == address)
+        .filter(|(_, p)| p.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
@@ -607,8 +617,8 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     Ok(())
 }
 
-pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn store_external_ingress_proof_checked(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     ingress_proof: &IngressProof,
     address: IrysAddress,
 ) -> eyre::Result<()> {
@@ -623,9 +633,13 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     }
 
     // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    let mut cursor = tx.cursor_dup_read::<IngressProofs>()?;
+    let walker = cursor.walk_dup(Some(ingress_proof.data_root), None)?;
+    let existing_proofs: Vec<(DataRoot, CompactCachedIngressProof)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+    for (_, existing) in existing_proofs
         .into_iter()
-        .filter(|(_, proof)| proof.address == address)
+        .filter(|(_, p)| p.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
