@@ -427,6 +427,11 @@ pub trait DatabaseProviderCacheExt {
     where
         F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>;
 
+    /// Runs a cache write while attributing its writer-gate wait to `call_site`.
+    fn update_cache_eyre_at<T, F>(&self, call_site: &'static str, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>;
+
     fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
         F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> eyre::Result<T>;
@@ -445,6 +450,14 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>,
     {
+        self.update_cache_eyre_at("update_cache_eyre", f)
+    }
+
+    fn update_cache_eyre_at<T, F>(&self, call_site: &'static str, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>,
+    {
+        let _gate = lock_writer_gate(self.cache(), call_site);
         let inner = self.cache().tx_mut()?;
         let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
         let res = f(&tx)?;
@@ -467,6 +480,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T,
     {
+        let _gate = lock_writer_gate(self.cache(), "update_cache");
         let inner = self.cache().tx_mut()?;
         let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
         let res = f(&tx);
@@ -550,6 +564,51 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
+
+    #[derive(Clone, Copy)]
+    enum CacheWriteMethod {
+        Plain,
+        Eyre,
+        EyreAt,
+    }
+
+    #[rstest::rstest]
+    #[case::plain(CacheWriteMethod::Plain)]
+    #[case::eyre(CacheWriteMethod::Eyre)]
+    #[case::eyre_at(CacheWriteMethod::EyreAt)]
+    fn cache_writers_wait_for_the_cache_gate(#[case] method: CacheWriteMethod) -> eyre::Result<()> {
+        let tmp = irys_testing_utils::TempDirBuilder::new().build();
+        let db = irys_types::DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        let writer_spawned = Barrier::new(2);
+        let entered_closure = AtomicBool::new(false);
+
+        thread::scope(|scope| -> eyre::Result<()> {
+            let gate = lock_writer_gate(db.cache(), "test.hold_cache_gate");
+            let writer = scope.spawn(|| -> eyre::Result<()> {
+                writer_spawned.wait();
+                let write = || {
+                    entered_closure.store(true, Ordering::SeqCst);
+                    Ok(())
+                };
+                match method {
+                    CacheWriteMethod::Plain => db.update_cache(|_| write())?,
+                    CacheWriteMethod::Eyre => db.update_cache_eyre(|_| write()),
+                    CacheWriteMethod::EyreAt => {
+                        db.update_cache_eyre_at("test.gated_cache_writer", |_| write())
+                    }
+                }
+            });
+
+            writer_spawned.wait();
+            thread::sleep(Duration::from_millis(50));
+            let entered_while_locked = entered_closure.load(Ordering::SeqCst);
+            drop(gate);
+            writer.join().expect("cache writer thread panicked")?;
+            assert!(!entered_while_locked, "cache writer bypassed its gate");
+            assert!(entered_closure.load(Ordering::SeqCst));
+            Ok(())
+        })
+    }
 
     /// Two overlapping `update_eyre` writers must be mutually exclusive.
     ///
