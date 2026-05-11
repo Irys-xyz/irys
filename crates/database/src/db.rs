@@ -374,6 +374,41 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     }
 }
 
+pub trait DatabaseProviderTestExt {
+    fn for_testing(
+        consensus_path: &std::path::Path,
+        cache_path: &std::path::Path,
+    ) -> eyre::Result<Self>
+    where
+        Self: Sized;
+}
+
+impl DatabaseProviderTestExt for irys_types::DatabaseProvider {
+    fn for_testing(
+        consensus_path: &std::path::Path,
+        cache_path: &std::path::Path,
+    ) -> eyre::Result<Self> {
+        use crate::IrysDatabaseArgs as _;
+        use crate::tables::{CacheTables, ConsensusTables};
+        use reth_db::mdbx::DatabaseArguments;
+        let consensus = crate::open_or_create_db(
+            consensus_path,
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let cache = crate::open_or_create_db(
+            cache_path,
+            CacheTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        crate::migration::ensure_db_version_compatible(&consensus, &cache)?;
+        Ok(Self::new(
+            std::sync::Arc::new(consensus),
+            std::sync::Arc::new(cache),
+        ))
+    }
+}
+
 use reth_db::cursor::DbCursorRO as _;
 
 impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
