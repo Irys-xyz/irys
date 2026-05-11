@@ -102,16 +102,19 @@ fn main() -> eyre::Result<()> {
                     hex::encode(hash.as_bytes())
                 );
                 // Also fetch the block header to confirm it's there
-                if let Ok(Some(_)) = tx.get::<IrysBlockHeaders>(hash) {
-                    println!(
+                match tx.get::<IrysBlockHeaders>(hash) {
+                    Ok(Some(_)) => println!(
                         "  ↳ IrysBlockHeaders[{}] EXISTS",
                         bs58::encode(hash.as_bytes()).into_string()
-                    );
-                } else {
-                    println!(
+                    ),
+                    Ok(None) => println!(
                         "  ↳ IrysBlockHeaders[{}] MISSING (orphaned?)",
                         bs58::encode(hash.as_bytes()).into_string()
-                    );
+                    ),
+                    Err(e) => println!(
+                        "  ↳ IrysBlockHeaders[{}] READ ERROR: {e}",
+                        bs58::encode(hash.as_bytes()).into_string()
+                    ),
                 }
             }
             None => println!(

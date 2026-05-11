@@ -66,6 +66,24 @@ fn pull_kind_label(req: &GossipDataRequestV2) -> &'static str {
     }
 }
 
+/// Map a [`RejectionReason`] to a stable `reason` label for the pull-failure metric.
+/// Used at the rejection arms in `pull_data_from_network` where every variant is
+/// otherwise wrapped in `PeerNetworkError::FailedToRequestData(...)` and would
+/// collapse to a single label under [`pull_failure_reason`].
+fn pull_rejection_reason(reason: &RejectionReason) -> &'static str {
+    match reason {
+        RejectionReason::HandshakeRequired(_) => "handshake_required",
+        RejectionReason::GossipDisabled => "gossip_disabled",
+        RejectionReason::InvalidData => "invalid_data",
+        RejectionReason::RateLimited => "rate_limited",
+        RejectionReason::UnableToVerifyOrigin => "unable_to_verify_origin",
+        RejectionReason::InvalidCredentials => "invalid_credentials",
+        RejectionReason::ProtocolMismatch => "protocol_mismatch",
+        RejectionReason::UnsupportedProtocolVersion(_) => "unsupported_protocol_version",
+        RejectionReason::UnsupportedFeature => "unsupported_feature",
+    }
+}
+
 /// Map a [`GossipError`] to a stable `reason` label for the pull-failure metric.
 /// Gives finer resolution than [`gossip_error_type`] by unpacking the wrapped
 /// [`PeerNetworkError`] variants we care about for pull diagnostics.
@@ -1832,8 +1850,11 @@ impl GossipClient {
     /// circuit-breaker is open), plus the count of peers excluded by the filter
     /// (pre-truncate). Filter runs after shuffle so selection stays unbiased,
     /// and before truncate so the surviving CB-closed set fills the 5 slots.
-    /// Trusted-only callers get the trusted set; general callers get the top 10
-    /// most active peers. Caller must handle the empty-result case (no peers known).
+    /// Trusted-only callers get the full trusted set; general callers get every
+    /// active+online peer sorted by reputation — capping the pool *before* the
+    /// CB filter would let a cluster of high-score CB-open peers starve the
+    /// pull even when healthy peers are available further down the list.
+    /// Caller must handle the empty-result case (no peers known).
     pub(crate) fn select_candidates_for_pull(
         &self,
         peer_list: &PeerList,
@@ -1842,7 +1863,7 @@ impl GossipClient {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()
         } else {
-            peer_list.top_active_peers(Some(10), None)
+            peer_list.top_active_peers(None, None)
         };
         peers.shuffle(&mut rand::thread_rng());
         let before = peers.len();
@@ -1878,8 +1899,10 @@ impl GossipClient {
         // Track peers eligible for retry across rounds (transient failures only)
         let mut retryable_peers = peers.clone();
 
-        // Track if all failures were due to handshake requirements
-        let mut all_failures_were_handshake = true;
+        // Peers that responded HandshakeRequired in any round. After the inner loop
+        // we wait for handshakes to complete and retry these specifically, even
+        // when other peers in the round failed for non-handshake reasons.
+        let mut handshake_retry_candidates: Vec<(IrysPeerId, PeerListItem)> = Vec::new();
         let mut had_any_attempts = false;
 
         for attempt in 1..=DATA_REQUEST_RETRIES {
@@ -1934,7 +1957,6 @@ impl GossipClient {
                                     );
                                     errors_by_peer.insert(peer_id, synth);
                                     // Not retriable: don't include this peer for future rounds
-                                    all_failures_were_handshake = false;
                                 }
                             },
                             None => {
@@ -1950,7 +1972,6 @@ impl GossipClient {
                                 );
                                 errors_by_peer.insert(peer_id, synth);
                                 next_retryable.push(peer);
-                                all_failures_were_handshake = false;
                             }
                         }
                     }
@@ -1959,11 +1980,16 @@ impl GossipClient {
                             "Peer {} rejected the request: {:?}: {:?}",
                             peer_id, data_request, reason
                         );
+                        // Capture rejection-specific label before the move into `match reason`.
+                        // Each inner arm wraps its synth error in
+                        // PeerNetworkError::FailedToRequestData, which would otherwise collapse
+                        // every variant to "failed_to_request_data" via pull_failure_reason.
+                        let reason_label = pull_rejection_reason(&reason);
                         match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
+                            RejectionReason::HandshakeRequired(handshake_reason) => {
                                 warn!(
                                     "Data request {:?} requires handshake: {:?}",
-                                    data_request, reason
+                                    data_request, handshake_reason
                                 );
                                 peer_list.initiate_handshake(
                                     peer.1.address.api,
@@ -1976,11 +2002,11 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
+                                // Retry this peer after HANDSHAKE_WAIT_TIMEOUT, regardless of
+                                // other peers' outcomes — its handshake may complete by then.
+                                handshake_retry_candidates.push(peer);
                             }
                             RejectionReason::GossipDisabled => {
                                 peer_list.set_is_online_by_peer_id(&peer.0, false);
@@ -1990,12 +2016,8 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidData => {
                                 let synth = GossipError::from(
@@ -2004,12 +2026,8 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::RateLimited => {
                                 let synth = GossipError::from(
@@ -2018,12 +2036,8 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::UnableToVerifyOrigin => {
                                 let synth = GossipError::from(
@@ -2032,12 +2046,8 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidCredentials
                             | RejectionReason::ProtocolMismatch => {
@@ -2047,12 +2057,8 @@ impl GossipClient {
                                         data_request, peer_id, reason
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
                                 let synth = GossipError::from(
@@ -2061,12 +2067,8 @@ impl GossipClient {
                                         data_request, peer_id, unsupported_version
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                             RejectionReason::UnsupportedFeature => {
                                 let synth = GossipError::from(
@@ -2075,12 +2077,8 @@ impl GossipClient {
                                         data_request, peer_id
                                     )),
                                 );
-                                crate::metrics::record_gossip_pull_failure(
-                                    kind,
-                                    pull_failure_reason(&synth),
-                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
                                 errors_by_peer.insert(peer_id, synth);
-                                all_failures_were_handshake = false;
                             }
                         }
                         // Do not retry the same peer on rejection
@@ -2096,7 +2094,6 @@ impl GossipClient {
                         if requeue {
                             next_retryable.push(peer);
                         }
-                        all_failures_were_handshake = false;
                     }
                 }
             }
@@ -2109,19 +2106,22 @@ impl GossipClient {
             }
         }
 
-        // If all failures were due to handshake requirements, wait for handshake and retry once
-        if had_any_attempts && all_failures_were_handshake && !peers.is_empty() {
+        // If any peer responded HandshakeRequired, wait for handshakes and retry just those.
+        // Runs even when other peers failed for non-handshake reasons — the targeted
+        // retry is cheap (only the handshake-required subset) and catches a peer whose
+        // handshake completes while the rest of the round is busy with unrelated failures.
+        if had_any_attempts && !handshake_retry_candidates.is_empty() {
             debug!(
-                "All attempts failed with HandshakeRequired for {:?}. Waiting {}s for handshake completion...",
+                "{} peer(s) requested handshake for {:?}. Waiting {}s for handshake completion...",
+                handshake_retry_candidates.len(),
                 data_request,
                 HANDSHAKE_WAIT_TIMEOUT.as_secs()
             );
 
             tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
 
-            // Retry with original peer set one more time
             let mut retry_futs = futures::stream::FuturesUnordered::new();
-            for peer in &peers {
+            for peer in &handshake_retry_candidates {
                 let gc = self.clone();
                 let dr = data_request.clone();
                 let pl = peer_list;
