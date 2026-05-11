@@ -41,8 +41,8 @@
 //!    signed block with malicious `vdf_info`.
 //!
 //! Both prerequisites are out of scope for this branch (see
-//! `docs/superpowers/plans/2026-05-08-vdf-validation-progress-check.md`,
-//! "Deferred / out of scope"). The unit tests in `crates/vdf/src/state.rs`
+//! `design/docs/vdf-validation-stall-detection.md`). The unit tests in
+//! `crates/vdf/src/state.rs`
 //! (`wait_for_step_bails_when_no_progress`,
 //! `wait_for_step_bails_on_cancel`,
 //! `wait_for_step_completes_when_state_advances`) are the canonical
