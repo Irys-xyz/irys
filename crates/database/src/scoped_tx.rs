@@ -19,6 +19,8 @@ use reth_db::{
     transaction::{DbTx as _, DbTxMut as _},
 };
 
+use crate::db::IrysDupCursorExt as _;
+
 /// Marker trait: this table lives in the consensus MDBX env.
 pub trait ConsensusTable: Table {}
 
@@ -194,6 +196,15 @@ impl ScopedTx<Cache> {
         &self,
     ) -> Result<impl DbDupCursorRO<T> + DbCursorRO<T>, DatabaseError> {
         self.inner.cursor_dup_read::<T>()
+    }
+
+    /// Count the number of duplicate entries for the given key in a DupSort table.
+    pub fn dup_count<T: DupSort + CacheTable>(
+        &self,
+        key: T::Key,
+    ) -> Result<Option<u32>, DatabaseError> {
+        let mut cursor = self.inner.cursor_dup_read::<T>()?;
+        cursor.dup_count(key)
     }
 }
 

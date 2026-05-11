@@ -1,7 +1,6 @@
 use super::ChunkIngressServiceInner;
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
-use irys_database::reth_db::transaction::DbTx as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
@@ -12,7 +11,6 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
 };
-use reth_db::DatabaseError;
 use tracing::{debug, error, warn};
 
 /// Errors that can occur when ingesting an external ingress proof.
@@ -92,23 +90,18 @@ impl ChunkIngressServiceInner {
         self.validate_ingress_proof_anchor(&ingress_proof)?;
 
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
-        let res = self
-            .irys_db
-            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
+        self.irys_db
+            .update_cache_eyre(|rw_tx| {
                 irys_database::store_external_ingress_proof_checked(rw_tx, &ingress_proof, address)
-                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                Ok(())
             })
-            .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?;
-
-        if let Err(e) = res {
-            tracing::error!(
-                ingress_proof.data_root = ?ingress_proof.data_root,
-                "Failed to store ingress proof data root: {:?}",
-                e
-            );
-            return Err(IngressProofError::DatabaseError(e.to_string()));
-        }
+            .map_err(|e| {
+                tracing::error!(
+                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    "Failed to store ingress proof data root: {:?}",
+                    e
+                );
+                IngressProofError::DatabaseError(e.to_string())
+            })?;
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let data_root = ingress_proof.data_root;
@@ -188,12 +181,7 @@ impl ChunkIngressServiceInner {
         data_root: DataRoot,
     ) -> Result<(), IngressProofError> {
         irys_db
-            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
-                delete_ingress_proof(rw_tx, data_root)
-                    .map_err(|report| DatabaseError::Other(report.to_string()))?;
-                Ok(())
-            })
-            .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
+            .update_cache_eyre(|rw_tx| delete_ingress_proof(rw_tx, data_root))
             .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?;
 
         Ok(())
@@ -554,14 +542,13 @@ pub fn calculate_and_validate_data_size(
 
     // Load data_size & confirm we have metadata for this root
     let (data_size, chunk_count) = db
-        .view_eyre(|tx| {
+        .view_cache_eyre(|tx| {
             let data_size = cached_data_root_by_data_root(tx, data_root)
                 .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
                 .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
                 .data_size;
-            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-            let count = cursor
-                .dup_count(data_root)?
+            let count = tx
+                .dup_count::<CachedChunksIndex>(data_root)?
                 .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
             Ok((data_size, count))
         })
