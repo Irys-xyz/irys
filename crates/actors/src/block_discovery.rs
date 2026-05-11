@@ -25,7 +25,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::{
     mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
@@ -263,11 +263,21 @@ impl BlockDiscoveryService {
             } => {
                 let block_hash = block.header().block_hash;
                 let block_height = block.header().height;
+                let started = Instant::now();
                 let result = self.inner.clone().block_discovered(block, skip_vdf)
                     .instrument(tracing::info_span!(parent: &parent_span, "block_discovery.process", block.hash = %block_hash, block.height = block_height))
                     .await;
-                if let Err(ref e) = result {
-                    metrics::record_block_discovery_error(e.metric_label());
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                metrics::record_prevalidation_duration_ms(elapsed_ms);
+                match result.as_ref() {
+                    Ok(()) => {
+                        metrics::record_block_discovery_success();
+                        metrics::record_validation_result("prevalidation", "valid");
+                    }
+                    Err(e) => {
+                        metrics::record_block_discovery_error(e.metric_label());
+                        metrics::record_validation_result("prevalidation", "invalid");
+                    }
                 }
                 if let Some(sender) = response
                     && let Err(e) = sender.send(result)

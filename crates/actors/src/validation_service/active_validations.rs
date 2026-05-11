@@ -19,10 +19,12 @@ use priority_queue::PriorityQueue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument as _, debug, info, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
+use crate::metrics;
 use crate::validation_service::VdfValidationResult;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 
@@ -80,6 +82,7 @@ impl PartialOrd for BlockPriorityMeta {
 pub(super) struct ConcurrentValidationResult {
     pub block_hash: BlockHash,
     pub validation_result: ValidationResult,
+    pub enqueued_at: Instant,
 }
 
 /// VDF task with preemption support
@@ -95,6 +98,7 @@ impl PreemptibleVdfTask {
         let header = self.task.sealed_block.header();
         let skip_vdf = self.task.skip_vdf_validation;
 
+        let started = Instant::now();
         // No bridge task needed - just use the AtomicU8 directly!
         let result = match inner
             .ensure_vdf_is_valid(header, self.cancel_u8.clone(), skip_vdf)
@@ -110,6 +114,7 @@ impl PreemptibleVdfTask {
                 }
             }
         };
+        metrics::record_vdf_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
 
         (result, self.task)
     }
@@ -313,6 +318,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             current
                 .cancel_signal
                 .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+            metrics::record_vdf_preemption();
         }
     }
 
@@ -363,8 +369,9 @@ pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
-    /// Maps task IDs to block hashes for panic diagnostics
-    pub concurrent_task_blocks: HashMap<tokio::task::Id, BlockHash>,
+    /// Maps task IDs to (block hash, enqueue time) for panic diagnostics and
+    /// E2E duration accounting when a concurrent task fails to return a result.
+    pub concurrent_task_blocks: HashMap<tokio::task::Id, (BlockHash, Instant)>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -449,6 +456,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     /// Spawn a VDF-validated block into the concurrent validation JoinSet.
     pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
         let block_hash = task.sealed_block.header().block_hash;
+        let enqueued_at = task.enqueued_at;
 
         let abort_handle = self.concurrent_tasks.spawn(
             async move {
@@ -457,6 +465,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
                 ConcurrentValidationResult {
                     block_hash,
                     validation_result,
+                    enqueued_at,
                 }
             }
             .instrument(tracing::error_span!(
@@ -466,7 +475,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             .in_current_span(),
         );
         self.concurrent_task_blocks
-            .insert(abort_handle.id(), block_hash);
+            .insert(abort_handle.id(), (block_hash, enqueued_at));
     }
 
     /// Abort all running validation tasks for clean shutdown.
@@ -495,6 +504,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     #[instrument(level = "trace", skip_all)]
     pub(super) fn reevaluate_priorities(&mut self) {
         info!("Reevaluating priorities after reorg");
+        let started = Instant::now();
 
         // Reevaluate current VDF task
         self.reevaluate_current_vdf();
@@ -512,6 +522,45 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
         // Maintains the invariant even if future code paths add to pending
         // without calling start_next().
         self.vdf_scheduler.start_next();
+
+        metrics::record_reorg_priority_reevaluation(started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// Snapshot of pending VDF tasks bucketed by priority class, plus the age
+    /// of the oldest pending or running task in milliseconds.
+    pub(super) fn pipeline_snapshot(&self) -> (Vec<(&'static str, u64)>, u64) {
+        let mut canonical_extension = 0_u64;
+        let mut canonical = 0_u64;
+        let mut fork = 0_u64;
+        let mut unknown = 0_u64;
+        let mut oldest = std::time::Duration::ZERO;
+        for (task, meta) in self.vdf_scheduler.pending.iter() {
+            match meta.state {
+                BlockPriority::CanonicalExtension => canonical_extension += 1,
+                BlockPriority::Canonical => canonical += 1,
+                BlockPriority::Fork => fork += 1,
+                BlockPriority::Unknown => unknown += 1,
+            }
+            let age = task.enqueued_at.elapsed();
+            if age > oldest {
+                oldest = age;
+            }
+        }
+        if let Some(current) = &self.vdf_scheduler.current
+            && let Some(task) = &current.requeue_task
+        {
+            let age = task.enqueued_at.elapsed();
+            if age > oldest {
+                oldest = age;
+            }
+        }
+        let by_priority = vec![
+            ("canonical_extension", canonical_extension),
+            ("canonical", canonical),
+            ("fork", fork),
+            ("unknown", unknown),
+        ];
+        (by_priority, oldest.as_millis() as u64)
     }
 
     /// Reevaluate and potentially preempt current VDF task

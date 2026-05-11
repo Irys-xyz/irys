@@ -242,9 +242,14 @@ impl ValidationService {
                     match result {
                         Ok((hash, vdf_result, task)) => match vdf_result {
                             VdfValidationResult::Valid => {
+                                metrics::record_validation_result("vdf", "valid");
                                 coordinator.spawn_concurrent(task);
                             }
                             VdfValidationResult::Invalid(vdf_error) => {
+                                metrics::record_validation_result("vdf", "invalid");
+                                metrics::record_validation_full_duration_ms(
+                                    task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
                                 error!(
                                     block.hash = %hash,
                                     custom.error = %vdf_error,
@@ -255,6 +260,7 @@ impl ValidationService {
                                 ));
                             }
                             VdfValidationResult::Cancelled => {
+                                metrics::record_validation_result("vdf", "cancelled");
                                 // Preemption set the cancel signal, so the task
                                 // exited cooperatively. Resubmit — submit_task
                                 // recalculates priority (which may have changed
@@ -263,6 +269,12 @@ impl ValidationService {
                             }
                         }
                         Err(join_error) => if join_error.is_panic() {
+                            metrics::record_validation_result("vdf", "panicked");
+                            if let Some(task) = &current.requeue_task {
+                                metrics::record_validation_full_duration_ms(
+                                    task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                            }
                             error!(
                                 block.hash = %current.hash,
                                 custom.error = %join_error,
@@ -300,6 +312,9 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
+                            metrics::record_validation_full_duration_ms(
+                                validation.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                            );
                             self.send_validation_result(
                                 validation.block_hash,
                                 validation.validation_result,
@@ -313,12 +328,15 @@ impl ValidationService {
                                 "Concurrent validation task panicked"
                             };
                             error!(
-                                block.hash = ?removed.as_ref(),
+                                block.hash = ?removed.as_ref().map(|(h, _)| h),
                                 custom.error = %e,
                                 message
                             );
-                            if let Some(hash) = removed
-                                && !self.send_validation_result(hash, ValidationResult::Invalid(
+                            if let Some((hash, enqueued_at)) = removed {
+                                metrics::record_validation_full_duration_ms(
+                                    enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                                if !self.send_validation_result(hash, ValidationResult::Invalid(
                                     ValidationError::TaskPanicked {
                                         task: "concurrent_validation".to_string(),
                                         details: e.to_string(),
@@ -331,6 +349,7 @@ impl ValidationService {
                                         format!("block={} error=concurrent task panicked: {}", hash, e),
                                     );
                                 }
+                            }
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()
@@ -343,6 +362,7 @@ impl ValidationService {
                 _ = pipeline_log_interval.tick() => {
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
+                    let (by_priority, oldest_age_ms) = coordinator.pipeline_snapshot();
 
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
@@ -358,11 +378,13 @@ impl ValidationService {
                         vdf.vdf_block_height = ?vdf_block_height,
                         vdf.pending = vdf_pending,
                         vdf.concurrent_active = concurrent_active,
+                        vdf.queue_oldest_age_ms = oldest_age_ms,
                         "Validation pipeline status"
                     );
-                    metrics::record_validation_pipeline(
-                        vdf_pending as u64,
+                    metrics::record_validation_queue_snapshot(
+                        &by_priority,
                         concurrent_active as u64,
+                        oldest_age_ms,
                     );
                 }
             }
@@ -405,6 +427,7 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
     ) -> eyre::Result<()> {
         let retries_per_second = 20;
+        let started = std::time::Instant::now();
         loop {
             if cancel.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
                 warn!(
@@ -412,12 +435,14 @@ impl ValidationServiceInner {
                     vdf.current_step = self.vdf_state.read().global_step,
                     "VDF validation cancelled while waiting for step"
                 );
+                metrics::record_vdf_step_wait_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
                 bail!("Cancelled");
             }
             let read = self.vdf_state.read().global_step;
 
             if read >= desired_step_number {
                 debug!("VDF Step is available");
+                metrics::record_vdf_step_wait_duration_ms(started.elapsed().as_secs_f64() * 1000.0);
                 return Ok(());
             }
             debug!("Waiting for step");
