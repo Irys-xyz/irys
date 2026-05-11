@@ -16,7 +16,7 @@ use reth_db::table::{DupSort, Table};
 use reth_db::{
     Database, DatabaseEnv, DatabaseError,
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
-    transaction::{DbTx, DbTxMut},
+    transaction::{DbTx as _, DbTxMut as _},
 };
 
 /// Marker trait: this table lives in the consensus MDBX env.
