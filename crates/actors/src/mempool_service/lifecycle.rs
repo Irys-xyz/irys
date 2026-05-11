@@ -2,7 +2,7 @@ use crate::block_tree_service::ReorgEvent;
 use crate::chunk_ingress_service::ChunkIngressMessage;
 use crate::mempool_service::{Inner, MempoolError, TxIngressError};
 use eyre::OptionExt as _;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_types::{
     CommitmentTransaction, DataLedger, H256, IrysTransactionCommon, IrysTransactionId, SealedBlock,
     SendTraced as _, SystemLedger, get_ingress_proofs,
@@ -85,7 +85,7 @@ impl Inner {
             .get_ledger_txs(DataLedger::Submit)
         {
             let data_root = submit_tx.data_root;
-            match self.irys_db.update_eyre(|db_tx| {
+            match self.irys_db.update_cache_eyre(|db_tx| {
                 irys_database::cache_data_root(db_tx, submit_tx, Some(block.as_ref()))?;
                 Ok(())
             }) {
