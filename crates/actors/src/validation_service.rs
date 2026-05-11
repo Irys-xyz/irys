@@ -66,18 +66,6 @@ pub(crate) enum VdfTaskStage {
 }
 
 impl VdfTaskStage {
-    pub(crate) fn from_raw(raw: u8) -> Self {
-        match raw {
-            x if x == Self::WaitPrevStep as u8 => Self::WaitPrevStep,
-            x if x == Self::ValidateSeeds as u8 => Self::ValidateSeeds,
-            x if x == Self::ValidateBatch as u8 => Self::ValidateBatch,
-            x if x == Self::FastForwardBatch as u8 => Self::FastForwardBatch,
-            x if x == Self::WaitFinalCatchUp as u8 => Self::WaitFinalCatchUp,
-            x if x == Self::Completed as u8 => Self::Completed,
-            _ => Self::Starting,
-        }
-    }
-
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -88,6 +76,27 @@ impl VdfTaskStage {
             Self::WaitFinalCatchUp => "wait_final_catch_up",
             Self::Completed => "completed",
         }
+    }
+}
+
+impl From<u8> for VdfTaskStage {
+    fn from(raw: u8) -> Self {
+        match raw {
+            // weird pattern for single source of discriminant truth
+            x if x == Self::WaitPrevStep as u8 => Self::WaitPrevStep,
+            x if x == Self::ValidateSeeds as u8 => Self::ValidateSeeds,
+            x if x == Self::ValidateBatch as u8 => Self::ValidateBatch,
+            x if x == Self::FastForwardBatch as u8 => Self::FastForwardBatch,
+            x if x == Self::WaitFinalCatchUp as u8 => Self::WaitFinalCatchUp,
+            x if x == Self::Completed as u8 => Self::Completed,
+            _ => Self::Starting,
+        }
+    }
+}
+
+impl From<VdfTaskStage> for u8 {
+    fn from(stage: VdfTaskStage) -> Self {
+        stage as Self
     }
 }
 
@@ -103,7 +112,7 @@ fn record_vdf_task_progress(
     stage_signal.store(stage as u8, Ordering::Relaxed);
     *progress_signal
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
 }
 
 fn validate_vdf_batch(
@@ -363,24 +372,16 @@ impl ValidationService {
                                 block.hash = %current.hash,
                                 "VDF validation task panicked; aborting"
                             );
+                            // we _used_ to return this as an invalid validation result... but this should NEVER panic
                             std::panic::resume_unwind(panic);
-                        } else if let Some(watchdog_abort) = current.watchdog_abort.as_ref() {
-                            warn!(
-                                block.hash = %current.hash,
-                                vdf.stage = watchdog_abort.stage.as_str(),
-                                vdf.stalled_for = ?watchdog_abort.stalled_for,
-                                "VDF task was force-aborted by watchdog; requeuing"
-                            );
-                            if let Some(task) = current.requeue_task {
-                                coordinator.submit_task(task);
-                            }
                         } else {
                             // JoinError::Cancelled — the spawned future was aborted
                             // without going through the cooperative cancel signal.
                             // This shouldn't happen during normal operation: shutdown
                             // runs after the loop exits, and preemption uses the
-                            // AtomicU8 signal. Requeue defensively to avoid silently
-                            // dropping a block.
+                            // AtomicU8 signal, and watchdog-triggered aborts panic
+                            // the service before reaching this handler. Requeue
+                            // defensively to avoid silently dropping a block.
                             warn!(
                                 block.hash = %current.hash,
                                 custom.error = %join_error,
@@ -448,20 +449,27 @@ impl ValidationService {
 
                 // Periodic pipeline state logging
                 _ = pipeline_log_interval.tick() => {
-                    if let Some(watchdog_abort) = coordinator
+                    if let Some((stalled_for, stage)) = coordinator
                         .vdf_scheduler
                         .abort_stalled_current(vdf_task_progress_timeout(&self.inner.config))
                     {
-                        if let Some(current_vdf) = coordinator.vdf_scheduler.current.as_ref() {
-                            error!(
-                                block.hash = %current_vdf.hash,
-                                block.height = current_vdf.sealed_block.header().height,
-                                vdf.stage = watchdog_abort.stage.as_str(),
-                                vdf.stalled_for = ?watchdog_abort.stalled_for,
-                                "Validation watchdog force-aborted stalled VDF task"
-                            );
-                            metrics::record_validation_task_force_aborted();
-                        }
+                        // Watchdog firing means a VDF validation task made no progress for
+                        // longer than the configured timeout. With the batch-size clamp this
+                        // should be unreachable in healthy operation; treat it as a fatal
+                        // protocol-level bug rather than silently requeuing.
+                        let current_vdf = coordinator
+                            .vdf_scheduler
+                            .current
+                            .as_ref()
+                            .expect("watchdog aborted a task; current must be Some");
+                        metrics::record_validation_task_force_aborted();
+                        panic!(
+                            "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?})",
+                            current_vdf.hash,
+                            current_vdf.sealed_block.header().height,
+                            stage.as_str(),
+                            stalled_for,
+                        );
                     }
 
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
@@ -476,7 +484,7 @@ impl ValidationService {
                                 Some(current_vdf.hash),
                                 Some(current_vdf.sealed_block.header().height),
                                 Some(
-                                    VdfTaskStage::from_raw(
+                                    VdfTaskStage::from(
                                         current_vdf.stage_signal.load(Ordering::Relaxed),
                                     )
                                     .as_str(),
@@ -486,7 +494,7 @@ impl ValidationService {
                                     current_vdf
                                         .last_progress_at
                                         .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                                         .elapsed()
                                         .as_millis() as u64,
                                 ),
@@ -561,7 +569,30 @@ impl ValidationServiceInner {
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
         let progress_timeout = Duration::from_secs(self.config.vdf.progress_timeout_secs);
-        let validation_batch_size = self.config.vdf.validation_batch_size.max(1);
+        let thread_count = self.config.vdf.parallel_verification_thread_limit;
+        let configured_batch_size = self.config.vdf.validation_batch_size;
+        let min_batch_size = thread_count;
+        let max_batch_size = thread_count.saturating_mul(2);
+        let validation_batch_size = if configured_batch_size < min_batch_size {
+            warn!(
+                configured_batch_size,
+                thread_count,
+                clamped_to = min_batch_size,
+                "vdf.validation_batch_size is lower than vdf.parallel_verification_thread_limit; clamping batch size up to thread count to avoid idle worker threads",
+            );
+            min_batch_size
+        } else if configured_batch_size > max_batch_size {
+            warn!(
+                configured_batch_size,
+                thread_count,
+                clamped_to = max_batch_size,
+                "vdf.validation_batch_size exceeds 2x vdf.parallel_verification_thread_limit; clamping batch size down to 2x thread count to keep watchdog progress checks tight",
+            );
+            max_batch_size
+        } else {
+            configured_batch_size
+        }
+        .max(1);
 
         info!(
             vdf.first_step_number = first_step_number,

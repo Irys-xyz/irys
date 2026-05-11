@@ -130,12 +130,6 @@ impl PreemptibleVdfTask {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct WatchdogAbortMetadata {
-    pub stalled_for: Duration,
-    pub stage: VdfTaskStage,
-}
-
 /// Currently running VDF task with its JoinHandle.
 pub(super) struct RunningVdfTask {
     pub hash: BlockHash,
@@ -146,7 +140,6 @@ pub(super) struct RunningVdfTask {
     pub started_at: Instant,
     pub sealed_block: Arc<SealedBlock>,
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
-    pub watchdog_abort: Option<WatchdogAbortMetadata>,
     /// Clone of the task retained so the select handler can requeue if the
     /// handle is unexpectedly cancelled (e.g. runtime teardown). `None` only
     /// in unit tests that construct `RunningVdfTask` directly.
@@ -399,7 +392,6 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             started_at: Instant::now(),
             sealed_block,
             handle,
-            watchdog_abort: None,
             requeue_task: Some(requeue_task),
         });
         true
@@ -408,13 +400,10 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
     pub(super) fn abort_stalled_current(
         &mut self,
         hard_timeout: Duration,
-    ) -> Option<WatchdogAbortMetadata> {
+    ) -> Option<(Duration, VdfTaskStage)> {
         let current = self.current.as_mut()?;
-        if current.watchdog_abort.is_some() {
-            return None;
-        }
 
-        let stage = VdfTaskStage::from_raw(current.stage_signal.load(Ordering::Relaxed));
+        let stage = VdfTaskStage::from(current.stage_signal.load(Ordering::Relaxed));
         if matches!(
             stage,
             VdfTaskStage::WaitPrevStep | VdfTaskStage::WaitFinalCatchUp | VdfTaskStage::Completed
@@ -425,7 +414,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         let stalled_for = current
             .last_progress_at
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
         if stalled_for < hard_timeout {
             return None;
@@ -436,9 +425,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
         current.handle.abort();
 
-        let metadata = WatchdogAbortMetadata { stalled_for, stage };
-        current.watchdog_abort = Some(metadata.clone());
-        Some(metadata)
+        Some((stalled_for, stage))
     }
 }
 
@@ -1124,7 +1111,6 @@ mod tests {
             started_at: Instant::now(),
             sealed_block: sealed,
             handle: tokio::spawn(std::future::pending()),
-            watchdog_abort: None,
             requeue_task: None,
         };
         (task, cancel)
@@ -1286,19 +1272,19 @@ mod tests {
         *running_task
             .last_progress_at
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Instant::now() - Duration::from_secs(10);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         running_task
             .stage_signal
             .store(VdfTaskStage::ValidateBatch as u8, Ordering::Relaxed);
         scheduler.current = Some(running_task);
 
-        let watchdog_abort = scheduler
+        let (stalled_for, stage) = scheduler
             .abort_stalled_current(Duration::from_secs(5))
             .expect("watchdog should abort a stale task");
-        assert_eq!(watchdog_abort.stage, VdfTaskStage::ValidateBatch);
+        assert_eq!(stage, VdfTaskStage::ValidateBatch);
         assert!(
-            watchdog_abort.stalled_for >= Duration::from_secs(10),
+            stalled_for >= Duration::from_secs(10),
             "stalled metadata should reflect the stale runtime"
         );
         assert_eq!(
@@ -1311,10 +1297,6 @@ mod tests {
             .current
             .as_mut()
             .expect("current task should remain tracked until the aborted handle resolves");
-        assert!(
-            current.watchdog_abort.is_some(),
-            "watchdog metadata should be stored on the running task"
-        );
         let join_error = match (&mut current.handle).await {
             Ok(_) => panic!("aborted task should resolve as JoinError"),
             Err(join_error) => join_error,
@@ -1654,7 +1636,6 @@ mod tests {
             started_at: Instant::now(),
             sealed_block: ext_sealed,
             handle: tokio::spawn(std::future::pending()),
-            watchdog_abort: None,
             requeue_task: None,
         });
 
@@ -1862,7 +1843,6 @@ mod tests {
                 .expect("sealing block"),
             ),
             handle: tokio::spawn(std::future::pending()),
-            watchdog_abort: None,
             requeue_task: None,
         });
 
