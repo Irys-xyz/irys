@@ -25,13 +25,15 @@ use crate::block_validation::{
     poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
     submit_payload_to_reth,
 };
+use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState, HardforkConfigExt as _};
-use irys_types::{BlockHash, SealedBlock, SystemLedger};
+use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{Instrument as _, debug, error, warn};
 
 /// Result of waiting for parent validation to complete
@@ -51,6 +53,9 @@ pub(super) struct BlockValidationTask {
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
     pub parent_span: tracing::Span,
+    /// When the task first entered the validation queue. Preserved across
+    /// preemption/requeue so queue-age metrics reflect total waiting time.
+    pub enqueued_at: Instant,
 }
 
 impl PartialEq for BlockValidationTask {
@@ -98,6 +103,7 @@ impl BlockValidationTask {
             block_tree_guard,
             skip_vdf_validation,
             parent_span,
+            enqueued_at: Instant::now(),
         }
     }
 
@@ -135,12 +141,15 @@ impl BlockValidationTask {
             block_tree_guard,
             skip_vdf_validation: false,
             parent_span: tracing::Span::none(),
+            enqueued_at: Instant::now(),
         }
     }
 
     /// Execute the concurrent validation task
     #[tracing::instrument(parent = &self.parent_span, skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
+        let concurrent_started = Instant::now();
+        let block_timestamp_ms = self.sealed_block.header().timestamp.as_millis();
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference
             // Return invalid to prevent this block from being accepted
@@ -157,24 +166,43 @@ impl BlockValidationTask {
             .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
             .boxed();
         let validate_block = self.validate_block().boxed();
-        match futures::future::select(validate_block, wait_for_parent_validation).await {
-            futures::future::Either::Left((validation_result, _block_too_old_future)) => {
-                // If validation is successful, wait for parent to be validated before reporting
-                if matches!(validation_result, ValidationResult::Valid) {
-                    match self.wait_for_parent_validation().await {
-                        ParentValidationResult::Cancelled => return parent_got_cancelled(),
-                        ParentValidationResult::Ready => {
-                            // Parent is ready, continue to report validation result
+        let final_result =
+            match futures::future::select(validate_block, wait_for_parent_validation).await {
+                futures::future::Either::Left((validation_result, _block_too_old_future)) => {
+                    // If validation is successful, wait for parent to be validated before reporting
+                    if matches!(validation_result, ValidationResult::Valid) {
+                        let parent_wait_started = Instant::now();
+                        let parent_wait_outcome = self.wait_for_parent_validation().await;
+                        metrics::record_parent_wait_duration_ms(
+                            parent_wait_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                        match parent_wait_outcome {
+                            ParentValidationResult::Cancelled => parent_got_cancelled(),
+                            ParentValidationResult::Ready => validation_result,
                         }
+                    } else {
+                        validation_result
                     }
                 }
+                futures::future::Either::Right((_, _validation_task)) => parent_got_cancelled(),
+            };
 
-                validation_result
-            }
-            futures::future::Either::Right((_, _validation_task)) => {
-                return parent_got_cancelled();
-            }
+        metrics::record_validation_stage_duration_ms(
+            "concurrent_overall",
+            concurrent_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        let result_label = match &final_result {
+            ValidationResult::Valid => "valid",
+            ValidationResult::Invalid(ValidationError::ValidationCancelled { .. }) => "cancelled",
+            ValidationResult::Invalid(ValidationError::TaskPanicked { .. }) => "panicked",
+            ValidationResult::Invalid(_) => "invalid",
+        };
+        metrics::record_validation_result("concurrent_overall", result_label);
+        if let Ok(now) = UnixTimestampMs::now() {
+            let age_ms = now.as_millis().saturating_sub(block_timestamp_ms) as f64;
+            metrics::record_block_age_at_validation_ms(age_ms);
         }
+        final_result
     }
 
     /// Wait for parent validation to complete
@@ -237,12 +265,18 @@ impl BlockValidationTask {
                         "Cancelling validation: block too far behind tip"
                     );
                 }
+                metrics::record_validation_cancellation("height_diff");
                 return ParentValidationResult::Cancelled;
             }
 
             match extra_checks(parent_hash) {
                 ControlFlow::Continue(()) => {}
-                ControlFlow::Break(result) => return result,
+                ControlFlow::Break(result) => {
+                    if matches!(result, ParentValidationResult::Cancelled) {
+                        metrics::record_validation_cancellation("parent_missing");
+                    }
+                    return result;
+                }
             }
 
             // 3. Wait for relevant state changes
@@ -264,6 +298,7 @@ impl BlockValidationTask {
                         block.height = %self.sealed_block.header().height,
                         "Block state channel closed while waiting for parent"
                     );
+                    metrics::record_validation_cancellation("channel_closed");
                     return ParentValidationResult::Cancelled;
                 }
             }
@@ -313,20 +348,30 @@ impl BlockValidationTask {
 
         // Recall range validation
         let recall_task = async move {
-            recall_recall_range_is_valid(
+            let started = Instant::now();
+            let outcome = recall_recall_range_is_valid(
                 block,
                 &self.service_inner.config.consensus,
                 &self.service_inner.vdf_state,
             )
-            .await
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or_else(|err| {
-                tracing::error!(
-                    custom.error = ?err,
-                    "recall range validation failed"
-                );
-                ValidationResult::Invalid(ValidationError::RecallRangeInvalid(err.to_string()))
-            })
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "recall_range",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            outcome
+                .map(|()| {
+                    metrics::record_validation_result("recall_range", "valid");
+                    ValidationResult::Valid
+                })
+                .unwrap_or_else(|err| {
+                    metrics::record_validation_result("recall_range", "invalid");
+                    tracing::error!(
+                        custom.error = ?err,
+                        "recall range validation failed"
+                    );
+                    ValidationResult::Invalid(ValidationError::RecallRangeInvalid(err.to_string()))
+                })
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
@@ -381,19 +426,30 @@ impl BlockValidationTask {
         };
 
         let poa_task = async move {
+            let started = Instant::now();
             let res = poa_task.await;
+            metrics::record_validation_stage_duration_ms(
+                "poa",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
 
             match res {
-                Ok(res) => res.unwrap_or_else(|e| {
-                    tracing::error!(
-                        block.hash = %block_hash_for_error_log,
-                        block.height = %block_height_for_error_log,
-                        custom.error = ?e,
-                        "PoA validation failed"
-                    );
-                    ValidationResult::Invalid(ValidationError::PreValidation(e))
-                }),
+                Ok(res) => res
+                    .inspect(|_| {
+                        metrics::record_validation_result("poa", "valid");
+                    })
+                    .unwrap_or_else(|e| {
+                        metrics::record_validation_result("poa", "invalid");
+                        tracing::error!(
+                            block.hash = %block_hash_for_error_log,
+                            block.height = %block_height_for_error_log,
+                            custom.error = ?e,
+                            "PoA validation failed"
+                        );
+                        ValidationResult::Invalid(ValidationError::PreValidation(e))
+                    }),
                 Err(err) => {
+                    metrics::record_validation_result("poa", "panicked");
                     tracing::error!(
                         block.hash = %block_hash_for_error_log,
                         block.height = %block_height_for_error_log,
@@ -441,6 +497,7 @@ impl BlockValidationTask {
 
         let sealed_block_for_shadow = self.sealed_block.clone();
         let shadow_tx_task = async move {
+            let started = Instant::now();
             let parent_commitment_snapshot = self
                 .block_tree_guard
                 .read()
@@ -451,7 +508,7 @@ impl BlockValidationTask {
                         block.previous_block_hash
                     )
                 })?;
-            shadow_transactions_are_valid(
+            let result = shadow_transactions_are_valid(
                 config,
                 &self.block_tree_guard,
                 &self.service_inner.mempool_guard,
@@ -468,24 +525,39 @@ impl BlockValidationTask {
                 block.hash = %self.sealed_block.header().block_hash,
                 block.height = %self.sealed_block.header().height
             ))
-            .await
-            .inspect_err(|err| {
-                tracing::error!(
-                    custom.error = ?err,
-                    "shadow transaction validation failed"
-                )
-            })
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "shadow_tx",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            match result.as_ref() {
+                Ok(_) => metrics::record_validation_result("shadow_tx", "valid"),
+                Err(err) => {
+                    metrics::record_validation_result("shadow_tx", "invalid");
+                    tracing::error!(
+                        custom.error = ?err,
+                        "shadow transaction validation failed"
+                    );
+                }
+            }
+            result
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
         let seeds_block_hash = self.sealed_block.header().block_hash;
         let seeds_block_height = self.sealed_block.header().height;
         let seeds_validation_task = async move {
+            let started = Instant::now();
             let binding = self.block_tree_guard.read();
             let previous_block =
                 match binding.get_block(&self.sealed_block.header().previous_block_hash) {
                     Some(block) => block,
                     None => {
+                        metrics::record_validation_stage_duration_ms(
+                            "seeds",
+                            started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                        metrics::record_validation_result("seeds", "invalid");
                         tracing::error!(
                             block.parent_hash = %self.sealed_block.header().previous_block_hash,
                             "Previous block not found in block tree"
@@ -495,11 +567,22 @@ impl BlockValidationTask {
                         });
                     }
                 };
-            is_seed_data_valid(
+            let outcome = is_seed_data_valid(
                 self.sealed_block.header(),
                 previous_block,
                 vdf_reset_frequency,
-            )
+            );
+            metrics::record_validation_stage_duration_ms(
+                "seeds",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            match &outcome {
+                ValidationResult::Valid => metrics::record_validation_result("seeds", "valid"),
+                ValidationResult::Invalid(_) => {
+                    metrics::record_validation_result("seeds", "invalid")
+                }
+            }
+            outcome
         }
         .instrument(tracing::info_span!(
             "seeds_validation",
@@ -510,7 +593,8 @@ impl BlockValidationTask {
         // Commitment transaction ordering validation
         let sealed_block_for_commitment = self.sealed_block.clone();
         let commitment_ordering_task = async move {
-            commitment_txs_are_valid(
+            let started = Instant::now();
+            let outcome = commitment_txs_are_valid(
                 config,
                 block,
                 &self.block_tree_guard,
@@ -519,22 +603,32 @@ impl BlockValidationTask {
                     .get_ledger_system_txs(SystemLedger::Commitment),
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
-            .await
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or_else(|err| {
-                tracing::error!(
-                    custom.error = ?err,
-                    "commitment ordering validation failed"
-                );
-                ValidationResult::Invalid(err)
-            })
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "commitment_ordering",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            outcome
+                .map(|()| {
+                    metrics::record_validation_result("commitment_ordering", "valid");
+                    ValidationResult::Valid
+                })
+                .unwrap_or_else(|err| {
+                    metrics::record_validation_result("commitment_ordering", "invalid");
+                    tracing::error!(
+                        custom.error = ?err,
+                        "commitment ordering validation failed"
+                    );
+                    ValidationResult::Invalid(err)
+                })
         };
 
         // Data transaction fee validation
         let sealed_block_for_data = self.sealed_block.clone();
         let data_txs_validation_task = async move {
+            let started = Instant::now();
             let txs = sealed_block_for_data.transactions();
-            data_txs_are_valid(
+            let outcome = data_txs_are_valid(
                 config,
                 service_senders,
                 block,
@@ -548,15 +642,24 @@ impl BlockValidationTask {
                 block.hash = %self.sealed_block.header().block_hash,
                 block.height = %self.sealed_block.header().height
             ))
-            .await
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    custom.error = ?e,
-                    "data transaction validation failed"
-                );
-                ValidationResult::Invalid(ValidationError::PreValidation(e))
-            })
+            .await;
+            metrics::record_validation_stage_duration_ms(
+                "data_txs",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            outcome
+                .map(|()| {
+                    metrics::record_validation_result("data_txs", "valid");
+                    ValidationResult::Valid
+                })
+                .unwrap_or_else(|e| {
+                    metrics::record_validation_result("data_txs", "invalid");
+                    tracing::error!(
+                        custom.error = ?e,
+                        "data transaction validation failed"
+                    );
+                    ValidationResult::Invalid(ValidationError::PreValidation(e))
+                })
         };
 
         // Wait for all validation tasks to complete
@@ -604,6 +707,7 @@ impl BlockValidationTask {
                 tracing::debug!("All consensus validations successful, submitting to reth");
 
                 // All consensus layer validations passed, now submit to execution layer
+                let reth_started = Instant::now();
                 let reth_result = submit_payload_to_reth(
                     self.sealed_block.header(),
                     &self.service_inner.reth_node_adapter,
@@ -615,13 +719,19 @@ impl BlockValidationTask {
                     block.height = %self.sealed_block.header().height
                 ))
                 .await;
+                metrics::record_validation_stage_duration_ms(
+                    "reth_submission",
+                    reth_started.elapsed().as_secs_f64() * 1000.0,
+                );
 
                 match reth_result {
                     Ok(()) => {
+                        metrics::record_validation_result("reth_submission", "valid");
                         tracing::debug!("Reth execution layer validation successful");
                         ValidationResult::Valid
                     }
                     Err(err) => {
+                        metrics::record_validation_result("reth_submission", "invalid");
                         tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
                         ValidationResult::Invalid(ValidationError::ExecutionLayerFailed(
                             err.to_string(),

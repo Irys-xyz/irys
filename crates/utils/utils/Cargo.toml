@@ -11,10 +11,15 @@ authors.workspace = true
 [dependencies]
 tokio = { workspace = true, features = ["signal", "sync", "time", "rt"] }
 tracing.workspace = true
+metrics.workspace = true
 eyre.workspace = true
 dashmap = "6.1.0"
 irys-types.workspace = true
 socket2.workspace = true
+# Unconditional: install_metrics_recorder() must run in every build because
+# reth-node-bridge always exposes Reth's /metrics endpoint regardless of the
+# `telemetry` feature, and DB metric handles bind eagerly at DB-open time.
+reth-node-metrics.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }

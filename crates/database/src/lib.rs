@@ -14,6 +14,7 @@ pub mod system_ledger;
 pub mod db;
 /// Data in the indexes is confirmed data
 pub mod db_index;
+pub mod db_metrics;
 pub mod metadata;
 pub mod migration;
 /// Extension traits for custom tables

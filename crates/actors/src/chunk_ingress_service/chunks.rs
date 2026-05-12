@@ -22,7 +22,7 @@ use irys_types::{
 use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{Database as _, cursor::DbDupCursorRO as _, transaction::DbTx as _};
+use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
@@ -876,7 +876,7 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
-    db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)
 }

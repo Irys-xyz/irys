@@ -781,7 +781,7 @@ impl GossipClient {
             Ok(resp) => resp,
             Err(error) => {
                 tracing::debug!(
-                    peer = ?peer_id,
+                    peer.id = ?peer_id,
                     error = %error,
                     "health check request failed, recording circuit breaker failure"
                 );

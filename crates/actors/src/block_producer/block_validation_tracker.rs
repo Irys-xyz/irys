@@ -17,10 +17,11 @@
 //!    - Switch to new max-difficulty block if one appears
 //! 4. Return block hash when validation completes
 
-use crate::{block_tree_service::BlockStateUpdated, services::ServiceSenders};
+use crate::{block_tree_service::BlockStateUpdated, metrics, services::ServiceSenders};
 use eyre::bail;
 use irys_domain::BlockTreeReadGuard;
 use irys_types::BlockHash;
+use std::time::Instant;
 use tokio::sync::broadcast::{self, Receiver};
 use tracing::{debug, info, instrument, trace, warn};
 
@@ -58,6 +59,7 @@ impl BlockValidationTracker {
     /// Returns the validated block hash to use as parent.
     #[instrument(skip_all)]
     pub async fn wait_for_validation(&mut self) -> eyre::Result<BlockHash> {
+        let started = Instant::now();
         loop {
             // Extract current target (or return if already validated)
             let (target_hash, target_height) = match &self.state {
@@ -69,6 +71,9 @@ impl BlockValidationTracker {
                         block.hash = %block_hash,
                         block.height = block_height,
                         "Validation completed"
+                    );
+                    metrics::record_producer_parent_wait_duration_ms(
+                        started.elapsed().as_secs_f64() * 1000.0,
                     );
                     return Ok(*block_hash);
                 }
@@ -103,6 +108,7 @@ impl BlockValidationTracker {
                     block_validation.new_height = max_height,
                     "Target block changed during validation wait"
                 );
+                metrics::record_producer_parent_wait_target_switch();
                 self.state = ValidationState::Tracking {
                     target_hash: max_hash,
                     target_height: max_height,

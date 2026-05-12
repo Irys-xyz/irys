@@ -1386,7 +1386,7 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
-#[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     block_tree_guard: &BlockTreeReadGuard,

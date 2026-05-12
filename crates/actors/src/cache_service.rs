@@ -30,7 +30,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{Instrument as _, debug, error, info, trace, warn};
+use tracing::{Instrument as _, debug, error, info, info_span, trace, warn};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -320,6 +320,14 @@ impl InnerCacheTask {
 
             // Commit a small batch to avoid large transactions
             if pending_roots.len() >= 256 {
+                // Span attributes any libmdbx writer-lock stall warning fired
+                // during begin_rw_txn to libmdbx_rw_tx_lock_stalls_total
+                // {scope="irys-consensus"} (see crates/utils/utils/src/mdbx_metrics.rs).
+                let _span = info_span!(
+                    irys_utils::MDBX_RW_TX_SPAN,
+                    db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+                )
+                .entered();
                 let write_tx = self.db.tx_mut()?;
                 for root in pending_roots.drain(..) {
                     trace!(
@@ -342,6 +350,11 @@ impl InnerCacheTask {
 
         // Flush any remaining pending deletions
         if !pending_roots.is_empty() {
+            let _span = info_span!(
+                irys_utils::MDBX_RW_TX_SPAN,
+                db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+            )
+            .entered();
             let write_tx = self.db.tx_mut()?;
             for root in pending_roots.drain(..) {
                 let pruned = delete_cached_chunks_by_data_root_older_than(
@@ -370,6 +383,11 @@ impl InnerCacheTask {
         let local_addr = signer.address();
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
+        let _span = info_span!(
+            irys_utils::MDBX_RW_TX_SPAN,
+            db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+        )
+        .entered();
         let write_tx = self.db.tx_mut()?;
         let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
         let mut walker = cursor.walk(None)?;

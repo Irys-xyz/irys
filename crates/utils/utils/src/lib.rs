@@ -1,9 +1,36 @@
+mod mdbx_metrics;
 mod metric_macros;
 
 pub mod circuit_breaker;
 pub mod listener;
 pub mod shutdown;
 pub mod signal;
+
+pub use mdbx_metrics::{
+    DB_SCOPE_FIELD, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_SCOPE_UNKNOWN,
+    DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_LOCK_STALLS_TOTAL, MDBX_RW_TX_SPAN,
+    mdbx_lock_metrics_layer,
+};
+
+/// Installs Reth's prometheus recorder as the global `metrics` recorder.
+///
+/// Must run before any DB is opened: `DatabaseEnvMetrics` registers per-table
+/// counter/histogram handles eagerly at construction, and handles bound while a
+/// no-op recorder is active stay no-op forever — including the per-tx commit
+/// latency histograms (`reth_database_transaction_commit_*_duration_seconds`)
+/// that surface MDBX write-lock contention.
+///
+/// Unconditional (not gated by the `telemetry` feature): Reth's prometheus
+/// `/metrics` endpoint is exposed by `reth-node-bridge` regardless of our
+/// telemetry feature, and the recorder is what makes that endpoint emit DB
+/// metrics rather than only Reth's engine counters.
+///
+/// Idempotent: backed by an `OnceLock` inside Reth, so a later call from
+/// `EngineNodeLauncher::start_prometheus_endpoint` is a no-op.
+pub fn install_metrics_recorder() {
+    reth_node_metrics::recorder::install_prometheus_recorder();
+    mdbx_metrics::describe_mdbx_metrics();
+}
 
 /// Extension trait for converting [`std::time::Instant`] elapsed time to milliseconds.
 pub trait ElapsedMs {

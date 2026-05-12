@@ -12,6 +12,7 @@ use crate::tables::{
     IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
 
+use crate::db::IrysDatabaseExt as _;
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
@@ -33,7 +34,6 @@ use reth_db::{
     cursor::*,
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
 };
-use reth_db_api::Database as _;
 use tracing::{debug, warn};
 
 /// Extension trait adding Irys preset constructors to [`DatabaseArguments`].
@@ -84,8 +84,9 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
     tables: &[T],
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    // Note: Metrics recorder should be installed via init_telemetry() before this is called.
-    // The OpenTelemetryRecorder bridges `metrics` crate to OTEL for push-based export.
+    // `with_metrics_and_tables` registers per-table counter/histogram handles
+    // eagerly. A metrics recorder must be installed first; handles bound while
+    // the no-op recorder is active stay no-op for the process lifetime.
     let db = init_db_for::<P, T>(path, args)?.with_metrics_and_tables(tables);
 
     Ok(db)
@@ -568,7 +569,7 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    db.update(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
+    db.update_scoped(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
 }
 
 pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
