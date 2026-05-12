@@ -483,12 +483,12 @@ pub async fn prevalidate_block(
         "Prevalidating block",
     );
 
-    let poa_chunk: Vec<u8> = match &block.poa.chunk {
-        Some(chunk) => chunk.clone().into(),
+    let poa_chunk: &[u8] = match &block.poa.chunk {
+        Some(chunk) => chunk.as_ref(),
         None => return Err(PreValidationError::PoAChunkMissing),
     };
 
-    let block_poa_hash: H256 = sha::sha256(&poa_chunk).into();
+    let block_poa_hash: H256 = sha::sha256(poa_chunk).into();
     if block.chunk_hash != block_poa_hash {
         return Err(PreValidationError::PoAChunkHashMismatch {
             expected: block.chunk_hash,
@@ -569,7 +569,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(block, &poa_chunk)?;
+    solution_hash_link_is_valid(block, poa_chunk)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
