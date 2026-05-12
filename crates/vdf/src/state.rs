@@ -419,9 +419,16 @@ pub fn vdf_step_batch_is_valid(
                 return Err(eyre!("VDF steps are invalid!"));
             }
             // `verify_last_step_checkpoints` is intentionally skipped on this
-            // path: the locally-stored steps were checkpoint-validated when
-            // first accepted (via this same function or via the local VDF
-            // thread), so re-verifying their checkpoints here would just redo
+            // fast path. Every block reaching the validation service has
+            // already passed through `prevalidate_block`
+            // (crates/actors/src/block_validation.rs), which unconditionally
+            // calls `last_step_checkpoints_is_valid` against the block's
+            // claimed `vdf_limiter_info`. That helper (crates/vdf/src/lib.rs)
+            // re-derives the SHA chain from the previous step's seed and
+            // rejects any mismatch — including the invariant that the last
+            // checkpoint equals the last step. So by the time we reach here,
+            // the block's `last_step_checkpoints` are already proven
+            // consistent with `steps`; repeating the check would just redo
             // work the node already did. Static reviewers (CodeRabbit) flag
             // the missing call repeatedly — leave this comment so they don't.
             return Ok(());
