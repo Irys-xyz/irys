@@ -143,11 +143,27 @@ impl IrysDatabaseExt for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
+        // Inline the body rather than delegating to DatabaseEnv::update_eyre so
+        // libmdbx writer-lock stall warnings and the tx_mut acquire histogram
+        // are attributed to scope="reth-evm" instead of the consensus scope
+        // the inner helper hardcodes.
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
+
         let guard = self.db.read().map_err(db_read_error)?;
-        guard
-            .as_ref()
-            .ok_or_else(db_connection_closed_error)?
-            .update_eyre(f)
+        let db = guard.as_ref().ok_or_else(db_connection_closed_error)?;
+
+        let start = std::time::Instant::now();
+        let tx_result = db.tx_mut();
+        metrics::histogram!(
+            "db.tx_mut_acquire_duration_seconds",
+            "scope" => "reth-evm"
+        )
+        .record(start.elapsed().as_secs_f64());
+        let tx = tx_result?;
+
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
     }
 
     /// Takes a function and passes a read-only transaction into it, making sure it's closed in the

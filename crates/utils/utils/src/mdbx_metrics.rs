@@ -24,9 +24,11 @@ pub const DB_SCOPE_RETH_EVM: &str = "reth-evm";
 pub const DB_SCOPE_UNKNOWN: &str = "unknown";
 
 const LIBMDBX_TARGET: &str = "libmdbx";
+/// Prefix matched against `target="libmdbx"` WARN messages to recognise
+/// writer-lock stalls. Matched with `starts_with` so trailing punctuation,
+/// retry counters, or future suffix changes in the upstream wording don't
+/// silently drop the counter to zero.
 const RW_TX_LOCK_STALL_MESSAGE: &str = "Process stalled, awaiting read-write transaction lock";
-const RW_TX_LOCK_STALL_MESSAGE_WITH_PERIOD: &str =
-    "Process stalled, awaiting read-write transaction lock.";
 
 /// Tracing [`Layer`] that converts upstream `target="libmdbx"` writer-lock
 /// stall warnings into a [`metrics`] counter, attributed to a database scope
@@ -123,68 +125,18 @@ impl Visit for LockStallMessageVisitor {
 }
 
 fn is_lock_stall_message(value: &str) -> bool {
-    matches!(
-        value,
-        RW_TX_LOCK_STALL_MESSAGE | RW_TX_LOCK_STALL_MESSAGE_WITH_PERIOD
-    )
+    value.starts_with(RW_TX_LOCK_STALL_MESSAGE)
 }
 
 fn debug_message_matches(value: &dyn fmt::Debug) -> bool {
-    debug_value_matches(value, RW_TX_LOCK_STALL_MESSAGE)
-        || debug_value_matches(value, RW_TX_LOCK_STALL_MESSAGE_WITH_PERIOD)
-}
-
-fn debug_value_matches(value: &dyn fmt::Debug, expected: &str) -> bool {
-    let mut writer = ExactDebugWriter::new(expected);
-    fmt::write(&mut writer, format_args!("{value:?}")).is_ok() && writer.matches()
-}
-
-struct ExactDebugWriter<'a> {
-    expected: &'a str,
-    consumed: usize,
-    matched: bool,
-}
-
-impl<'a> ExactDebugWriter<'a> {
-    const fn new(expected: &'a str) -> Self {
-        Self {
-            expected,
-            consumed: 0,
-            matched: true,
-        }
-    }
-
-    fn matches(&self) -> bool {
-        self.matched && self.consumed == self.expected.len()
-    }
-}
-
-impl fmt::Write for ExactDebugWriter<'_> {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        if !self.matched {
-            return Ok(());
-        }
-
-        let Some(remaining) = self.expected.get(self.consumed..) else {
-            self.matched = false;
-            return Ok(());
-        };
-
-        if !remaining.starts_with(value) {
-            self.matched = false;
-            return Ok(());
-        }
-
-        self.consumed = match self.consumed.checked_add(value.len()) {
-            Some(consumed) => consumed,
-            None => {
-                self.matched = false;
-                return Ok(());
-            }
-        };
-
-        Ok(())
-    }
+    let formatted = format!("{value:?}");
+    // Some recording paths route &str through Debug, which surrounds the
+    // value with quotes. Strip a single matching pair before matching.
+    let trimmed = formatted
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(&formatted);
+    is_lock_stall_message(trimmed)
 }
 
 #[derive(Default)]
@@ -253,6 +205,15 @@ mod tests {
                     target: "libmdbx",
                     "Process stalled, awaiting read-write transaction lock"
                 );
+                // Future suffix variants — prefix match keeps these counted.
+                tracing::warn!(
+                    target: "libmdbx",
+                    "Process stalled, awaiting read-write transaction lock!"
+                );
+                tracing::warn!(
+                    target: "libmdbx",
+                    "Process stalled, awaiting read-write transaction lock (retry 1)"
+                );
                 tracing::warn!(target: "libmdbx", "unrelated warning");
                 tracing::info!(
                     target: "libmdbx",
@@ -266,7 +227,7 @@ mod tests {
         });
 
         // No parent span carries db_scope → counter increments under "unknown".
-        assert_eq!(recorder.scope_count(DB_SCOPE_UNKNOWN), 2);
+        assert_eq!(recorder.scope_count(DB_SCOPE_UNKNOWN), 4);
         assert_eq!(recorder.scope_count(DB_SCOPE_IRYS_CONSENSUS), 0);
         assert_eq!(recorder.scope_count(DB_SCOPE_RETH_EVM), 0);
     }
