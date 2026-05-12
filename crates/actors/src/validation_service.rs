@@ -25,13 +25,12 @@ use irys_domain::{
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
-    VDFLimiterInfo, app_state::DatabaseProvider,
+    app_state::DatabaseProvider,
 };
 use irys_vdf::rayon;
 use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};
 use irys_vdf::vdf_utils::fast_forward_validated_steps;
 use reth::tasks::shutdown::Shutdown;
-use std::ops::Range;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, Ordering},
@@ -119,34 +118,6 @@ fn record_vdf_task_progress(
     *progress_signal
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
-}
-
-fn validate_vdf_batch(
-    pool: &rayon::ThreadPool,
-    vdf_info: &VDFLimiterInfo,
-    vdf_config: &irys_types::VdfConfig,
-    vdf_state: &VdfStateReadonly,
-    batch_range: Range<usize>,
-    cancel: Arc<AtomicU8>,
-) -> eyre::Result<u64> {
-    let batch_start_step_number = vdf_info.first_step_number() + batch_range.start as u64;
-    let batch_steps = vdf_info
-        .steps
-        .0
-        .get(batch_range.clone())
-        .ok_or_else(|| eyre::eyre!("VDF batch range {:?} is out of bounds", batch_range))?;
-    let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
-
-    vdf_step_batch_is_valid(
-        pool,
-        vdf_info,
-        vdf_config,
-        vdf_state,
-        batch_range,
-        batch_end_step_number == vdf_info.global_step_number,
-        cancel,
-    )?;
-    Ok(batch_end_step_number)
 }
 
 /// Messages that the validation service supports
@@ -570,6 +541,34 @@ impl ValidationService {
 }
 
 impl ValidationServiceInner {
+    /// Clamp the configured VDF validation batch size to `[thread_count, 2 * thread_count]`
+    /// (and at least 1). Below the floor we leave worker threads idle; above the
+    /// ceiling we stretch the gap between watchdog progress checks.
+    fn clamped_validation_batch_size(&self) -> usize {
+        let thread_count = self.config.vdf.parallel_verification_thread_limit;
+        let configured_batch_size = self.config.vdf.validation_batch_size;
+        let min_batch_size = thread_count;
+        let max_batch_size = thread_count.saturating_mul(2);
+        if configured_batch_size < min_batch_size {
+            warn!(
+                configured_batch_size,
+                thread_count,
+                clamped_to = min_batch_size,
+                "vdf.validation_batch_size is lower than vdf.parallel_verification_thread_limit; clamping batch size up to thread count to avoid idle worker threads",
+            );
+        } else if configured_batch_size > max_batch_size {
+            warn!(
+                configured_batch_size,
+                thread_count,
+                clamped_to = max_batch_size,
+                "vdf.validation_batch_size exceeds 2x vdf.parallel_verification_thread_limit; clamping batch size down to 2x thread count to keep watchdog progress checks tight",
+            );
+        }
+        configured_batch_size
+            .clamp(min_batch_size, max_batch_size)
+            .max(1)
+    }
+
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
     #[tracing::instrument(err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
@@ -581,34 +580,12 @@ impl ValidationServiceInner {
         progress_signal: Arc<Mutex<Instant>>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
-        let vdf_info = block.vdf_limiter_info.clone();
+        let vdf_info = Arc::new(block.vdf_limiter_info.clone());
+        let vdf_config = self.config.vdf.clone();
         let first_step_number = vdf_info.first_step_number();
         let prev_output_step_number = first_step_number.saturating_sub(1);
-        let progress_timeout = Duration::from_secs(self.config.vdf.progress_timeout_secs);
-        let thread_count = self.config.vdf.parallel_verification_thread_limit;
-        let configured_batch_size = self.config.vdf.validation_batch_size;
-        let min_batch_size = thread_count;
-        let max_batch_size = thread_count.saturating_mul(2);
-        let validation_batch_size = if configured_batch_size < min_batch_size {
-            warn!(
-                configured_batch_size,
-                thread_count,
-                clamped_to = min_batch_size,
-                "vdf.validation_batch_size is lower than vdf.parallel_verification_thread_limit; clamping batch size up to thread count to avoid idle worker threads",
-            );
-            min_batch_size
-        } else if configured_batch_size > max_batch_size {
-            warn!(
-                configured_batch_size,
-                thread_count,
-                clamped_to = max_batch_size,
-                "vdf.validation_batch_size exceeds 2x vdf.parallel_verification_thread_limit; clamping batch size down to 2x thread count to keep watchdog progress checks tight",
-            );
-            max_batch_size
-        } else {
-            configured_batch_size
-        }
-        .max(1);
+        let progress_timeout = Duration::from_secs(vdf_config.progress_timeout_secs);
+        let validation_batch_size = self.clamped_validation_batch_size();
 
         info!(
             vdf.first_step_number = first_step_number,
@@ -645,7 +622,7 @@ impl ValidationServiceInner {
         );
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
-        let vdf_reset_frequency = self.config.vdf.reset_frequency as u64;
+        let vdf_reset_frequency = vdf_config.reset_frequency as u64;
         record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::ValidateSeeds);
         debug!(
             stage = "validate_seeds",
@@ -674,22 +651,24 @@ impl ValidationServiceInner {
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
         // each validated prefix immediately.
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
-        let vdf_state = self.vdf_state.clone();
-        if !skip_vdf_validation {
-            let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
-            for (batch_index, batch_steps) in
-                vdf_info.steps.0.chunks(validation_batch_size).enumerate()
-            {
-                let batch_start_index = batch_index * validation_batch_size;
-                let batch_end_index = batch_start_index + batch_steps.len();
-                let batch_start_step_number = first_step_number + batch_start_index as u64;
-                let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
+        let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
+        for (batch_index, batch_steps) in vdf_info.steps.0.chunks(validation_batch_size).enumerate()
+        {
+            let batch_start_index = batch_index * validation_batch_size;
+            let batch_start_step_number = first_step_number + batch_start_index as u64;
+            let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
 
-                record_vdf_task_progress(
-                    &stage_signal,
-                    &progress_signal,
-                    VdfTaskStage::ValidateBatch,
+            record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::ValidateBatch);
+            if skip_vdf_validation {
+                debug!(
+                    stage = VdfTaskStage::ValidateBatch.as_str(),
+                    vdf.batch_index = batch_index + 1,
+                    vdf.total_batches = total_batches,
+                    vdf.batch_start_step = batch_start_step_number,
+                    vdf.batch_end_step = batch_end_step_number,
+                    "ensure_vdf_is_valid: skipping VDF batch validation"
                 );
+            } else {
                 info!(
                     stage = VdfTaskStage::ValidateBatch.as_str(),
                     vdf.batch_index = batch_index + 1,
@@ -699,87 +678,46 @@ impl ValidationServiceInner {
                     "ensure_vdf_is_valid: validating VDF batch"
                 );
 
-                let batch_range = batch_start_index..batch_end_index;
-                let vdf_info = vdf_info.clone();
-                let vdf_state_for_batch = vdf_state.clone();
-                let vdf_config = self.config.vdf.clone();
+                let batch_range = batch_start_index..batch_start_index + batch_steps.len();
+                let is_final_batch = batch_end_step_number == vdf_info.global_step_number;
+                let vdf_info_for_batch = Arc::clone(&vdf_info);
+                let vdf_state_for_batch = self.vdf_state.clone();
+                let vdf_config_for_batch = vdf_config.clone();
                 let this_inner = Arc::clone(&self);
                 let cancel_for_blocking = Arc::clone(&cancel);
-                let validated_batch_end = tokio::task::spawn_blocking(move || {
-                    validate_vdf_batch(
+                tokio::task::spawn_blocking(move || {
+                    vdf_step_batch_is_valid(
                         &this_inner.pool,
-                        &vdf_info,
-                        &vdf_config,
+                        &vdf_info_for_batch,
+                        &vdf_config_for_batch,
                         &vdf_state_for_batch,
                         batch_range,
+                        is_final_batch,
                         cancel_for_blocking,
                     )
                 })
                 .await??;
-
-                record_vdf_task_progress(
-                    &stage_signal,
-                    &progress_signal,
-                    VdfTaskStage::FastForwardBatch,
-                );
-                debug!(
-                    stage = VdfTaskStage::FastForwardBatch.as_str(),
-                    vdf.batch_index = batch_index + 1,
-                    vdf.total_batches = total_batches,
-                    vdf.batch_end_step = validated_batch_end,
-                    "ensure_vdf_is_valid: validated VDF batch sent to fast-forward"
-                );
-                fast_forward_validated_steps(
-                    batch_start_step_number,
-                    batch_steps,
-                    &vdf_ff,
-                    progress_timeout,
-                )
-                .await?;
-                info!(
-                    stage = VdfTaskStage::FastForwardBatch.as_str(),
-                    vdf.batch_index = batch_index + 1,
-                    vdf.total_batches = total_batches,
-                    vdf.batch_end_step = validated_batch_end,
-                    "ensure_vdf_is_valid: validated VDF batch enqueued for fast-forward"
-                );
             }
-        } else {
-            let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
-            for (batch_index, batch_steps) in
-                vdf_info.steps.0.chunks(validation_batch_size).enumerate()
-            {
-                let batch_start_index = batch_index * validation_batch_size;
-                let batch_start_step_number = first_step_number + batch_start_index as u64;
-                let batch_end_step_number = batch_start_step_number + batch_steps.len() as u64 - 1;
 
-                record_vdf_task_progress(
-                    &stage_signal,
-                    &progress_signal,
-                    VdfTaskStage::ValidateBatch,
-                );
-                debug!(
-                    stage = VdfTaskStage::ValidateBatch.as_str(),
-                    vdf.batch_index = batch_index + 1,
-                    vdf.total_batches = total_batches,
-                    vdf.batch_start_step = batch_start_step_number,
-                    vdf.batch_end_step = batch_end_step_number,
-                    "ensure_vdf_is_valid: skipping VDF batch validation"
-                );
-
-                record_vdf_task_progress(
-                    &stage_signal,
-                    &progress_signal,
-                    VdfTaskStage::FastForwardBatch,
-                );
-                fast_forward_validated_steps(
-                    batch_start_step_number,
-                    batch_steps,
-                    &vdf_ff,
-                    progress_timeout,
-                )
-                .await?;
-            }
+            record_vdf_task_progress(
+                &stage_signal,
+                &progress_signal,
+                VdfTaskStage::FastForwardBatch,
+            );
+            debug!(
+                stage = VdfTaskStage::FastForwardBatch.as_str(),
+                vdf.batch_index = batch_index + 1,
+                vdf.total_batches = total_batches,
+                vdf.batch_end_step = batch_end_step_number,
+                "ensure_vdf_is_valid: enqueueing validated VDF batch for fast-forward"
+            );
+            fast_forward_validated_steps(
+                batch_start_step_number,
+                batch_steps,
+                &vdf_ff,
+                progress_timeout,
+            )
+            .await?;
         }
 
         record_vdf_task_progress(
@@ -792,7 +730,7 @@ impl ValidationServiceInner {
             vdf.global_step_number = vdf_info.global_step_number,
             "ensure_vdf_is_valid: waiting for fast-forward to reach block end"
         );
-        vdf_state
+        self.vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
                 Arc::clone(&cancel),
@@ -832,7 +770,7 @@ fn handle_broadcast_recv<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{H256, H256List, NodeConfig, U256};
+    use irys_types::{H256, H256List, NodeConfig, U256, VDFLimiterInfo};
     use irys_vdf::state::{CancelEnum, test_helpers::mocked_vdf_service};
     use irys_vdf::{VdfStep, step_number_to_salt_number, vdf_sha};
 
@@ -896,12 +834,13 @@ mod tests {
         let (_tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
-        let result = validate_vdf_batch(
+        let result = vdf_step_batch_is_valid(
             &pool,
             &vdf_info,
             &config.vdf,
             &vdf_state,
             0..vdf_info.steps.len(),
+            true,
             cancel,
         );
 
@@ -923,10 +862,17 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
-        let batch_end = validate_vdf_batch(&pool, &vdf_info, &config.vdf, &vdf_state, 0..1, cancel)
-            .expect("valid prefix should be accepted");
+        vdf_step_batch_is_valid(
+            &pool,
+            &vdf_info,
+            &config.vdf,
+            &vdf_state,
+            0..1,
+            false,
+            cancel,
+        )
+        .expect("valid prefix should be accepted");
 
-        assert_eq!(batch_end, 1);
         fast_forward_validated_steps(1, &vdf_info.steps.0[..1], &tx, Duration::from_secs(1))
             .await
             .expect("validated prefix should fast-forward");
