@@ -15,7 +15,8 @@ use reth_node_core::version::default_client_version;
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
 use super::{
-    BLOCK_INDEX_SUBDIR, GENESIS_COMMITMENTS_FILE, GENESIS_FILE, IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR,
+    BLOCK_INDEX_SUBDIR, GENESIS_COMMITMENTS_FILE, GENESIS_FILE, IRYS_CACHE_SUBDIR,
+    IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR,
 };
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,17 @@ pub(crate) fn run_export(opts: ExportOpts) -> eyre::Result<()> {
     let staging_path = staging.path();
 
     let (effective_schema_version, source_tip) = snapshot_irys_consensus(&opts, staging_path)?;
+    if opts.include_caches && effective_schema_version >= u32::from(irys_types::DatabaseVersion::V4)
+    {
+        let src_path = opts.data_dir.join(IRYS_CACHE_SUBDIR);
+        let cache = open_irys_db_ro(&src_path).context("opening source cache DB")?;
+        copy_mdbx_env(
+            &cache,
+            &staging_path.join(IRYS_CACHE_SUBDIR),
+            opts.copy_flags,
+        )
+        .context("copying Irys cache mdbx")?;
+    }
     copy_block_index(&opts, staging_path)?;
     copy_genesis_files(&opts, staging_path)?;
     let reth_tip = snapshot_reth(&opts, staging_path)?;
@@ -74,7 +86,7 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
     }
 
     let (schema_version, tip_height) = {
-        let src_db = open_consensus_ro(&src_path)?;
+        let src_db = open_irys_db_ro(&src_path)?;
         let mut tx = src_db.tx().context("begin source consensus RO tx")?;
         let schema = database_schema_version(&mut tx)
             .context("reading source schema version")?
@@ -145,7 +157,7 @@ fn snapshot_reth(opts: &ExportOpts, staging: &Path) -> eyre::Result<Option<u64>>
     snapshot_reth_state(&src, &dest, opts.copy_flags).context("snapshotting Reth state")
 }
 
-fn open_consensus_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
+fn open_irys_db_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
     DatabaseEnv::open(
         path,
         DatabaseEnvKind::RO,
@@ -153,7 +165,7 @@ fn open_consensus_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
             .with_log_level(None)
             .with_exclusive(Some(false)),
     )
-    .with_context(|| format!("opening Irys consensus RO at {}", path.display()))
+    .with_context(|| format!("opening Irys DB RO at {}", path.display()))
 }
 
 fn write_manifest(staging: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {

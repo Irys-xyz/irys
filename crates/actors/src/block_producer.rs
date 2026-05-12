@@ -20,6 +20,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{OptionExt as _, eyre};
+use irys_database::DatabaseProvider;
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation, HardforkConfigExt as _,
@@ -38,9 +39,8 @@ use irys_types::{
     DataTransactionHeader, DataTransactionLedger, H256, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, SealedBlock as IrysSealedBlock, SendTraced as _, Signature,
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
-    calculate_difficulty, compute_solution_hash, next_cumulative_diff, storage_pricing::Amount,
-    u256_from_le_bytes as hash_to_number,
+    VDFLimiterInfo, block_production::SolutionContext, calculate_difficulty, compute_solution_hash,
+    next_cumulative_diff, storage_pricing::Amount, u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;

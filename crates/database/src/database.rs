@@ -14,6 +14,7 @@ use crate::tables::{
     Metadata, MigratedBlockHashes, PeerListItems,
 };
 
+use crate::DatabaseProvider;
 use crate::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
@@ -21,11 +22,11 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
-    H256, IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId,
-    IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp,
-    UnpackedChunk, expected_chunk_byte_range, generate_ingress_data_hash,
-    generate_ingress_leaf_from_data_hash, hash_sha256, validate_path,
+    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseVersion, H256,
+    IngressMerkleLeaf, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
+    LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    expected_chunk_byte_range, generate_ingress_data_hash, generate_ingress_leaf_from_data_hash,
+    hash_sha256, validate_path,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -2631,11 +2632,11 @@ mod tests {
     /// passes the reorg floor — and must be idempotent across boots.
     #[test]
     fn backfill_genesis_commitment_included_height_is_idempotent() -> eyre::Result<()> {
+        use crate::DatabaseProvider;
         use crate::backfill_genesis_commitment_included_height;
         use crate::canonical_commitment_included_height;
         use crate::db::DatabaseProviderTestExt as _;
         use crate::tables::MigratedBlockHashes;
-        use irys_types::DatabaseProvider;
         use reth_db::transaction::DbTxMut as _;
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -2688,9 +2689,9 @@ mod tests {
     /// than silently skip.
     #[test]
     fn backfill_genesis_commitment_included_height_fails_without_mbh() -> eyre::Result<()> {
+        use crate::DatabaseProvider;
         use crate::backfill_genesis_commitment_included_height;
         use crate::db::DatabaseProviderTestExt as _;
-        use irys_types::DatabaseProvider;
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = DatabaseProvider::for_testing(path.path(), &path.path().join("cache"))?;
@@ -2708,12 +2709,13 @@ mod tests {
             delete_ingress_proof_by_signer, ingress_proof_by_data_root_address,
             ingress_proofs_by_data_root,
         };
+        use crate::DatabaseProvider;
         use crate::{
             db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _},
             db_cache::CachedDataRoot,
             tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
         };
-        use irys_types::{DatabaseProvider, IrysAddress, ingress::CachedIngressProof};
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = DatabaseProvider::for_testing(path.path(), &path.path().join("cache"))?;
@@ -2792,12 +2794,13 @@ mod tests {
     #[test]
     fn delete_ingress_proof_if_unchanged_preserves_refreshed_proof() -> eyre::Result<()> {
         use super::{delete_ingress_proof_if_unchanged, ingress_proof_by_data_root_address};
+        use crate::DatabaseProvider;
         use crate::{
             db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _},
             db_cache::CachedDataRoot,
             tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
         };
-        use irys_types::{DatabaseProvider, IrysAddress, ingress::CachedIngressProof};
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = DatabaseProvider::for_testing(path.path(), &path.path().join("cache"))?;
@@ -3318,6 +3321,7 @@ mod tests {
     /// the idempotency / no-op / expiry-handling semantics independently of
     /// the migration call site.
     mod data_root_block_set_helpers {
+        use crate::DatabaseProvider;
         use crate::{
             cache_data_root,
             db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _},
@@ -3326,7 +3330,7 @@ mod tests {
             update_data_root_block_set,
         };
         use irys_testing_utils::utils::tempfile;
-        use irys_types::{DataTransactionHeader, DatabaseProvider, H256};
+        use irys_types::{DataTransactionHeader, H256};
 
         /// Returns `(env, tempdir)`.  The caller must bind the tempdir to a
         /// variable that lives the duration of the test — dropping it before

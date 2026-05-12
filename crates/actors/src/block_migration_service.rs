@@ -2,6 +2,7 @@ use crate::block_reward::block_emission;
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
+use irys_database::DatabaseProvider;
 use irys_database::{
     append_block_stream_event, block_header_by_hash,
     db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
@@ -18,7 +19,7 @@ use irys_types::block_stream::{BlockEvent, BlockRef, StreamEvent, StreamFrame};
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
     PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _, SystemLedger, Traced,
-    U256, app_state::DatabaseProvider,
+    U256,
 };
 use lru::LruCache;
 use std::{

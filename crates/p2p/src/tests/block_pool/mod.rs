@@ -11,15 +11,15 @@ use futures::{FutureExt as _, future};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{AtomicMempoolState, create_state};
 use irys_actors::services::ServiceSenders;
+use irys_database::DatabaseProvider;
 use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
-    SealedBlock,
+    BlockBody, Config, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig, PeerAddress,
+    PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock,
 };
 use irys_vdf::state::{VdfController, VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -68,7 +68,7 @@ struct MockedServices {
 impl MockedServices {
     fn new(config: &Config) -> Self {
         let _cache_dir = TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(
+        let db = irys_database::DatabaseProvider::for_testing(
             &config.node_config.base_directory,
             _cache_dir.path(),
         )
@@ -178,7 +178,6 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        vdf_controller: _,
         ..
     } = MockedServices::new(&config);
 
@@ -637,7 +636,6 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        vdf_controller: _,
         ..
     } = MockedServices::new(&config);
 
@@ -907,7 +905,6 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        vdf_controller: _,
         ..
     } = MockedServices::new(&config);
 

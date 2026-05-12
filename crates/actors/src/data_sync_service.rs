@@ -16,13 +16,14 @@ use crate::{
 use chunk_fetcher::ChunkFetchFailureKind;
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use futures::FutureExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BatchEnqueueItem, BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
 use irys_packing::unpack;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
@@ -2365,10 +2366,11 @@ mod peer_event_channel_tests {
     };
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList};
     use irys_testing_utils::TempDirBuilder;
-    use irys_types::{Config, NodeConfig, app_state::DatabaseProvider};
+    use irys_types::{Config, NodeConfig};
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
@@ -2713,6 +2715,7 @@ mod ingress_proof_peer_tests {
     use super::DataSyncServiceInner;
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::db::DatabaseProviderCacheExt as _;
     use irys_database::{
         DatabaseProviderTestExt as _, cache_data_root, store_external_ingress_proof_checked,
@@ -2722,9 +2725,8 @@ mod ingress_proof_peer_tests {
     use irys_types::{
         Config, DataLedger, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId,
         LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, PeerAddress, PeerListItem,
-        PeerScore, ProtocolVersion, app_state::DatabaseProvider, ingress::IngressProof,
-        irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        PeerScore, ProtocolVersion, ingress::IngressProof, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -3047,12 +3049,13 @@ mod body_migration_holes_routing_tests {
     use super::{DataSyncServiceInner, DataSyncServiceMessage};
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, PartitionChunkOffset,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, RwLock};
 
@@ -3156,6 +3159,7 @@ mod peer_chunk_validation_tests {
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::chunk_ingress_service::ChunkIngressMessage;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_database::submodule::{SubmoduleStore as _, tables::DataRootInfo};
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
@@ -3163,8 +3167,8 @@ mod peer_chunk_validation_tests {
     use irys_types::{
         Base64, ChunkFormat, Config, DataLedger, H256, IrysAddress, IrysBlockHeader,
         LedgerChunkOffset, LedgerChunkRange, PartitionChunkOffset, RelativeChunkOffset, Traced,
-        TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
-        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+        TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use nodit::interval::ii;
     use std::{
@@ -3837,13 +3841,14 @@ mod entropy_peer_sync_tests {
     use super::DataSyncServiceInner;
     use crate::chunk_fetcher::MockChunkFetcher;
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, ChunkType, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
-        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, app_state::DatabaseProvider,
-        partition::PartitionAssignment, partition_chunk_offset_ie,
+        PeerAddress, PeerListItem, PeerScore, ProtocolVersion, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -4081,13 +4086,14 @@ mod assignment_follow_tests {
     use crate::chunk_fetcher::{ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher};
     use crate::data_sync_service::chunk_orchestrator::{ChunkRequest, ChunkRequestState};
     use crate::services::ServiceSenders;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, DataLedger, H256, IrysAddress, IrysBlockHeader, IrysPeerId, PartitionChunkOffset,
         PeerAddress, PeerListItem, PeerScore, ProtocolVersion, UnpackedChunk,
-        app_state::DatabaseProvider, partition::PartitionAssignment, partition_chunk_offset_ie,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::Instant;

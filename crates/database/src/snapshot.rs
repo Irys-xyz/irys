@@ -7,6 +7,7 @@ use eyre::Context as _;
 use reth_db::Database as _;
 use reth_db::DatabaseEnv;
 use reth_db::mdbx::ffi;
+use reth_db::table::Table as _;
 use reth_db::transaction::{DbTx as _, DbTxMut as _};
 use std::ffi::CString;
 use std::path::Path;
@@ -124,9 +125,9 @@ pub fn copy_dir_recursive(src: &Path, dest: &Path) -> eyre::Result<()> {
 
 /// Clear node-local tables in an opened consensus-DB env.
 ///
-/// `PeerListItems` is always cleared. Cache tables (`CachedDataRoots`,
-/// `CachedChunksIndex`, `CachedChunks`, `IngressProofs`) are cleared when
-/// `include_caches` is false.
+/// Peer and block-stream rows are always cleared. Legacy cache tables still
+/// present in this environment are cleared when `include_caches` is false.
+/// Since V4, caches live in a separate environment handled by the snapshot CLI.
 pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result<()> {
     let tx = env
         .tx_mut()
@@ -137,16 +138,22 @@ pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result
     tx.clear::<IrysBlockStreamEvents>()
         .context("clearing IrysBlockStreamEvents")?;
     if !include_caches {
-        tx.clear::<CachedDataRoots>()
-            .context("clearing CachedDataRoots")?;
-        tx.clear::<CachedChunksIndex>()
-            .context("clearing CachedChunksIndex")?;
-        tx.clear::<CachedChunks>()
-            .context("clearing CachedChunks")?;
-        tx.clear::<CachedIngressLeaves>()
-            .context("clearing CachedIngressLeaves")?;
-        tx.clear::<IngressProofs>()
-            .context("clearing IngressProofs")?;
+        for name in [
+            CachedDataRoots::NAME,
+            CachedChunksIndex::NAME,
+            CachedChunks::NAME,
+            CachedIngressLeaves::NAME,
+            IngressProofs::NAME,
+        ] {
+            let table = match tx.inner().open_db(Some(name)) {
+                Ok(table) => table,
+                Err(reth_db::mdbx::Error::NotFound) => continue,
+                Err(error) => return Err(error).with_context(|| format!("opening {name}")),
+            };
+            tx.inner()
+                .clear_db(table.dbi())
+                .with_context(|| format!("clearing {name}"))?;
+        }
     }
     tx.commit().context("committing snapshot strip")?;
     Ok(())
@@ -253,11 +260,22 @@ mod tests {
     }
 
     #[rstest]
-    #[case::strip_caches(false)]
-    #[case::keep_caches(true)]
-    fn copy_and_strip_round_trip(#[case] include_caches: bool) {
-        let (_src_dir, src_db) = open_fixture();
+    #[case::split_strip(false, false)]
+    #[case::split_keep(true, false)]
+    #[case::legacy_strip(false, true)]
+    #[case::legacy_keep(true, true)]
+    fn copy_and_strip_round_trip(#[case] include_caches: bool, #[case] legacy_cache: bool) {
+        let (_src_dir, mut src_db) = open_fixture();
         let block_hash = populate_source(&src_db);
+        if legacy_cache {
+            src_db
+                .create_and_track_tables_for::<crate::tables::CacheTables>()
+                .expect("create legacy cache tables");
+            src_db
+                .update(|tx| tx.put::<CachedDataRoots>(block_hash, Default::default()))
+                .expect("open legacy cache write")
+                .expect("seed legacy cache");
+        }
         assert_eq!(count_peers(&src_db), 2);
 
         let dest_dir = TempDirBuilder::new().build();
@@ -303,6 +321,16 @@ mod tests {
 
         assert_eq!(count_peers(&src_db), 2, "source db left untouched");
         assert!(block_present(&src_db, &block_hash));
+        if legacy_cache {
+            let tx = copy_db.tx().expect("read copied legacy cache");
+            assert_eq!(
+                tx.get::<CachedDataRoots>(block_hash)
+                    .expect("read cached root")
+                    .is_some(),
+                include_caches,
+                "legacy cache follows the include flag"
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::WrapErr as _;
+use irys_database::DatabaseProvider;
 use irys_domain::{ChunkType, RecallChunks, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -15,7 +16,6 @@ use irys_storage::ii;
 use irys_types::{
     Base64, ChunkDataPath, Config, DataLedger, H256List, PartitionChunkOffset, PartitionChunkRange,
     ProofDeserialize as _, SendTraced as _, TokioServiceHandle, U256,
-    app_state::DatabaseProvider,
     block_production::{Seed, SolutionContext, TxPathJob, TxPathSource},
     get_leaf_proof, partition_chunk_offset_ie, u256_from_le_bytes,
 };

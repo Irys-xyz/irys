@@ -3,9 +3,10 @@
 //! `irys-vdf` drop its direct `irys-database`/`reth-db` dependencies while the
 //! storage stack stays in `irys-chain`.
 
+use irys_database::DatabaseProvider;
 use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
-use irys_types::{BlockHash, DatabaseProvider, IrysBlockHeader, block_production::Seed};
+use irys_types::{BlockHash, IrysBlockHeader, block_production::Seed};
 use irys_vdf::state::{VdfBootstrap, VdfSeedSource};
 use reth_db::Database as _;
 use std::collections::VecDeque;

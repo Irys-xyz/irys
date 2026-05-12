@@ -8,6 +8,7 @@ use crate::{
 use crate::metrics;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
     db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
@@ -19,9 +20,9 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DatabaseProvider, H256, IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _,
-    SystemLedger, TokioServiceHandle, Traced, get_ingress_proofs,
+    BlockBody, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, H256,
+    IrysBlockHeader, IrysTransactionId, SealedBlock, SendTraced as _, SystemLedger,
+    TokioServiceHandle, Traced, get_ingress_proofs,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;

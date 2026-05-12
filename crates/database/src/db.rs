@@ -399,7 +399,7 @@ pub trait DatabaseProviderCacheExt {
         F: FnOnce(&ScopedTx<Cache>) -> T;
 }
 
-impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
+impl DatabaseProviderCacheExt for crate::DatabaseProvider {
     fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
         F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
@@ -412,7 +412,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
     {
         let _gate = lock_writer_gate(self.cache(), call_site);
-        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
+        let tx = self.cache().begin_rw()?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -422,7 +422,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&ScopedTx<Cache>) -> eyre::Result<T>,
     {
-        let tx = ScopedTx::<Cache>::begin_ro(self.cache())?;
+        let tx = self.cache().begin_ro()?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -433,7 +433,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         F: FnOnce(&ScopedTxMut<Cache>) -> T,
     {
         let _gate = lock_writer_gate(self.cache(), "update_cache");
-        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
+        let tx = self.cache().begin_rw()?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -443,7 +443,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&ScopedTx<Cache>) -> T,
     {
-        let tx = ScopedTx::<Cache>::begin_ro(self.cache())?;
+        let tx = self.cache().begin_ro()?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -459,7 +459,7 @@ pub trait DatabaseProviderTestExt {
         Self: Sized;
 }
 
-impl DatabaseProviderTestExt for irys_types::DatabaseProvider {
+impl DatabaseProviderTestExt for crate::DatabaseProvider {
     fn for_testing(
         consensus_path: &std::path::Path,
         cache_path: &std::path::Path,
@@ -528,7 +528,7 @@ mod tests {
     #[case::eyre_at(CacheWriteMethod::EyreAt)]
     fn cache_writers_wait_for_the_cache_gate(#[case] method: CacheWriteMethod) -> eyre::Result<()> {
         let tmp = irys_testing_utils::TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
+        let db = crate::DatabaseProvider::for_testing(tmp.path(), &tmp.path().join("cache"))?;
         let writer_spawned = Barrier::new(2);
         let entered_closure = AtomicBool::new(false);
 

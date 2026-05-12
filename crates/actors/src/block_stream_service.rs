@@ -25,9 +25,10 @@
 //! `seq <= last_seen` as a no-op (or reconnect for durable replay).
 
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::block_stream::{BlockEvent, EventsPage, StreamEvent, StreamFrame};
-use irys_types::{DatabaseProvider, H256, TokioServiceHandle};
+use irys_types::{H256, TokioServiceHandle};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::num::NonZeroUsize;

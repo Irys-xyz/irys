@@ -1,9 +1,10 @@
 use crate::block_reward::block_emission;
 use eyre::Result;
+use irys_database::DatabaseProvider;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndexReadGuard, SupplyState};
 use irys_reward_curve::HalvingCurve;
-use irys_types::{DatabaseProvider, U256};
+use irys_types::U256;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};

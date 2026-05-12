@@ -13,6 +13,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
 };
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
@@ -22,8 +23,8 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
+    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,

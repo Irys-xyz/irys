@@ -2,14 +2,14 @@ use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, poa_ledger_matches_assignment,
     poa_partition_is_owned_by_miner, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
+use irys_database::DatabaseProvider;
 use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, EpochSnapshot};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_testing_utils::new_mock_signed_header;
 use irys_types::{
-    Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
-    IrysBlockHeader, LedgerIndexItem, PoaData, UnixTimestamp, UnixTimestampMs,
-    compute_solution_hash,
+    Base64, BlockIndexItem, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader,
+    LedgerIndexItem, PoaData, UnixTimestamp, UnixTimestampMs, compute_solution_hash,
     hardfork_config::{Activation, Delta},
     partition::PartitionAssignment,
 };

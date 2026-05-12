@@ -62,6 +62,7 @@ use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, ensure, eyre};
+use irys_database::DatabaseProvider;
 use irys_database::{
     canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
     reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
@@ -70,7 +71,6 @@ use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, SealedBlock, U256,
-    app_state::DatabaseProvider,
     fee_distribution::TermFeeCharges,
     hardfork_config::{Cascade, ForBlock, ForEpoch},
     ledger_chunk_offset_ii,
@@ -3812,12 +3812,13 @@ mod tests {
     /// never held canonical data at all.
     #[tokio::test]
     async fn submit_expiry_skips_canonical_unwritten_slots() -> eyre::Result<()> {
+        use irys_database::DatabaseProvider;
         use irys_database::{insert_block_header, insert_tx_header, set_data_tx_included_height};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
+            DataTransactionMetadata, H256List, LedgerIndexItem,
         };
         use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};
@@ -4257,12 +4258,13 @@ mod tests {
     /// users charged, non-promotable, and unsettled.
     #[test_log::test(tokio::test)]
     async fn empty_partition_expired_slot_still_refunds_unpromoted_txs() -> eyre::Result<()> {
+        use irys_database::DatabaseProvider;
         use irys_database::{insert_block_header, insert_tx_header};
         use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
             ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
+            DataTransactionMetadata, H256List, LedgerIndexItem,
         };
         use reth_db::transaction::DbTxMut as _;
         use std::sync::{Arc, RwLock};

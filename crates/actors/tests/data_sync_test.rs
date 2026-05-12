@@ -175,7 +175,7 @@ impl DataSyncServiceTestHarness {
         // (no residual-hole proof-signer expansion).
         let db_path = config.node_config.base_directory.join("data_sync_test_db");
         let db = {
-            use irys_types::app_state::DatabaseProvider;
+            use irys_database::DatabaseProvider;
             DatabaseProvider::for_testing(&db_path, &db_path.join("cache")).expect("test db")
         };
 
@@ -1038,7 +1038,7 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     ));
 
     let db = {
-        use irys_types::app_state::DatabaseProvider;
+        use irys_database::DatabaseProvider;
         DatabaseProvider::for_testing(
             &config.node_config.base_directory.join("orchestrator-db"),
             &config

@@ -4,6 +4,7 @@ use crate::chunk_ingress_service::ingress_proofs::{
     reanchor_and_store_ingress_proof,
 };
 use crate::metrics;
+use irys_database::DatabaseProvider;
 use irys_database::{
     cached_data_root_by_data_root, delete_ingress_proof_if_unchanged,
     delete_unprotected_cached_chunks_older_than, get_data_tx_metadata,
@@ -24,9 +25,9 @@ use irys_domain::{
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DataTransactionHeader, DatabaseProvider, GIGABYTE, H256,
-    IngressProof, IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnixTimestamp,
+    Config, DataLedger, DataRoot, DataTransactionHeader, GIGABYTE, H256, IngressProof,
+    IrysBlockHeader, LedgerChunkOffset, PartitionChunkOffset, SendTraced as _, TokioServiceHandle,
+    Traced, TxChunkOffset, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -468,7 +469,7 @@ impl InnerCacheTask {
         let mut candidates: BTreeMap<DataRoot, BTreeSet<TxChunkOffset>> = BTreeMap::new();
         let mut tally = PruneTally::default();
         {
-            let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
+            let tx = self.db.cache().begin_ro()?;
             let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
             let seek_key: DataRoot = H256::random();
             let mut chunk_walk = chunk_cursor.walk(Some(seek_key))?;
@@ -1105,7 +1106,7 @@ impl InnerCacheTask {
         // released between batches rather than held for the whole table scan.
         let mut candidates: Vec<EvictionRecord> = Vec::new();
         {
-            let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
+            let tx = self.db.cache().begin_ro()?;
             let consensus_tx = self.db.tx()?;
             let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
             let seek_key: DataRoot = H256::random();
@@ -1423,7 +1424,7 @@ impl InnerCacheTask {
     ) -> eyre::Result<()> {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
-        let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
+        let tx = self.db.cache().begin_ro()?;
         let consensus_tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
         let mut walker = cursor.walk(Some(seek_key))?;
@@ -2082,6 +2083,7 @@ mod tests {
     }
 
     use super::*;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_database::{
         database,
@@ -2095,7 +2097,7 @@ mod tests {
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
-        NodeConfig, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+        NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};

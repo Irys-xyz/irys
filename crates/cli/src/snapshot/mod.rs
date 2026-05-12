@@ -10,6 +10,7 @@ pub(crate) mod import;
 pub(crate) mod manifest;
 
 pub(crate) const IRYS_CONSENSUS_SUBDIR: &str = "irys_consensus_data";
+pub(crate) const IRYS_CACHE_SUBDIR: &str = "irys_cache_data";
 pub(crate) const BLOCK_INDEX_SUBDIR: &str = "block_index";
 pub(crate) const RETH_SUBDIR: &str = "reth";
 pub(crate) const GENESIS_FILE: &str = ".irys_genesis.json";
@@ -19,14 +20,16 @@ pub(crate) const STORAGE_MODULES_SUBDIR: &str = "storage_modules";
 
 #[cfg(test)]
 mod round_trip_tests {
-    use super::IRYS_CONSENSUS_SUBDIR;
     use super::export::{ExportOpts, run_export};
     use super::import::{ImportOpts, run_import};
+    use super::{IRYS_CACHE_SUBDIR, IRYS_CONSENSUS_SUBDIR};
     use irys_database::reth_db::cursor::DbCursorRO as _;
     use irys_database::reth_db::mdbx::DatabaseArguments;
-    use irys_database::reth_db::transaction::DbTx as _;
+    use irys_database::reth_db::transaction::{DbTx as _, DbTxMut as _};
     use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
-    use irys_database::tables::{ConsensusTables, IrysBlockHeaders, PeerListItems};
+    use irys_database::tables::{
+        CacheTables, CachedDataRoots, ConsensusTables, IrysBlockHeaders, PeerListItems,
+    };
     use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -85,6 +88,25 @@ mod round_trip_tests {
             .expect("stamp schema inner");
         drop(irys_db);
 
+        let cache = open_or_create_db(
+            data_dir.join(IRYS_CACHE_SUBDIR),
+            CacheTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open cache db");
+        cache
+            .update(|tx| -> eyre::Result<()> {
+                irys_database::set_cache_database_schema_version(
+                    tx,
+                    irys_types::DatabaseVersion::CURRENT,
+                )?;
+                tx.put::<CachedDataRoots>(block.block_hash, Default::default())?;
+                Ok(())
+            })
+            .expect("cache write")
+            .expect("seed cache");
+        drop(cache);
+
         std::fs::write(data_dir.join(".irys_genesis.json"), b"{}").expect("write genesis");
 
         let reth_db = data_dir.join("reth/db");
@@ -122,8 +144,10 @@ mod round_trip_tests {
         n
     }
 
-    #[test]
-    fn export_then_import_round_trip() {
+    #[rstest::rstest]
+    #[case::without_cache(false)]
+    #[case::with_cache(true)]
+    fn export_then_import_round_trip(#[case] include_caches: bool) {
         let src_keep = TempDirBuilder::new().build();
         let src_dir: PathBuf = src_keep.path().to_path_buf();
         let block_hash = build_source(&src_dir);
@@ -134,7 +158,7 @@ mod round_trip_tests {
         run_export(ExportOpts {
             data_dir: src_dir,
             output: archive_path.clone(),
-            include_caches: false,
+            include_caches,
             chain_id: 7777,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
@@ -151,7 +175,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 7777,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT.into(),
         })
         .expect("import");
 
@@ -195,6 +219,29 @@ mod round_trip_tests {
         let tx = imported.tx().expect("ro tx");
         let header: Option<_> = tx.get::<IrysBlockHeaders>(block_hash).expect("get header");
         assert!(header.is_some(), "specific block_hash present");
+        let cache_path = target_dir.join(IRYS_CACHE_SUBDIR);
+        assert_eq!(
+            cache_path.exists(),
+            include_caches,
+            "cache follows the include flag"
+        );
+        if include_caches {
+            let cache = DatabaseEnv::open(
+                &cache_path,
+                DatabaseEnvKind::RO,
+                DatabaseArguments::irys_testing().expect("testing args"),
+            )
+            .expect("open imported cache");
+            assert!(
+                cache
+                    .tx()
+                    .expect("cache read")
+                    .get::<CachedDataRoots>(block_hash)
+                    .expect("read imported cached root")
+                    .is_some(),
+                "cached root carried over"
+            );
+        }
     }
 
     /// Helper: build a valid snapshot archive from a source dir, returning its path.
@@ -271,7 +318,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 4242,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT.into(),
         })
         .expect_err("smuggled archive must be rejected");
         assert!(
@@ -304,15 +351,26 @@ mod round_trip_tests {
         .expect("write stale params");
         std::fs::write(target_dir.join("irys_submodules.toml"), b"old = true")
             .expect("write stale submodules");
+        std::fs::create_dir_all(target_dir.join(IRYS_CACHE_SUBDIR)).expect("mk stale cache");
+        std::fs::write(
+            target_dir.join(IRYS_CACHE_SUBDIR).join("mdbx.dat"),
+            b"stale",
+        )
+        .expect("write stale cache");
 
         run_import(ImportOpts {
             input: archive,
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4243,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT.into(),
         })
         .expect("force import succeeds");
+
+        assert!(
+            !target_dir.join(IRYS_CACHE_SUBDIR).exists(),
+            "stale cache must be purged under --force"
+        );
 
         assert!(
             !target_dir.join("storage_modules").exists(),
@@ -385,7 +443,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4244,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT.into(),
         })
         .unwrap_err();
         assert!(
@@ -429,7 +487,7 @@ mod round_trip_tests {
             data_dir: target_dir,
             force: false,
             expected_chain_id: 11,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT.into(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("not empty"), "got: {err}");

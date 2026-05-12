@@ -264,7 +264,7 @@ impl BlockStatusProvider {
 #[cfg(test)]
 impl BlockStatusProvider {
     #[cfg(test)]
-    pub fn mock(node_config: &NodeConfig, db: irys_types::DatabaseProvider) -> Self {
+    pub fn mock(node_config: &NodeConfig, db: irys_database::DatabaseProvider) -> Self {
         use irys_domain::{BlockIndex, BlockTree};
 
         let mut genesis = IrysBlockHeader::new_mock_header();
@@ -515,10 +515,11 @@ impl BlockProvider for BlockStatusProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockState;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{DatabaseProvider, NodeConfig};
+    use irys_types::NodeConfig;
     use rstest::rstest;
 
     fn mock_provider() -> (BlockStatusProvider, IrysBlockHeader, tempfile::TempDir) {

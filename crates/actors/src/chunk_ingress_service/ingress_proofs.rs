@@ -1,4 +1,5 @@
 use super::ChunkIngressServiceInner;
+use irys_database::DatabaseProvider;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::store_ingress_proof;
@@ -7,8 +8,7 @@ use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, Traced,
+    BlockHash, Config, DataRoot, H256, IngressMerkleLeaf, IngressProof, SendTraced as _, Traced,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};

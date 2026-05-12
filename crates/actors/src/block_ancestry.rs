@@ -1,6 +1,7 @@
+use irys_database::DatabaseProvider;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockTree, BlockTreeReadGuard};
-use irys_types::{H256, IrysBlockHeader, app_state::DatabaseProvider};
+use irys_types::{H256, IrysBlockHeader};
 use std::ops::ControlFlow;
 
 /// Resolve a block header by hash against an already-held tree read guard,

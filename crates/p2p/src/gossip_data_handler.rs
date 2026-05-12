@@ -1470,13 +1470,14 @@ mod fetch_body_retries_tests {
 mod block_body_serve_cap_tests {
     use super::*;
     use crate::tests::util::data_handler_stub;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
-        BlockHash, Config, DatabaseProvider, H256, IrysAddress, IrysPeerId, NodeConfig,
-        PeerAddress, PeerListItem, PeerScore,
+        BlockHash, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerAddress, PeerListItem,
+        PeerScore,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -1735,6 +1736,7 @@ mod body_fetch_recovery_tests {
     use crate::block_pool::BlockRemovalReason;
     use crate::tests::util::{FakeGossipServer, data_handler_stub_with_sync, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
@@ -1742,9 +1744,7 @@ mod body_fetch_recovery_tests {
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::SealedBlock;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{
-        BlockBody, Config, DatabaseProvider, H256, IrysAddress, IrysPeerId, NodeConfig, PeerScore,
-    };
+    use irys_types::{BlockBody, Config, H256, IrysAddress, IrysPeerId, NodeConfig, PeerScore};
     use irys_utils::circuit_breaker::CircuitBreakerConfig;
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -2777,12 +2777,13 @@ mod execution_payload_tests {
     use super::*;
     use crate::tests::util::{FakeGossipServer, data_handler_stub, peer_list_item};
     use crate::types::GossipResponse;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::PeerList;
     use irys_domain::chain_sync_state::ChainSyncState;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::v2::GossipDataV2;
-    use irys_types::{DatabaseProvider, NodeConfig, PeerScore};
+    use irys_types::{NodeConfig, PeerScore};
     use reth::primitives::Header;
     use reth::primitives::proofs::calculate_ommers_root;
     use reth_ethereum_primitives::BlockBody as EvmBlockBody;

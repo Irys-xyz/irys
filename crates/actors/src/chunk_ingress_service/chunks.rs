@@ -6,15 +6,16 @@ use super::metrics::{
     record_flush_failure, record_validation_duration,
 };
 
+use irys_database::DatabaseProvider;
 use irys_database::{
     complete_ingress_leaves, confirm_data_size_for_data_root, db::DatabaseProviderCacheExt as _,
 };
 use irys_domain::{StorageModule, WriteDataChunkError};
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    ChunkPathHash, DataLedger, DataRoot, DatabaseProvider, H256, IngressMerkleLeaf, IngressProof,
-    SendTraced as _, chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256,
-    irys::IrysSigner, validate_path, validate_path_byte_range,
+    ChunkPathHash, DataLedger, DataRoot, H256, IngressMerkleLeaf, IngressProof, SendTraced as _,
+    chunk::UnpackedChunk, expected_chunk_byte_range, hash_sha256, irys::IrysSigner, validate_path,
+    validate_path_byte_range,
 };
 use irys_utils::ElapsedMs as _;
 use lru::LruCache;

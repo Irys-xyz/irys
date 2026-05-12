@@ -1,7 +1,8 @@
 use crate::block_ancestry::walk_ancestors_tree_then_db;
+use irys_database::DatabaseProvider;
 use irys_database::{canonical_commitment_included_height, db::IrysDatabaseExt as _};
 use irys_domain::BlockTreeReadGuard;
-use irys_types::{CommitmentTransaction, DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::{CommitmentTransaction, H256, IrysBlockHeader};
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 

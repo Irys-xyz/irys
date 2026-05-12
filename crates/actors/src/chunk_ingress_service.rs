@@ -20,11 +20,12 @@ use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use irys_database::DatabaseProvider;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
     BlockHash, ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, TxChunkOffset,
-    app_state::DatabaseProvider, chunk::UnpackedChunk,
+    chunk::UnpackedChunk,
 };
 use lru::LruCache;
 use pending_ingress_proofs::PendingIngressProofs;
