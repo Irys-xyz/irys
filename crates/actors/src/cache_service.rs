@@ -401,10 +401,15 @@ impl InnerCacheTask {
                         );
                     }
                 }
-                let horizon = match (inclusion_max_height, cached.expiry_height) {
+                // Only fall back to expiry_height when there are no candidate
+                // blocks at all. A non-empty block_set with no resolvable
+                // headers means the blocks haven't been processed yet (or live
+                // on a not-yet-followed fork) — pruning on expiry in that case
+                // would evict entries that the inclusion path still needs.
+                let horizon = match (inclusion_max_height, cached.block_set.is_empty()) {
                     (Some(h), _) => Some(h),
-                    (None, Some(e)) => Some(e),
-                    (None, None) => None,
+                    (None, true) => cached.expiry_height,
+                    (None, false) => None,
                 };
                 let max_height: u64 = match horizon {
                     Some(h) => h,
