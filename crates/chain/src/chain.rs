@@ -1049,9 +1049,21 @@ impl IrysNode {
                     // report_metrics() — that hook only covers Reth's DB.
                     // Surfaces freelist, table sizes, and timed-out-reader
                     // gauges so MDBX contention shows up alongside the per-tx
-                    // commit-latency histograms.
-                    irys_database::db_metrics::report_irys_consensus_db_gauges(
+                    // commit-latency histograms. Run for both Irys envs so the
+                    // cache DB (added in V4) gets the same observability.
+                    irys_database::db_metrics::report_db_gauges::<
+                        irys_database::scoped_tx::Consensus,
+                        _,
+                    >(
                         irys_db_for_metrics.consensus().as_ref(),
+                        irys_database::tables::ConsensusTables::ALL,
+                    );
+                    irys_database::db_metrics::report_db_gauges::<
+                        irys_database::scoped_tx::Cache,
+                        _,
+                    >(
+                        irys_db_for_metrics.cache().as_ref(),
+                        irys_database::tables::CacheTables::ALL,
                     );
                 }
             });
