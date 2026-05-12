@@ -1,6 +1,7 @@
 # Scoped Transaction Types
 
 ## Status
+
 Accepted
 
 ## Context
@@ -75,4 +76,5 @@ See also: [Cache DB Split](cache-db-split.md)
 - `pub fn new` on `ScopedTx` / `ScopedTxMut` is exposed (rather than `pub(crate)`) so that downstream services like `cache_service::prune_data_root_cache` can manually construct a scoped tx when the closure-based `view_cache` / `update_cache` shape does not fit (e.g., async code holding the tx across `.await` points, or code that opens both a cache tx and a consensus tx in the same function).
 
 ## Source
+
 Branch `feat/cache-db`.

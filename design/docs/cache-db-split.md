@@ -1,6 +1,7 @@
 # Cache DB Split
 
 ## Status
+
 Accepted
 
 ## Context
@@ -15,7 +16,7 @@ The alternative of optimizing cache-pruning batch sizes was rejected because it 
 
 Open two MDBX environments at startup:
 
-```
+```text
 <base_directory>/
 ├── irys_consensus_data/    # existing — consensus-critical tables
 └── irys_cache_data/        # new — reconstructable cache tables
@@ -47,4 +48,5 @@ See also: [Scoped Transaction Types](scoped-transaction-types.md), [Cross-Env Mi
 - A subset of test setups and pre-existing `DatabaseProvider` consumers that wrapped non-consensus envs (e.g., `StorageSubmodule`, the CLI `RollbackBlocks` command) now construct `DatabaseProvider::new(env.clone(), env)` to satisfy the two-env constructor while only using the Deref→consensus path. This is pre-existing misuse of `DatabaseProvider` as a generic single-env wrapper, flagged for follow-up cleanup.
 
 ## Source
+
 Branch `feat/cache-db`.
