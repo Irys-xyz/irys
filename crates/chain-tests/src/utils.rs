@@ -1424,8 +1424,8 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .node_ctx
                 .db
                 .view_cache(|tx| walk_all::<IngressProofs, _>(tx.inner()))
-                .unwrap()
-                .unwrap()
+                .map_err(|e| eyre::eyre!("cache view_cache failed: {e}"))?
+                .map_err(|e| eyre::eyre!("walk_all<IngressProofs> failed: {e}"))?
                 .into_iter()
                 .fold(
                     HashMap::new(),
