@@ -40,6 +40,7 @@ use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
+use rayon::prelude::*;
 use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
@@ -724,7 +725,7 @@ pub async fn prevalidate_block(
         })?;
 
         let ledger_txs = transactions.get_ledger_txs(ledger);
-        validate_transactions(ledger_txs, &dl.tx_ids.0)?;
+        validate_transactions(&pool, ledger_txs, &dl.tx_ids.0)?;
         debug!(
             block.hash = ?block.block_hash,
             block.height = ?block.height,
@@ -820,7 +821,7 @@ pub async fn prevalidate_block(
         }
 
         // Validate commitment transactions: count, IDs, and signatures
-        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        validate_transactions(&pool, commitment_txs, &commitment_ledger.tx_ids.0)?;
         debug!(
             block.hash = ?block.block_hash,
             block.height = ?block.height,
@@ -852,11 +853,12 @@ fn find_invalid_commitment_version(
 
 /// Validate transactions against expected IDs from the block header.
 /// Checks: count matches, IDs match in order, signatures are valid.
-fn validate_transactions<T: IrysTransactionCommon>(
+fn validate_transactions<T: IrysTransactionCommon + Sync>(
+    pool: &rayon::ThreadPool,
     txs: &[T],
     expected_ids: &[IrysTransactionId],
 ) -> Result<(), PreValidationError> {
-    // Check count matches
+    // Check count matches (sequential — cold path)
     if txs.len() != expected_ids.len() {
         let provided_ids: std::collections::HashSet<_> =
             txs.iter().map(IrysTransactionCommon::id).collect();
@@ -868,21 +870,24 @@ fn validate_transactions<T: IrysTransactionCommon>(
         return Err(PreValidationError::MissingTransactions(missing));
     }
 
-    // Check IDs match in order and signatures are valid
-    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
-        let actual_id = tx.id();
-        if actual_id != *expected_id {
-            return Err(PreValidationError::TransactionIdMismatch {
-                expected: *expected_id,
-                actual: actual_id,
-            });
-        }
-        if !tx.is_signature_valid() {
-            return Err(PreValidationError::InvalidTransactionSignature(actual_id));
-        }
-    }
-
-    Ok(())
+    // Check IDs match in order and signatures are valid (parallel ECDSA)
+    pool.install(|| {
+        txs.par_iter()
+            .zip(expected_ids.par_iter())
+            .try_for_each(|(tx, expected_id)| {
+                let actual_id = tx.id();
+                if actual_id != *expected_id {
+                    return Err(PreValidationError::TransactionIdMismatch {
+                        expected: *expected_id,
+                        actual: actual_id,
+                    });
+                }
+                if !tx.is_signature_valid() {
+                    return Err(PreValidationError::InvalidTransactionSignature(actual_id));
+                }
+                Ok(())
+            })
+    })
 }
 
 pub fn prev_output_is_valid(
