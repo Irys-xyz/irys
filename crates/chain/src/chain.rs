@@ -82,7 +82,7 @@ use tokio::{
     runtime::Handle,
     sync::{
         mpsc,
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
 };
@@ -1765,7 +1765,7 @@ impl IrysNode {
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
-        metrics::record_vdf_global_step(global_step_number);
+        irys_vdf::metrics::record_vdf_global_step(global_step_number);
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
@@ -2018,7 +2018,7 @@ impl IrysNode {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
+        vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,

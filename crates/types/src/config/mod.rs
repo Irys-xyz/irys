@@ -114,6 +114,14 @@ impl Config {
             &self.consensus.vdf.max_allowed_vdf_fork_steps,
             &minimum_step_capacity
         );
+        ensure!(
+            self.vdf.validation_batch_size > 0,
+            "vdf.validation_batch_size must be > 0"
+        );
+        ensure!(
+            self.vdf.progress_timeout_secs > 0,
+            "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
+        );
 
         // ensure that prune_at_capacity_percent is a sane value
         let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
@@ -248,6 +256,8 @@ impl From<&NodeConfig> for VdfConfig {
             max_allowed_vdf_fork_steps: consensus.max_allowed_vdf_fork_steps,
             sha_1s_difficulty: consensus.sha_1s_difficulty,
             throttle: value.vdf.throttle,
+            progress_timeout_secs: value.vdf.progress_timeout_secs,
+            validation_batch_size: value.vdf.validation_batch_size,
         }
     }
 }
@@ -308,6 +318,12 @@ pub struct VdfConfig {
     /// When true, enforce a minimum step duration to prevent VDF from
     /// outrunning block production when sha_1s_difficulty is low.
     pub throttle: bool,
+
+    /// See `VdfNodeConfig::progress_timeout_secs`.
+    pub progress_timeout_secs: u64,
+
+    /// See `VdfNodeConfig::validation_batch_size`.
+    pub validation_batch_size: usize,
 }
 
 impl VdfConfig {

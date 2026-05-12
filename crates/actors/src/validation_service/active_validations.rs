@@ -14,19 +14,19 @@
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
-use irys_vdf::state::CancelEnum;
+use irys_vdf::state::{CancelEnum, WaitForStepError};
 use priority_queue::PriorityQueue;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument as _, debug, info, instrument, warn};
 
 use crate::block_tree_service::ValidationResult;
 use crate::metrics;
-use crate::validation_service::VdfValidationResult;
 use crate::validation_service::block_validation_task::BlockValidationTask;
+use crate::validation_service::{VdfTaskStage, VdfValidationResult};
 
 /// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -89,6 +89,8 @@ pub(super) struct ConcurrentValidationResult {
 pub(super) struct PreemptibleVdfTask {
     pub task: BlockValidationTask,
     pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+    pub stage_u8: Arc<std::sync::atomic::AtomicU8>,
+    pub progress_instant: Arc<Mutex<Instant>>,
 }
 
 impl PreemptibleVdfTask {
@@ -101,16 +103,41 @@ impl PreemptibleVdfTask {
         let started = Instant::now();
         // No bridge task needed - just use the AtomicU8 directly!
         let result = match inner
-            .ensure_vdf_is_valid(header, self.cancel_u8.clone(), skip_vdf)
+            .ensure_vdf_is_valid(
+                header,
+                self.cancel_u8.clone(),
+                self.stage_u8.clone(),
+                self.progress_instant.clone(),
+                skip_vdf,
+            )
             .await
         {
             Ok(()) => VdfValidationResult::Valid,
             Err(e) => {
-                // Check if we were cancelled by inspecting the AtomicU8
-                if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
-                    VdfValidationResult::Cancelled
-                } else {
-                    VdfValidationResult::Invalid(e)
+                // Distinguish cooperative cancellation from a stalled VDF: Cancelled
+                // requeues, Stalled (and other errors) surface as Invalid.
+                // The cancellation/stall counter gives operators a quick way to
+                // see which mode of failure is occurring without scraping logs;
+                // `vdf_stalled` is recorded here for parity even though Stalled
+                // maps to Invalid downstream — the metric counts wait-pathway
+                // failures by reason, not just true cancellations.
+                match e.downcast_ref::<WaitForStepError>() {
+                    Some(WaitForStepError::Cancelled) => {
+                        metrics::record_validation_cancellation("vdf_preempted");
+                        VdfValidationResult::Cancelled
+                    }
+                    Some(WaitForStepError::Stalled { .. }) => {
+                        metrics::record_validation_cancellation("vdf_stalled");
+                        VdfValidationResult::Invalid(e)
+                    }
+                    None => {
+                        if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                            metrics::record_validation_cancellation("vdf_preempted");
+                            VdfValidationResult::Cancelled
+                        } else {
+                            VdfValidationResult::Invalid(e)
+                        }
+                    }
                 }
             }
         };
@@ -125,6 +152,9 @@ pub(super) struct RunningVdfTask {
     pub hash: BlockHash,
     pub priority: BlockPriorityMeta,
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
+    pub stage_signal: Arc<std::sync::atomic::AtomicU8>,
+    pub last_progress_at: Arc<Mutex<Instant>>,
+    pub started_at: Instant,
     pub sealed_block: Arc<SealedBlock>,
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
     /// Clone of the task retained so the select handler can requeue if the
@@ -144,6 +174,8 @@ pub(super) trait VdfSpawnStrategy {
         runtime_handle: &tokio::runtime::Handle,
         task: BlockValidationTask,
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        stage_u8: Arc<std::sync::atomic::AtomicU8>,
+        progress_instant: Arc<Mutex<Instant>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>;
@@ -158,12 +190,21 @@ impl VdfSpawnStrategy for ProductionVdfSpawn {
         runtime_handle: &tokio::runtime::Handle,
         task: BlockValidationTask,
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        stage_u8: Arc<std::sync::atomic::AtomicU8>,
+        progress_instant: Arc<Mutex<Instant>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
         runtime_handle.spawn(
             async move {
-                let (result, task) = PreemptibleVdfTask { task, cancel_u8 }.execute().await;
+                let (result, task) = PreemptibleVdfTask {
+                    task,
+                    cancel_u8,
+                    stage_u8,
+                    progress_instant,
+                }
+                .execute()
+                .await;
                 (hash, result, task)
             }
             .instrument(tracing::info_span!(
@@ -189,6 +230,8 @@ impl VdfSpawnStrategy for TestVdfSpawn {
         runtime_handle: &tokio::runtime::Handle,
         _task: BlockValidationTask,
         _cancel_u8: Arc<std::sync::atomic::AtomicU8>,
+        _stage_u8: Arc<std::sync::atomic::AtomicU8>,
+        _progress_instant: Arc<Mutex<Instant>>,
         _hash: BlockHash,
         _priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -338,6 +381,12 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         // Create AtomicU8 for cancellation
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
         let cancel_signal = Arc::clone(&cancel_u8);
+        let stage_u8 = Arc::new(std::sync::atomic::AtomicU8::new(
+            VdfTaskStage::Starting as u8,
+        ));
+        let stage_signal = Arc::clone(&stage_u8);
+        let progress_instant = Arc::new(Mutex::new(Instant::now()));
+        let last_progress_at = Arc::clone(&progress_instant);
         let sealed_block = Arc::clone(&task.sealed_block);
         let requeue_task = task.clone();
 
@@ -345,6 +394,8 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             &self.runtime_handle,
             task,
             cancel_u8,
+            stage_u8,
+            progress_instant,
             hash,
             priority,
         );
@@ -353,11 +404,45 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             hash,
             priority,
             cancel_signal,
+            stage_signal,
+            last_progress_at,
+            started_at: Instant::now(),
             sealed_block,
             handle,
             requeue_task: Some(requeue_task),
         });
         true
+    }
+
+    pub(super) fn abort_stalled_current(
+        &mut self,
+        hard_timeout: Duration,
+    ) -> Option<(Duration, VdfTaskStage)> {
+        let current = self.current.as_mut()?;
+
+        let stage = VdfTaskStage::from(current.stage_signal.load(Ordering::Relaxed));
+        if matches!(
+            stage,
+            VdfTaskStage::WaitPrevStep | VdfTaskStage::WaitFinalCatchUp | VdfTaskStage::Completed
+        ) {
+            return None;
+        }
+
+        let stalled_for = current
+            .last_progress_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed();
+        if stalled_for < hard_timeout {
+            return None;
+        }
+
+        current
+            .cancel_signal
+            .store(CancelEnum::Cancelled as u8, Ordering::Relaxed);
+        current.handle.abort();
+
+        Some((stalled_for, stage))
     }
 }
 
@@ -1014,6 +1099,10 @@ mod tests {
         priority: BlockPriorityMeta,
     ) -> (RunningVdfTask, Arc<std::sync::atomic::AtomicU8>) {
         let cancel = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
+        let stage = Arc::new(std::sync::atomic::AtomicU8::new(
+            VdfTaskStage::Starting as u8,
+        ));
+        let progress = Arc::new(Mutex::new(Instant::now()));
         let mut header = IrysBlockHeader::new_mock_header();
         header.height = priority.height;
         header.vdf_limiter_info.steps =
@@ -1034,6 +1123,9 @@ mod tests {
             hash,
             priority,
             cancel_signal: Arc::clone(&cancel),
+            stage_signal: stage,
+            last_progress_at: progress,
+            started_at: Instant::now(),
             sealed_block: sealed,
             handle: tokio::spawn(std::future::pending()),
             requeue_task: None,
@@ -1179,6 +1271,56 @@ mod tests {
         assert!(
             scheduler.current.is_none(),
             "No task should start with empty pending"
+        );
+    }
+
+    /// Verifies that the scheduler-level watchdog cancels and aborts a stalled
+    /// current task, annotating it with stage/elapsed metadata for the select
+    /// handler to surface as an invalid result instead of silently wedging.
+    #[tokio::test]
+    async fn test_abort_stalled_current_marks_and_aborts_task() {
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+        let priority = BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::Canonical,
+            vdf_step_count: 1,
+        };
+        let (running_task, cancel) = make_running_vdf_task(priority);
+        *running_task
+            .last_progress_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        running_task
+            .stage_signal
+            .store(VdfTaskStage::ValidateBatch as u8, Ordering::Relaxed);
+        scheduler.current = Some(running_task);
+
+        let (stalled_for, stage) = scheduler
+            .abort_stalled_current(Duration::from_secs(5))
+            .expect("watchdog should abort a stale task");
+        assert_eq!(stage, VdfTaskStage::ValidateBatch);
+        assert!(
+            stalled_for >= Duration::from_secs(10),
+            "stalled metadata should reflect the stale runtime"
+        );
+        assert_eq!(
+            cancel.load(Ordering::Relaxed),
+            CancelEnum::Cancelled as u8,
+            "watchdog must set the cooperative cancel signal before aborting"
+        );
+
+        let current = scheduler
+            .current
+            .as_mut()
+            .expect("current task should remain tracked until the aborted handle resolves");
+        let join_error = match (&mut current.handle).await {
+            Ok(_) => panic!("aborted task should resolve as JoinError"),
+            Err(join_error) => join_error,
+        };
+        assert!(
+            join_error.is_cancelled(),
+            "watchdog abort should cancel the JoinHandle"
         );
     }
 
@@ -1504,6 +1646,11 @@ mod tests {
             hash: ext_header.block_hash,
             priority: initial_priority,
             cancel_signal: cancel,
+            stage_signal: Arc::new(std::sync::atomic::AtomicU8::new(
+                VdfTaskStage::Starting as u8,
+            )),
+            last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            started_at: Instant::now(),
             sealed_block: ext_sealed,
             handle: tokio::spawn(std::future::pending()),
             requeue_task: None,
@@ -1697,6 +1844,11 @@ mod tests {
             hash: ext_hash,
             priority: initial_priority,
             cancel_signal: Arc::clone(&cancel),
+            stage_signal: Arc::new(std::sync::atomic::AtomicU8::new(
+                VdfTaskStage::Starting as u8,
+            )),
+            last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            started_at: Instant::now(),
             sealed_block: Arc::new(
                 SealedBlock::new(
                     ext_header,

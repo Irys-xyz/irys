@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::state::AtomicVdfState;
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -8,7 +9,7 @@ use irys_types::{
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -57,7 +58,7 @@ pub fn run_vdf<B: BlockProvider>(
     global_step_number: u64,
     current_vdf_hash: H256,
     initial_reset_seed: H256,
-    mut fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
+    mut fast_forward_receiver: Receiver<Traced<VdfStep>>,
     is_mining_enabled: Arc<AtomicBool>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
@@ -118,6 +119,10 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
                 ) else {
+                    error!(
+                        vdf.proposed_step = proposed_ff_step.global_step_number,
+                        "VDF thread exiting: store_step failed during fast-forward (lock poisoned)"
+                    );
                     return;
                 };
                 if returned == prev_step {
@@ -134,6 +139,7 @@ pub fn run_vdf<B: BlockProvider>(
                 global_step_number = returned;
                 hash = proposed_ff_step.step;
                 chain_sync_state.record_vdf_step(global_step_number);
+                metrics::record_vdf_global_step(global_step_number);
                 hash = process_reset(
                     global_step_number,
                     hash,
@@ -222,10 +228,15 @@ pub fn run_vdf<B: BlockProvider>(
             global_step_number + 1,
             canonical_global_step_number,
         ) else {
+            error!(
+                vdf.global_step_number = global_step_number,
+                "VDF thread exiting: store_step failed during local stepping (lock poisoned)"
+            );
             return;
         };
         global_step_number = returned;
         chain_sync_state.record_vdf_step(global_step_number);
+        metrics::record_vdf_global_step(global_step_number);
         info!("Seed created {} step number {}", hash, global_step_number);
 
         broadcast_mining_service.broadcast(
@@ -382,7 +393,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -500,7 +511,7 @@ mod tests {
         init_tracing();
 
         let broadcast_mining_service = MockMining;
-        let (_, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -606,7 +617,7 @@ mod tests {
 
         let current_seed = H256::random();
         let reset_seed = H256::random();
-        let (ff_step_sender, ff_step_receiver) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (ff_step_sender, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
         let is_mining_enabled = Arc::new(AtomicBool::new(false));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -643,15 +654,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         ff_step_sender
-            .send_traced(VdfStep {
+            .send(Traced::new(VdfStep {
                 step: H256::random(),
                 global_step_number: 1,
-            })
+            }))
+            .await
             .unwrap();
 
-        tokio::time::timeout(Duration::from_millis(100), vdf_steps_guard.wait_for_step(1))
-            .await
-            .expect("fast-forward step should be applied promptly while syncing");
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            vdf_steps_guard.wait_for_step(1, cancel, Duration::from_secs(30)),
+        )
+        .await
+        .expect("fast-forward step should be applied promptly while syncing")
+        .expect("wait_for_step should not error");
 
         shutdown_token.cancel();
         vdf_thread_handler.join().unwrap();
@@ -678,7 +695,7 @@ mod tests {
             "lock must be poisoned to exercise the path"
         );
 
-        let (_ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (_ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let atomic_step = Arc::new(AtomicU64::new(0));
         let chain_sync_state = ChainSyncState::new(false, false);
@@ -732,12 +749,13 @@ mod tests {
         let bad_ff_seed = H256::repeat_byte(0xAA);
         let gap_target_step: u64 = 100;
 
-        let (ff_tx, ff_rx) = mpsc::unbounded_channel::<Traced<VdfStep>>();
+        let (ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
         ff_tx
             .send(Traced::new(VdfStep {
                 step: bad_ff_seed,
                 global_step_number: gap_target_step,
             }))
+            .await
             .unwrap();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));

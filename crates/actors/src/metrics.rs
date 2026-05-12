@@ -12,6 +12,7 @@ irys_utils::define_metrics! {
     gauge VDF_PENDING("irys.validation.vdf_pending", "Pending VDF validation tasks (labelled by priority class)");
     gauge CONCURRENT_ACTIVE("irys.validation.concurrent_active", "Active concurrent validation tasks");
     gauge VALIDATION_QUEUE_OLDEST_AGE_MS("irys.validation.queue_oldest_age_ms", "Age of the oldest pending VDF task in milliseconds");
+    counter VALIDATION_TASK_FORCE_ABORTED("irys.validation.task_force_aborted_total", "Validation watchdog force-aborts of stalled VDF tasks");
     gauge CACHE_CHUNK_COUNT("irys.cache.chunk_count", "Number of cached chunks");
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
@@ -128,6 +129,10 @@ pub(crate) fn record_validation_queue_snapshot(
     }
     CONCURRENT_ACTIVE.record(concurrent_active, &[]);
     VALIDATION_QUEUE_OLDEST_AGE_MS.record(queue_oldest_age_ms, &[]);
+}
+
+pub(crate) fn record_validation_task_force_aborted(stage: &'static str) {
+    VALIDATION_TASK_FORCE_ABORTED.add(1, &[KeyValue::new("stage", stage)]);
 }
 
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {

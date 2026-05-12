@@ -9,6 +9,8 @@ irys-types.workspace = true
 irys-database.workspace = true
 irys-efficient-sampling.workspace = true
 irys-domain.workspace = true
+irys-utils.workspace = true
+opentelemetry.workspace = true
 sha2.workspace = true
 rayon.workspace = true
 reth-db.workspace = true
@@ -20,10 +22,12 @@ openssl.workspace = true
 hex.workspace = true
 base58.workspace = true
 nodit.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 criterion.workspace = true
 proptest.workspace = true
@@ -33,6 +37,9 @@ test-log.workspace = true
 [[bench]]
 name = "vdf_bench"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["opentelemetry"]
 
 [lints]
 workspace = true

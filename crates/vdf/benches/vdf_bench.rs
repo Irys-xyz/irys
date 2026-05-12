@@ -27,6 +27,8 @@ fn build_tiers() -> [Tier; 3] {
         max_allowed_vdf_fork_steps: testnet_consensus.max_allowed_vdf_fork_steps,
         sha_1s_difficulty: testnet_consensus.sha_1s_difficulty,
         throttle: false,
+        progress_timeout_secs: 30,
+        validation_batch_size: 32,
     };
 
     let mainnet_consensus = ConsensusConfig::mainnet().vdf;
@@ -37,6 +39,8 @@ fn build_tiers() -> [Tier; 3] {
         max_allowed_vdf_fork_steps: mainnet_consensus.max_allowed_vdf_fork_steps,
         sha_1s_difficulty: mainnet_consensus.sha_1s_difficulty,
         throttle: false,
+        progress_timeout_secs: 30,
+        validation_batch_size: 32,
     };
 
     [
