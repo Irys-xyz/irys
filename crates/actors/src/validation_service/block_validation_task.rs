@@ -157,7 +157,6 @@ impl BlockValidationTask {
                 block.hash = %self.sealed_block.header().block_hash,
                 "Validation cancelled due to height difference"
             );
-            metrics::record_validation_cancellation("height_diff");
             ValidationResult::Invalid(ValidationError::ValidationCancelled {
                 reason: "height difference".to_string(),
             })
