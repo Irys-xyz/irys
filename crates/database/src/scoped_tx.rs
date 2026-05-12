@@ -46,6 +46,27 @@ pub enum Cache {}
 /// tag since the stall counter's `scope` label is a fixed vocabulary, not a
 /// per-env identifier. Has no associated table-set marker — submodule writes
 /// use raw transactions through `Env<Submodule>::update_eyre`.
+///
+/// **Per-submodule granularity is a planned follow-up.** Right now every
+/// submodule shares one bucket (`scope="irys-submodule"`) — once submodule
+/// load is non-trivial we'll need per-partition labels for triage. Sketch:
+///
+/// 1. Add an optional `instance: Option<Arc<str>>` field to `Env<S>`
+///    carrying a stable short identifier (e.g. `partition_hash[..8]`).
+///    Bounds prometheus cardinality at partition count.
+/// 2. Plumb it through `begin_scoped_rw` / `enter_rw_tx_span` as a second
+///    span field `db_instance`. Extend `MdbxLockMetricsLayer` (in
+///    `irys-utils/src/mdbx_metrics.rs`) to read it and emit a parallel
+///    `submodule_id` label on `libmdbx_rw_tx_lock_stalls_total`.
+/// 3. The acquire-latency histogram cached per-scope (the `LazyLock<Histogram>`
+///    statics below) can't pre-resolve per-SM handles — dynamic cardinality.
+///    Either cache per-instance via `OnceLock<Histogram>` on each `Env<S>`,
+///    or fall back to inline `metrics::histogram!` calls (recorder
+///    amortises lookups; modest overhead).
+/// 4. `report_db_gauges::<Submodule>(env)` invoked per submodule in the
+///    storage-modules tick, with the instance label threaded through. The
+///    `IrysScope::ALL_TABLES` machinery already supports it; just needs
+///    the helper to accept an optional instance label.
 pub enum Submodule {}
 
 /// Zero-sized scope tag for the Reth EVM env. Has no associated table-set
