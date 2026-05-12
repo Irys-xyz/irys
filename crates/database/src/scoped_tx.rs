@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use std::sync::LazyLock;
 
 use metrics::Histogram;
-use reth_db::table::{DupSort, Table};
+use reth_db::table::{DupSort, Table, TableInfo};
 use reth_db::{
     Database, DatabaseEnv, DatabaseError,
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
@@ -101,6 +101,16 @@ impl DbScope for Reth {
     fn acquire_histogram() -> &'static Histogram {
         &RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM
     }
+}
+
+/// Extension trait for Irys-owned scopes that have an associated table set.
+///
+/// `Reth` deliberately does *not* implement this: the Reth EVM env uses
+/// `reth_db::Tables` upstream, and Irys-side table enumeration / gauge hooks
+/// don't apply to it.
+pub trait IrysScope: DbScope {
+    type Tables: TableInfo + 'static;
+    const ALL_TABLES: &'static [Self::Tables];
 }
 
 /// Enter the `mdbx_rw_tx` span attributed to scope `S`.

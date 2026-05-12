@@ -269,7 +269,17 @@ pub use cache_tables_inner::{
 pub use ConsensusTables as IrysTables;
 
 // Marker-trait impls — wire each table to its environment.
-use crate::scoped_tx::{CacheTable, ConsensusTable};
+use crate::scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, IrysScope};
+
+impl IrysScope for Consensus {
+    type Tables = ConsensusTables;
+    const ALL_TABLES: &'static [Self::Tables] = ConsensusTables::ALL;
+}
+
+impl IrysScope for Cache {
+    type Tables = CacheTables;
+    const ALL_TABLES: &'static [Self::Tables] = CacheTables::ALL;
+}
 
 macro_rules! impl_consensus_tables {
     ($($name:ident),* $(,)?) => {

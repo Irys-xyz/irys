@@ -1046,15 +1046,8 @@ impl IrysNode {
                     // cache DB (added in V4) gets the same observability.
                     use irys_database::db_metrics::report_db_gauges;
                     use irys_database::scoped_tx::{Cache, Consensus};
-                    use irys_database::tables::{CacheTables, ConsensusTables};
-                    report_db_gauges::<Consensus, _>(
-                        irys_db_for_metrics.consensus().as_ref(),
-                        ConsensusTables::ALL,
-                    );
-                    report_db_gauges::<Cache, _>(
-                        irys_db_for_metrics.cache().as_ref(),
-                        CacheTables::ALL,
-                    );
+                    report_db_gauges::<Consensus>(irys_db_for_metrics.consensus().as_ref());
+                    report_db_gauges::<Cache>(irys_db_for_metrics.cache().as_ref());
                 }
             });
         }

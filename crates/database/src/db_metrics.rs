@@ -1,34 +1,30 @@
-use crate::scoped_tx::DbScope;
+use crate::scoped_tx::IrysScope;
 use metrics::{Label, gauge};
 use reth_db::DatabaseEnv;
-use reth_db::table::TableInfo;
+use reth_db::table::TableInfo as _;
 use reth_db_api::Database as _;
 use tracing::warn;
 
 /// Emits per-table size, page-count, entry-count, freelist, page-size, and
 /// timed-out-reader gauges for an Irys `DatabaseEnv`, attributed via the
 /// scope marker `S` (e.g. [`crate::scoped_tx::Consensus`] or
-/// [`crate::scoped_tx::Cache`]).
+/// [`crate::scoped_tx::Cache`]). The table set is derived from `S` via
+/// [`IrysScope::ALL_TABLES`].
 ///
 /// Mirrors `<DatabaseEnv as DatabaseMetrics>::gauge_metrics` (in
-/// `reth-db/src/implementation/mdbx/mod.rs`) but iterates the caller-supplied
-/// table set so the same routine covers both the consensus and cache envs.
-/// Reth's built-in impl iterates `reth_db::Tables::ALL` — which doesn't match
-/// either Irys table set, so neither Irys DB has an alternative path to these
-/// gauges.
+/// `reth-db/src/implementation/mdbx/mod.rs`) but iterates the scope's table
+/// set so the same routine covers both the consensus and cache envs. Reth's
+/// built-in impl iterates `reth_db::Tables::ALL` — which doesn't match either
+/// Irys table set, so neither Irys DB has an alternative path to these gauges.
 ///
 /// Intended for a periodic hook driven from chain init; neither Irys DB has
 /// an equivalent of Reth's `metrics_hooks()` provider-factory hook.
 ///
 /// All gauges are tagged `scope=S::LABEL` to disambiguate from Reth's EVM DB
 /// gauges, which share the same metric names.
-pub fn report_db_gauges<S, T>(db: &DatabaseEnv, tables: &[T])
-where
-    S: DbScope,
-    T: TableInfo,
-{
+pub fn report_db_gauges<S: IrysScope>(db: &DatabaseEnv) {
     let view_outcome = db.view(|tx| -> eyre::Result<()> {
-        for table in tables {
+        for table in S::ALL_TABLES {
             let name = table.name();
             let table_db = tx
                 .inner()
