@@ -8377,7 +8377,7 @@ mod tests {
         pub consensus_config: ConsensusConfig,
     }
 
-    async fn init() -> (TempDir, TestContext) {
+    async fn init() -> (TempDir, TempDir, TestContext) {
         let data_dir = TempDirBuilder::new()
             .prefix("block_validation_tests")
             .build();
@@ -8453,6 +8453,7 @@ mod tests {
 
         (
             data_dir,
+            _cache_dir,
             TestContext {
                 block_index,
                 miner_address,
@@ -8466,7 +8467,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_test_3_complete_txs() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
@@ -8514,7 +8515,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_not_complete_last_chunk_test() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
 
         // Create a signed TX from the chunks
         let signer = IrysSigner::random_signer(&context.consensus_config);
@@ -9536,7 +9537,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_does_not_allow_modified_leaves() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         // Create a bunch of TX chunks
         let data_chunks = vec![
             vec![[0; 32], [1; 32], [2; 32]], // tx0
