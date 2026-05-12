@@ -10,6 +10,8 @@ irys_utils::define_metrics! {
     gauge PENDING_CHUNKS("irys.mempool.pending_chunks", "Number of pending chunks in mempool");
     gauge PENDING_DATA_TXS("irys.mempool.pending_data_txs", "Number of pending data transactions in mempool");
     gauge SYNC_STATE("irys.sync.state", "Node sync state (1=synced, 0=syncing)");
+    gauge SYNC_HEIGHT("irys.sync.height", "Current synced height (block_index latest)");
+    gauge SYNC_TARGET_HEIGHT("irys.sync.target_height", "Sync target height");
     gauge NODE_UP("irys.node.up", "Node liveness indicator (1=up)");
     gauge NODE_UPTIME("irys.node.uptime_seconds", "Node uptime in seconds");
     gauge VDF_GLOBAL_STEP("irys.vdf.global_step_number", "Current VDF global step number");
@@ -44,6 +46,14 @@ pub(crate) fn record_pending_data_txs(count: u64) {
 
 pub(crate) fn record_sync_state(synced: bool) {
     SYNC_STATE.record(u64::from(synced), &[]);
+}
+
+pub(crate) fn record_sync_height(height: u64) {
+    SYNC_HEIGHT.record(height, &[]);
+}
+
+pub(crate) fn record_sync_target_height(height: u64) {
+    SYNC_TARGET_HEIGHT.record(height, &[]);
 }
 
 pub(crate) fn record_node_up() {

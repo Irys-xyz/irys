@@ -888,6 +888,32 @@ impl IrysNode {
             .stake_pledge_drives
             .then(|| ctx.service_senders.subscribe_block_state_updates());
 
+        // Early metrics emitter. The full node-state loop below is gated
+        // behind initial_sync().await?, which means the only metric that
+        // signals "syncing" (irys_sync_state = 0) cannot fire during the
+        // period it would actually be meaningful. This minimal task uses
+        // only sync_state + block_index — both populated before sync
+        // starts — so sync-progress telemetry is visible from t=0.
+        {
+            let sync_state = ctx.sync_state.clone();
+            let block_index = ctx.block_index_guard.clone();
+            task_executor.spawn_task(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    let synced_height = block_index.read().latest_height();
+                    let target_height =
+                        u64::try_from(sync_state.sync_target_height()).unwrap_or(0);
+                    let is_syncing = sync_state.is_syncing();
+                    metrics::record_node_up();
+                    metrics::record_node_uptime();
+                    metrics::record_sync_state(!is_syncing);
+                    metrics::record_sync_height(synced_height);
+                    metrics::record_sync_target_height(target_height);
+                }
+            });
+        }
+
         // This is going to resolve instantly for a genesis node with 0 blocks,
         //  going to wait for sync otherwise.
         ctx.sync_service_facade.initial_sync().await?;
