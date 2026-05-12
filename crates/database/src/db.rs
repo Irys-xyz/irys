@@ -397,15 +397,6 @@ pub trait DatabaseProviderCacheExt {
     fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&ScopedTx<Cache>) -> T;
-
-    /// Open a scoped cache rw-transaction with MDBX stall metrics attributed
-    /// via the `Cache` scope tag. Use this when the rw-tx must outlive a single
-    /// closure (e.g. iterating with a cursor and committing after the loop).
-    ///
-    /// The caller must hold the cache environment's [`lock_writer_gate`] guard
-    /// until this transaction commits or is dropped. Prefer the `update_cache`
-    /// helpers, which manage that guard automatically.
-    fn cache_tx_mut_scoped(&self) -> Result<ScopedTxMut<Cache>, DatabaseError>;
 }
 
 impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
@@ -421,7 +412,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
     {
         let _gate = lock_writer_gate(self.cache(), call_site);
-        let tx = self.cache_tx_mut_scoped()?;
+        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -442,7 +433,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         F: FnOnce(&ScopedTxMut<Cache>) -> T,
     {
         let _gate = lock_writer_gate(self.cache(), "update_cache");
-        let tx = self.cache_tx_mut_scoped()?;
+        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -456,10 +447,6 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
-    }
-
-    fn cache_tx_mut_scoped(&self) -> Result<ScopedTxMut<Cache>, DatabaseError> {
-        ScopedTxMut::<Cache>::begin_rw(self.cache())
     }
 }
 
