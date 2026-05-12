@@ -54,6 +54,16 @@ use std::{
 use thiserror::Error;
 use tracing::{Instrument as _, debug, error, info, warn};
 
+/// SAFETY-CRITICAL: variants in this enum are returned from `prevalidate_block`
+/// and used by callers to decide whether a block is consensus-invalid. Local
+/// or runtime failures (I/O, task join errors, lock contention, transient
+/// service unavailability, etc.) MUST NEVER be mapped to a variant that
+/// describes a consensus-level rejection (`VDFCheckpointsInvalid`,
+/// `BlockSignatureInvalid`, `InvalidTransactionSignature`, etc.). Marking a
+/// valid block as invalid — or an invalid block as valid — by routing through
+/// the wrong variant is catastrophic. When in doubt, add a distinct
+/// internal/runtime variant (e.g. `InternalTaskJoin`) rather than reusing a
+/// validation variant.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
@@ -154,6 +164,8 @@ pub enum PreValidationError {
     TimestampTooFarInFuture { current: u128, now: u128 },
     #[error("Validation service unreachable")]
     ValidationServiceUnreachable,
+    #[error("Internal prevalidation task failed (likely panic): {0}")]
+    InternalTaskJoin(String),
     #[error("last_step_checkpoints validation failed: {0}")]
     VDFCheckpointsInvalid(String),
     #[error(
@@ -339,6 +351,15 @@ impl PreValidationError {
     /// rather than silently dropping.
     pub fn is_fatal_corruption(&self) -> bool {
         matches!(self, Self::CachePoisoned { .. })
+    }
+
+    /// Returns true for variants representing local/runtime failures (verifier
+    /// panics, transient task-join errors, etc.) that must NEVER be attributed
+    /// to the peer or used to mark a block as consensus-invalid. See the enum
+    /// safety-critical doc for the full invariant. Grow this method as new
+    /// non-consensus variants are added.
+    pub fn is_internal_failure(&self) -> bool {
+        matches!(self, Self::InternalTaskJoin(_))
     }
 }
 
@@ -608,7 +629,9 @@ pub async fn prevalidate_block(
         "last_epoch_hash_is_valid",
     );
 
-    // We only check last_step_checkpoints during pre-validation
+    // We only check last_step_checkpoints during pre-validation.
+    // A spawn_blocking JoinError is a local panic in the verifier thread, not
+    // a consensus failure — it must never be mapped to VDFCheckpointsInvalid.
     let pool_clone = Arc::clone(&pool);
     let vdf_info = block.vdf_limiter_info.clone();
     let vdf_config = config.vdf.clone();
@@ -616,7 +639,15 @@ pub async fn prevalidate_block(
         last_step_checkpoints_is_valid(&pool_clone, &vdf_info, &vdf_config)
     })
     .await
-    .map_err(|e| PreValidationError::VDFCheckpointsInvalid(format!("join error: {e}")))?
+    .map_err(|e| {
+        error!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            error = %e,
+            "spawn_blocking for last_step_checkpoints_is_valid failed",
+        );
+        PreValidationError::InternalTaskJoin(format!("last_step_checkpoints_is_valid: {e}"))
+    })?
     .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
@@ -1186,6 +1217,25 @@ mod prevalidation_error_classification_tests {
                 expected_height: 0,
             }
             .is_fatal_corruption()
+        );
+    }
+
+    /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
+    /// must classify as internal so callers route it away from peer-attributed
+    /// "block invalid" paths.
+    #[test]
+    fn internal_task_join_is_internal_failure() {
+        let err = PreValidationError::InternalTaskJoin("panic".to_string());
+        assert!(err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
+    }
+
+    /// Consensus-validation variants must NOT classify as internal.
+    #[test]
+    fn validation_errors_are_not_internal_failures() {
+        assert!(!PreValidationError::BlockSignatureInvalid.is_internal_failure());
+        assert!(
+            !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
     }
 }

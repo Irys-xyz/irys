@@ -279,7 +279,18 @@ impl BlockDiscoveryService {
                     }
                     Err(e) => {
                         metrics::record_block_discovery_error(e.metric_label());
-                        metrics::record_validation_result("prevalidation", "invalid");
+                        // Internal/runtime failures don't tell us anything about block
+                        // validity — recording "invalid" would inflate the rejection
+                        // rate metric and obscure real consensus failures.
+                        let result_label = match e {
+                            BlockDiscoveryError::BlockValidationError(pe)
+                                if pe.is_internal_failure() =>
+                            {
+                                "internal_error"
+                            }
+                            _ => "invalid",
+                        };
+                        metrics::record_validation_result("prevalidation", result_label);
                     }
                 }
                 if let Some(sender) = response

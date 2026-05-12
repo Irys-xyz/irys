@@ -912,8 +912,11 @@ where
             // Cache poisoning is unrecoverable; surface as critical so the
             // service can escalate. `ParentNotInCache` is a local
             // prune/reorg race — the peer is innocent — so it gets its own
-            // non-penalising variant. All other pre-validation failures
-            // remain `BlockError` (peer-attributed bogus data).
+            // non-penalising variant. Internal verifier failures (e.g. a
+            // panic propagating through spawn_blocking) MUST NOT be peer-
+            // attributed either: the peer's block may have been valid; we
+            // simply couldn't verify it locally. All remaining variants are
+            // genuine consensus rejections and route to `BlockError`.
             if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
                 if pre_err.is_fatal_corruption() {
                     error!(
@@ -954,6 +957,27 @@ where
                         .record_block_processing_error(pre_err.to_string());
                     return Err(
                         CriticalBlockPoolError::ParentNotInCache(pre_err.to_string()).into(),
+                    );
+                }
+
+                if pre_err.is_internal_failure() {
+                    error!(
+                        block.hash = ?block_hash,
+                        error = ?pre_err,
+                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown"
+                    );
+                    self.blocks_cache
+                        .remove_block(
+                            &block_hash,
+                            BlockRemovalReason::FailedToProcess(
+                                FailureReason::BlockPrevalidationFailed,
+                            ),
+                        )
+                        .await;
+                    self.sync_state
+                        .record_block_processing_error(pre_err.to_string());
+                    return Err(
+                        CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into(),
                     );
                 }
             }
