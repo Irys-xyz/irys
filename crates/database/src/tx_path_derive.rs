@@ -964,7 +964,7 @@ mod tests {
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::{SubmoduleIndex, SubmoduleStore as _};
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{
         IrysDatabaseArgs as _, insert_block_header, insert_block_index_items_for_block,
         insert_tx_header, open_or_create_db,
@@ -1048,7 +1048,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1414,7 +1414,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1561,7 +1561,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1619,7 +1619,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1654,7 +1654,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");
@@ -1708,7 +1708,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open db");

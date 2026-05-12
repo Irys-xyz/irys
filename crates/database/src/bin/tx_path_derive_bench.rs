@@ -24,7 +24,7 @@ use irys_database::submodule::tables::{
     TxPathIntervalByStart, unrecognised_rocks_layout,
 };
 use irys_database::submodule::{SubmoduleIndex, SubmoduleStore as _};
-use irys_database::tables::{CacheTables, IrysDataTxHeaders, IrysTables, MigratedBlockHashes};
+use irys_database::tables::{CacheTables, ConsensusTables, IrysDataTxHeaders, MigratedBlockHashes};
 use irys_database::tx_path_derive::{
     LedgerSpan, collect_data_spans, derive_tx_path_at_offset_with, derive_tx_path_synthetic_with,
     read_stored_tx_data_path, tx_header_schema, tx_path_hash,
@@ -930,7 +930,7 @@ fn migrate_consensus(path: &Path) -> eyre::Result<()> {
     )?;
     let db = open_or_create_db(
         path,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(DbSyncMode::Durable)?.with_exclusive(Some(true)),
     )?;
     ensure_db_version_compatible(&db, &cache)?;
@@ -1412,7 +1412,7 @@ fn prepare_fixture(dir: &Path) -> eyre::Result<()> {
     ];
     let db = open_or_create_db(
         &consensus,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(DbSyncMode::Durable)?.with_log_level(None),
     )?;
     db.update_eyre(|tx| {
