@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778007480614,
+  "lastUpdate": 1778585206314,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2839,6 +2839,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab7a4a1b57940c66c5132e8d7b0142bb53530e28",
+          "message": "feat(metrics): expose MDBX metrics via Reth's /metrics endpoint (#1409)\n\n* feat(database, telemetry): expose MDBX metrics for consensus DB\n\n* fix(database, telemetry): install metrics recorder unconditionally\n\n* feat(database, chain): add 60s gauge hook for irys consensus DB\n\n* feat(database): add tx_mut acquire histogram for irys consensus DB\n\n* feat(database, telemetry): count libmdbx rw-tx lock stall warnings\n\n* feat(database, telemetry): count libmdbx rw-tx lock stall warnings\n\n* feat(database): add update_scoped to scope-attribute consensus DB stalls\n\n* refactor(telemetry): use dotted field names in tracing spans\n\n* feat(validation, telemetry): add stage, outcome and E2E metrics\n\n* fix(database, telemetry): scope reth-evm writes and harden stall matcher\n\n* fix(validation, telemetry): drop double-count in parent_got_cancelled\n\nThe `parent_got_cancelled` closure in `BlockValidationTask::execute_concurrent`\nrecorded `record_validation_cancellation(\"height_diff\")`, but every path that\nreaches it has already recorded a labelled cancellation inside\n`exit_if_block_is_too_old`:\n\n- `Either::Right` branch: the boxed `exit_if_block_is_too_old(|_| Continue(()))`\n  finished first. Its closure never breaks, so the only ways it returns are via\n  the `height_diff` (line 269) or `channel_closed` (line 302) early returns,\n  both of which record a counter.\n- `Either::Left -> ParentValidationResult::Cancelled` branch: reached only when\n  `wait_for_parent_validation()` returned `Cancelled`, which means the inner\n  `exit_if_block_is_too_old(parent_chain_state_check)` returned via one of\n  `height_diff`, `parent_missing` (line 277), or `channel_closed` — all of\n  which record a counter.\n\nNet effect of the duplicate: every concurrent-stage cancellation was\ndouble-counted, and `parent_missing` / `channel_closed` cancellations were\ninflated with a spurious `height_diff` increment that masked the real reason\nin dashboards.\n\nThe trailing `tracing::warn!`'s \"due to height difference\" wording is now\nslightly misleading for the parent_missing / channel_closed paths, but\nfixing that requires threading the actual reason out of\n`exit_if_block_is_too_old` and is out of scope for this metric-correctness fix.\n\n* refactor(database, telemetry): centralize MDBX span name and scope consts\n\nPromote the rw-tx span name to a public constant in irys-utils alongside\nthe existing `DB_SCOPE_*` constants, and switch all callers to the\ncanonical exports instead of inlining literal strings.\n\nBefore, `crates/database/src/db.rs` declared its own `MDBX_RW_TX_SPAN`,\n`DB_SCOPE_RETH_EVM`, and `DB_SCOPE_IRYS_CONSENSUS` consts with a\n\"keep these literals in sync with mdbx_metrics.rs\" comment, and the\nremaining rw-tx wrap sites in chain, cache_service, and the cli hard-coded\nthe same `\"mdbx_rw_tx\"` + `\"irys-consensus\"` strings inline. Any drift in\nthose strings silently demoted the stall counter to `scope=\"unknown\"` for\nthe affected writer.\n\nChanges:\n- Add `pub const MDBX_RW_TX_SPAN` next to the `DB_SCOPE_*` consts in\n  `crates/utils/utils/src/mdbx_metrics.rs` and re-export it from `lib.rs`.\n- Drop the three local consts and the \"keep in sync\" comment in\n  `crates/database/src/db.rs`; import them from `irys_utils` instead.\n- Replace inlined literals at the four wrap sites in\n  `crates/chain/src/chain.rs`, `crates/actors/src/cache_service.rs`,\n  `crates/cli/src/commands.rs`, and `crates/cli/src/db_utils.rs`.\n- Add `irys-utils` to `crates/database/Cargo.toml` (no cycle —\n  irys-utils does not depend on irys-database).\n\nHistogram label string values (e.g. `\"scope\" => \"irys-consensus\"`) are\nleft untouched; those are metrics-layer label values, independent of the\ntracing span field and out of scope for this refactor.\n\n* perf(telemetry): cache tx_mut acquire histogram handles + add description\n\n`IrysDatabaseExt::update_eyre` previously called `metrics::histogram!(...)`\ninline on every invocation. The macro doesn't allocate a new histogram per\ncall (the recorder amortises lookups), but it still pays a recorder\nindirection + per-call `Key` construction on a path that runs for every\nconsensus and EVM rw-tx. There was also no `describe_histogram!` for the\nmetric, so its prometheus output had no HELP line.\n\nChanges:\n- Add `DB_TX_MUT_ACQUIRE_DURATION_SECONDS` constant + `describe_histogram!`\n  (Unit::Seconds, explanatory description) in `irys-utils::mdbx_metrics`,\n  re-exported from the crate root. Description noted as\n  recorder-default-bucketed; per-metric bucket tuning requires touching\n  the prometheus recorder install in `install_metrics_recorder`.\n- Cache the per-scope `Histogram` handles as `LazyLock<Histogram>` statics\n  in `crates/database/src/db.rs` so the rw-tx path only calls `.record()`.\n  Inline comment documents the binding-timing tradeoff: the handle binds\n  to whatever recorder is global at first use, so any test relying on\n  `metrics::with_local_recorder` will not see writes from this path.\n  Production safety is enforced by `install_metrics_recorder()` running\n  before any DB is opened (chain/src/main.rs).\n- As a side benefit, the histogram name and the `\"scope\"` label values\n  are now sourced from the same constants used elsewhere, removing the\n  last remaining magic-string literals in this file.\n\n* chore: fmt\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-05-12T12:09:07+01:00",
+          "tree_id": "eb1554ac0121f72f3cf633e08c5c7286e8cfc85f",
+          "url": "https://github.com/Irys-xyz/irys/commit/ab7a4a1b57940c66c5132e8d7b0142bb53530e28"
+        },
+        "date": 1778585204555,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074766,
+            "range": "± 0.001166",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 757.037097,
+            "range": "± 11.26515",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1004.107461,
+            "range": "± 30.039968",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11795,
+            "range": "± 0.001045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1186.123203,
+            "range": "± 8.690713",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1551.204673,
+            "range": "± 11.692492",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.462338,
+            "range": "± 0.031781",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.999331,
+            "range": "± 1.988239",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.168789,
+            "range": "± 6.201586",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
