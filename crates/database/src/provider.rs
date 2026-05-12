@@ -1,8 +1,10 @@
 use std::{marker::PhantomData, ops::Deref, sync::Arc};
 
-use reth_db::{DatabaseEnv, DatabaseError};
+use reth_db::transaction::DbTx as _;
+use reth_db::{Database, DatabaseEnv, DatabaseError};
 
-use crate::scoped_tx::{Cache, Consensus, DbScope, ScopedTx, ScopedTxMut};
+use crate::db::lock_writer_gate;
+use crate::scoped_tx::{Cache, Consensus, DbScope, ScopedTx, ScopedTxMut, begin_scoped_rw};
 
 /// Scope-tagged MDBX environment wrapper.
 ///
@@ -10,8 +12,9 @@ use crate::scoped_tx::{Cache, Consensus, DbScope, ScopedTx, ScopedTxMut};
 /// `Reth`). Scope-aware tx factories hang off the wrapper, so callers write
 /// `env.begin_ro()` / `env.begin_rw()` instead of naming the scope at every
 /// call site. The wrapper derefs to the inner `Arc<DatabaseEnv>` so untyped
-/// `reth_db::Database` operations (`tx()`, `update_eyre(...)`, etc.) continue
-/// to work via auto-deref.
+/// `reth_db::Database` operations such as `tx()` continue to work via auto-deref.
+/// The inherent update helpers keep scope attribution and hold the writer gate
+/// through commit or rollback.
 ///
 /// Multiple `Env<S>` instances of the same scope can coexist — submodules
 /// hold their own `Env<Submodule>` per partition.
@@ -66,6 +69,46 @@ impl<S: DbScope> Env<S> {
     /// transaction closes. The cache update helpers manage that guard for callers.
     pub fn begin_rw(&self) -> Result<ScopedTxMut<S>, DatabaseError> {
         ScopedTxMut::<S>::begin_rw(&self.inner)
+    }
+
+    /// Run `f` inside a scope-attributed rw transaction, returning an
+    /// `eyre::Result`. Shadows [`crate::db::IrysDatabaseExt::update_eyre`]
+    /// on the underlying `DatabaseEnv` so callers don't accidentally pick up
+    /// that impl's hard-coded `Consensus` scope via deref.
+    pub fn update_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&<DatabaseEnv as Database>::TXMut) -> eyre::Result<T>,
+    {
+        let _gate = lock_writer_gate(&self.inner, "update_eyre");
+        let tx = begin_scoped_rw::<S>(&self.inner)?;
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    /// Same as [`Self::update_eyre`] but the closure returns `T` (no `Result`),
+    /// matching [`crate::db::IrysDatabaseExt::update_scoped`].
+    pub fn update_scoped<T, F>(&self, f: F) -> Result<T, DatabaseError>
+    where
+        F: FnOnce(&<DatabaseEnv as Database>::TXMut) -> T,
+    {
+        let _gate = lock_writer_gate(&self.inner, "update_scoped");
+        let tx = begin_scoped_rw::<S>(&self.inner)?;
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
+    }
+
+    /// Run `f` inside a read tx and return its `eyre::Result`. No scope span /
+    /// histogram: MDBX read transactions don't take the writer lock.
+    pub fn view_eyre<T, F>(&self, f: F) -> eyre::Result<T>
+    where
+        F: FnOnce(&<DatabaseEnv as Database>::TX) -> eyre::Result<T>,
+    {
+        let tx = self.inner.tx()?;
+        let res = f(&tx)?;
+        tx.commit()?;
+        Ok(res)
     }
 }
 

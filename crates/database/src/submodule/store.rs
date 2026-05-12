@@ -47,7 +47,7 @@ use super::{
     },
     write_data_path_updates,
 };
-use crate::db::IrysDatabaseExt as _;
+use crate::{Env, Submodule};
 
 /// Consistent read of one submodule index.
 // MDBX-SUBMODULE-INDEX: collapse this trait onto RocksSubmoduleStore when MDBX is gone. Do not delete behavior RocksDB v1 implements. The default methods below are the MDBX behavior.
@@ -552,7 +552,7 @@ pub trait SubmoduleStore: Send + Sync {
 pub struct MdbxSubmoduleStore {
     /// Dropped first so the delay thread joins before `env` closes.
     lifetime: Arc<EngineLifetime>,
-    env: Arc<DatabaseEnv>,
+    env: Env<Submodule>,
     group: Arc<GroupCommit>,
     /// Held across `MDBX_SAFE_NOSYNC` and the enabled bit, and across a
     /// durable commit that still sees group commit as off. The flag makes
@@ -624,7 +624,7 @@ impl MdbxSubmoduleStore {
         let group = GroupCommit::new();
         Self {
             lifetime: EngineLifetime::new(Arc::clone(&group)),
-            env: Arc::new(env),
+            env: Env::new(Arc::new(env)),
             group,
             nosync_enable: Arc::new(Mutex::new(())),
             writable,
@@ -804,7 +804,7 @@ impl MdbxSubmoduleStore {
     }
 
     fn spawn_delay(&self) -> eyre::Result<()> {
-        let env = Arc::downgrade(&self.env);
+        let env = Arc::downgrade(self.env.arc());
         let group = Arc::clone(&self.group);
         self.lifetime
             .spawn(Arc::clone(&self.group), move || match env.upgrade() {

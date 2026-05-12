@@ -522,6 +522,56 @@ mod tests {
         EyreAt,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum EnvWriteMethod {
+        Scoped,
+        Eyre,
+        Rollback,
+    }
+
+    #[rstest::rstest]
+    #[case::scoped(EnvWriteMethod::Scoped)]
+    #[case::eyre(EnvWriteMethod::Eyre)]
+    #[case::rollback(EnvWriteMethod::Rollback)]
+    fn scoped_env_updates_hold_and_release_writer_gate(
+        #[case] method: EnvWriteMethod,
+    ) -> eyre::Result<()> {
+        use crate::submodule::db::{put_reset_marker, read_reset_marker};
+
+        let tmp = irys_testing_utils::TempDirBuilder::new().build();
+        let env = crate::Env::<crate::Submodule>::new(Arc::new(
+            crate::submodule::create_or_open_submodule_db(
+                tmp.path(),
+                DatabaseArguments::irys_testing()?,
+            )?,
+        ));
+        let gate = writer_gate_for(&env);
+        let write = |tx: &<DatabaseEnv as Database>::TXMut| {
+            assert!(matches!(
+                gate.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            put_reset_marker(tx)
+        };
+        match method {
+            EnvWriteMethod::Scoped => env.update_scoped(write)??,
+            EnvWriteMethod::Eyre => env.update_eyre(write)?,
+            EnvWriteMethod::Rollback => {
+                let result: eyre::Result<()> = env.update_eyre(|tx| {
+                    write(tx)?;
+                    eyre::bail!("abort scoped write");
+                });
+                assert!(result.is_err());
+            }
+        }
+        assert!(gate.try_lock().is_ok(), "writer gate was not released");
+        assert_eq!(
+            env.view_eyre(read_reset_marker)?,
+            method != EnvWriteMethod::Rollback
+        );
+        Ok(())
+    }
+
     #[rstest::rstest]
     #[case::plain(CacheWriteMethod::Plain)]
     #[case::eyre(CacheWriteMethod::Eyre)]
