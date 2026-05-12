@@ -183,9 +183,9 @@ impl IrysDatabaseExt for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
-        // RethDbWrapper's own Database::update impl already wraps the call in
-        // an `mdbx_rw_tx` span carrying `db_scope=reth-evm` (see line 104), so
-        // this trait method just delegates — no second span needed.
+        // RethDbWrapper's own Database::update impl above already wraps the
+        // call in an `mdbx_rw_tx` span carrying `db_scope=reth-evm`, so this
+        // trait method just delegates — no second span needed.
         <Self as Database>::update(self, f)
     }
 }
@@ -195,9 +195,6 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        // `begin_scoped_rw::<Consensus>` enters the `mdbx_rw_tx` span carrying
-        // `db_scope="irys-consensus"` and records the acquire-latency histogram
-        // — both driven by the `Consensus` scope tag rather than literals.
         let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
         let res = f(&tx)?;
         tx.commit()?;
