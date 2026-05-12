@@ -2644,14 +2644,14 @@ impl IrysNodeTest<IrysNodeCtx> {
                     for i in 0..expected_chunks {
                         // Read chunk directly from sender's DB cache by data_root + tx-relative offset
                         let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
-                        if let Ok(Some((_meta, cached_chunk))) =
-                            self.node_ctx.db.view_cache_eyre(|tx| {
-                                irys_database::cached_chunk_by_chunk_offset(
-                                    tx,
-                                    tx_header.data_root,
-                                    tx_chunk_offset,
-                                )
-                            })
+                        let cached = self.node_ctx.db.view_cache_eyre(|tx| {
+                            irys_database::cached_chunk_by_chunk_offset(
+                                tx,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                        })?;
+                        if let Some((_meta, cached_chunk)) = cached
                             && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
@@ -2681,17 +2681,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                             {
                                 let mut attempts = 0_usize;
                                 loop {
-                                    let got = peer
-                                        .node_ctx
-                                        .db
-                                        .view_cache_eyre(|tx| {
-                                            irys_database::cached_chunk_by_chunk_offset(
-                                                tx,
-                                                verify_data_root,
-                                                verify_tx_offset,
-                                            )
-                                        })
-                                        .unwrap_or(None);
+                                    let got = peer.node_ctx.db.view_cache_eyre(|tx| {
+                                        irys_database::cached_chunk_by_chunk_offset(
+                                            tx,
+                                            verify_data_root,
+                                            verify_tx_offset,
+                                        )
+                                    })?;
                                     if got.is_some() || attempts >= 5 {
                                         break;
                                     }
