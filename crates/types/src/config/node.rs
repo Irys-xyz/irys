@@ -789,16 +789,19 @@ pub struct VdfNodeConfig {
     /// this many seconds. Detects a dead/stuck VDF thread without imposing a
     /// wall-clock cap on legitimate long waits.
     ///
-    /// Used in three places, all in the validation pipeline:
+    /// Used in three places, all in the validation pipeline. All three treat a
+    /// trip as a local-infrastructure failure ("never mislabel a block as
+    /// Valid or Invalid"; see design/docs/vdf-validation-stall-detection.md)
+    /// and panic the process so the supervisor restarts it clean:
     ///   1. `wait_for_step` — `ensure_vdf_is_valid` calls it once at the start
     ///      (waiting for the previous VDF step) and once at the end (waiting
     ///      for `global_step` to reach the block's `global_step_number` after
-    ///      all batches have been enqueued). If `global_step` does not advance
-    ///      for this many seconds at either site, the wait returns
-    ///      `WaitForStepError::Stalled` and the block is marked Invalid.
-    ///   2. `fast_forward_validated_steps` — per-step send timeout into the
-    ///      bounded `vdf_fast_forward` channel. A consumer that stays stuck
-    ///      for this long panics (process abort) — see the call site for why.
+    ///      all batches have been enqueued). A `WaitForStepError::Stalled`
+    ///      from either site panics the validation task.
+    ///   2. `fast_forward_validated_steps` — per-step send timeout (and the
+    ///      receiver-closed arm) into the bounded `vdf_fast_forward` channel.
+    ///      A consumer that stays stuck for this long, or has dropped the
+    ///      receiver, panics — see the call site for why.
     ///   3. The pipeline watchdog — every 5s tick the validation loop force-
     ///      aborts a VDF task whose stage signal has been idle for this long,
     ///      panicking the service (and the process) on the assumption that

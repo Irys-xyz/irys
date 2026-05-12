@@ -29,7 +29,24 @@ pub async fn fast_forward_validated_steps(
         .await
         {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err.into()),
+            Ok(Err(_)) => {
+                // Channel closed: the receiver was dropped because `run_vdf` has
+                // exited (e.g., graceful exit on a poisoned VDF state lock; see
+                // crates/vdf/src/vdf.rs `run_vdf`). This is the same local-
+                // infrastructure failure class as the send-timeout arm below —
+                // the consumer is dead either way. Panic for the same reason: a
+                // dead VDF thread cannot validate any block, so surfacing this
+                // as an Err that the caller turns into Invalid would silently
+                // fork us off the network on a programmer-error condition. The
+                // global panic hook raises SIGINT and the 45 s shutdown watchdog
+                // forces process abort, letting the supervisor restart clean.
+                // See design/docs/vdf-validation-stall-detection.md.
+                panic!(
+                    "VDF fast-forward channel closed (receiver dropped) while sending step {}; \
+                     run_vdf has exited",
+                    start_step_number + i as u64
+                );
+            }
             Err(_) => {
                 // Send timeout means the bounded vdf_fast_forward channel stayed full
                 // for `send_timeout` (the configured progress_timeout, default 15s).
