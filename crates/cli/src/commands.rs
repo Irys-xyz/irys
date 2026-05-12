@@ -10,7 +10,6 @@ use crate::snapshot_output::{
 
 use eyre::{OptionExt as _, bail};
 use irys_chain::utils::load_config;
-use irys_database::reth_db::Database as _;
 use irys_database::reth_db::DatabaseEnvKind;
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
@@ -18,7 +17,7 @@ use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, DatabaseProvider, NodeConfig};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::{info, info_span, warn};
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 fn signing_key_from_hex(hex_str: Zeroizing<String>) -> eyre::Result<k256::ecdsa::SigningKey> {
@@ -158,15 +157,8 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
             );
 
             use irys_database::reth_db::transaction::DbTxMut as _;
-            // Span attributes any libmdbx writer-lock stall warning fired
-            // during begin_rw_txn to
-            // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
-            let _span = info_span!(
-                irys_utils::MDBX_RW_TX_SPAN,
-                db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-            )
-            .entered();
-            let rw_tx = db.tx_mut()?;
+            use irys_database::scoped_tx::{Consensus, begin_scoped_rw};
+            let rw_tx = begin_scoped_rw::<Consensus>(db.consensus().as_ref())?;
 
             for h in (target_height + 1)..=latest {
                 if let Some(item) = block_index.get_item(h) {
