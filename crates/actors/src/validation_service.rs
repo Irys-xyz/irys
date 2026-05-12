@@ -76,6 +76,22 @@ impl VdfTaskStage {
             Self::Completed => "completed",
         }
     }
+
+    /// Stage label for the `irys.validation.stage_duration_ms` histogram.
+    /// Prefixed with `vdf_` so VDF stages don't collide with the existing
+    /// concurrent-validation labels (`seeds`, `recall_range`, `poa`,
+    /// `shadow_tx`, `concurrent_overall`) recorded elsewhere.
+    pub(crate) const fn metric_label(self) -> &'static str {
+        match self {
+            Self::Starting => "vdf_starting",
+            Self::WaitPrevStep => "vdf_wait_prev_step",
+            Self::ValidateSeeds => "vdf_validate_seeds",
+            Self::ValidateBatch => "vdf_validate_batch",
+            Self::FastForwardBatch => "vdf_fast_forward_batch",
+            Self::WaitFinalCatchUp => "vdf_wait_final_catch_up",
+            Self::Completed => "vdf_completed",
+        }
+    }
 }
 
 impl From<u8> for VdfTaskStage {
@@ -110,6 +126,13 @@ fn vdf_task_progress_timeout(config: &Config) -> Duration {
 /// proof that the task is making forward progress. Periodic calls inside a
 /// stuck stage would silently defeat the watchdog.
 ///
+/// Records the duration of the stage being LEFT to the
+/// `irys.validation.stage_duration_ms` histogram with a `stage` label
+/// (`vdf_<stage_name>`, prefixed so VDF stages don't collide with the
+/// existing concurrent-validation labels like `seeds`/`poa`/`shadow_tx`).
+/// The very first call records the spawn-to-first-progress latency under
+/// the `vdf_starting` label.
+///
 /// Write order matters: refresh the `Instant` **before** publishing the new
 /// stage. The watchdog reads stage first, then the `Instant`, so this ordering
 /// guarantees that when the watchdog observes a watched (computational) stage
@@ -120,9 +143,16 @@ fn record_vdf_task_progress(
     progress_signal: &Arc<Mutex<Instant>>,
     stage: VdfTaskStage,
 ) {
-    *progress_signal
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    let previous_stage = VdfTaskStage::from(stage_signal.load(Ordering::Relaxed));
+    let now = Instant::now();
+    {
+        let mut guard = progress_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let elapsed_ms = now.saturating_duration_since(*guard).as_secs_f64() * 1000.0;
+        metrics::record_validation_stage_duration_ms(previous_stage.metric_label(), elapsed_ms);
+        *guard = now;
+    }
     stage_signal.store(stage as u8, Ordering::Relaxed);
 }
 
@@ -470,7 +500,7 @@ impl ValidationService {
                             .current
                             .as_ref()
                             .expect("watchdog aborted a task; current must be Some");
-                        metrics::record_validation_task_force_aborted();
+                        metrics::record_validation_task_force_aborted(stage.metric_label());
                         panic!(
                             "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?})",
                             current_vdf.hash,
@@ -622,13 +652,19 @@ impl ValidationServiceInner {
             stage = "wait_prev_step",
             "ensure_vdf_is_valid: waiting for previous step"
         );
-        self.vdf_state
+        let wait_started = Instant::now();
+        let wait_result = self
+            .vdf_state
             .wait_for_step(
                 prev_output_step_number,
                 Arc::clone(&cancel),
                 progress_timeout,
             )
-            .await?;
+            .await;
+        metrics::record_vdf_step_wait_duration_ms(
+            wait_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        wait_result?;
 
         // Unreachable in practice: `wait_for_step` above only returns Ok once
         // `global_step >= prev_output_step_number`, so the step is in the seed
@@ -765,13 +801,19 @@ impl ValidationServiceInner {
             vdf.global_step_number = vdf_info.global_step_number,
             "ensure_vdf_is_valid: waiting for fast-forward to reach block end"
         );
-        self.vdf_state
+        let final_wait_started = Instant::now();
+        let final_wait_result = self
+            .vdf_state
             .wait_for_step(
                 vdf_info.global_step_number,
                 Arc::clone(&cancel),
                 progress_timeout,
             )
-            .await?;
+            .await;
+        metrics::record_vdf_step_wait_duration_ms(
+            final_wait_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        final_wait_result?;
 
         record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::Completed);
         info!(

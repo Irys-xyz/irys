@@ -131,8 +131,8 @@ pub(crate) fn record_validation_queue_snapshot(
     VALIDATION_QUEUE_OLDEST_AGE_MS.record(queue_oldest_age_ms, &[]);
 }
 
-pub(crate) fn record_validation_task_force_aborted() {
-    VALIDATION_TASK_FORCE_ABORTED.add(1, &[]);
+pub(crate) fn record_validation_task_force_aborted(stage: &'static str) {
+    VALIDATION_TASK_FORCE_ABORTED.add(1, &[KeyValue::new("stage", stage)]);
 }
 
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {

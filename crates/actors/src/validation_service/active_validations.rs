@@ -116,11 +116,23 @@ impl PreemptibleVdfTask {
             Err(e) => {
                 // Distinguish cooperative cancellation from a stalled VDF: Cancelled
                 // requeues, Stalled (and other errors) surface as Invalid.
+                // The cancellation/stall counter gives operators a quick way to
+                // see which mode of failure is occurring without scraping logs;
+                // `vdf_stalled` is recorded here for parity even though Stalled
+                // maps to Invalid downstream — the metric counts wait-pathway
+                // failures by reason, not just true cancellations.
                 match e.downcast_ref::<WaitForStepError>() {
-                    Some(WaitForStepError::Cancelled) => VdfValidationResult::Cancelled,
-                    Some(WaitForStepError::Stalled { .. }) => VdfValidationResult::Invalid(e),
+                    Some(WaitForStepError::Cancelled) => {
+                        metrics::record_validation_cancellation("vdf_preempted");
+                        VdfValidationResult::Cancelled
+                    }
+                    Some(WaitForStepError::Stalled { .. }) => {
+                        metrics::record_validation_cancellation("vdf_stalled");
+                        VdfValidationResult::Invalid(e)
+                    }
                     None => {
                         if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                            metrics::record_validation_cancellation("vdf_preempted");
                             VdfValidationResult::Cancelled
                         } else {
                             VdfValidationResult::Invalid(e)
