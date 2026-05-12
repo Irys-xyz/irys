@@ -1,7 +1,7 @@
 //! Integration test (currently `#[ignore]`d — see "Why ignored" below).
 //!
 //! Goal: verify end-to-end that a peer whose local VDF state cannot reach a
-//! block's required `global_step_number` surfaces `VdfValidationFailed`
+//! block's required `global_step_number` surfaces a `WaitForStepError::Stalled`
 //! within `progress_timeout_secs` rather than hanging the validation
 //! pipeline.
 //!
@@ -12,8 +12,12 @@
 //!   global_step well beyond Peer B's.
 //! - Peer A gossips only the head block to Peer B and is then stopped.
 //! - Expectation: Peer B cannot reach the head's `prev_output_step_number`,
-//!   `wait_for_step` bails on the progress check, and Peer B emits
-//!   `BlockStateUpdated { validation_result: Invalid(VdfValidationFailed(_)) }`.
+//!   `wait_for_step` bails on the progress check with `Stalled`, and Peer B
+//!   panics (the "never mislabel" rule: a local liveness failure must not
+//!   be reported as block-Invalid to the block tree). The test body still
+//!   asserts on the legacy `Invalid(VdfValidationFailed)` path and will need
+//!   to be reworked to observe a process exit instead — out of scope for
+//!   this branch.
 //!
 //! Why ignored: the assumption that Peer B "cannot reach `prev_output_step`"
 //! does not hold under the current `block_pool`. When Peer B receives the

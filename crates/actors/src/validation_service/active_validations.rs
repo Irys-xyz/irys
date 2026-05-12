@@ -26,7 +26,7 @@ use tracing::{Instrument as _, debug, info, instrument, warn};
 use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
-use crate::validation_service::{VdfTaskStage, VdfValidationResult};
+use crate::validation_service::{VdfTaskStage, VdfValidationResult, record_vdf_task_progress};
 
 /// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -96,6 +96,22 @@ pub(super) struct PreemptibleVdfTask {
 impl PreemptibleVdfTask {
     #[instrument(skip_all, fields(block.hash = %self.task.sealed_block.header().block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
+        // First action on first poll: refresh `progress_instant` from the
+        // spawn-queue time (set in `VdfScheduler::start_next`) to first-poll
+        // time. Without this, a delayed first poll under tokio runtime
+        // saturation would look identical to a genuine in-stage stall to the
+        // watchdog. With this, the watchdog clock measures real
+        // forward-progress from the moment the future actually gets CPU; the
+        // spawn-to-first-poll latency is captured in the `vdf_starting`
+        // histogram for diagnostics. We pass `Starting` to keep the stage
+        // unchanged (the next stage transition happens inside
+        // `ensure_vdf_is_valid`).
+        record_vdf_task_progress(
+            &self.stage_u8,
+            &self.progress_instant,
+            VdfTaskStage::Starting,
+        );
+
         let inner = Arc::clone(&self.task.service_inner);
         let header = self.task.sealed_block.header();
         let skip_vdf = self.task.skip_vdf_validation;
@@ -114,13 +130,18 @@ impl PreemptibleVdfTask {
         {
             Ok(()) => VdfValidationResult::Valid,
             Err(e) => {
-                // Distinguish cooperative cancellation from a stalled VDF: Cancelled
-                // requeues, Stalled (and other errors) surface as Invalid.
-                // The cancellation/stall counter gives operators a quick way to
-                // see which mode of failure is occurring without scraping logs;
-                // `vdf_stalled` is recorded here for parity even though Stalled
-                // maps to Invalid downstream — the metric counts wait-pathway
-                // failures by reason, not just true cancellations.
+                // Distinguish three error classes from the VDF wait pathway:
+                // - `Cancelled` (cooperative preemption / shutdown) → requeue.
+                // - `Stalled` (local VDF state did not advance) → PANIC. This is a
+                //   local-infrastructure failure (dead writer thread, poisoned
+                //   lock, paused sync), not block-invalidity evidence. The
+                //   non-cooperative watchdog already panics on the same condition
+                //   inside computational stages because surfacing the block as
+                //   Invalid would drop a block every honest peer accepts and
+                //   fork us off the network — the "never mislabel" rule in
+                //   design/docs/vdf-validation-stall-detection.md. The
+                //   cooperative `Wait*` stages must follow the same policy.
+                // - Anything else (real validation finding) → Invalid.
                 match e.downcast_ref::<WaitForStepError>() {
                     Some(WaitForStepError::Cancelled) => {
                         metrics::record_validation_cancellation("vdf_preempted");
@@ -128,7 +149,16 @@ impl PreemptibleVdfTask {
                     }
                     Some(WaitForStepError::Stalled { .. }) => {
                         metrics::record_validation_cancellation("vdf_stalled");
-                        VdfValidationResult::Invalid(e)
+                        // See above. Panic propagates through the spawned task
+                        // as JoinError::is_panic(), then `resume_unwind` in the
+                        // validation service select loop re-raises it onto the
+                        // service task. The global panic hook then raises SIGINT
+                        // and the 45s shutdown watchdog forces process abort.
+                        panic!(
+                            "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
+                            self.task.sealed_block.header().block_hash,
+                            e
+                        );
                     }
                     None => {
                         if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
@@ -421,9 +451,39 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         let current = self.current.as_mut()?;
 
         let stage = VdfTaskStage::from(current.stage_signal.load(Ordering::Relaxed));
+        // Only `WaitPrevStep`/`WaitFinalCatchUp` are skipped, and not because
+        // they have a redundant check — they need a *different kind* of check.
+        // The watchdog measures stage wall-clock duration; `wait_for_step`
+        // measures `global_step` advancement. These are different things, and
+        // only the second one is meaningful for a wait stage.
+        //
+        // A `Wait*` stage can legitimately last minutes — e.g. a peer catching
+        // up several hundred VDF steps from gossip at ~1 step/s. The wait is
+        // healthy as long as `global_step` keeps advancing; the stage clock has
+        // no bearing on whether progress is happening. Watching `Wait*` with a
+        // stage-duration timeout would false-fire on every legitimate long
+        // catch-up, recreating the original production-hang failure mode in
+        // reverse. `wait_for_step` panics on `WaitForStepError::Stalled`
+        // (no step advance for `progress_timeout`) — that's the right
+        // granularity here, and it shares the same shutdown path as this
+        // watchdog.
+        //
+        // Every other stage is watched, including `Starting` and `Completed`:
+        // - `Starting`: resilience to first-poll delay is achieved by
+        //   `PreemptibleVdfTask::execute` refreshing `progress_instant` at its
+        //   first statement. A 15 s queue-to-first-poll latency *does* trip the
+        //   watchdog — that's the desired behavior; a consensus-critical task
+        //   the runtime can't schedule for 15 s means the node cannot validate.
+        // - `Completed`: a terminal handoff state. Between
+        //   `record_vdf_task_progress(Completed)` and `poll_vdf` collecting the
+        //   `JoinHandle` is one select-loop round-trip — microseconds in normal
+        //   operation. If the task sits in `Completed` for 15 s, the validation
+        //   service's own select loop is starved (or the JoinHandle is
+        //   wedged), which is exactly the operational condition the watchdog
+        //   exists to surface.
         if matches!(
             stage,
-            VdfTaskStage::WaitPrevStep | VdfTaskStage::WaitFinalCatchUp | VdfTaskStage::Completed
+            VdfTaskStage::WaitPrevStep | VdfTaskStage::WaitFinalCatchUp
         ) {
             return None;
         }

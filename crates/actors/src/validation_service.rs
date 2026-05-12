@@ -138,7 +138,7 @@ fn vdf_task_progress_timeout(config: &Config) -> Duration {
 /// guarantees that when the watchdog observes a watched (computational) stage
 /// it pairs it with an `Instant` no older than the transition itself —
 /// never with the previous stage's stale `Instant`.
-fn record_vdf_task_progress(
+pub(crate) fn record_vdf_task_progress(
     stage_signal: &Arc<AtomicU8>,
     progress_signal: &Arc<Mutex<Instant>>,
     stage: VdfTaskStage,
