@@ -12,8 +12,7 @@ use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard};
 use tracing::{info, info_span};
 
 use irys_utils::{
-    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-    MDBX_RW_TX_SPAN,
+    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
 };
 
 // Cache the per-scope histogram handles so the hot rw-tx path doesn't re-resolve
