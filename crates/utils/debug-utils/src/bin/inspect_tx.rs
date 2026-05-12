@@ -7,8 +7,7 @@
 //! `<tx_id_base58>` is the base58-encoded transaction id.
 //!
 //! Opens the env in RO mode with `with_exclusive(false)` so it can run alongside
-//! a live node if needed (peer-2 is currently offline so we get exclusive access
-//! anyway).
+//! a live node if needed.
 
 use eyre::{Context as _, eyre};
 use irys_database::reth_db::{
@@ -30,6 +29,9 @@ fn main() -> eyre::Result<()> {
     let tx_id_b58 = args
         .next()
         .ok_or_else(|| eyre!("usage: inspect_tx <db_path> <tx_id_base58>"))?;
+    if args.next().is_some() {
+        return Err(eyre!("usage: inspect_tx <db_path> <tx_id_base58>"));
+    }
 
     let tx_bytes = bs58::decode(&tx_id_b58)
         .into_vec()
