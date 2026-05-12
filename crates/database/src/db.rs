@@ -12,7 +12,8 @@ use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard};
 use tracing::{info, info_span};
 
 use irys_utils::{
-    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
+    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM,
+    DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
 };
 
 // Cache the per-scope histogram handles so the hot rw-tx path doesn't re-resolve
@@ -33,6 +34,12 @@ static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(||
     metrics::histogram!(
         DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
         "scope" => DB_SCOPE_RETH_EVM,
+    )
+});
+static IRYS_CACHE_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_IRYS_CACHE,
     )
 });
 
@@ -326,6 +333,18 @@ pub trait DatabaseProviderCacheExt {
     fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
         F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> T;
+
+    /// Open a scoped cache rw-transaction with MDBX stall metrics attributed to
+    /// `db_scope=irys-cache`. Use this when the rw-tx must outlive a single
+    /// closure (e.g. iterating with a cursor and committing after the loop).
+    /// The acquire-latency histogram (`db.tx_mut_acquire_duration_seconds{scope="irys-cache"}`)
+    /// is recorded here; libmdbx writer-lock stall warnings emitted during
+    /// `begin_rw_txn` are attributed via the entered span — stalls fire only
+    /// during acquisition, so the span does not need to stay live for the rest
+    /// of the tx's lifetime.
+    fn cache_tx_mut_scoped(
+        &self,
+    ) -> Result<crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>, DatabaseError>;
 }
 
 impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
@@ -333,8 +352,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>,
     {
-        let inner = self.cache().tx_mut()?;
-        let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
+        let tx = self.cache_tx_mut_scoped()?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -355,8 +373,7 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     where
         F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T,
     {
-        let inner = self.cache().tx_mut()?;
-        let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner);
+        let tx = self.cache_tx_mut_scoped()?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -371,6 +388,16 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
+    }
+
+    fn cache_tx_mut_scoped(
+        &self,
+    ) -> Result<crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>, DatabaseError> {
+        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CACHE).entered();
+        let start = std::time::Instant::now();
+        let inner = self.cache().tx_mut();
+        IRYS_CACHE_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
+        Ok(crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner?))
     }
 }
 
