@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778585206314,
+  "lastUpdate": 1778609139768,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -2923,6 +2923,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "109c94cffab577e6739497c2dee985cdb903d6bb",
+          "message": "feat: vdf progress (#1411)\n\n* docs: add VDF validation progress-check implementation plan\n\n* feat(vdf): add progress_timeout_secs to VdfConfig\n\n* feat(vdf): add cancel + progress check to wait_for_step\n\nExtend VdfStateReadonly::wait_for_step with a cancel signal and a\nprogress-timeout Duration. The progress check tracks (last_observed_step,\nlast_progress_at): if global_step does not advance within the timeout\nwindow, the wait bails with a typed error instead of hanging forever.\nThis catches the case where the local VDF writer thread has died (e.g.,\npoisoned lock -> run_vdf returns) without imposing a wall-clock cap on\nlegitimately long waits.\n\nAlso enable tokio's `test-util` feature for irys-vdf dev-deps so the new\ntests can use `start_paused = true`. The single in-tree caller in\nvalidation_service.rs is updated minimally to keep the workspace\ncompiling; full plumbing of cancel + configured progress_timeout to that\nsite lands in Task 4.\n\n* chore(validation): clarify Task 4 TODO at site C shim\n\n* refactor(validation): route site A through VdfStateReadonly::wait_for_step\n\n* fix(validation): plumb cancel signal into site C's wait_for_step\n\n* feat(validation): promote ensure_vdf_is_valid stage logs to debug/info\n\n* chore(validation): drop redundant pre-entry debug log\n\n* feat(vdf): log explicit error when run_vdf exits via poisoned store_step\n\n* test(chain-tests): document VDF progress-check integration test (ignored)\n\n* style: cargo fmt fixes after task 5/7\n\n* docs(vdf): clarify worst-case progress-timeout latency\n\n* Implement progressive VDF validation watchdog\n\n* Fix bounded VDF fast-forward receiver wiring\n\n* feat: panic on watchdog intervention\n\n* feat: improvements\n\n* docs: produce ADR\n\n* chore: fix typo\n\n* feat: code refinement\n\n* fix: address feedback\n\n* feat(metrics): expose VDF stage durations and stall/preempt labels\n\nIntegrates the branch's VDF stall-detection work with master's new\nvalidation-metrics framework.\n\n- Wire `record_vdf_step_wait_duration_ms` to both `wait_for_step` calls\n  in `ensure_vdf_is_valid`. Replaces the per-call helper that master\n  added and the branch removed in the wait_for_step refactor.\n- Record per-VDF-stage histograms via `record_validation_stage_duration_ms`\n  inside `record_vdf_task_progress`. Stage labels are `vdf_`-prefixed\n  (e.g. `vdf_validate_batch`) so they don't collide with the existing\n  concurrent-validation labels (`seeds`, `recall_range`, `poa`,\n  `shadow_tx`, `concurrent_overall`).\n- Label `VALIDATION_TASK_FORCE_ABORTED` by stage so operators can see\n  which stage is stalling when the watchdog fires.\n- Categorise `wait_for_step` failures on\n  `record_validation_cancellation`: `vdf_preempted` for cooperative\n  cancellation, `vdf_stalled` for the progress-timeout path. The two\n  failure modes are deliberately kept separate end-to-end.\n\n* chore: fmt\n\n* feat: record global VDF step more often\n\n* docs: update comment",
+          "timestamp": "2026-05-12T18:45:40+01:00",
+          "tree_id": "a9e163dc53f45b2908ac40c08839a0a40093809e",
+          "url": "https://github.com/Irys-xyz/irys/commit/109c94cffab577e6739497c2dee985cdb903d6bb"
+        },
+        "date": 1778609137937,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077161,
+            "range": "± 0.001809",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 771.539426,
+            "range": "± 14.51583",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 983.128616,
+            "range": "± 58.615413",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120214,
+            "range": "± 0.001263",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1221.104156,
+            "range": "± 13.714398",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1616.51303,
+            "range": "± 13.208116",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.479356,
+            "range": "± 0.020136",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.294925,
+            "range": "± 3.799295",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.901588,
+            "range": "± 2.469455",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
