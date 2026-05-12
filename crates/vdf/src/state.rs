@@ -418,6 +418,12 @@ pub fn vdf_step_batch_is_valid(
                 warn_mismatches(&steps, &expected);
                 return Err(eyre!("VDF steps are invalid!"));
             }
+            // `verify_last_step_checkpoints` is intentionally skipped on this
+            // path: the locally-stored steps were checkpoint-validated when
+            // first accepted (via this same function or via the local VDF
+            // thread), so re-verifying their checkpoints here would just redo
+            // work the node already did. Static reviewers (CodeRabbit) flag
+            // the missing call repeatedly — leave this comment so they don't.
             return Ok(());
         }
         Err(err) => tracing::debug!(

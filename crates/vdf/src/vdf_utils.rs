@@ -36,9 +36,15 @@ pub async fn fast_forward_validated_steps(
                 // `run_vdf` fully drains this channel between every ~1s SHA step
                 // (see crates/vdf/src/vdf.rs:99), so a healthy consumer cannot fall
                 // this far behind — a trip here means run_vdf is dead (poisoned-lock
-                // exit) or deadlocked. The panic + global panic hook aborts the
-                // process so the supervisor can restart cleanly; returning Err here
-                // would only mask the underlying VDF-thread failure.
+                // exit) or deadlocked.
+                //
+                // Governing rule: never mislabel a block as Valid or Invalid. With
+                // run_vdf dead we can't validate any block, so surfacing this as an
+                // Err that the caller turns into Invalid would silently fork us off
+                // the network on a programmer-error condition. Panic instead — the
+                // global panic hook (setup_panic_hook) raises SIGINT and the 45s
+                // shutdown watchdog forces process abort, letting the supervisor
+                // restart the node clean. See design/docs/vdf-validation-stall-detection.md.
                 panic!(
                     "VDF fast-forward channel remained full for {:?} while sending step {}",
                     send_timeout,

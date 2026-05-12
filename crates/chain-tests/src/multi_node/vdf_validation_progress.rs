@@ -48,6 +48,12 @@
 //! `wait_for_step_completes_when_state_advances`) are the canonical
 //! coverage of the progress-check semantics until one of those
 //! prerequisites lands.
+//!
+//! Status: this test is kept in-tree intentionally — the scenario it
+//! describes is the one we ultimately want covered end-to-end. It will be
+//! re-activated in a follow-up PR once the orphan-storm fix (Defect 2) or
+//! the direct `ValidateBlock` injection helper lands; the test body itself
+//! is otherwise correct against the design.
 
 use crate::utils::IrysNodeTest;
 use irys_actors::{block_tree_service::ValidationResult, block_validation::ValidationError};

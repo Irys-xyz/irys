@@ -38,10 +38,12 @@ Collapsing the two into a single `Err` would re-introduce the original failure m
 
 `ensure_vdf_is_valid` records its progress at each stage boundary via `record_vdf_task_progress`, which writes both a `stage_signal: AtomicU8` and a `progress_instant: Mutex<Instant>`. The `ValidationService` select loop ticks every 5s and asks `VdfScheduler::abort_stalled_current(progress_timeout)`:
 
-- It watches only the **computational** stages (`ValidateSeeds`, `ValidateBatch`, `FastForwardBatch`). The `WaitPrevStep` and `WaitFinalCatchUp` stages are excluded — those are already bounded by `wait_for_step`'s cooperative progress check, so doubling up would be redundant.
+- It explicitly skips the `WaitPrevStep`, `WaitFinalCatchUp`, and `Completed` stages — `Wait*` are already bounded by `wait_for_step`'s cooperative progress check (doubling up would be redundant), and `Completed` means the task is already on its way out. Every other stage (`Starting`, `ValidateSeeds`, `ValidateBatch`, `FastForwardBatch`) is watched; the only stage where the task is allowed to legitimately sit is the two `Wait*` ones.
 - If a watched stage's `progress_instant` is older than `progress_timeout`, the watchdog sets the cooperative cancel signal, calls `JoinHandle::abort()` on the task, then `panic!`s the validation service.
 
-Critically, the panic is *not* handled in the loop — a process-wide panic hook converts it to a process abort, and the supervisor restarts the node clean. Marking the block Invalid (the obvious alternative) would have masked an underlying protocol-level bug as a data-level failure; the next block would re-trigger it.
+The panic is *not* handled in the loop. It propagates to the global panic hook (`setup_panic_hook` in `crates/utils/testing-utils/src/utils.rs`, installed by `crates/chain/src/main.rs`), which logs the panic, raises `SIGINT` to start an orderly shutdown, and arms a `GRACEFUL_SHUTDOWN_TIMEOUT` (45s) watchdog that calls `std::process::abort()` if the shutdown stalls. Either way the supervisor restarts the node clean.
+
+The governing rule, both here and at the matching select-loop arm that `std::panic::resume_unwind`s on `JoinError::is_panic()`, is: **never mislabel a block as Valid or Invalid.** Either misclassification near-guarantees a fork — Valid lets an actually-invalid block onto the local chain; Invalid drops an actually-valid block while every honest peer accepts it. Validation panics are by construction unreachable; if one ever fires, the only consensus-safe response is to crash and let the supervisor restart, so the node rejoins from a clean state instead of forking off on an internal programmer-error signal.
 
 `record_vdf_task_progress` is documented as "call only at real stage transitions" — adding periodic heartbeats inside a stage would silently defeat the watchdog.
 
@@ -49,12 +51,12 @@ Critically, the panic is *not* handled in the loop — a process-wide panic hook
 
 The `vdf_fast_forward` channel was previously unbounded; under the deadlock scenario above it would have grown without bound while the validation pipeline parked. It is now bounded to 4096 messages, and `fast_forward_validated_steps` sends with `progress_timeout` as a per-step send timeout.
 
-On timeout it panics under the same reasoning as the watchdog: `run_vdf` drains this channel fully between every ~1s SHA step, so 15s of sustained backpressure means the consumer is dead, not slow. Process-abort is the correct response.
+On timeout it panics under the same reasoning as the watchdog: `run_vdf` drains this channel fully between every ~1s SHA step, so 15s of sustained backpressure means the consumer is dead, not slow. Process-abort (via the same panic-hook → SIGINT → 45 s watchdog path as above) is the correct response.
 
 ## Consequences
 
 - A stalled VDF state surfaces as `Invalid(VdfValidationFailed)` instead of silently parking validation. The block tree learns and acts.
-- A deadlocked validation task takes the whole node down via process abort, not just the validation service. This is intentional: an L1 node that can't validate is worse than one that's offline — supervised restart is preferable to silent consensus divergence.
+- A deadlocked validation task takes the whole node down via the panic-hook shutdown path described above, not just the validation service. This is intentional: an L1 node that can't validate is worse than one that's offline — supervised restart is preferable to silent consensus divergence. Worst-case wall-clock from panic to fresh process is bounded by `GRACEFUL_SHUTDOWN_TIMEOUT` (45 s).
 - Operators must configure node supervision (systemd, k8s, etc.) to restart on abort. This was already required for other panic-as-crash paths in the codebase.
 - The cooperative progress check and the non-cooperative watchdog deliberately do not overlap (the watchdog skips the `Wait*` stages). A regression in either mechanism is not caught by the other — both must stay green.
 - `progress_timeout_secs` couples three timeouts (wait_for_step's progress check, fast_forward send timeout, watchdog stage budget) under one knob. Operators tune one number and the system stays internally consistent; the cost is that the three sites cannot be independently relaxed.

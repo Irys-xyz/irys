@@ -109,15 +109,21 @@ fn vdf_task_progress_timeout(config: &Config) -> Duration {
 /// (`abort_stalled_current`) treats `progress_signal.elapsed() < timeout` as
 /// proof that the task is making forward progress. Periodic calls inside a
 /// stuck stage would silently defeat the watchdog.
+///
+/// Write order matters: refresh the `Instant` **before** publishing the new
+/// stage. The watchdog reads stage first, then the `Instant`, so this ordering
+/// guarantees that when the watchdog observes a watched (computational) stage
+/// it pairs it with an `Instant` no older than the transition itself —
+/// never with the previous stage's stale `Instant`.
 fn record_vdf_task_progress(
     stage_signal: &Arc<AtomicU8>,
     progress_signal: &Arc<Mutex<Instant>>,
     stage: VdfTaskStage,
 ) {
-    stage_signal.store(stage as u8, Ordering::Relaxed);
     *progress_signal
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    stage_signal.store(stage as u8, Ordering::Relaxed);
 }
 
 /// Messages that the validation service supports
@@ -349,7 +355,18 @@ impl ValidationService {
                                 block.hash = %current.hash,
                                 "VDF validation task panicked; aborting"
                             );
-                            // we _used_ to return this as an invalid validation result... but this should NEVER panic
+                            // Governing rule: NEVER mislabel a block as Valid or Invalid.
+                            // Both misclassifications near-guarantee a fork.
+                            //
+                            // Validation panics inside `ensure_vdf_is_valid` are unreachable
+                            // by construction (see comments at the reachable `expect` sites,
+                            // e.g. the `get_step` `.expect` after `wait_for_step`). If we
+                            // ever do panic here, we don't know whether the block is valid —
+                            // master used to convert this to `Invalid(TaskPanicked)`, but
+                            // surfacing a programmer-error as a data-level Invalid would
+                            // drop a block every honest peer still accepts, forking us off
+                            // the network. Crashing instead lets the supervisor restart us
+                            // clean. See design/docs/vdf-validation-stall-detection.md.
                             std::panic::resume_unwind(panic);
                         } else {
                             // JoinError::Cancelled — the spawned future was aborted
@@ -438,12 +455,16 @@ impl ValidationService {
                         // means a deadlock, a poisoned lock, or a runaway loop, not slow
                         // hardware.
                         //
-                        // We panic instead of marking the block Invalid because:
-                        //   1. A process-wide panic hook turns this into an abort, so the
-                        //      supervisor restarts the node and the operator gets a loud
-                        //      crash signal.
-                        //   2. Marking the block Invalid would mask the underlying bug as
-                        //      a data-level failure — the next block would re-trigger it.
+                        // We panic instead of marking the block Invalid because of the
+                        // never-mislabel rule: a stalled validation pipeline does not tell
+                        // us whether the block is valid or invalid. Both misclassifications
+                        // fork us off the network. Crashing is the only consensus-safe
+                        // response — `setup_panic_hook` (in chain/src/main.rs) catches the
+                        // panic, raises SIGINT for graceful shutdown, and arms a 45s
+                        // force-abort watchdog so the supervisor restarts the node clean.
+                        // The operator gets a loud crash signal; the underlying bug isn't
+                        // re-triggered by the next block as a silent data-level failure.
+                        // See design/docs/vdf-validation-stall-detection.md.
                         let current_vdf = coordinator
                             .vdf_scheduler
                             .current
@@ -609,6 +630,20 @@ impl ValidationServiceInner {
             )
             .await?;
 
+        // Unreachable in practice: `wait_for_step` above only returns Ok once
+        // `global_step >= prev_output_step_number`, so the step is in the seed
+        // buffer. The buffer can in principle have trimmed past
+        // `prev_output_step_number` if a canonical-tip update advanced
+        // `minimum_step_to_keep` during the sub-millisecond window after
+        // `wait_for_step` returned — but the buffer's capacity is at minimum
+        // `max_allowed_vdf_fork_steps` (≥60k for production), so trimming
+        // requires ~60k steps of canonical advancement in that window. That
+        // doesn't happen.
+        //
+        // If it ever does fire, the panic is intentional. We must not
+        // downgrade this to an `Invalid` result — see the never-mislabel
+        // rule documented at the `resume_unwind` site in the select loop
+        // and in design/docs/vdf-validation-stall-detection.md.
         let stored_previous_step = self
             .vdf_state
             .get_step(prev_output_step_number)
