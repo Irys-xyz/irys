@@ -1191,6 +1191,7 @@ mod assignment_reset_tests {
     use super::*;
     use crate::services::ServiceSenders;
     use irys_config::StorageSubmodulesConfig;
+    use irys_database::DatabaseProvider;
     use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::{
         BlockIndex, BlockTree, BlockTreeReadGuard, StorageModule, StorageModuleInfo,
@@ -1198,9 +1199,8 @@ mod assignment_reset_tests {
     };
     use irys_testing_utils::{new_mock_signed_header, utils::TempDirBuilder};
     use irys_types::{
-        Config, ConsensusConfig, ConsensusOptions, DataLedger, DatabaseProvider, H256, NodeConfig,
-        NodeMode, PartitionChunkOffset, ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie,
+        Config, ConsensusConfig, ConsensusOptions, DataLedger, H256, NodeConfig, NodeMode,
+        PartitionChunkOffset, ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     };
     use std::{
         sync::{

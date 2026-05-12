@@ -12,7 +12,9 @@ use std::path::{Component, Path, PathBuf};
 
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, ManifestFile, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
-use super::{IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR, STORAGE_MODULES_SUBDIR, SUBMODULES_FILE};
+use super::{
+    IRYS_CACHE_SUBDIR, IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR, STORAGE_MODULES_SUBDIR, SUBMODULES_FILE,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportOpts {
@@ -61,6 +63,7 @@ pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     verify_no_extra_entries(staging.path(), &extracted.files)?;
     sanity_check_consensus_db(staging.path())?;
     sanity_check_reth_db(staging.path())?;
+    sanity_check_cache_db(staging.path(), &extracted)?;
 
     std::fs::create_dir_all(&opts.data_dir)
         .with_context(|| format!("creating data dir {}", opts.data_dir.display()))?;
@@ -120,6 +123,40 @@ fn sanity_check_consensus_db(root: &Path) -> eyre::Result<()> {
     }
     drop(tx);
     drop(env);
+    Ok(())
+}
+
+fn sanity_check_cache_db(root: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {
+    let cache_dir = root.join(IRYS_CACHE_SUBDIR);
+    if !manifest.includes_caches {
+        eyre::ensure!(
+            !cache_dir.exists(),
+            "snapshot contains an undeclared cache environment"
+        );
+        return Ok(());
+    }
+    if manifest.irys_schema_version < u32::from(irys_types::DatabaseVersion::V4) {
+        return Ok(());
+    }
+    eyre::ensure!(
+        cache_dir.join("mdbx.dat").is_file(),
+        "snapshot cache DB is missing mdbx.dat"
+    );
+    let env = DatabaseEnv::open(
+        &cache_dir,
+        DatabaseEnvKind::RO,
+        DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )
+    .context("sanity opening snapshot cache DB")?;
+    let mut tx = env.tx().context("starting RO tx on snapshot cache DB")?;
+    let version = irys_database::cache_database_schema_version(&mut tx)
+        .context("reading snapshot cache schema version")?;
+    eyre::ensure!(
+        version == Some(manifest.irys_schema_version),
+        "snapshot cache schema version disagrees with consensus"
+    );
     Ok(())
 }
 
@@ -217,6 +254,9 @@ fn purge_node_local_state(target: &Path, allowed_roots: &BTreeSet<OsString>) -> 
     }
     remove_if_exists(&target.join(STORAGE_MODULES_SUBDIR))?;
     remove_if_exists(&target.join(SUBMODULES_FILE))?;
+    if !allowed_roots.contains(std::ffi::OsStr::new(IRYS_CACHE_SUBDIR)) {
+        remove_if_exists(&target.join(IRYS_CACHE_SUBDIR))?;
+    }
     Ok(())
 }
 
@@ -595,6 +635,59 @@ mod tests {
             created_by: "test".to_owned(),
             files: Vec::<ManifestFile>::new(),
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum BadCache {
+        Missing,
+        Corrupt,
+        Unstamped,
+        WrongSchema,
+    }
+
+    #[rstest]
+    #[case::missing(BadCache::Missing, "missing mdbx.dat")]
+    #[case::corrupt(BadCache::Corrupt, "sanity opening snapshot cache DB")]
+    #[case::unstamped(BadCache::Unstamped, "schema version disagrees")]
+    #[case::wrong_schema(BadCache::WrongSchema, "schema version disagrees")]
+    fn rejects_invalid_split_cache(
+        #[case] bad: BadCache,
+        #[case] expected: &str,
+    ) -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().build();
+        let cache_path = dir.path().join(IRYS_CACHE_SUBDIR);
+        match bad {
+            BadCache::Missing => {}
+            BadCache::Corrupt => {
+                std::fs::create_dir(&cache_path)?;
+                std::fs::write(cache_path.join("mdbx.dat"), b"corrupt")?;
+            }
+            BadCache::Unstamped | BadCache::WrongSchema => {
+                let cache = open_or_create_db(
+                    &cache_path,
+                    irys_database::tables::CacheTables::ALL,
+                    DatabaseArguments::irys_testing()?,
+                )?;
+                if matches!(bad, BadCache::WrongSchema) {
+                    cache.update(|tx| {
+                        irys_database::set_cache_database_schema_version(
+                            tx,
+                            irys_types::DatabaseVersion::V3,
+                        )
+                    })??;
+                }
+            }
+        }
+        let mut manifest = manifest_with(
+            1,
+            irys_types::DatabaseVersion::CURRENT.into(),
+            SNAPSHOT_FORMAT_VERSION,
+        );
+        manifest.includes_caches = true;
+        let error = sanity_check_cache_db(dir.path(), &manifest)
+            .expect_err("invalid cache must fail before import");
+        assert!(error.to_string().contains(expected), "{error:?}");
+        Ok(())
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::mempool_service::TxIngressError;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeEntry, BlockTreeReadGuard};
 use irys_types::ingress::IngressProof;
-use irys_types::{H256, IrysTransactionCommon, app_state::DatabaseProvider};
+use irys_types::{H256, IrysTransactionCommon};
 use tracing::{debug, warn};
 
 /// Resolves an anchor (block hash) to its height.

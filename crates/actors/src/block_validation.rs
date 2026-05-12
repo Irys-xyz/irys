@@ -13,6 +13,7 @@ use alloy_consensus::transaction::SignerRecoverable as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, canonical_promoted_height, canonical_submit_height,
     db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
@@ -36,7 +37,6 @@ use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, TxChunkOffset, U256, UnixTimestamp,
-    app_state::DatabaseProvider,
     calculate_difficulty, ensure_proof_layout, expected_chunk_byte_range,
     hardfork_config::{Cascade, ForEpoch, IrysHardforkConfig},
     next_cumulative_diff,
@@ -3537,7 +3537,7 @@ mod c1_side_fork_regression_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("c1_side_fork_regression")
             .build();
-        let db = irys_types::DatabaseProvider::for_testing(
+        let db = irys_database::DatabaseProvider::for_testing(
             tmp_dir.path(),
             &tmp_dir.path().join("cache"),
         )
@@ -3722,7 +3722,7 @@ mod poa_bounds_snapshot_tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("poa_bounds_snapshot_hash")
             .build();
-        let db = irys_types::DatabaseProvider::for_testing(
+        let db = irys_database::DatabaseProvider::for_testing(
             tmp_dir.path(),
             &tmp_dir.path().join("cache"),
         )
@@ -8584,7 +8584,7 @@ mod tests {
 
         // Create epoch service with random miner address
         let _cache_dir = TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
+        let db = irys_database::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
             .expect("test db setup");
         let block_index = BlockIndex::new_for_testing(db);
 

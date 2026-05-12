@@ -13,11 +13,11 @@
 //!      + `MigratedBlockHashes` — O(1) DB read once the confirming block
 //!      has migrated out of the tree window.
 
+use irys_database::DatabaseProvider;
 use irys_database::{block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes};
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::{
     DataLedger, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
-    app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
 use reth_db::Database as _;
@@ -263,6 +263,7 @@ fn compute_submit_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProvider;
     use irys_database::{
         DatabaseProviderTestExt as _, insert_tx_header, set_data_tx_included_height,
         tables::IrysBlockHeaders,
@@ -276,7 +277,7 @@ mod tests {
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
-        IrysBlockHeader, SealedBlock, U256, app_state::DatabaseProvider,
+        IrysBlockHeader, SealedBlock, U256,
     };
     use reth_db::transaction::DbTxMut as _;
     use std::sync::{Arc, RwLock};

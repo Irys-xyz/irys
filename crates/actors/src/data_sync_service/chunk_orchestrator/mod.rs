@@ -11,6 +11,7 @@ use crate::{
     metrics,
     services::ServiceSenders,
 };
+use irys_database::DatabaseProvider;
 use irys_database::{cached_chunk_by_chunk_offset, db::DatabaseProviderCacheExt as _};
 use irys_domain::{
     BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule,
@@ -18,7 +19,7 @@ use irys_domain::{
 };
 use irys_types::{
     DataLedger, IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
-    UnpackedChunk, app_state::DatabaseProvider, hardfork_config::DataLedgerLookup,
+    UnpackedChunk, hardfork_config::DataLedgerLookup,
 };
 use nodit::interval::ii;
 use std::{

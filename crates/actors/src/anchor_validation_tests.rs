@@ -1,12 +1,10 @@
 use std::sync::{Arc, RwLock};
 
+use irys_database::DatabaseProvider;
 use irys_database::{DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_block_header};
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
-use irys_types::{
-    CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader,
-    irys::IrysSigner,
-};
+use irys_types::{CommitmentTransaction, ConsensusConfig, H256, IrysBlockHeader, irys::IrysSigner};
 
 use super::{get_anchor_height, validate_anchor_for_inclusion};
 

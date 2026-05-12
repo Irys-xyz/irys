@@ -2799,8 +2799,9 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let block_requests = Arc::new(Mutex::new(vec![]));
             let block_requests_clone = block_requests.clone();
@@ -2987,8 +2988,9 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let mut node_config = NodeConfig::testing();
             node_config.node_mode = NodeMode::Genesis;
@@ -3133,8 +3135,9 @@ mod tests {
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -3265,8 +3268,9 @@ mod tests {
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -3517,10 +3521,11 @@ mod tests {
         use super::*;
         use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
+        use irys_database::DatabaseProvider;
         use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::BlockIndex;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{DatabaseProvider, NodeConfig, PeerListItem};
+        use irys_types::{NodeConfig, PeerListItem};
         use std::sync::atomic::AtomicUsize;
 
         /// The first height that the sync needs. Our index has the main chain
@@ -4168,12 +4173,13 @@ mod tests {
         use super::*;
         use crate::tests::util::{FakeGossipServer, peer_list_item};
         use crate::types::GossipResponse;
+        use irys_database::DatabaseProvider;
         use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::BlockIndex;
         use irys_testing_utils::utils::TempDirBuilder;
         use irys_types::{
-            DatabaseProvider, IrysAddress, IrysPeerId, NodeConfig, NodeInfo, PeerAddress,
-            PeerListItem, PeerNetworkSender, PeerScore,
+            IrysAddress, IrysPeerId, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore,
         };
         use irys_utils::circuit_breaker::CircuitBreakerConfig;
         use std::sync::Arc;
@@ -4834,11 +4840,12 @@ mod tests {
             VdfController,
         ) {
             use crate::tests::util::data_handler_stub;
+            use irys_database::DatabaseProvider;
             use irys_database::DatabaseProviderTestExt as _;
             use irys_domain::PeerList;
             use irys_domain::chain_sync_state::ChainSyncState;
             use irys_testing_utils::utils::TempDirBuilder;
-            use irys_types::{Config, DatabaseProvider, NodeConfig};
+            use irys_types::{Config, NodeConfig};
 
             let dir = TempDirBuilder::new().with_tracing().build();
             let mut node_config = NodeConfig::testing();
@@ -4928,12 +4935,13 @@ mod tests {
     #[tokio::test]
     async fn failed_parent_request_keeps_a_block_another_path_stored() {
         use crate::tests::util::data_handler_stub;
+        use irys_database::DatabaseProvider;
         use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::PeerList;
         use irys_domain::chain_sync_state::ChainSyncState;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{BlockBody, Config, DatabaseProvider, H256, NodeConfig, SealedBlock};
+        use irys_types::{BlockBody, Config, H256, NodeConfig, SealedBlock};
         use irys_vdf::state::VdfController;
         use std::sync::atomic::AtomicBool;
 
@@ -5003,12 +5011,13 @@ mod tests {
     #[tokio::test]
     async fn failed_parent_request_keeps_a_block_stored_during_cleanup() {
         use crate::tests::util::data_handler_stub;
+        use irys_database::DatabaseProvider;
         use irys_database::DatabaseProviderTestExt as _;
         use irys_domain::PeerList;
         use irys_domain::chain_sync_state::ChainSyncState;
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_testing_utils::utils::TempDirBuilder;
-        use irys_types::{BlockBody, Config, DatabaseProvider, H256, NodeConfig, SealedBlock};
+        use irys_types::{BlockBody, Config, H256, NodeConfig, SealedBlock};
         use irys_vdf::state::VdfController;
         use std::sync::atomic::AtomicBool;
 

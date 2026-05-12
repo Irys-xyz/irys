@@ -4,6 +4,7 @@ use crate::{
     metrics,
     test_helpers::build_test_service_senders,
 };
+use irys_database::DatabaseProvider;
 use irys_database::{DatabaseProviderTestExt as _, cache_chunk, cache_data_root};
 use irys_domain::ChunkType;
 use irys_domain::{BlockTree, StorageModuleInfo};
@@ -11,8 +12,8 @@ use irys_testing_utils::TempDirBuilder;
 use irys_types::{
     Base64, Config, ConsensusConfig, DataLedger, DataTransaction, DataTransactionLedger, H256,
     IrysAddress, LedgerChunkOffset, LedgerChunkRange, NodeConfig, PeerAddress, PeerListItem,
-    TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider, irys::IrysSigner,
-    ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ii,
+    partition::PartitionAssignment, partition_chunk_offset_ie,
 };
 use nodit::interval::ii;
 use std::sync::atomic::{AtomicU64, Ordering};

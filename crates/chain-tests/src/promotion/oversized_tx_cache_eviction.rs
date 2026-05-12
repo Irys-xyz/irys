@@ -1,12 +1,11 @@
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
+use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, IrysDupCursorExt as _};
 use irys_database::tables::CachedChunksIndex;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, IrysAddress, NodeConfig, irys::IrysSigner,
-};
+use irys_types::{DataLedger, DataRoot, IrysAddress, NodeConfig, irys::IrysSigner};
 use reth_db::transaction::DbTx as _;
 use std::time::Duration;
 

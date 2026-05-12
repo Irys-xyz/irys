@@ -1,13 +1,13 @@
 use crate::models::PeerEvent;
 use alloy_core::primitives::B256;
+use irys_database::DatabaseProvider;
 use irys_database::reth_db::Database as _;
 use irys_database::reth_db::DatabaseError;
 use irys_database::reth_db::cursor::DbCursorRO as _;
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::tables::PeerListItems;
 use irys_types::{
-    Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
-    PeerNetworkSender,
+    Config, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender,
 };
 use irys_types::{IrysAddress, IrysPeerId, ProtocolVersion};
 use lru::LruCache;

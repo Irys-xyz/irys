@@ -2,10 +2,10 @@ use eyre::Result;
 use eyre::bail;
 use eyre::eyre;
 
+use irys_database::DatabaseProvider;
 use irys_database::database;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_types::BlockHash;
-use irys_types::DatabaseProvider;
 
 use irys_types::IrysBlockHeader;
 

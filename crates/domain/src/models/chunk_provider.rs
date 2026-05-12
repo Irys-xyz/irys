@@ -1,10 +1,10 @@
+use irys_database::DatabaseProvider;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::data_size_to_chunk_count;
 use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
     PartitionChunkOffset, RelativeChunkOffset, TxChunkOffset, UnpackedChunk,
-    app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
 use opentelemetry::{KeyValue, global, metrics::Counter};

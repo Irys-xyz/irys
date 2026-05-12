@@ -1,3 +1,4 @@
+use irys_database::DatabaseProvider;
 use irys_database::{
     DatabaseProviderTestExt as _, cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
     db::DatabaseProviderCacheExt as _, submodule::SubmoduleStore as _,
@@ -7,10 +8,10 @@ use irys_storage::*;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{
     Base64, Config, ConsensusConfig, ConsensusOptions, DataLedger, DataTransaction,
-    DataTransactionHeader, DataTransactionLedger, DatabaseProvider, H256, LedgerChunkOffset,
-    LedgerChunkRange, NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset,
-    UnpackedChunk, ledger_chunk_offset_ii, partition::PartitionAssignment,
-    partition_chunk_offset_ie, partition_chunk_offset_ii,
+    DataTransactionHeader, DataTransactionLedger, H256, LedgerChunkOffset, LedgerChunkRange,
+    NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk,
+    ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    partition_chunk_offset_ii,
 };
 use openssl::sha;
 use tracing::info;

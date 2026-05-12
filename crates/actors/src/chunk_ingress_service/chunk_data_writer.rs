@@ -1,9 +1,8 @@
 use dashmap::DashSet;
+use irys_database::DatabaseProvider;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{CacheChunkOutcome, cache_chunk_verified, store_ingress_data_hash};
-use irys_types::{
-    ChunkPathHash, DatabaseProvider, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash,
-};
+use irys_types::{ChunkPathHash, H256, IrysAddress, UnpackedChunk, generate_ingress_data_hash};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
