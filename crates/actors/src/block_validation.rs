@@ -8,9 +8,9 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::scoped_tx::{Cache, ScopedTx};
 use irys_database::{
-    cached_data_root_by_data_root, db::DatabaseProviderCacheExt as _, tx_header_by_txid_canonical,
+    DatabaseProvider, cached_data_root_by_data_root, db::DatabaseProviderCacheExt as _,
+    tx_header_by_txid_canonical,
 };
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -29,9 +29,8 @@ use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
-    app_state::DatabaseProvider,
-    calculate_difficulty, next_cumulative_diff,
+    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp, calculate_difficulty,
+    next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path,
 };
@@ -2742,11 +2741,12 @@ pub async fn data_txs_are_valid(
                 let expected_chunk_count =
                     tx_header.data_size.div_ceil(config.consensus.chunk_size);
 
-                let ro_tx = ScopedTx::<Cache>::begin_ro(db.cache()).map_err(|e| {
-                    PreValidationError::DatabaseError {
-                        error: e.to_string(),
-                    }
-                })?;
+                let ro_tx =
+                    db.cache()
+                        .begin_ro()
+                        .map_err(|e| PreValidationError::DatabaseError {
+                            error: e.to_string(),
+                        })?;
 
                 let mut chunks: Vec<irys_types::ChunkBytes> =
                     Vec::with_capacity(expected_chunk_count as usize);
@@ -2895,7 +2895,7 @@ pub async fn data_txs_are_valid(
                             }
 
                             // Re-open a fresh read tx to observe the write
-                            let ro_tx2 = ScopedTx::<Cache>::begin_ro(db.cache()).map_err(|e| {
+                            let ro_tx2 = db.cache().begin_ro().map_err(|e| {
                                 PreValidationError::DatabaseError {
                                     error: e.to_string(),
                                 }
@@ -3667,7 +3667,7 @@ mod tests {
 
         // Create epoch service with random miner address
         let _cache_dir = TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
+        let db = irys_database::DatabaseProvider::for_testing(data_dir.path(), _cache_dir.path())
             .expect("test db setup");
         let block_index = BlockIndex::new_for_testing(db);
 

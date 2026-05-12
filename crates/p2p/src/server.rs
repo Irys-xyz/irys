@@ -1897,7 +1897,7 @@ mod tests {
         let cache_dir = TempDirBuilder::new().build();
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
-        let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), cache_dir.path())
+        let db = irys_database::DatabaseProvider::for_testing(temp_dir.path(), cache_dir.path())
             .expect("test db setup");
         let (tx, _rx) = mpsc::unbounded_channel();
         let peer_network_sender = PeerNetworkSender::new(tx);

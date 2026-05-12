@@ -281,7 +281,7 @@ pub trait DatabaseProviderCacheExt {
         F: FnOnce(&ScopedTx<Cache>) -> T;
 }
 
-impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
+impl DatabaseProviderCacheExt for crate::DatabaseProvider {
     fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
         F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
@@ -332,7 +332,7 @@ pub trait DatabaseProviderTestExt {
         Self: Sized;
 }
 
-impl DatabaseProviderTestExt for irys_types::DatabaseProvider {
+impl DatabaseProviderTestExt for crate::DatabaseProvider {
     fn for_testing(
         consensus_path: &std::path::Path,
         cache_path: &std::path::Path,

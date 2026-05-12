@@ -239,7 +239,7 @@ impl BlockStatusProvider {
 #[cfg(test)]
 impl BlockStatusProvider {
     #[cfg(test)]
-    pub fn mock(node_config: &NodeConfig, db: irys_types::DatabaseProvider) -> Self {
+    pub fn mock(node_config: &NodeConfig, db: irys_database::DatabaseProvider) -> Self {
         use irys_domain::{BlockIndex, BlockTree};
 
         let mut genesis = IrysBlockHeader::new_mock_header();

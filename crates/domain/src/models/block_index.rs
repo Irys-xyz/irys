@@ -5,13 +5,14 @@
 //! `MigratedBlockHashes` tables.
 
 use eyre::Result;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_index_item_by_height, block_index_latest_height, block_index_num_blocks,
     db::IrysDatabaseExt as _, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, H256, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, SealedBlock,
+    BlockIndexItem, DataLedger, DataTransactionHeader, H256, LedgerChunkOffset, LedgerIndexItem,
+    NodeConfig, SealedBlock,
 };
 use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;

@@ -1,7 +1,8 @@
 use dashmap::DashSet;
+use irys_database::DatabaseProvider;
 use irys_database::cache_chunk_verified;
 use irys_database::db::DatabaseProviderCacheExt as _;
-use irys_types::{ChunkPathHash, DatabaseProvider, UnpackedChunk};
+use irys_types::{ChunkPathHash, UnpackedChunk};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};

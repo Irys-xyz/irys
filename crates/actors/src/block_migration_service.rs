@@ -1,10 +1,11 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use eyre::{OptionExt as _, ensure};
+use irys_database::DatabaseProvider;
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
 use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
 use irys_types::{
     DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
-    Traced, app_state::DatabaseProvider,
+    Traced,
 };
 use std::{
     collections::HashMap,

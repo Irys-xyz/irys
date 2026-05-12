@@ -2,17 +2,17 @@ use crate::wire_types::{GossipResponse, RejectionReason};
 use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
 use eyre::{Report, Result as EyreResult};
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::DatabaseError;
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage, HandshakeRequest,
-    HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
-    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent,
-    get_version,
+    AnnouncementFinishedMessage, Config, HandshakeMessage, HandshakeRequest, HandshakeRequestV2,
+    IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode, PeerListItem,
+    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse, ProtocolVersion,
+    RejectedResponse, RethPeerInfo, TokioServiceHandle, build_user_agent, get_version,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -1199,7 +1199,7 @@ mod tests {
         path: &std::path::Path,
     ) -> (DatabaseProvider, irys_testing_utils::tempfile::TempDir) {
         let cache_dir = TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(path, cache_dir.path())
+        let db = irys_database::DatabaseProvider::for_testing(path, cache_dir.path())
             .expect("open test database");
         (db, cache_dir)
     }

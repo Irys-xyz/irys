@@ -3,21 +3,21 @@ use crate::chunk_ingress_service::ingress_proofs::{
     RegenAction, generate_and_store_ingress_proof, reanchor_and_store_ingress_proof,
 };
 use crate::metrics;
+use irys_database::DatabaseProvider;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
 };
 use irys_database::{
     db::DatabaseProviderCacheExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
-    scoped_tx::{Cache, ScopedTx, ScopedTxMut},
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
-    LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
+    Config, DataLedger, DataRoot, GIGABYTE, H256, IngressProof, LedgerChunkOffset, SendTraced as _,
+    TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -272,7 +272,7 @@ impl InnerCacheTask {
         let delete_chunks_older_than =
             UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
 
-        let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
+        let tx = self.db.cache().begin_ro()?;
 
         // Collect candidate data roots from CachedDataRoots
         let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
@@ -322,7 +322,7 @@ impl InnerCacheTask {
 
             // Commit a small batch to avoid large transactions
             if pending_roots.len() >= 256 {
-                let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
+                let write_tx = self.db.cache().begin_rw()?;
                 for root in pending_roots.drain(..) {
                     trace!(
                         chunk.data_root = ?root,
@@ -344,7 +344,7 @@ impl InnerCacheTask {
 
         // Flush any remaining pending deletions
         if !pending_roots.is_empty() {
-            let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
+            let write_tx = self.db.cache().begin_rw()?;
             for root in pending_roots.drain(..) {
                 let pruned = delete_cached_chunks_by_data_root_older_than(
                     &write_tx,
@@ -374,7 +374,7 @@ impl InnerCacheTask {
         let mut eviction_count: usize = 0;
         // Consensus read tx for block header lookups; cache write tx for cache table mutations.
         let consensus_rtx = self.db.tx()?;
-        let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
+        let write_tx = self.db.cache().begin_rw()?;
         {
             let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
             let mut walker = cursor.walk(None)?;
@@ -524,7 +524,7 @@ impl InnerCacheTask {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
         // Cache read tx for cache table operations; consensus read tx for tx header lookups.
-        let cache_tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
+        let cache_tx = self.db.cache().begin_ro()?;
         let consensus_rtx = self.db.tx()?;
         let mut cursor = cache_tx.cursor_read::<IngressProofs>()?;
         // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
@@ -982,7 +982,7 @@ mod tests {
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, NodeConfig, TxChunkOffset,
-        UnpackedChunk, app_state::DatabaseProvider,
+        UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::RwLock;

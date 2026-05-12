@@ -230,7 +230,7 @@ impl Display for BlockParam {
 //         let storage_config = StorageConfig::default();
 
 //         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+//             irys_database::DatabaseProvider(db_arc.clone()),
 //             task_manager.executor(),
 //             IrysSigner::random_signer(),
 //             storage_config.clone(),
@@ -287,7 +287,7 @@ impl Display for BlockParam {
 //         let storage_config = StorageConfig::default();
 
 //         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+//             irys_database::DatabaseProvider(db_arc.clone()),
 //             task_manager.executor(),
 //             IrysSigner::random_signer(),
 //             storage_config.clone(),

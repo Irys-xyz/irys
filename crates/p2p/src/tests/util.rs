@@ -15,6 +15,7 @@ use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{AtomicMempoolState, TxIngressError, TxReadError, create_state};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, block_discovery::BlockDiscoveryFacade};
+use irys_database::DatabaseProvider;
 use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
@@ -27,10 +28,10 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, H256, IrysBlockHeader,
-    IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _, TokioServiceHandle,
-    Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk,
+    DataTransaction, DataTransactionHeader, GossipRequest, H256, IrysBlockHeader, IrysPeerId,
+    MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+    ProtocolVersion, RethPeerInfo, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
+    TxChunkOffset, TxKnownStatus, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -270,7 +271,7 @@ impl GossipServiceTestFixture {
         let config = Config::new_with_random_peer_id(node_config);
 
         let _cache_dir = TempDirBuilder::new().build();
-        let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+        let db = irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
             .expect("test db setup");
 
         let (service_senders, service_receivers) =

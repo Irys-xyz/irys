@@ -801,7 +801,7 @@ async fn epoch_blocks_reinitialization_test() {
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
     let _cache_dir = TempDirBuilder::new().build();
-    let db = irys_types::DatabaseProvider::for_testing(&base_path, _cache_dir.path())
+    let db = irys_database::DatabaseProvider::for_testing(&base_path, _cache_dir.path())
         .expect("test db setup");
     let block_index = BlockIndex::new_for_testing(db);
 

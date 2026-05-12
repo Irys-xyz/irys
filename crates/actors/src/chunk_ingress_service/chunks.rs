@@ -5,6 +5,7 @@ use super::metrics::{
     record_validation_duration,
 };
 use eyre::eyre;
+use irys_database::DatabaseProvider;
 use irys_database::{
     confirm_data_size_for_data_root,
     db::DatabaseProviderCacheExt as _,
@@ -13,7 +14,7 @@ use irys_database::{
 };
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
+    DataLedger, DataRoot, H256, IngressProof, SendTraced as _,
     chunk::{UnpackedChunk, max_chunk_offset},
     hash_sha256,
     irys::IrysSigner,

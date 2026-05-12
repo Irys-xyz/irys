@@ -17,6 +17,7 @@ pub mod db_index;
 pub mod db_metrics;
 pub mod metadata;
 pub mod migration;
+pub mod provider;
 /// Extension traits for custom tables
 pub mod reth_ext;
 pub mod scoped_tx;
@@ -29,6 +30,7 @@ pub use data_ledger::*;
 pub use database::*;
 pub use db::{DatabaseProviderCacheExt, DatabaseProviderTestExt};
 pub use db_index::*;
+pub use provider::{DatabaseProvider, Env, RethDatabaseProvider};
 pub use scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, DbScope, ScopedTx, ScopedTxMut};
 pub use system_ledger::*;
 

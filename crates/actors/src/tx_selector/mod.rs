@@ -7,6 +7,7 @@ use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
 use futures::FutureExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
@@ -24,7 +25,7 @@ use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharge
 use irys_types::{
     BlockHash, BoundedFee, CommitmentTypeV2, DataLedger, DataTransactionHeader, IngressProofsList,
 };
-use irys_types::{Config, H256, IrysTransactionCommon as _, U256, app_state::DatabaseProvider};
+use irys_types::{Config, H256, IrysTransactionCommon as _, U256};
 use irys_types::{IrysAddress, SystemLedger, UnixTimestamp};
 use reth::rpc::types::BlockId;
 use reth_db::Database as _;

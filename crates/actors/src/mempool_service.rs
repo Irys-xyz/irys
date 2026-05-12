@@ -14,6 +14,7 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use crate::{MempoolReadGuard, TxMetadata};
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeReadGuard, CommitmentSnapshotStatus, get_atomic_file};
 use irys_reth_node_bridge::{IrysRethNodeAdapter, ext::IrysRethRpcTestContextExt as _};
@@ -21,7 +22,7 @@ use irys_storage::RecoveredMempoolState;
 use irys_types::CommitmentTypeV2;
 use irys_types::{
     BoundedFee, Config, H256, IrysTransactionCommon, IrysTransactionId, NodeConfig, SealedBlock,
-    U256, app_state::DatabaseProvider,
+    U256,
 };
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, DataTransactionHeader, IrysAddress,

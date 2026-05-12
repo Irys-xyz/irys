@@ -1,4 +1,5 @@
 use crate::{cache_service::CacheServiceAction, services::ServiceSenders};
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_header_by_hash, cached_chunk_by_chunk_offset,
     db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
@@ -12,7 +13,7 @@ use irys_storage::{InclusiveInterval as _, ie, ii};
 use irys_types::{
     Base64, BlockHash, Config, DataLedger, DataRoot, DataTransactionHeader, DataTransactionLedger,
     H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, Proof, SendTraced as _,
-    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+    TokioServiceHandle, Traced, TxChunkOffset, UnpackedChunk,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{collections::HashMap, sync::Arc};

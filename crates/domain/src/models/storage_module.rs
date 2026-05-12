@@ -40,6 +40,7 @@ use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::{
+    DatabaseProvider,
     db::IrysDatabaseExt as _,
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
@@ -54,9 +55,7 @@ use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
     DataTransactionHeader, H256, IrysAddress, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
     PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset,
-    TxChunkOffset, TxPath, UnpackedChunk,
-    app_state::DatabaseProvider,
-    get_leaf_proof, ledger_chunk_offset_ie,
+    TxChunkOffset, TxPath, UnpackedChunk, get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii,
 };

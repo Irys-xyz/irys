@@ -31,6 +31,7 @@ use irys_actors::{
 };
 use irys_api_server::{API_VERSION, ApiState, create_listener, run_server};
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_database::DatabaseProvider;
 use irys_database::database;
 use irys_database::db::RethDbWrapper;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -58,7 +59,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{

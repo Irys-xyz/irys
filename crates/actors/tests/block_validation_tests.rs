@@ -83,7 +83,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
 
     let _tmp_dir = TempDirBuilder::new().build();
     let _cache_dir = TempDirBuilder::new().build();
-    let db = irys_types::DatabaseProvider::for_testing(_tmp_dir.path(), _cache_dir.path())
+    let db = irys_database::DatabaseProvider::for_testing(_tmp_dir.path(), _cache_dir.path())
         .expect("test db setup");
     let block_index = BlockIndex::new_for_testing(db);
     for (height, item) in block_index_items.iter().enumerate() {

@@ -347,7 +347,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Manually update the data_root -> partition_hash index
     let _cache_dir = TempDirBuilder::new().build();
-    let db = irys_types::DatabaseProvider::for_testing(tmp_dir.path(), _cache_dir.path()).unwrap();
+    let db =
+        irys_database::DatabaseProvider::for_testing(tmp_dir.path(), _cache_dir.path()).unwrap();
     let _part_hash_0 = storage_modules[0].partition_hash().unwrap();
     let _part_hash_1 = storage_modules[1].partition_hash().unwrap();
 

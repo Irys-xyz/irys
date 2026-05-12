@@ -39,11 +39,12 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
         load_genesis_block_from_disk, load_genesis_commitments_from_disk,
         save_genesis_block_to_disk, save_genesis_commitments_to_disk,
     };
+    use irys_database::DatabaseProvider;
     use irys_database::database;
     use irys_database::reth_db::transaction::DbTx as _;
     use irys_database::scoped_tx::{Consensus, begin_scoped_rw};
     use irys_domain::BlockIndex;
-    use irys_types::{BlockBody, DatabaseProvider, SealedBlock};
+    use irys_types::{BlockBody, SealedBlock};
 
     let genesis_block = load_genesis_block_from_disk(genesis_dir)
         .wrap_err_with(|| format!("loading genesis block from {:?}", genesis_dir))?;

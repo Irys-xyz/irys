@@ -1,9 +1,11 @@
 use std::sync::{Arc, RwLock};
 
-use irys_database::{DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_block_header};
+use irys_database::{
+    DatabaseProvider, DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_block_header,
+};
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
-use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::{ConsensusConfig, H256, IrysBlockHeader};
 
 use super::get_anchor_height;
 

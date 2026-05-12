@@ -1892,8 +1892,9 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let block_requests = Arc::new(Mutex::new(vec![]));
             let block_requests_clone = block_requests.clone();
@@ -2068,8 +2069,9 @@ mod tests {
             let sync_state = ChainSyncState::new(true, false);
 
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let mut node_config = NodeConfig::testing();
             node_config.node_mode = NodeMode::Genesis;
@@ -2213,8 +2215,9 @@ mod tests {
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -2343,8 +2346,9 @@ mod tests {
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = TempDirBuilder::new().with_tracing().build();
             let _cache_dir = TempDirBuilder::new().build();
-            let db = irys_types::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
-                .expect("test db setup");
+            let db =
+                irys_database::DatabaseProvider::for_testing(temp_dir.path(), _cache_dir.path())
+                    .expect("test db setup");
 
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();

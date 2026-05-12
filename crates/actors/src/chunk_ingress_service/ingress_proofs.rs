@@ -1,5 +1,6 @@
 use super::ChunkIngressServiceInner;
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
+use irys_database::DatabaseProvider;
 use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
@@ -8,9 +9,7 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
-};
+use irys_types::{BlockHash, Config, DataRoot, H256, IngressProof, SendTraced as _, Traced};
 use tracing::{debug, error, warn};
 
 /// Errors that can occur when ingesting an external ingress proof.
