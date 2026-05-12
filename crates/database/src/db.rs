@@ -285,9 +285,15 @@ impl IrysDatabaseExt for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
+<<<<<<< HEAD
         // RethDbWrapper's own Database::update impl already wraps the call in
         // an `mdbx_rw_tx` span carrying `db_scope=reth-evm`, so this trait
         // method just delegates — no second span or consensus gate.
+=======
+        // RethDbWrapper's own Database::update impl above already wraps the
+        // call in an `mdbx_rw_tx` span carrying `db_scope=reth-evm`, so this
+        // trait method just delegates — no second span needed.
+>>>>>>> c2e1f0a17 (chore(database,chain): self-review cleanups in scope refactor)
         <Self as Database>::update(self, f)
     }
 }
@@ -297,6 +303,7 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
+<<<<<<< HEAD
         self.update_eyre_at("update_eyre", f)
     }
 
@@ -307,6 +314,8 @@ impl IrysDatabaseExt for DatabaseEnv {
         // Take this env's gate before begin_rw_txn so concurrent writers park
         // here instead of Busy-sleeping 250 ms in libmdbx.
         let _gate = lock_writer_gate(self, call_site);
+=======
+>>>>>>> c2e1f0a17 (chore(database,chain): self-review cleanups in scope refactor)
         let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
         let res = f(&tx)?;
         tx.commit()?;
