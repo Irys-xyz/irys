@@ -2742,11 +2742,11 @@ pub async fn data_txs_are_valid(
                 let expected_chunk_count =
                     tx_header.data_size.div_ceil(config.consensus.chunk_size);
 
-                let ro_tx = ScopedTx::<Cache>::new(db.cache().tx().map_err(|e| {
+                let ro_tx = ScopedTx::<Cache>::begin_ro(db.cache()).map_err(|e| {
                     PreValidationError::DatabaseError {
                         error: e.to_string(),
                     }
-                })?);
+                })?;
 
                 let mut chunks: Vec<irys_types::ChunkBytes> =
                     Vec::with_capacity(expected_chunk_count as usize);
@@ -2895,11 +2895,11 @@ pub async fn data_txs_are_valid(
                             }
 
                             // Re-open a fresh read tx to observe the write
-                            let ro_tx2 = ScopedTx::<Cache>::new(db.cache().tx().map_err(|e| {
+                            let ro_tx2 = ScopedTx::<Cache>::begin_ro(db.cache()).map_err(|e| {
                                 PreValidationError::DatabaseError {
                                     error: e.to_string(),
                                 }
-                            })?);
+                            })?;
                             maybe_chunk = irys_database::cached_chunk_by_chunk_offset(
                                 &ro_tx2,
                                 tx_header.data_root,

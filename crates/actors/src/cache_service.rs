@@ -272,7 +272,7 @@ impl InnerCacheTask {
         let delete_chunks_older_than =
             UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
 
-        let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+        let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
 
         // Collect candidate data roots from CachedDataRoots
         let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
@@ -524,7 +524,7 @@ impl InnerCacheTask {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
         // Cache read tx for cache table operations; consensus read tx for tx header lookups.
-        let cache_tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+        let cache_tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
         let consensus_rtx = self.db.tx()?;
         let mut cursor = cache_tx.cursor_read::<IngressProofs>()?;
         // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
