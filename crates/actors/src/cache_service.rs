@@ -468,7 +468,7 @@ impl InnerCacheTask {
         let mut candidates: BTreeMap<DataRoot, BTreeSet<TxChunkOffset>> = BTreeMap::new();
         let mut tally = PruneTally::default();
         {
-            let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+            let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
             let mut chunk_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
             let seek_key: DataRoot = H256::random();
             let mut chunk_walk = chunk_cursor.walk(Some(seek_key))?;
@@ -1105,7 +1105,7 @@ impl InnerCacheTask {
         // released between batches rather than held for the whole table scan.
         let mut candidates: Vec<EvictionRecord> = Vec::new();
         {
-            let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+            let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
             let consensus_tx = self.db.tx()?;
             let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
             let seek_key: DataRoot = H256::random();
@@ -1423,7 +1423,7 @@ impl InnerCacheTask {
     ) -> eyre::Result<()> {
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
-        let tx = ScopedTx::<Cache>::new(self.db.cache().tx()?);
+        let tx = ScopedTx::<Cache>::begin_ro(self.db.cache())?;
         let consensus_tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
         let mut walker = cursor.walk(Some(seek_key))?;
