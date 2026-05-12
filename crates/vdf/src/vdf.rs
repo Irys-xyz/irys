@@ -474,10 +474,7 @@ mod tests {
             ..VDFLimiterInfo::default()
         };
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.vdf.parallel_verification_thread_limit)
-            .build()
-            .expect("to be able to build vdf validation pool");
+        let pool = crate::build_verification_pool(&config.vdf);
 
         assert!(
             vdf_steps_are_valid(
@@ -584,10 +581,7 @@ mod tests {
             ..VDFLimiterInfo::default()
         };
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.vdf.parallel_verification_thread_limit)
-            .build()
-            .expect("to be able to build vdf validation pool");
+        let pool = crate::build_verification_pool(&config.vdf);
 
         assert!(
             vdf_steps_are_valid(

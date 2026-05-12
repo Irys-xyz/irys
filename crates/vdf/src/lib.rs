@@ -171,6 +171,15 @@ pub fn apply_reset_seed(seed: H256, reset_seed: H256) -> H256 {
     H256::from(hasher.finish())
 }
 
+/// Build a rayon thread pool for VDF and prevalidation parallel work, sized
+/// to `VdfConfig::parallel_verification_thread_limit`.
+pub fn build_verification_pool(config: &VdfConfig) -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(config.parallel_verification_thread_limit)
+        .build()
+        .expect("to build verification pool")
+}
+
 /// Validates VDF `last_step_checkpoints` in parallel across available cores.
 ///
 /// Takes a `VDFLimiterInfo` from a block header and verifies each checkpoint by:
@@ -457,10 +466,7 @@ mod tests {
         let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+        let pool = build_verification_pool(&config);
         let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         if x.is_err() {
             debug!("{:?}", x);
@@ -535,10 +541,7 @@ mod tests {
         let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+        let pool = build_verification_pool(&config);
         let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
 
@@ -607,10 +610,7 @@ mod tests {
 
         let config = testing_config.vdf();
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+        let pool = build_verification_pool(&config);
         let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
     }
@@ -679,10 +679,7 @@ mod tests {
         // spellchecker:on
 
         let config = testing_config.vdf();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+        let pool = build_verification_pool(&config);
         let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
 
@@ -751,10 +748,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(config.parallel_verification_thread_limit)
-                .build()
-                .unwrap();
+            let pool = build_verification_pool(&config);
             let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(
@@ -775,10 +769,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(config.parallel_verification_thread_limit)
-                .build()
-                .unwrap();
+            let pool = build_verification_pool(&config);
             let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(
@@ -801,10 +792,7 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(config.parallel_verification_thread_limit)
-                .build()
-                .unwrap();
+            let pool = build_verification_pool(&config);
             let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(

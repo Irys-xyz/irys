@@ -34,7 +34,6 @@ irys-testing-utils.workspace = true
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-vdf.workspace = true
 itertools.workspace = true
-rayon.workspace = true
 reth.workspace = true
 reth-db.workspace = true
 reth-ethereum-primitives.workspace = true

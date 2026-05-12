@@ -144,10 +144,7 @@ fn bench_parallel_verification(c: &mut Criterion) {
             next_vdf_difficulty: None,
         };
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+        let pool = irys_vdf::build_verification_pool(config);
 
         group.sample_size(tier.sample_size);
         group.measurement_time(tier.measurement_time);
