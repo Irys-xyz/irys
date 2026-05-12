@@ -2,7 +2,7 @@ use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::{
     IrysDatabaseArgs as _, commitment_tx_by_txid, open_or_create_db,
     reth_db::{Database as _, DatabaseEnv},
-    tables::{ConsensusTables, IngressProofs, IrysDataTxHeaders},
+    tables::{CacheTables, ConsensusTables, IngressProofs, IrysDataTxHeaders},
     walk_all,
 };
 use irys_types::DbSyncMode;
@@ -16,22 +16,35 @@ use tracing_error::ErrorLayer;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, Layer as _, Registry, layer::SubscriberExt as _};
 
-pub fn load_db() -> DatabaseEnv {
-    let path = "/workspaces/irys-rs/.irys/1/reth/db";
-    open_or_create_db(
-        path,
+/// Opens the consensus and cache MDBX envs for ad-hoc debugging.
+///
+/// The V3→V4 split moved cache-only tables (e.g. `IngressProofs`) into a
+/// separate env, so a single handle no longer covers everything readable
+/// from the legacy `IrysTables`.
+pub fn load_db() -> (DatabaseEnv, DatabaseEnv) {
+    let base = "/workspaces/irys-rs/.irys/1";
+    let consensus = open_or_create_db(
+        format!("{base}/irys_consensus_data"),
         ConsensusTables::ALL,
         DatabaseArguments::irys_default(DbSyncMode::Durable).unwrap(),
     )
-    .unwrap()
+    .unwrap();
+    let cache = open_or_create_db(
+        format!("{base}/irys_cache_data"),
+        CacheTables::ALL,
+        DatabaseArguments::irys_default(DbSyncMode::Durable).unwrap(),
+    )
+    .unwrap();
+    (consensus, cache)
 }
 
 fn _promotion_debug() -> eyre::Result<()> {
-    let db = load_db();
-    let read_tx = db.tx()?;
-    let ingress_proofs = walk_all::<IngressProofs, _>(&read_tx)?;
+    let (consensus, cache) = load_db();
+    let cache_tx = cache.tx()?;
+    let ingress_proofs = walk_all::<IngressProofs, _>(&cache_tx)?;
     dbg!(ingress_proofs);
-    let storage_transactions = walk_all::<IrysDataTxHeaders, _>(&read_tx)?;
+    let consensus_tx = consensus.tx()?;
+    let storage_transactions = walk_all::<IrysDataTxHeaders, _>(&consensus_tx)?;
     dbg!(storage_transactions);
 
     Ok(())
