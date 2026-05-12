@@ -180,7 +180,8 @@ pub fn apply_reset_seed(seed: H256, reset_seed: H256) -> H256 {
 /// 4. Comparing computed results against provided checkpoints
 ///
 /// Returns Ok(()) if checkpoints are valid, Err otherwise with details of mismatches.
-pub async fn last_step_checkpoints_is_valid(
+pub fn last_step_checkpoints_is_valid(
+    pool: &rayon::ThreadPool,
     vdf_info: &VDFLimiterInfo,
     config: &VdfConfig,
 ) -> eyre::Result<()> {
@@ -256,35 +257,24 @@ pub async fn last_step_checkpoints_is_valid(
         config,
         (global_step_number - 1) as u64,
     ));
-    let config = config.clone();
 
-    let test = tokio::task::spawn_blocking(move || {
-        // Limit threads number to avoid overloading the system using configuration limit
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_verification_thread_limit)
-            .build()
-            .unwrap();
+    let num_iterations = config.num_iterations_per_checkpoint();
+    let test: Vec<H256> = pool.install(|| {
+        (0..config.num_checkpoints_in_vdf_step)
+            .into_par_iter()
+            .map(|i| {
+                let mut blocks = [[0_u8; 64]; 2];
+                (start_salt + i).to_little_endian(&mut blocks[0][..32]);
+                blocks[1] = SHA256_64B_PADDING;
+                blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
 
-        let num_iterations = config.num_iterations_per_checkpoint();
-        let test: Vec<H256> = pool.install(|| {
-            (0..config.num_checkpoints_in_vdf_step)
-                .into_par_iter()
-                .map(|i| {
-                    let mut blocks = [[0_u8; 64]; 2];
-                    (start_salt + i).to_little_endian(&mut blocks[0][..32]);
-                    blocks[1] = SHA256_64B_PADDING;
-                    blocks[0][32..64].copy_from_slice(cp[i].as_bytes());
-
-                    compress_n_rounds(&mut blocks, num_iterations);
-                    let mut result = H256::zero();
-                    result.as_mut().copy_from_slice(&blocks[0][32..64]);
-                    result
-                })
-                .collect::<Vec<H256>>()
-        });
-        test
-    })
-    .await?;
+                compress_n_rounds(&mut blocks, num_iterations);
+                let mut result = H256::zero();
+                result.as_mut().copy_from_slice(&blocks[0][32..64]);
+                result
+            })
+            .collect::<Vec<H256>>()
+    });
 
     let is_valid = test == vdf_info.last_step_checkpoints;
 
@@ -423,6 +413,7 @@ mod tests {
     async fn test_checkpoints_for_single_step_block() {
         // step: 44398 output: 0x893d
         let testing_config = irys_types::NodeConfig::testing();
+
         let vdf_info = VDFLimiterInfo {
             output: to_hash("Vk8iBZReeugJi3iJNNKX6ty9soW1t3N9dxoFPMTDdye"),
             global_step_number: 44398,
@@ -466,7 +457,11 @@ mod tests {
         let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.parallel_verification_thread_limit)
+            .build()
+            .unwrap();
+        let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         if x.is_err() {
             debug!("{:?}", x);
         }
@@ -540,7 +535,11 @@ mod tests {
         let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.parallel_verification_thread_limit)
+            .build()
+            .unwrap();
+        let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -608,7 +607,11 @@ mod tests {
 
         let config = testing_config.vdf();
 
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.parallel_verification_thread_limit)
+            .build()
+            .unwrap();
+        let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
     }
 
@@ -676,7 +679,11 @@ mod tests {
         // spellchecker:on
 
         let config = testing_config.vdf();
-        let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(config.parallel_verification_thread_limit)
+            .build()
+            .unwrap();
+        let x = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
         assert!(x.is_ok());
 
         if x.is_ok() {
@@ -744,7 +751,11 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(config.parallel_verification_thread_limit)
+                .build()
+                .unwrap();
+            let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(
                 result.unwrap_err().to_string().contains(expected_error),
@@ -764,7 +775,11 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(config.parallel_verification_thread_limit)
+                .build()
+                .unwrap();
+            let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(
                 result
@@ -786,7 +801,11 @@ mod tests {
                 ..VDFLimiterInfo::default()
             };
             let config = irys_types::NodeConfig::testing().vdf();
-            let result = last_step_checkpoints_is_valid(&vdf_info, &config).await;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(config.parallel_verification_thread_limit)
+                .build()
+                .unwrap();
+            let result = last_step_checkpoints_is_valid(&pool, &vdf_info, &config);
             assert!(result.is_err());
             assert!(
                 result

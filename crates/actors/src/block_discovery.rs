@@ -165,6 +165,8 @@ pub struct BlockDiscoveryServiceInner {
     pub mempool_guard: MempoolReadGuard,
     /// Reference to the global config
     pub config: Config,
+    /// Rayon pool shared for VDF checkpoint parallel verification
+    pub pool: Arc<rayon::ThreadPool>,
     /// The block reward curve
     pub reward_curve: Arc<HalvingCurve>,
     /// Database provider for accessing transaction headers and related data.
@@ -645,6 +647,7 @@ impl BlockDiscoveryServiceInner {
             &previous_block_header,
             parent_epoch_snapshot.clone(),
             config,
+            Arc::clone(&self.pool),
             reward_curve,
             &parent_ema_snapshot,
         )

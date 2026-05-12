@@ -2294,6 +2294,12 @@ impl IrysNode {
             mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
+            pool: Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(config.node_config.vdf.parallel_verification_thread_limit)
+                    .build()
+                    .expect("to build vdf prevalidation pool"),
+            ),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,

@@ -31,6 +31,7 @@ irys-api-client.workspace = true
 irys-reward-curve.workspace = true
 irys-utils.workspace = true
 
+rayon.workspace = true
 base58.workspace = true
 tracing-error.workspace = true
 eyre.workspace = true

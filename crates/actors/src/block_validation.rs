@@ -470,6 +470,7 @@ pub async fn prevalidate_block(
     previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
+    pool: Arc<rayon::ThreadPool>,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
@@ -607,9 +608,15 @@ pub async fn prevalidate_block(
     );
 
     // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.node_config.vdf())
-        .await
-        .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
+    let pool_clone = Arc::clone(&pool);
+    let vdf_info = block.vdf_limiter_info.clone();
+    let vdf_config = config.vdf.clone();
+    tokio::task::spawn_blocking(move || {
+        last_step_checkpoints_is_valid(&pool_clone, &vdf_info, &vdf_config)
+    })
+    .await
+    .map_err(|e| PreValidationError::VDFCheckpointsInvalid(format!("join error: {e}")))?
+    .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
