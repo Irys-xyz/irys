@@ -18,7 +18,7 @@
 //     block_producer::BlockMigrationMessage, chunk_migration_service::ChunkMigrationService,
 // };
 // use irys_config::IrysNodeConfig;
-// use irys_database::{open_or_create_db, tables::IrysTables, BlockIndex, Initialized, Ledger};
+// use irys_database::{open_or_create_db, tables::ConsensusTables, BlockIndex, Initialized, Ledger};
 // use irys_storage::*;
 // use irys_testing_utils::utils::TempDirBuilder;
 // use irys_types::{
@@ -132,7 +132,7 @@
 
 //     // Create an instance of the mempool actor
 //     let task_manager = TaskManager::current();
-//     let db = open_or_create_db(tmp_dir, IrysTables::ALL, None).unwrap();
+//     let db = open_or_create_db(tmp_dir, ConsensusTables::ALL, None).unwrap();
 //     let arc_db1 = DatabaseProvider(Arc::new(db));
 //     let mempool_service = MempoolService::new(
 //         arc_db1.clone(),

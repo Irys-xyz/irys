@@ -155,7 +155,7 @@ pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{
         IrysDatabaseArgs as _, insert_block_header, insert_peer_list_item, open_or_create_db,
     };
@@ -192,7 +192,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open fixture db");
@@ -275,7 +275,7 @@ mod tests {
 
         let copy_db = open_or_create_db(
             &dest_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open copied db");

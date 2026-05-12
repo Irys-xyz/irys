@@ -26,7 +26,7 @@ mod round_trip_tests {
     use irys_database::reth_db::mdbx::DatabaseArguments;
     use irys_database::reth_db::transaction::DbTx as _;
     use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
-    use irys_database::tables::{IrysBlockHeaders, IrysTables, PeerListItems};
+    use irys_database::tables::{ConsensusTables, IrysBlockHeaders, PeerListItems};
     use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -60,7 +60,7 @@ mod round_trip_tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let irys_db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");
@@ -182,7 +182,7 @@ mod round_trip_tests {
 
         let imported = open_or_create_db(
             target_dir.join(IRYS_CONSENSUS_SUBDIR),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open imported irys db");

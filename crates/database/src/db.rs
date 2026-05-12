@@ -507,7 +507,7 @@ impl<K: TransactionKind, T: DupSort> IrysDupCursorExt<T> for Cursor<K, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::mdbx::DatabaseArguments;
     use std::sync::Barrier;
@@ -576,7 +576,7 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             tmp.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -645,7 +645,7 @@ mod tests {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             tmp.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();

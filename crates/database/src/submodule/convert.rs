@@ -5030,7 +5030,7 @@ mod tests {
     };
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::rocks::RocksSubmoduleStore;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::tx_path_derive::{derive_tx_path_at_offset, tx_path_hash};
     use crate::{
         IrysDatabaseArgs as _, insert_block_header, insert_block_index_items_for_block,
@@ -5111,7 +5111,7 @@ mod tests {
             block_with(1, std::slice::from_ref(&tx_a), 11),
             block_with(2, &[tx_b.clone(), tx_c.clone()], 13),
         ];
-        let db = open_or_create_db(path, IrysTables::ALL, testing_args()?)?;
+        let db = open_or_create_db(path, ConsensusTables::ALL, testing_args()?)?;
         db.update_eyre(|tx| {
             for header in [&tx_a, &tx_b, &tx_c] {
                 insert_tx_header(tx, header)?;
@@ -5908,7 +5908,7 @@ mod tests {
         let foreign = root.path().join("foreign");
         fs::create_dir_all(&foreign)?;
         {
-            let db = open_or_create_db(&foreign, IrysTables::ALL, testing_args()?)?;
+            let db = open_or_create_db(&foreign, ConsensusTables::ALL, testing_args()?)?;
             db.update_eyre(|tx| {
                 crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
                 Ok(())
@@ -7213,7 +7213,7 @@ mod tests {
         } = populated("convert-empty-consensus")?;
         let empty = root.path().join("empty-consensus");
         fs::create_dir_all(&empty)?;
-        let db = open_or_create_db(&empty, IrysTables::ALL, testing_args()?)?;
+        let db = open_or_create_db(&empty, ConsensusTables::ALL, testing_args()?)?;
         db.update_eyre(|tx| {
             crate::set_database_schema_version(tx, DatabaseVersion::V3)?;
             Ok(())
@@ -7285,7 +7285,7 @@ mod tests {
             block_with(0, &[], 0),
             block_with(1, &[left.clone(), right.clone()], 2),
         ];
-        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
+        let db = open_or_create_db(&consensus, ConsensusTables::ALL, testing_args()?)?;
         db.update_eyre(|tx| {
             insert_tx_header(tx, &left)?;
             insert_tx_header(tx, &right)?;
@@ -7444,7 +7444,7 @@ mod tests {
         let consensus = root.join("consensus");
         fs::create_dir_all(&consensus)?;
         let blocks = [block_with(0, &[], 0), block_with(1, txs, total)];
-        let db = open_or_create_db(&consensus, IrysTables::ALL, testing_args()?)?;
+        let db = open_or_create_db(&consensus, ConsensusTables::ALL, testing_args()?)?;
         db.update_eyre(|tx| {
             for header in txs {
                 insert_tx_header(tx, header)?;

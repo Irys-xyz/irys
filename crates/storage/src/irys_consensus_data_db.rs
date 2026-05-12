@@ -1,5 +1,5 @@
 use irys_database::open_or_create_db;
-use irys_database::tables::{CacheTables, IrysTables};
+use irys_database::tables::{CacheTables, ConsensusTables};
 use reth_db::DatabaseEnv;
 use reth_db::mdbx::DatabaseArguments;
 use std::path::Path;
@@ -42,7 +42,7 @@ pub fn open_or_create_irys_consensus_data_db_with_args(
     path: impl AsRef<Path>,
     args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, IrysTables::ALL, args)
+    open_or_create_db(path, ConsensusTables::ALL, args)
 }
 
 /// Test-oriented convenience for opening the cache-side MDBX environment, with the
