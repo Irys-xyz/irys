@@ -8553,18 +8553,24 @@ mod tests {
     }
 
     /// The honest PoA for a 40-byte tx's 8-byte tail, at ledger offset 1.
-    async fn tail_chunk_poa() -> (TempDir, TestContext, IndexedSubmit, IndexedChunkPoa) {
-        let (tmp, mut context) = init().await;
+    async fn tail_chunk_poa() -> (
+        TempDir,
+        TempDir,
+        TestContext,
+        IndexedSubmit,
+        IndexedChunkPoa,
+    ) {
+        let (tmp, cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 40]]);
         let tail = built.poas[1].clone();
         assert_eq!(tail.block_offset, 1);
         assert!(validate_indexed_poa(&context, &built, &tail).is_ok());
-        (tmp, context, built, tail)
+        (tmp, cache_tmp, context, built, tail)
     }
 
     #[tokio::test]
     async fn poa_shorter_than_chunk_size_is_too_short() {
-        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let (_tmp, _cache_tmp, context, built, mut tail) = tail_chunk_poa().await;
         let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
         // Keep the 8 data bytes. Only the zero padding is dropped.
         chunk.0.truncate(8);
@@ -8583,7 +8589,7 @@ mod tests {
     /// the PoA, not panic on a data span longer than the chunk.
     #[tokio::test]
     async fn poa_with_entropy_shorter_than_the_chunk_is_rejected() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         context.consensus_config.chunk_size = 48;
         let data = vec![0x33_u8; 48];
         let tx = sign_data_tx(
@@ -8636,7 +8642,7 @@ mod tests {
 
     #[tokio::test]
     async fn poa_tail_padding_must_unpack_to_zero() {
-        let (_tmp, context, built, mut tail) = tail_chunk_poa().await;
+        let (_tmp, _cache_tmp, context, built, mut tail) = tail_chunk_poa().await;
         let chunk = tail.poa.chunk.as_mut().expect("packed chunk");
         chunk.0[20] ^= 1;
 
@@ -8706,7 +8712,7 @@ mod tests {
     /// One data leaf spans the whole two-chunk tx, hashed over the first chunk.
     #[tokio::test]
     async fn poa_rejects_a_data_leaf_wider_than_its_chunk() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_len = context.consensus_config.chunk_size as usize;
         let first = vec![0xAB_u8; chunk_len];
         let data_size = chunk_len * 2;
@@ -8732,7 +8738,7 @@ mod tests {
     async fn poa_rejects_a_data_leaf_behind_a_shifted_pivot() {
         use irys_types::Helpers as _;
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_len = context.consensus_config.chunk_size as usize;
         let first = vec![0x11_u8; chunk_len];
         let left_hash = hash_sha256(&first);
@@ -8762,7 +8768,7 @@ mod tests {
     /// A zero-width leaf would check no chunk bytes at all.
     #[tokio::test]
     async fn poa_rejects_a_zero_width_data_leaf() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_len = context.consensus_config.chunk_size as usize;
         let empty_hash = hash_sha256(&[]);
         let built = index_authored_data_tree(
@@ -8803,7 +8809,7 @@ mod tests {
     /// past the end of the tree.
     #[tokio::test]
     async fn poa_validates_every_chunk_after_an_unaligned_tx() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let built = index_submit_poas(&mut context, &data);
         for poa in &built.poas {
@@ -8827,7 +8833,7 @@ mod tests {
     /// the chunk after the unaligned transaction.
     #[tokio::test]
     async fn poa_validates_unaligned_chunk_from_unmigrated_block() {
-        let (_tmp, context) = init().await;
+        let (_tmp, _cache_tmp, context) = init().await;
         let data = [vec![3_u8; 40], vec![5_u8; 40]];
         let seeded = seed_unmigrated_submit_block(&context, &data);
 
@@ -8885,7 +8891,7 @@ mod tests {
     /// to a different tx than the chunk layout is rejected.
     #[tokio::test]
     async fn poa_accepts_one_byte_txs_and_rejects_a_foreign_proof() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let one_byte = [vec![3_u8; 1], vec![4_u8; 1], vec![5_u8; 32]];
         let built = index_submit_poas(&mut context, &one_byte);
         for poa in &built.poas {
@@ -8899,7 +8905,7 @@ mod tests {
             );
         }
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let data = [vec![1_u8; 40], vec![2_u8; 80]];
         let built = index_submit_poas(&mut context, &data);
         let tx0_chunk0 = built.poas.iter().find(|poa| poa.tx_index == 0).unwrap();
@@ -8936,7 +8942,7 @@ mod tests {
         use irys_database::tables::IrysBlockHeaders;
         use reth_db::transaction::DbTxMut as _;
 
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let built = index_submit_poas(&mut context, &[vec![3_u8; 32]]);
         context
             .block_index
@@ -8963,7 +8969,7 @@ mod tests {
     /// without the empty tx, and its PoA validates.
     #[tokio::test]
     async fn poa_skips_zero_size_tx() {
-        let (_tmp, mut context) = init().await;
+        let (_tmp, _cache_tmp, mut context) = init().await;
         let chunk_size = context.consensus_config.chunk_size as usize;
         let signer = IrysSigner::random_signer(&context.consensus_config);
         let left_bytes = vec![3_u8; chunk_size];
