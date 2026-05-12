@@ -11,7 +11,6 @@ use std::{
 };
 
 use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
-use tracing::info_span;
 
 /// Load NodeConfig from the CONFIG env var (default "config.toml").
 ///
@@ -41,7 +40,8 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
         save_genesis_block_to_disk, save_genesis_commitments_to_disk,
     };
     use irys_database::database;
-    use irys_database::reth_db::{Database as _, transaction::DbTx as _};
+    use irys_database::reth_db::transaction::DbTx as _;
+    use irys_database::scoped_tx::{Consensus, begin_scoped_rw};
     use irys_domain::BlockIndex;
     use irys_types::{BlockBody, DatabaseProvider, SealedBlock};
 
@@ -123,14 +123,7 @@ Use an empty/reset database before importing.",
     };
     let genesis_sealed = SealedBlock::new((*genesis_block).clone(), genesis_body)?;
 
-    // Span attributes any libmdbx writer-lock stall warning fired during
-    // begin_rw_txn to libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
-    let _span = info_span!(
-        irys_utils::MDBX_RW_TX_SPAN,
-        db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-    )
-    .entered();
-    let write_tx = db.tx_mut()?;
+    let write_tx = begin_scoped_rw::<Consensus>(db.consensus().as_ref())?;
     database::insert_block_header(&write_tx, &genesis_block)?;
     for commitment_tx in &commitments {
         database::insert_commitment_tx(&write_tx, commitment_tx)?;
