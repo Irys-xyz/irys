@@ -759,16 +759,25 @@ pub async fn prevalidate_block(
 
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
-    // Validate ingress proofs for published transactions
+    // Validate ingress proofs for published transactions.
+    // First pass: collect all (proof, data_root) pairs sequentially (get_ingress_proofs is non-crypto).
+    let mut ingress_pairs: Vec<(IngressProof, H256)> = Vec::new();
     for tx_header in publish_txs.iter() {
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
-        for proof in tx_proofs.iter() {
-            proof
-                .pre_validate(&tx_header.data_root)
-                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
+        for proof in tx_proofs.0 {
+            ingress_pairs.push((proof, tx_header.data_root));
         }
     }
+    // Second pass: ECDSA pre_validate in parallel.
+    pool.install(|| {
+        ingress_pairs.par_iter().try_for_each(|(proof, data_root)| {
+            proof
+                .pre_validate(data_root)
+                .map(|_| ())
+                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
+        })
+    })?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
