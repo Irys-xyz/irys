@@ -5232,6 +5232,7 @@ dependencies = [
  "irys-config",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
  "metrics",
  "modular-bitfield",
  "paste",

@@ -23,6 +23,10 @@ pub const DB_SCOPE_RETH_EVM: &str = "reth-evm";
 /// Fallback scope used when no parent span carries [`DB_SCOPE_FIELD`].
 pub const DB_SCOPE_UNKNOWN: &str = "unknown";
 
+/// Span name used by callers to wrap rw-tx acquisitions for stall attribution.
+/// Must be paired with a `db_scope` field set to one of the `DB_SCOPE_*` constants.
+pub const MDBX_RW_TX_SPAN: &str = "mdbx_rw_tx";
+
 const LIBMDBX_TARGET: &str = "libmdbx";
 /// Prefix matched against `target="libmdbx"` WARN messages to recognise
 /// writer-lock stalls. Matched with `starts_with` so trailing punctuation,

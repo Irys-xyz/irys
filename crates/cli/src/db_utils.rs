@@ -125,7 +125,11 @@ Use an empty/reset database before importing.",
 
     // Span attributes any libmdbx writer-lock stall warning fired during
     // begin_rw_txn to libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
-    let _span = info_span!("mdbx_rw_tx", db_scope = "irys-consensus").entered();
+    let _span = info_span!(
+        irys_utils::MDBX_RW_TX_SPAN,
+        db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+    )
+    .entered();
     let write_tx = db.tx_mut()?;
     database::insert_block_header(&write_tx, &genesis_block)?;
     for commitment_tx in &commitments {

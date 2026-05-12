@@ -715,7 +715,11 @@ impl IrysNode {
         // stall warning fired during begin_rw_txn to
         // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}
         // (see crates/utils/utils/src/mdbx_metrics.rs).
-        let _span = info_span!("mdbx_rw_tx", db_scope = "irys-consensus").entered();
+        let _span = info_span!(
+            irys_utils::MDBX_RW_TX_SPAN,
+            db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+        )
+        .entered();
         let write_tx = irys_db.tx_mut()?;
 
         // Insert the genesis block header

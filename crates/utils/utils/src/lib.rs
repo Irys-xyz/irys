@@ -8,7 +8,7 @@ pub mod signal;
 
 pub use mdbx_metrics::{
     DB_SCOPE_FIELD, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_SCOPE_UNKNOWN,
-    MDBX_RW_TX_LOCK_STALLS_TOTAL, mdbx_lock_metrics_layer,
+    MDBX_RW_TX_LOCK_STALLS_TOTAL, MDBX_RW_TX_SPAN, mdbx_lock_metrics_layer,
 };
 
 /// Installs Reth's prometheus recorder as the global `metrics` recorder.

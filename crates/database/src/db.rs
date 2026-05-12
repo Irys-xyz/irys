@@ -12,13 +12,7 @@ use std::sync::RwLock;
 use std::sync::{Arc, PoisonError, RwLockReadGuard};
 use tracing::{info, info_span};
 
-// Span name and `db_scope` field values must match the canonical scopes
-// recognised by `irys_utils::mdbx_lock_metrics_layer`. Mismatched values are
-// silently downgraded to `db_scope=unknown` in the stall counter, so keep
-// these literals in sync with `crates/utils/utils/src/mdbx_metrics.rs`.
-const MDBX_RW_TX_SPAN: &str = "mdbx_rw_tx";
-const DB_SCOPE_RETH_EVM: &str = "reth-evm";
-const DB_SCOPE_IRYS_CONSENSUS: &str = "irys-consensus";
+use irys_utils::{DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, MDBX_RW_TX_SPAN};
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
