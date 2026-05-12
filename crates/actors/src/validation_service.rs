@@ -661,9 +661,7 @@ impl ValidationServiceInner {
                 progress_timeout,
             )
             .await;
-        metrics::record_vdf_step_wait_duration_ms(
-            wait_started.elapsed().as_secs_f64() * 1000.0,
-        );
+        metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
         // Unreachable in practice: `wait_for_step` above only returns Ok once
