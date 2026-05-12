@@ -165,7 +165,8 @@ pub struct BlockDiscoveryServiceInner {
     pub mempool_guard: MempoolReadGuard,
     /// Reference to the global config
     pub config: Config,
-    /// Rayon pool shared for VDF checkpoint parallel verification
+    /// Rayon pool for parallel prevalidation work: VDF last-step checkpoints,
+    /// transaction signature verification, and ingress proof ECDSA recovery.
     pub pool: Arc<rayon::ThreadPool>,
     /// The block reward curve
     pub reward_curve: Arc<HalvingCurve>,

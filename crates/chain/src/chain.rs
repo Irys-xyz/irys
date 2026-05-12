@@ -2298,7 +2298,7 @@ impl IrysNode {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(config.node_config.vdf.parallel_verification_thread_limit)
                     .build()
-                    .expect("to build vdf prevalidation pool"),
+                    .expect("to build prevalidation pool"),
             ),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
