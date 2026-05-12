@@ -356,7 +356,13 @@ impl ChunkIngressServiceInner {
                 .update_cache_eyre(|db_tx| {
                     confirm_data_size_for_data_root(db_tx, &chunk.data_root, confirmed_data_size)
                 })
-                .expect("confirm_data_size database operation to succeed");
+                .map_err(|e| {
+                    error!(
+                        "Database error confirming data_size for data_root {:?}: {:?}",
+                        chunk.data_root, e
+                    );
+                    CriticalChunkIngressError::DatabaseError
+                })?;
         }
 
         // Use data_size to identify and validate that only the last chunk
