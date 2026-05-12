@@ -2,7 +2,7 @@ use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::{
     IrysDatabaseArgs as _, commitment_tx_by_txid, open_or_create_db,
     reth_db::{Database as _, DatabaseEnv},
-    tables::{IngressProofs, IrysDataTxHeaders, IrysTables},
+    tables::{ConsensusTables, IngressProofs, IrysDataTxHeaders},
     walk_all,
 };
 use irys_types::DbSyncMode;
@@ -20,7 +20,7 @@ pub fn load_db() -> DatabaseEnv {
     let path = "/workspaces/irys-rs/.irys/1/reth/db";
     open_or_create_db(
         path,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(DbSyncMode::Durable).unwrap(),
     )
     .unwrap()

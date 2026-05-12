@@ -1,4 +1,4 @@
-use irys_database::tables::{CacheTables, IrysTables};
+use irys_database::tables::{CacheTables, ConsensusTables};
 use irys_database::{IrysDatabaseArgs as _, open_or_create_cache_db, open_or_create_db};
 use irys_types::DbSyncMode;
 use reth_db::DatabaseEnv;
@@ -11,7 +11,7 @@ pub fn open_or_create_irys_consensus_data_db(
 ) -> eyre::Result<DatabaseEnv> {
     open_or_create_db(
         path,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(sync_mode)?,
     )
 }

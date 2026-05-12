@@ -932,7 +932,7 @@ mod v3_to_v4 {
 
 #[cfg(test)]
 mod tests {
-    use crate::tables::{CacheTables, IrysBlockHeaders, IrysDataTxHeaders, IrysTables};
+    use crate::tables::{CacheTables, ConsensusTables, IrysBlockHeaders, IrysDataTxHeaders};
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{H256, IrysBlockHeader};
@@ -964,7 +964,7 @@ mod tests {
         let db_path = TempDirBuilder::new().build();
         let db = open_or_create_db(
             db_path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
 
@@ -1089,7 +1089,7 @@ mod tests {
         let db_path = TempDirBuilder::new().build();
         let db = open_or_create_db(
             db_path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
 
@@ -1253,7 +1253,7 @@ mod tests {
         let db_path = TempDirBuilder::new().build();
         let db = open_or_create_db(
             db_path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
 
@@ -1356,7 +1356,7 @@ mod tests {
         let db_path = TempDirBuilder::new().build();
         let db = open_or_create_db(
             db_path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing()?,
         )?;
 
@@ -1400,7 +1400,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1420,7 +1420,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1450,7 +1450,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1478,7 +1478,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1503,7 +1503,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1571,7 +1571,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();

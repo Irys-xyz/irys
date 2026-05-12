@@ -198,7 +198,7 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{IrysDatabaseArgs as _, open_or_create_db};
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -208,7 +208,7 @@ mod tests {
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -252,7 +252,7 @@ mod tests {
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -310,7 +310,7 @@ mod tests {
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -351,7 +351,7 @@ mod tests {
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();

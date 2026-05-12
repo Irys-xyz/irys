@@ -264,10 +264,6 @@ pub use cache_tables_inner::{
     CacheMetadata, CacheTables, CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs,
 };
 
-// Backwards-compat alias so existing callers that name `IrysTables` keep
-// compiling. Delete once all callers migrate to `ConsensusTables`.
-pub use ConsensusTables as IrysTables;
-
 // Marker-trait impls — wire each table to its environment.
 use crate::scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, IrysScope};
 

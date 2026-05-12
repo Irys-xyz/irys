@@ -878,7 +878,7 @@ pub fn cache_database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>,
 mod tests {
     use crate::{
         block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
-        insert_commitment_tx, tables::IrysTables,
+        insert_commitment_tx, tables::ConsensusTables,
     };
     use arbitrary::Arbitrary as _;
     use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
@@ -911,7 +911,7 @@ mod tests {
 
         let db = open_or_create_db(
             path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -965,7 +965,7 @@ mod tests {
     mod tx_header_by_txid_canonical_tests {
         use crate::{
             db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
-            tables::IrysTables, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
+            tables::ConsensusTables, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
@@ -999,7 +999,7 @@ mod tests {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
-                IrysTables::ALL,
+                ConsensusTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
