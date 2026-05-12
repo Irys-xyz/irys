@@ -1,5 +1,5 @@
 use crate::reth_db::DatabaseError;
-use metrics::Label;
+use metrics::{Histogram, Label};
 use reth_db::mdbx::TransactionKind;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
@@ -8,11 +8,34 @@ use reth_db::{Database, DatabaseEnv};
 use reth_db_api::database_metrics::DatabaseMetrics;
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::RwLock;
-use std::sync::{Arc, PoisonError, RwLockReadGuard};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard};
 use tracing::{info, info_span};
 
-use irys_utils::{DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, MDBX_RW_TX_SPAN};
+use irys_utils::{
+    DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+    MDBX_RW_TX_SPAN,
+};
+
+// Cache the per-scope histogram handles so the hot rw-tx path doesn't re-resolve
+// the recorder + per-call Key allocation on every `update_eyre`. Handles bind to
+// the global recorder at first access, so `install_metrics_recorder()` must have
+// run by the time any update_eyre is called — which is enforced by the call in
+// chain/src/main.rs that runs before the DB is opened. Thread-local recorders
+// (e.g. `metrics::with_local_recorder` in tests) are not visible to these
+// statics; tests needing per-thread recorder isolation must not exercise this
+// path.
+static IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_IRYS_CONSENSUS,
+    )
+});
+static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_RETH_EVM,
+    )
+});
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -148,11 +171,7 @@ impl IrysDatabaseExt for RethDbWrapper {
 
         let start = std::time::Instant::now();
         let tx_result = db.tx_mut();
-        metrics::histogram!(
-            "db.tx_mut_acquire_duration_seconds",
-            "scope" => "reth-evm"
-        )
-        .record(start.elapsed().as_secs_f64());
+        RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
         let tx = tx_result?;
 
         let res = f(&tx)?;
@@ -202,11 +221,7 @@ impl IrysDatabaseExt for DatabaseEnv {
         // so genuinely-slow-then-failed waits are visible.
         let start = std::time::Instant::now();
         let tx_result = self.tx_mut();
-        metrics::histogram!(
-            "db.tx_mut_acquire_duration_seconds",
-            "scope" => "irys-consensus"
-        )
-        .record(start.elapsed().as_secs_f64());
+        IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
         let tx = tx_result?;
 
         let res = f(&tx)?;
