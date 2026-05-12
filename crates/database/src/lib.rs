@@ -31,7 +31,9 @@ pub use database::*;
 pub use db::{DatabaseProviderCacheExt, DatabaseProviderTestExt};
 pub use db_index::*;
 pub use provider::{DatabaseProvider, Env, RethDatabaseProvider};
-pub use scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, DbScope, ScopedTx, ScopedTxMut};
+pub use scoped_tx::{
+    Cache, CacheTable, Consensus, ConsensusTable, DbScope, Reth, ScopedTx, ScopedTxMut, Submodule,
+};
 pub use system_ledger::*;
 
 pub mod reth_db {

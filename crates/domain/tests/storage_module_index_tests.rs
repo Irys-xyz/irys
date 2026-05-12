@@ -1,4 +1,3 @@
-use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
     cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
     db::{DatabaseProviderCacheExt as _, DatabaseProviderTestExt as _},

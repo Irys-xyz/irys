@@ -40,8 +40,7 @@ use atomic_write_file::AtomicWriteFile;
 use derive_more::derive::{Deref, DerefMut};
 use eyre::{Context as _, OptionExt as _, Result, ensure, eyre};
 use irys_database::{
-    DatabaseProvider,
-    db::IrysDatabaseExt as _,
+    Env, Submodule,
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
         add_full_tx_path, add_tx_path_hash_to_offset_index, clear_submodule_database,
@@ -176,8 +175,10 @@ pub static PACKING_PARAMS_FILE_NAME: &str = "packing_params.toml";
 /// Manages chunk storage on a single physical drive
 #[derive(Debug)]
 pub struct StorageSubmodule {
-    /// Persistent database env
-    pub db: DatabaseProvider,
+    /// Persistent database env. Scoped via [`Submodule`] so rw-tx stall
+    /// warnings and acquire-latency histograms are attributed to
+    /// `scope="irys-submodule"` rather than the consensus DB scope.
+    pub db: Env<Submodule>,
     /// path to this Submodule
     pub path: PathBuf,
     /// Persistent storage handle
@@ -352,10 +353,7 @@ impl StorageModule {
                     StorageSubmodule {
                         path: dir,
                         file: chunks_file,
-                        db: DatabaseProvider::new(
-                            Arc::new(submodule_db.clone()),
-                            Arc::new(submodule_db),
-                        ),
+                        db: Env::<Submodule>::new(Arc::new(submodule_db)),
                         intervals_file: Arc::new(Mutex::new(submodules_intervals_file)),
                     },
                 )

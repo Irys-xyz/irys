@@ -23,7 +23,7 @@ use reth_db::{
 use tracing::info_span;
 
 use irys_utils::{
-    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM,
+    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_IRYS_SUBMODULE, DB_SCOPE_RETH_EVM,
     DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
 };
 
@@ -40,6 +40,13 @@ pub enum Consensus {}
 
 /// Zero-sized scope tag for the cache env.
 pub enum Cache {}
+
+/// Zero-sized scope tag for per-partition Irys submodule envs. Each storage
+/// submodule owns its own MDBX env; they all share the same `Submodule` scope
+/// tag since the stall counter's `scope` label is a fixed vocabulary, not a
+/// per-env identifier. Has no associated table-set marker — submodule writes
+/// use raw transactions through `Env<Submodule>::update_eyre`.
+pub enum Submodule {}
 
 /// Zero-sized scope tag for the Reth EVM env. Has no associated table-set
 /// marker — Reth uses untyped transactions — but participates in `DbScope`
@@ -81,6 +88,12 @@ static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(||
         "scope" => DB_SCOPE_RETH_EVM,
     )
 });
+static SUBMODULE_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_IRYS_SUBMODULE,
+    )
+});
 
 impl DbScope for Consensus {
     const LABEL: &'static str = DB_SCOPE_IRYS_CONSENSUS;
@@ -93,6 +106,13 @@ impl DbScope for Cache {
     const LABEL: &'static str = DB_SCOPE_IRYS_CACHE;
     fn acquire_histogram() -> &'static Histogram {
         &CACHE_TX_MUT_ACQUIRE_HISTOGRAM
+    }
+}
+
+impl DbScope for Submodule {
+    const LABEL: &'static str = DB_SCOPE_IRYS_SUBMODULE;
+    fn acquire_histogram() -> &'static Histogram {
+        &SUBMODULE_TX_MUT_ACQUIRE_HISTOGRAM
     }
 }
 
