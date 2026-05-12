@@ -23,8 +23,8 @@ use reth_db::{
 use tracing::info_span;
 
 use irys_utils::{
-    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-    MDBX_RW_TX_SPAN,
+    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM,
+    DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
 };
 
 use crate::db::IrysDupCursorExt as _;
@@ -41,7 +41,12 @@ pub enum Consensus {}
 /// Zero-sized scope tag for the cache env.
 pub enum Cache {}
 
-/// A database scope (consensus or cache).
+/// Zero-sized scope tag for the Reth EVM env. Has no associated table-set
+/// marker — Reth uses untyped transactions — but participates in `DbScope`
+/// so MDBX stall/latency attribution flows through the same machinery.
+pub enum Reth {}
+
+/// A database scope (consensus, cache, or the Reth EVM env).
 ///
 /// Each scope carries its canonical metrics label and a cached
 /// `db.tx_mut_acquire_duration_seconds` histogram handle so that rw-tx
@@ -70,6 +75,12 @@ static CACHE_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
         "scope" => DB_SCOPE_IRYS_CACHE,
     )
 });
+static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_RETH_EVM,
+    )
+});
 
 impl DbScope for Consensus {
     const LABEL: &'static str = DB_SCOPE_IRYS_CONSENSUS;
@@ -85,6 +96,25 @@ impl DbScope for Cache {
     }
 }
 
+impl DbScope for Reth {
+    const LABEL: &'static str = DB_SCOPE_RETH_EVM;
+    fn acquire_histogram() -> &'static Histogram {
+        &RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM
+    }
+}
+
+/// Enter the `mdbx_rw_tx` span attributed to scope `S`.
+///
+/// Use this when wrapping an external rw-tx entrypoint (e.g. delegating to
+/// `reth_db::Database::update`) where we want libmdbx stall warnings counted
+/// under the right scope, but the actual `tx_mut()` call is owned by the
+/// inner helper so we can't time it ourselves. For paths we fully own,
+/// prefer [`begin_scoped_rw`] — it pairs the span with the acquire histogram.
+#[must_use = "the returned EnteredSpan must be bound to a local to stay live"]
+pub fn enter_rw_tx_span<S: DbScope>() -> tracing::span::EnteredSpan {
+    info_span!(MDBX_RW_TX_SPAN, db_scope = S::LABEL).entered()
+}
+
 /// Acquire a raw MDBX rw-tx with the scope's stall span entered and the
 /// scope's acquire-latency histogram recorded.
 ///
@@ -94,7 +124,7 @@ impl DbScope for Cache {
 pub fn begin_scoped_rw<S: DbScope>(
     env: &DatabaseEnv,
 ) -> Result<<DatabaseEnv as Database>::TXMut, DatabaseError> {
-    let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = S::LABEL).entered();
+    let _span = enter_rw_tx_span::<S>();
     let start = std::time::Instant::now();
     let tx_result = env.tx_mut();
     S::acquire_histogram().record(start.elapsed().as_secs_f64());

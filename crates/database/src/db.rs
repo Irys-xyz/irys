@@ -1,6 +1,8 @@
 use crate::reth_db::DatabaseError;
-use crate::scoped_tx::{Cache, Consensus, ScopedTx, ScopedTxMut};
-use metrics::{Histogram, Label};
+use crate::scoped_tx::{
+    Cache, Consensus, Reth, ScopedTx, ScopedTxMut, begin_scoped_rw, enter_rw_tx_span,
+};
+use metrics::Label;
 use reth_db::mdbx::TransactionKind;
 use reth_db::mdbx::cursor::Cursor;
 use reth_db::table::{Decode, Decompress, DupSort, Table, TableRow};
@@ -9,20 +11,8 @@ use reth_db::{Database, DatabaseEnv};
 use reth_db_api::database_metrics::DatabaseMetrics;
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard};
-use tracing::{info, info_span};
-
-use irys_utils::{DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN};
-
-// Reth's EVM rw-tx isn't routed through our typed `ScopedTxMut`, so its
-// scope-attribution histogram lives here. Cache + consensus handles are
-// owned by `crate::scoped_tx::DbScope::acquire_histogram` instead.
-static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    metrics::histogram!(
-        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-        "scope" => DB_SCOPE_RETH_EVM,
-    )
-});
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
+use tracing::info;
 
 /// In the reth library, there's a nested circular Arc reference. This circular dependency prevents
 /// the DB connection from being dropped even when external references are removed, thereby making
@@ -78,10 +68,7 @@ impl reth_db::Database for RethDbWrapper {
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        // Active span carries the EVM scope so any libmdbx writer-lock stall
-        // warning fired during begin_rw_txn lands under
-        // libmdbx_rw_tx_lock_stalls_total{scope="reth-evm"}.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
+        let _span = enter_rw_tx_span::<Reth>();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -104,8 +91,7 @@ impl reth_db::Database for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
-        // See tx_mut() above — same scope attribution for Database::update.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
+        let _span = enter_rw_tx_span::<Reth>();
         let guard = self.db.read().map_err(db_read_error)?;
         guard
             .as_ref()
@@ -147,20 +133,12 @@ impl IrysDatabaseExt for RethDbWrapper {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        // Inline the body rather than delegating to DatabaseEnv::update_eyre so
-        // libmdbx writer-lock stall warnings and the tx_mut acquire histogram
-        // are attributed to scope="reth-evm" instead of the consensus scope
-        // the inner helper hardcodes.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_RETH_EVM).entered();
-
+        // Inline rather than delegating to `DatabaseEnv::update_eyre` so the
+        // stall span and acquire histogram are attributed to `Reth` instead of
+        // the `Consensus` scope the inner helper bakes in.
         let guard = self.db.read().map_err(db_read_error)?;
         let db = guard.as_ref().ok_or_else(db_connection_closed_error)?;
-
-        let start = std::time::Instant::now();
-        let tx_result = db.tx_mut();
-        RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        let tx = tx_result?;
-
+        let tx = begin_scoped_rw::<Reth>(db)?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
