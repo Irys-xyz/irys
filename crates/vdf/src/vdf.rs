@@ -1,3 +1,4 @@
+use crate::metrics;
 use crate::state::AtomicVdfState;
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -138,6 +139,7 @@ pub fn run_vdf<B: BlockProvider>(
                 global_step_number = returned;
                 hash = proposed_ff_step.step;
                 chain_sync_state.record_vdf_step(global_step_number);
+                metrics::record_vdf_global_step(global_step_number);
                 hash = process_reset(
                     global_step_number,
                     hash,
@@ -234,6 +236,7 @@ pub fn run_vdf<B: BlockProvider>(
         };
         global_step_number = returned;
         chain_sync_state.record_vdf_step(global_step_number);
+        metrics::record_vdf_global_step(global_step_number);
         info!("Seed created {} step number {}", hash, global_step_number);
 
         broadcast_mining_service.broadcast(

@@ -1765,7 +1765,7 @@ impl IrysNode {
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
-        metrics::record_vdf_global_step(global_step_number);
+        irys_vdf::metrics::record_vdf_global_step(global_step_number);
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));

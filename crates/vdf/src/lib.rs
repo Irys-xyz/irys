@@ -12,6 +12,7 @@ use sha2::digest::generic_array::GenericArray;
 use sha2::digest::typenum::U64;
 use std::time::Duration;
 
+pub mod metrics;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;

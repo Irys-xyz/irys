@@ -9,6 +9,8 @@ irys-types.workspace = true
 irys-database.workspace = true
 irys-efficient-sampling.workspace = true
 irys-domain.workspace = true
+irys-utils.workspace = true
+opentelemetry.workspace = true
 sha2.workspace = true
 rayon.workspace = true
 reth-db.workspace = true
@@ -35,6 +37,9 @@ test-log.workspace = true
 [[bench]]
 name = "vdf_bench"
 harness = false
+
+[package.metadata.cargo-machete]
+ignored = ["opentelemetry"]
 
 [lints]
 workspace = true
