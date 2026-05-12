@@ -1,4 +1,5 @@
 use crate::reth_db::DatabaseError;
+use crate::scoped_tx::{Cache, Consensus, ScopedTx, ScopedTxMut};
 use metrics::{Histogram, Label};
 use reth_db::mdbx::TransactionKind;
 use reth_db::mdbx::cursor::Cursor;
@@ -11,35 +12,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard};
 use tracing::{info, info_span};
 
-use irys_utils::{
-    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_SCOPE_RETH_EVM,
-    DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN,
-};
+use irys_utils::{DB_SCOPE_RETH_EVM, DB_TX_MUT_ACQUIRE_DURATION_SECONDS, MDBX_RW_TX_SPAN};
 
-// Cache the per-scope histogram handles so the hot rw-tx path doesn't re-resolve
-// the recorder + per-call Key allocation on every `update_eyre`. Handles bind to
-// the global recorder at first access, so `install_metrics_recorder()` must have
-// run by the time any update_eyre is called — which is enforced by the call in
-// chain/src/main.rs that runs before the DB is opened. Thread-local recorders
-// (e.g. `metrics::with_local_recorder` in tests) are not visible to these
-// statics; tests needing per-thread recorder isolation must not exercise this
-// path.
-static IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    metrics::histogram!(
-        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-        "scope" => DB_SCOPE_IRYS_CONSENSUS,
-    )
-});
+// Reth's EVM rw-tx isn't routed through our typed `ScopedTxMut`, so its
+// scope-attribution histogram lives here. Cache + consensus handles are
+// owned by `crate::scoped_tx::DbScope::acquire_histogram` instead.
 static RETH_EVM_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
     metrics::histogram!(
         DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
         "scope" => DB_SCOPE_RETH_EVM,
-    )
-});
-static IRYS_CACHE_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
-    metrics::histogram!(
-        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
-        "scope" => DB_SCOPE_IRYS_CACHE,
     )
 });
 
@@ -214,22 +195,10 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> eyre::Result<T>,
     {
-        // Active span carries the consensus scope so any libmdbx writer-lock
-        // stall warning fired during begin_rw_txn lands under
-        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}. Direct
-        // tx_mut() callers that bypass update_eyre fall back to scope=unknown.
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
-
-        // Time tx_mut() acquisition. MDBX serializes all writers on a single
-        // global writer lock, so this histogram surfaces contention caused by
-        // any writer — including Database::update(...) callers we can't
-        // intercept directly. Both successful and failed acquires are recorded
-        // so genuinely-slow-then-failed waits are visible.
-        let start = std::time::Instant::now();
-        let tx_result = self.tx_mut();
-        IRYS_CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        let tx = tx_result?;
-
+        // `begin_scoped_rw::<Consensus>` enters the `mdbx_rw_tx` span carrying
+        // `db_scope="irys-consensus"` and records the acquire-latency histogram
+        // — both driven by the `Consensus` scope tag rather than literals.
+        let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -252,8 +221,10 @@ impl IrysDatabaseExt for DatabaseEnv {
     where
         F: FnOnce(&Self::TXMut) -> T,
     {
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CONSENSUS).entered();
-        <Self as Database>::update(self, f)
+        let tx = crate::scoped_tx::begin_scoped_rw::<Consensus>(self)?;
+        let res = f(&tx);
+        tx.commit()?;
+        Ok(res)
     }
 }
 
@@ -320,39 +291,32 @@ where
 pub trait DatabaseProviderCacheExt {
     fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>;
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>;
 
     fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> eyre::Result<T>;
+        F: FnOnce(&ScopedTx<Cache>) -> eyre::Result<T>;
 
     fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T;
+        F: FnOnce(&ScopedTxMut<Cache>) -> T;
 
     fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> T;
+        F: FnOnce(&ScopedTx<Cache>) -> T;
 
-    /// Open a scoped cache rw-transaction with MDBX stall metrics attributed to
-    /// `db_scope=irys-cache`. Use this when the rw-tx must outlive a single
+    /// Open a scoped cache rw-transaction with MDBX stall metrics attributed
+    /// via the `Cache` scope tag. Use this when the rw-tx must outlive a single
     /// closure (e.g. iterating with a cursor and committing after the loop).
-    /// The acquire-latency histogram (`db.tx_mut_acquire_duration_seconds{scope="irys-cache"}`)
-    /// is recorded here; libmdbx writer-lock stall warnings emitted during
-    /// `begin_rw_txn` are attributed via the entered span — stalls fire only
-    /// during acquisition, so the span does not need to stay live for the rest
-    /// of the tx's lifetime.
-    fn cache_tx_mut_scoped(
-        &self,
-    ) -> Result<crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>, DatabaseError>;
+    fn cache_tx_mut_scoped(&self) -> Result<ScopedTxMut<Cache>, DatabaseError>;
 }
 
 impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
     fn update_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> eyre::Result<T>,
+        F: FnOnce(&ScopedTxMut<Cache>) -> eyre::Result<T>,
     {
-        let tx = self.cache_tx_mut_scoped()?;
+        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -360,10 +324,9 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
 
     fn view_cache_eyre<T, F>(&self, f: F) -> eyre::Result<T>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> eyre::Result<T>,
+        F: FnOnce(&ScopedTx<Cache>) -> eyre::Result<T>,
     {
-        let inner = self.cache().tx()?;
-        let tx = crate::scoped_tx::ScopedTx::<crate::scoped_tx::Cache>::new(inner);
+        let tx = ScopedTx::<Cache>::begin_ro(self.cache())?;
         let res = f(&tx)?;
         tx.commit()?;
         Ok(res)
@@ -371,9 +334,9 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
 
     fn update_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>) -> T,
+        F: FnOnce(&ScopedTxMut<Cache>) -> T,
     {
-        let tx = self.cache_tx_mut_scoped()?;
+        let tx = ScopedTxMut::<Cache>::begin_rw(self.cache())?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
@@ -381,23 +344,16 @@ impl DatabaseProviderCacheExt for irys_types::DatabaseProvider {
 
     fn view_cache<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>) -> T,
+        F: FnOnce(&ScopedTx<Cache>) -> T,
     {
-        let inner = self.cache().tx()?;
-        let tx = crate::scoped_tx::ScopedTx::<crate::scoped_tx::Cache>::new(inner);
+        let tx = ScopedTx::<Cache>::begin_ro(self.cache())?;
         let res = f(&tx);
         tx.commit()?;
         Ok(res)
     }
 
-    fn cache_tx_mut_scoped(
-        &self,
-    ) -> Result<crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>, DatabaseError> {
-        let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = DB_SCOPE_IRYS_CACHE).entered();
-        let start = std::time::Instant::now();
-        let inner = self.cache().tx_mut();
-        IRYS_CACHE_TX_MUT_ACQUIRE_HISTOGRAM.record(start.elapsed().as_secs_f64());
-        Ok(crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::new(inner?))
+    fn cache_tx_mut_scoped(&self) -> Result<ScopedTxMut<Cache>, DatabaseError> {
+        ScopedTxMut::<Cache>::begin_rw(self.cache())
     }
 }
 

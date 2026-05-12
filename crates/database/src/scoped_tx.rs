@@ -11,12 +11,20 @@
 //! cross-scope call is a compile error.
 
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
+use metrics::Histogram;
 use reth_db::table::{DupSort, Table};
 use reth_db::{
     Database, DatabaseEnv, DatabaseError,
     cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
     transaction::{DbTx as _, DbTxMut as _},
+};
+use tracing::info_span;
+
+use irys_utils::{
+    DB_SCOPE_IRYS_CACHE, DB_SCOPE_IRYS_CONSENSUS, DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+    MDBX_RW_TX_SPAN,
 };
 
 use crate::db::IrysDupCursorExt as _;
@@ -34,9 +42,64 @@ pub enum Consensus {}
 pub enum Cache {}
 
 /// A database scope (consensus or cache).
-pub trait DbScope: 'static + Send + Sync {}
-impl DbScope for Consensus {}
-impl DbScope for Cache {}
+///
+/// Each scope carries its canonical metrics label and a cached
+/// `db.tx_mut_acquire_duration_seconds` histogram handle so that rw-tx
+/// acquisition can be attributed without callers ever naming the literal
+/// scope string.
+pub trait DbScope: 'static + Send + Sync {
+    const LABEL: &'static str;
+    fn acquire_histogram() -> &'static Histogram;
+}
+
+// Per-scope handles bind to the global recorder at first access, so
+// `install_metrics_recorder()` must have run before any DB tx is opened —
+// enforced by chain/src/main.rs running the install before opening the DB.
+// Thread-local recorders (e.g. `metrics::with_local_recorder` in tests) are
+// not visible to these statics; tests needing per-thread recorder isolation
+// must not exercise this path.
+static CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_IRYS_CONSENSUS,
+    )
+});
+static CACHE_TX_MUT_ACQUIRE_HISTOGRAM: LazyLock<Histogram> = LazyLock::new(|| {
+    metrics::histogram!(
+        DB_TX_MUT_ACQUIRE_DURATION_SECONDS,
+        "scope" => DB_SCOPE_IRYS_CACHE,
+    )
+});
+
+impl DbScope for Consensus {
+    const LABEL: &'static str = DB_SCOPE_IRYS_CONSENSUS;
+    fn acquire_histogram() -> &'static Histogram {
+        &CONSENSUS_TX_MUT_ACQUIRE_HISTOGRAM
+    }
+}
+
+impl DbScope for Cache {
+    const LABEL: &'static str = DB_SCOPE_IRYS_CACHE;
+    fn acquire_histogram() -> &'static Histogram {
+        &CACHE_TX_MUT_ACQUIRE_HISTOGRAM
+    }
+}
+
+/// Acquire a raw MDBX rw-tx with the scope's stall span entered and the
+/// scope's acquire-latency histogram recorded.
+///
+/// libmdbx writer-lock stall warnings fire only inside `begin_rw_txn`, so the
+/// span need only be live while `tx_mut()` is running. Both successful and
+/// failed acquires are timed so genuinely-slow-then-failed waits are visible.
+pub fn begin_scoped_rw<S: DbScope>(
+    env: &DatabaseEnv,
+) -> Result<<DatabaseEnv as Database>::TXMut, DatabaseError> {
+    let _span = info_span!(MDBX_RW_TX_SPAN, db_scope = S::LABEL).entered();
+    let start = std::time::Instant::now();
+    let tx_result = env.tx_mut();
+    S::acquire_histogram().record(start.elapsed().as_secs_f64());
+    tx_result
+}
 
 /// Read-only transaction scoped to a single DB environment.
 pub struct ScopedTx<S: DbScope> {
@@ -56,6 +119,13 @@ impl<S: DbScope> ScopedTx<S> {
             inner,
             _scope: PhantomData,
         }
+    }
+
+    /// Open a read-only transaction on `env` typed under scope `S`. No span /
+    /// histogram instrumentation: MDBX read transactions don't take the writer
+    /// lock and so never emit the stall warning that scope attribution is for.
+    pub fn begin_ro(env: &DatabaseEnv) -> Result<Self, DatabaseError> {
+        Ok(Self::new(env.tx()?))
     }
 
     /// Escape hatch: the underlying untyped reth transaction.
@@ -78,6 +148,12 @@ impl<S: DbScope> ScopedTxMut<S> {
             inner,
             _scope: PhantomData,
         }
+    }
+
+    /// Open a read-write transaction on `env` typed under scope `S`, with
+    /// MDBX stall attribution and acquire-latency metrics driven by `S`.
+    pub fn begin_rw(env: &DatabaseEnv) -> Result<Self, DatabaseError> {
+        Ok(Self::new(begin_scoped_rw::<S>(env)?))
     }
 
     pub fn inner(&self) -> &<DatabaseEnv as Database>::TXMut {
