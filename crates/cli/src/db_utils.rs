@@ -247,9 +247,16 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
                     .with_log_level(None)
                     .with_exclusive(Some(false)),
             )?;
-            // Open the cache env in RO too (it must exist on disk —
-            // any RW invocation prior would have created it). If the
-            // cache env is missing, the migration will create it.
+            // The cache env must exist on disk — any RW invocation prior would
+            // have created it via the V3→V4 migration. RO open can't create it,
+            // and MDBX's error here is opaque, so surface a directed message.
+            if !cache_path.exists() {
+                bail!(
+                    "Cache DB not found at {}. Run a read/write command (e.g. node startup) \
+                     once to create/migrate the cache env before opening it read-only.",
+                    cache_path.display()
+                );
+            }
             let cache = DatabaseEnv::open(
                 &cache_path,
                 access,
