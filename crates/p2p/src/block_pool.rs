@@ -964,15 +964,15 @@ where
                     error!(
                         block.hash = ?block_hash,
                         error = ?pre_err,
-                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown"
+                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
                     );
+                    // Keep the block in cache and clear `is_processing` so the next
+                    // gossip arrival (or orphan-resolve when a child arrives) re-runs
+                    // prevalidation. Removing would force a refetch round-trip even
+                    // though our local state is intact — the verifier crashed in an
+                    // isolated spawn_blocking thread, not in shared state.
                     self.blocks_cache
-                        .remove_block(
-                            &block_hash,
-                            BlockRemovalReason::FailedToProcess(
-                                FailureReason::BlockPrevalidationFailed,
-                            ),
-                        )
+                        .change_block_processing_status(block_hash, false)
                         .await;
                     self.sync_state
                         .record_block_processing_error(pre_err.to_string());
