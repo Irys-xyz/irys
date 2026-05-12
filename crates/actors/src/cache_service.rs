@@ -9,7 +9,7 @@ use irys_database::{
 use irys_database::{
     db::DatabaseProviderCacheExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
-    scoped_tx::{Cache, ScopedTx},
+    scoped_tx::{Cache, ScopedTx, ScopedTxMut},
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
@@ -322,7 +322,7 @@ impl InnerCacheTask {
 
             // Commit a small batch to avoid large transactions
             if pending_roots.len() >= 256 {
-                let write_tx = self.db.cache_tx_mut_scoped()?;
+                let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
                 for root in pending_roots.drain(..) {
                     trace!(
                         chunk.data_root = ?root,
@@ -344,7 +344,7 @@ impl InnerCacheTask {
 
         // Flush any remaining pending deletions
         if !pending_roots.is_empty() {
-            let write_tx = self.db.cache_tx_mut_scoped()?;
+            let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
             for root in pending_roots.drain(..) {
                 let pruned = delete_cached_chunks_by_data_root_older_than(
                     &write_tx,
@@ -374,7 +374,7 @@ impl InnerCacheTask {
         let mut eviction_count: usize = 0;
         // Consensus read tx for block header lookups; cache write tx for cache table mutations.
         let consensus_rtx = self.db.tx()?;
-        let write_tx = self.db.cache_tx_mut_scoped()?;
+        let write_tx = ScopedTxMut::<Cache>::begin_rw(self.db.cache())?;
         {
             let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
             let mut walker = cursor.walk(None)?;
