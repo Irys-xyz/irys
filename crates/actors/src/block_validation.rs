@@ -213,10 +213,17 @@ pub enum PreValidationError {
         "Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs"
     )]
     PublishTxProofLengthMismatch,
-    #[error("Block EMA snapshot not found for block {block_hash}")]
-    BlockEmaSnapshotNotFound { block_hash: BlockHash },
-    #[error("Parent epoch snapshot not found for block {block_hash}")]
-    ParentEpochSnapshotNotFound { block_hash: BlockHash },
+    /// Local block-tree cache no longer holds the parent's EMA snapshot. This
+    /// is a race against block-tree eviction or reorg pruning — the parent
+    /// existed at prevalidation time but has since fallen out of the in-memory
+    /// window. NOT a consensus failure: the block's validity is unknown and
+    /// must not be peer-attributed.
+    #[error("Local EMA snapshot missing for parent {parent_hash}")]
+    LocalEmaSnapshotMissing { parent_hash: BlockHash },
+    /// Local block-tree cache no longer holds the parent's epoch snapshot.
+    /// Same race semantics as `LocalEmaSnapshotMissing`.
+    #[error("Local epoch snapshot missing for parent {parent_hash}")]
+    LocalEpochSnapshotMissing { parent_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
     #[error("Failed to get previous transaction inclusions: {0}")]
@@ -381,6 +388,11 @@ impl PreValidationError {
             // Local snapshot computation; has no real failure path today, but
             // if it ever fires it's a local bug, not a consensus failure.
             | Self::EmaSnapshotError(_)
+            // Parent's snapshot missing from the in-memory block-tree window
+            // (eviction race); construction site only fires under this race,
+            // not under any consensus-induced condition.
+            | Self::LocalEmaSnapshotMissing { .. }
+            | Self::LocalEpochSnapshotMissing { .. }
         )
     }
 }
@@ -1287,6 +1299,18 @@ mod prevalidation_error_classification_tests {
         assert!(PreValidationError::RewardCurveError("ovf".to_string()).is_internal_failure());
         assert!(PreValidationError::FeeCalculationFailed("ovf".to_string()).is_internal_failure());
         assert!(PreValidationError::EmaSnapshotError("ema".to_string()).is_internal_failure());
+        assert!(
+            PreValidationError::LocalEmaSnapshotMissing {
+                parent_hash: H256::zero(),
+            }
+            .is_internal_failure()
+        );
+        assert!(
+            PreValidationError::LocalEpochSnapshotMissing {
+                parent_hash: H256::zero(),
+            }
+            .is_internal_failure()
+        );
     }
 }
 
@@ -2493,21 +2517,23 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Get the parent block's EMA snapshot for fee calculations
+    // Get the parent block's EMA snapshot for fee calculations.
+    // Missing parent snapshot at this stage is a local race (parent existed at
+    // prevalidation time, evicted between then and now), not a consensus failure.
     let block_ema = block_tree_guard
         .read()
         .get_ema_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
-            block_hash: block.previous_block_hash,
+        .ok_or(PreValidationError::LocalEmaSnapshotMissing {
+            parent_hash: block.previous_block_hash,
         })?;
 
     // Get the parent block's epoch snapshot for ingress proof validation
-    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation)
+    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation).
     let parent_epoch_snapshot = block_tree_guard
         .read()
         .get_epoch_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::ParentEpochSnapshotNotFound {
-            block_hash: block.previous_block_hash,
+        .ok_or(PreValidationError::LocalEpochSnapshotMissing {
+            parent_hash: block.previous_block_hash,
         })?;
 
     // Extract publish ledger for ingress proofs validation
