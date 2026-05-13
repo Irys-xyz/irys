@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778620366319,
+  "lastUpdate": 1778670285280,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3091,6 +3091,90 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "39a69b166ecdebbc7c397d05ab1f567bad8ef784",
+          "message": "feat: preval perf (#1414)\n\n* perf(preval): use long-lived rayon pool for VDF checkpoint validation\n\nlast_step_checkpoints_is_valid was building a fresh rayon::ThreadPool\ninside spawn_blocking on every block. The function is now sync and\ntakes &rayon::ThreadPool, mirroring vdf_step_batch_is_valid in state.rs.\n\nBlockDiscoveryServiceInner owns an Arc<rayon::ThreadPool> sized to\nparallel_verification_thread_limit, built once at node startup. It is\nthreaded through prevalidate_block and wrapped in spawn_blocking at the\nsingle VDF call site for now; subsequent commits will reuse the same\npool for transaction-signature and ingress-proof verification.\n\n* perf(preval): borrow PoA chunk instead of cloning before SHA-256\n\nThe PoA chunk is up to 256 KiB and we never mutate it during\nprevalidation. Borrow it as &[u8] for both the chunk-hash SHA-256 and\nsolution_hash_link_is_valid, saving one allocation + memcpy per block.\n\n* perf(preval): parallelize transaction signature verification\n\nvalidate_transactions ran tx.is_signature_valid() (ECDSA recover +\nkeccak, ~50-100us per tx) in a serial for-loop. For a full block this\nserial cost dominates prevalidation. Convert to a rayon par_iter on the\nshared BlockDiscovery pool, short-circuiting on the first failure via\ntry_for_each. Applies to both data-ledger and commitment-ledger txs.\n\n* perf(preval): parallelize ingress proof ECDSA recovery\n\nproof.pre_validate runs a secp256k1 signer recovery per ingress proof\nper published tx, previously in a serial nested loop. Split into two\npasses: a sequential collect (get_ingress_proofs is non-crypto and runs\nfine serially), then a parallel try_for_each on the shared pool that\nshort-circuits on the first signature failure.\n\n* docs(preval): expand pool doc-comment to cover all uses\n\nThe pool is now used for VDF checkpoints, transaction-signature ECDSA,\nand ingress-proof ECDSA recovery — not just VDF checkpoints. Also drop\n\"vdf\" from the construction-site expect message.\n\n* refactor(vdf): add build_verification_pool helper to dedupe construction\n\nPool construction (ThreadPoolBuilder::new().num_threads(...).build())\nwas repeated across 10+ sites (production, tests, bench). Centralize in\nirys_vdf::build_verification_pool(&VdfConfig).\n\nAlso: chain-tests now sources the thread count from config rather than\nhardcoding num_threads(2), and irys-chain / irys-chain-tests no longer\nneed a direct rayon dependency (only the helper is called).\n\n* refactor(preval): pre-size ingress_pairs and drop narration comments\n\n- Vec::with_capacity for ingress_pairs using publish_ledger's\n  required_proof_count when present, avoiding ~log2(n) reallocations on\n  a hot path.\n- Drop \"First pass / Second pass / parallel ECDSA / cold path\" comments\n  that narrated what the code does. The remaining comment captures the\n  reason for flattening: the parallel pass fans out across every proof.\n\n* fix(preval): split internal task-join failures from consensus rejections\n\nThe spawn_blocking wrapping last_step_checkpoints_is_valid was mapping\ntokio::task::JoinError (a panic in the verifier thread) into\nPreValidationError::VDFCheckpointsInvalid. That conflates a local\nruntime failure with a consensus-level \"block is invalid\" verdict —\ncatastrophic in a chain context: an honest peer's valid block could be\nrejected and the peer penalised because our own thread panicked.\n\n- Add PreValidationError::InternalTaskJoin for spawn_blocking join\n  failures, with a SAFETY-CRITICAL doc comment on the enum spelling out\n  the invariant: non-validation errors MUST NEVER be mapped to\n  consensus-validation variants.\n- Add PreValidationError::is_internal_failure() classifier.\n- block_pool now routes internal failures to OtherInternal (matching the\n  treatment of ParentNotInCache: the peer is innocent), not BlockError.\n- block_discovery's prevalidation metric tags internal failures as\n  \"internal_error\" so the rejection-rate counter isn't inflated by\n  unrelated runtime issues.\n- Log the JoinError with structured context before mapping.\n- Tests covering the classifier behaviour.\n\n* fix(block_pool): keep cached block on internal prevalidation failure\n\nFor PreValidationError::is_internal_failure() (currently just\nInternalTaskJoin, i.e. a verifier panic captured by spawn_blocking),\nthe failure is in our local verifier thread, not in any shared in-memory\nstate. Removing the block forces a refetch round-trip even though we\nstill have the bytes and our state is intact.\n\nSwitch to flipping `is_processing` back to false instead. The next\ngossip arrival or orphan-resolve on a child block will retry\nprevalidation against the same cached block. Retry rate is bounded by\ngossip arrival, so a deterministic verifier panic on adversarial input\nisn't a tight loop.\n\nOther failure paths are unchanged: FatalCacheCorruption (genuinely\nunrecoverable) and ParentNotInCache (deliberately drops orphans, since\nthey'll be reprocessed when the parent arrives) keep removing.\n\n* chore: fmt\n\n* chore: add TODO",
+          "timestamp": "2026-05-13T11:50:14+01:00",
+          "tree_id": "694a12a0caa28529f65fd782dcf043b394bab69a",
+          "url": "https://github.com/Irys-xyz/irys/commit/39a69b166ecdebbc7c397d05ab1f567bad8ef784"
+        },
+        "date": 1778670283354,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082614,
+            "range": "± 0.002657",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 830.518219,
+            "range": "± 19.50037",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 985.469473,
+            "range": "± 27.84369",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12019,
+            "range": "± 0.001044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1227.634046,
+            "range": "± 94.804736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1567.131036,
+            "range": "± 15.505603",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034424,
+            "range": "± 0.001111",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.826025,
+            "range": "± 1.449277",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.216987,
+            "range": "± 3.195252",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
