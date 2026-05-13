@@ -157,9 +157,10 @@ impl BlockValidationTask {
                 block.hash = %self.sealed_block.header().block_hash,
                 "Validation cancelled due to height difference"
             );
-            ValidationResult::Invalid(ValidationError::ValidationCancelled {
+            ValidationError::ValidationCancelled {
                 reason: "height difference".to_string(),
-            })
+            }
+            .into()
         };
 
         let wait_for_parent_validation = self
@@ -191,11 +192,17 @@ impl BlockValidationTask {
             "concurrent_overall",
             concurrent_started.elapsed().as_secs_f64() * 1000.0,
         );
+        // Preserve the existing "cancelled" / "panicked" sub-labels even
+        // though those variants now classify as InternalFailure — they were
+        // already split out for observability.
         let result_label = match &final_result {
             ValidationResult::Valid => "valid",
-            ValidationResult::Invalid(ValidationError::ValidationCancelled { .. }) => "cancelled",
-            ValidationResult::Invalid(ValidationError::TaskPanicked { .. }) => "panicked",
             ValidationResult::Invalid(_) => "invalid",
+            ValidationResult::InternalFailure(ValidationError::ValidationCancelled { .. }) => {
+                "cancelled"
+            }
+            ValidationResult::InternalFailure(ValidationError::TaskPanicked { .. }) => "panicked",
+            ValidationResult::InternalFailure(_) => "internal_error",
         };
         metrics::record_validation_result("concurrent_overall", result_label);
         if let Ok(now) = UnixTimestampMs::now() {
@@ -359,19 +366,18 @@ impl BlockValidationTask {
                 "recall_range",
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            outcome
-                .map(|()| {
-                    metrics::record_validation_result("recall_range", "valid");
-                    ValidationResult::Valid
-                })
-                .unwrap_or_else(|err| {
-                    metrics::record_validation_result("recall_range", "invalid");
+            let result: ValidationResult = match outcome {
+                Ok(()) => ValidationResult::Valid,
+                Err(err) => {
                     tracing::error!(
                         custom.error = ?err,
                         "recall range validation failed"
                     );
-                    ValidationResult::Invalid(ValidationError::RecallRangeInvalid(err.to_string()))
-                })
+                    ValidationError::RecallRangeInvalid(err.to_string()).into()
+                }
+            };
+            metrics::record_validation_result("recall_range", result.metric_label());
+            result
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
@@ -386,9 +392,10 @@ impl BlockValidationTask {
                     block.parent_hash = %block.previous_block_hash,
                     "Parent epoch snapshot not found"
                 );
-                return ValidationResult::Invalid(ValidationError::ParentEpochSnapshotMissing {
+                return ValidationError::ParentEpochSnapshotMissing {
                     block_hash: block.previous_block_hash,
-                });
+                }
+                .into();
             }
         };
         tracing::debug!("Using parent epoch snapshot for PoA validation");
@@ -433,35 +440,33 @@ impl BlockValidationTask {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
 
-            match res {
-                Ok(res) => res
-                    .inspect(|_| {
-                        metrics::record_validation_result("poa", "valid");
-                    })
-                    .unwrap_or_else(|e| {
-                        metrics::record_validation_result("poa", "invalid");
-                        tracing::error!(
-                            block.hash = %block_hash_for_error_log,
-                            block.height = %block_height_for_error_log,
-                            custom.error = ?e,
-                            "PoA validation failed"
-                        );
-                        ValidationResult::Invalid(ValidationError::PreValidation(e))
-                    }),
+            let result: ValidationResult = match res {
+                Ok(Ok(valid)) => valid,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        block.hash = %block_hash_for_error_log,
+                        block.height = %block_height_for_error_log,
+                        custom.error = ?e,
+                        "PoA validation failed"
+                    );
+                    e.into()
+                }
                 Err(err) => {
-                    metrics::record_validation_result("poa", "panicked");
                     tracing::error!(
                         block.hash = %block_hash_for_error_log,
                         block.height = %block_height_for_error_log,
                         custom.error = ?err,
                         "poa task panicked"
                     );
-                    ValidationResult::Invalid(ValidationError::TaskPanicked {
+                    ValidationError::TaskPanicked {
                         task: "poa".to_string(),
                         details: format!("{:?}", err),
-                    })
+                    }
+                    .into()
                 }
-            }
+            };
+            metrics::record_validation_result("poa", result.metric_label());
+            result
         };
 
         // Shadow transaction validation (pure validation, no reth submission)
@@ -480,9 +485,10 @@ impl BlockValidationTask {
                     block.parent_hash = %block.previous_block_hash,
                     "Parent epoch snapshot not found for shadow tx validation"
                 );
-                return ValidationResult::Invalid(ValidationError::ParentEpochSnapshotMissing {
+                return ValidationError::ParentEpochSnapshotMissing {
                     block_hash: block.previous_block_hash,
-                });
+                }
+                .into();
             }
         };
 
@@ -557,14 +563,16 @@ impl BlockValidationTask {
                             "seeds",
                             started.elapsed().as_secs_f64() * 1000.0,
                         );
-                        metrics::record_validation_result("seeds", "invalid");
+                        let result: ValidationResult = ValidationError::ParentBlockMissing {
+                            block_hash: self.sealed_block.header().previous_block_hash,
+                        }
+                        .into();
+                        metrics::record_validation_result("seeds", result.metric_label());
                         tracing::error!(
                             block.parent_hash = %self.sealed_block.header().previous_block_hash,
                             "Previous block not found in block tree"
                         );
-                        return ValidationResult::Invalid(ValidationError::ParentBlockMissing {
-                            block_hash: self.sealed_block.header().previous_block_hash,
-                        });
+                        return result;
                     }
                 };
             let outcome = is_seed_data_valid(
@@ -576,12 +584,7 @@ impl BlockValidationTask {
                 "seeds",
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            match &outcome {
-                ValidationResult::Valid => metrics::record_validation_result("seeds", "valid"),
-                ValidationResult::Invalid(_) => {
-                    metrics::record_validation_result("seeds", "invalid")
-                }
-            }
+            metrics::record_validation_result("seeds", outcome.metric_label());
             outcome
         }
         .instrument(tracing::info_span!(
@@ -608,19 +611,18 @@ impl BlockValidationTask {
                 "commitment_ordering",
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            outcome
-                .map(|()| {
-                    metrics::record_validation_result("commitment_ordering", "valid");
-                    ValidationResult::Valid
-                })
-                .unwrap_or_else(|err| {
-                    metrics::record_validation_result("commitment_ordering", "invalid");
+            let result: ValidationResult = match outcome {
+                Ok(()) => ValidationResult::Valid,
+                Err(err) => {
                     tracing::error!(
                         custom.error = ?err,
                         "commitment ordering validation failed"
                     );
-                    ValidationResult::Invalid(err)
-                })
+                    err.into()
+                }
+            };
+            metrics::record_validation_result("commitment_ordering", result.metric_label());
+            result
         };
 
         // Data transaction fee validation
@@ -647,19 +649,18 @@ impl BlockValidationTask {
                 "data_txs",
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            outcome
-                .map(|()| {
-                    metrics::record_validation_result("data_txs", "valid");
-                    ValidationResult::Valid
-                })
-                .unwrap_or_else(|e| {
-                    metrics::record_validation_result("data_txs", "invalid");
+            let result: ValidationResult = match outcome {
+                Ok(()) => ValidationResult::Valid,
+                Err(e) => {
                     tracing::error!(
                         custom.error = ?e,
                         "data transaction validation failed"
                     );
-                    ValidationResult::Invalid(ValidationError::PreValidation(e))
-                })
+                    e.into()
+                }
+            };
+            metrics::record_validation_result("data_txs", result.metric_label());
+            result
         };
 
         // Wait for all validation tasks to complete
@@ -684,9 +685,7 @@ impl BlockValidationTask {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
-                    err.to_string(),
-                ));
+                return ValidationError::ShadowTransactionInvalid(err.to_string()).into();
             }
         };
 
@@ -724,40 +723,47 @@ impl BlockValidationTask {
                     reth_started.elapsed().as_secs_f64() * 1000.0,
                 );
 
-                match reth_result {
+                let result: ValidationResult = match reth_result {
                     Ok(()) => {
-                        metrics::record_validation_result("reth_submission", "valid");
                         tracing::debug!("Reth execution layer validation successful");
                         ValidationResult::Valid
                     }
                     Err(err) => {
-                        metrics::record_validation_result("reth_submission", "invalid");
                         tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
-                        ValidationResult::Invalid(ValidationError::ExecutionLayerFailed(
-                            err.to_string(),
-                        ))
+                        ValidationError::ExecutionLayerFailed(err.to_string()).into()
                     }
-                }
+                };
+                metrics::record_validation_result("reth_submission", result.metric_label());
+                result
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
-                // At least one validation failed, return the first Invalid result
-                let first_invalid = [
+                // Prefer the first explicit Invalid — a consensus rejection is
+                // the strongest signal even if another concurrent task surfaced
+                // an InternalFailure. If only InternalFailures, propagate the
+                // first one so the block is not falsely marked invalid.
+                let stage_results = [
                     &recall_result,
                     &poa_result,
                     &seeds_validation_result,
                     &commitment_ordering_result,
                     &data_txs_result,
-                ]
-                .into_iter()
-                .find_map(|r| match r {
+                ];
+                if let Some(invalid) = stage_results.iter().find_map(|r| match r {
                     ValidationResult::Invalid(e) => Some(e.clone()),
                     _ => None,
-                })
-                .unwrap_or_else(|| {
-                    ValidationError::Other("consensus validation failed".to_string())
-                });
-                ValidationResult::Invalid(first_invalid)
+                }) {
+                    ValidationResult::Invalid(invalid)
+                } else if let Some(internal) = stage_results.iter().find_map(|r| match r {
+                    ValidationResult::InternalFailure(e) => Some(e.clone()),
+                    _ => None,
+                }) {
+                    ValidationResult::InternalFailure(internal)
+                } else {
+                    // No failure surfaced from any task yet we're in the
+                    // failure branch — defensive fallback.
+                    ValidationError::Other("consensus validation failed".to_string()).into()
+                }
             }
         }
     }

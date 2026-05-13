@@ -412,6 +412,51 @@ impl BlockTreeServiceInner {
         self.chain_sync_state
             .record_validation_finished(&block_hash);
 
+        // Handle internal/runtime validation failures first. Block validity
+        // is unknown locally — DO NOT remove the block from cache or mark it
+        // discarded. Validation can be retried when the cause clears (e.g.
+        // the parent reappears, the transient I/O recovers, the block is
+        // re-gossiped).
+        if let ValidationResult::InternalFailure(validation_error) = &validation_result {
+            error!(
+                block.hash = %block_hash,
+                error = %validation_error,
+                "block validation hit an internal failure; leaving block in cache, not marking invalid"
+            );
+            self.chain_sync_state.record_block_validation_error(format!(
+                "block={} internal_error={}",
+                block_hash, validation_error
+            ));
+            let (height, state) = {
+                let cache = self.cache.read().map_err(|_| {
+                    eyre::eyre!(
+                        "block tree cache read lock poisoned in on_block_validation_finished (internal-failure path)"
+                    )
+                })?;
+                let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
+                let state = cache
+                    .get_block_and_status(&block_hash)
+                    .map(|(_, state)| *state)
+                    .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+                (maybe_height.unwrap_or(0), state)
+            };
+            let event = BlockStateUpdated {
+                block_hash,
+                height,
+                state,
+                discarded: false,
+                validation_result,
+            };
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::trace!(
+                    block.hash = ?block_hash,
+                    block.height = height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
+            return Ok(());
+        }
+
         // Handle a failed validation first
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
@@ -1096,10 +1141,48 @@ pub fn validate_reorg_within_migration_depth(
 }
 
 /// Result of block validation.
+///
+/// SAFETY-CRITICAL: only `Invalid` should mark a block as consensus-rejected.
+/// `InternalFailure` represents a local/runtime issue (verifier panic,
+/// block-tree eviction race, transient I/O) where the block's validity is
+/// unknown and must not be peer-attributed or discarded. The `From` impls
+/// below dispatch to the correct variant based on the underlying error's
+/// `is_internal_failure()` classifier — prefer `.into()` over constructing
+/// these variants directly at call sites.
 #[derive(Debug, Clone)]
 pub enum ValidationResult {
     Valid,
     Invalid(crate::block_validation::ValidationError),
+    InternalFailure(crate::block_validation::ValidationError),
+}
+
+impl ValidationResult {
+    /// Label used for the validation-result metric. Distinguishes consensus
+    /// rejections ("invalid") from local/runtime failures ("internal_error")
+    /// so the rejection-rate counter isn't inflated by transient issues.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid(_) => "invalid",
+            Self::InternalFailure(_) => "internal_error",
+        }
+    }
+}
+
+impl From<crate::block_validation::ValidationError> for ValidationResult {
+    fn from(e: crate::block_validation::ValidationError) -> Self {
+        if e.is_internal_failure() {
+            Self::InternalFailure(e)
+        } else {
+            Self::Invalid(e)
+        }
+    }
+}
+
+impl From<crate::block_validation::PreValidationError> for ValidationResult {
+    fn from(e: crate::block_validation::PreValidationError) -> Self {
+        crate::block_validation::ValidationError::PreValidation(e).into()
+    }
 }
 
 /// Look up a block header from the in-memory block tree, falling back to the database.
@@ -1128,8 +1211,53 @@ pub fn get_block_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_validation::PreValidationError;
     use irys_types::BlockTransactions;
     use rstest::rstest;
+
+    /// A consensus-rejection error must convert to `ValidationResult::Invalid`.
+    #[test]
+    fn consensus_preval_error_converts_to_invalid() {
+        let result: ValidationResult = PreValidationError::BlockSignatureInvalid.into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        assert_eq!(result.metric_label(), "invalid");
+    }
+
+    /// A local/runtime PreValidationError must convert to InternalFailure so
+    /// downstream consumers don't mark the block as consensus-invalid.
+    #[test]
+    fn internal_preval_error_converts_to_internal_failure() {
+        let result: ValidationResult = PreValidationError::InternalTaskJoin("panic".into()).into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        assert_eq!(result.metric_label(), "internal_error");
+    }
+
+    /// ValidationError-level local failures must also dispatch to InternalFailure.
+    #[test]
+    fn internal_validation_error_converts_to_internal_failure() {
+        let result: ValidationResult = crate::block_validation::ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "x".into(),
+        }
+        .into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        assert_eq!(result.metric_label(), "internal_error");
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            }
+            .into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+    }
+
+    /// A ValidationError-level consensus rejection stays Invalid.
+    #[test]
+    fn consensus_validation_error_converts_to_invalid() {
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
 
     fn entry_at(height: u64, hash_byte: u8) -> BlockTreeEntry {
         let mut header = IrysBlockHeader::new_mock_header();

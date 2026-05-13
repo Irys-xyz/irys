@@ -524,6 +524,32 @@ pub enum ValidationError {
     Other(String),
 }
 
+impl ValidationError {
+    /// Returns true for variants representing local/runtime failures that must
+    /// NEVER be treated as a consensus rejection of the block. Mirrors
+    /// `PreValidationError::is_internal_failure` at the outer enum so a single
+    /// `From<ValidationError> for ValidationResult` impl can dispatch the
+    /// correct outcome (`InternalFailure` vs `Invalid`) for every call site.
+    /// Grow this method as new ValidationError-level local failures are added.
+    pub fn is_internal_failure(&self) -> bool {
+        match self {
+            // Delegate to PreValidationError's classifier.
+            Self::PreValidation(e) => e.is_internal_failure(),
+            // Task panic / cancellation are local; the block's validity is
+            // unknown, not bad.
+            Self::TaskPanicked { .. } | Self::ValidationCancelled { .. } => true,
+            // Parent lookup missing == local block-tree window eviction race
+            // (same shape as PreValidationError::LocalEmaSnapshotMissing).
+            Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentBlockMissing { .. } => true,
+            // Everything else is treated as a consensus-level rejection until
+            // its construction sites are individually audited.
+            _ => false,
+        }
+    }
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
