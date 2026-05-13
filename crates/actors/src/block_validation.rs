@@ -393,6 +393,15 @@ impl PreValidationError {
             // not under any consensus-induced condition.
             | Self::LocalEmaSnapshotMissing { .. }
             | Self::LocalEpochSnapshotMissing { .. }
+            // Block-bounds lookup failures: the PoA-validation construction
+            // site pre-checks peer-supplied offsets against the chain max and
+            // rejects out-of-range offsets via PoAChunkOffsetOutOfBlockBounds
+            // first, so by the time this variant is constructed the failure
+            // is local (empty index, DB I/O, ledger missing). The
+            // get_assigned_ingress_proofs sites only operate on block hashes
+            // already present in our DB, so any lookup failure there is
+            // likewise a local DB consistency issue.
+            | Self::BlockBoundsLookupError(_)
         )
     }
 }
@@ -1311,6 +1320,9 @@ mod prevalidation_error_classification_tests {
             }
             .is_internal_failure()
         );
+        assert!(
+            PreValidationError::BlockBoundsLookupError("db gone".to_string()).is_internal_failure()
+        );
     }
 }
 
@@ -1434,10 +1446,27 @@ pub fn poa_is_valid(
         let ledger = DataLedger::try_from(ledger_id)
             .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
-        let bb = block_index_guard
-            .read()
-            .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
-            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
+        // Disambiguate at source: if the peer-supplied offset is past what
+        // any indexed block has committed for this ledger, the PoA references
+        // data that doesn't exist — unambiguously consensus-invalid. Reject
+        // here so the BlockBoundsLookupError variant below only carries
+        // genuine internal failures (empty index, DB I/O, ledger missing).
+        let bb = {
+            let index = block_index_guard.read();
+            if let Some(latest) = index.get_latest_item()
+                && let Some(chain_max) = latest
+                    .ledgers
+                    .iter()
+                    .find(|l| l.ledger == ledger)
+                    .map(|l| l.total_chunks)
+                && ledger_chunk_offset >= chain_max
+            {
+                return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+            }
+            index
+                .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
+                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?
+        };
         if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
