@@ -198,11 +198,11 @@ impl BlockValidationTask {
         let result_label = match &final_result {
             ValidationResult::Valid => "valid",
             ValidationResult::Invalid(_) => "invalid",
-            ValidationResult::InternalFailure(ValidationError::ValidationCancelled { .. }) => {
-                "cancelled"
-            }
-            ValidationResult::InternalFailure(ValidationError::TaskPanicked { .. }) => "panicked",
-            ValidationResult::InternalFailure(_) => "internal_error",
+            ValidationResult::InternalFailure(inner) => match inner.err() {
+                ValidationError::ValidationCancelled { .. } => "cancelled",
+                ValidationError::TaskPanicked { .. } => "panicked",
+                _ => "internal_error",
+            },
         };
         metrics::record_validation_result("concurrent_overall", result_label);
         if let Ok(now) = UnixTimestampMs::now() {
@@ -755,7 +755,7 @@ impl BlockValidationTask {
                 }) {
                     ValidationResult::Invalid(invalid)
                 } else if let Some(internal) = stage_results.iter().find_map(|r| match r {
-                    ValidationResult::InternalFailure(e) => Some(e.clone()),
+                    ValidationResult::InternalFailure(inner) => Some(inner.clone()),
                     _ => None,
                 }) {
                     ValidationResult::InternalFailure(internal)

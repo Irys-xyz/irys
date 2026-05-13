@@ -1140,6 +1140,33 @@ pub fn validate_reorg_within_migration_depth(
     Ok(())
 }
 
+/// Wrapper that guarantees the inner `ValidationError` is classified as a
+/// local/runtime failure (per `ValidationError::is_internal_failure`).
+///
+/// SAFETY-CRITICAL: this type is the structural enforcement of the rule that
+/// `ValidationResult::InternalFailure` must never carry a consensus-rejection
+/// variant. The only construction path is `From<ValidationError> for
+/// ValidationResult`, which checks the classifier before wrapping. Direct
+/// construction outside this module is impossible because the inner field is
+/// private. Consumers read the underlying error via `err()`.
+#[derive(Debug, Clone)]
+pub struct InternalFailureError(crate::block_validation::ValidationError);
+
+impl InternalFailureError {
+    /// Borrow the wrapped `ValidationError` for inspection / logging /
+    /// pattern-matching. Use this in `if let ValidationResult::InternalFailure(e) = ...`
+    /// to look at sub-variants for finer-grained handling.
+    pub fn err(&self) -> &crate::block_validation::ValidationError {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for InternalFailureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Result of block validation.
 ///
 /// SAFETY-CRITICAL: only `Invalid` should mark a block as consensus-rejected.
@@ -1148,12 +1175,14 @@ pub fn validate_reorg_within_migration_depth(
 /// unknown and must not be peer-attributed or discarded. The `From` impls
 /// below dispatch to the correct variant based on the underlying error's
 /// `is_internal_failure()` classifier — prefer `.into()` over constructing
-/// these variants directly at call sites.
+/// these variants directly at call sites. The `InternalFailure` payload is a
+/// sealed wrapper (`InternalFailureError`) so that constructing it with a
+/// consensus-rejection variant is structurally impossible.
 #[derive(Debug, Clone)]
 pub enum ValidationResult {
     Valid,
     Invalid(crate::block_validation::ValidationError),
-    InternalFailure(crate::block_validation::ValidationError),
+    InternalFailure(InternalFailureError),
 }
 
 impl ValidationResult {
@@ -1172,7 +1201,7 @@ impl ValidationResult {
 impl From<crate::block_validation::ValidationError> for ValidationResult {
     fn from(e: crate::block_validation::ValidationError) -> Self {
         if e.is_internal_failure() {
-            Self::InternalFailure(e)
+            Self::InternalFailure(InternalFailureError(e))
         } else {
             Self::Invalid(e)
         }
@@ -1257,6 +1286,24 @@ mod tests {
         let result: ValidationResult =
             crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
         assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
+
+    /// `InternalFailureError::err()` exposes the underlying ValidationError
+    /// for inspection (e.g. sub-variant matching in metric labelling).
+    #[test]
+    fn internal_failure_error_exposes_inner() {
+        let result: ValidationResult = crate::block_validation::ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "boom".into(),
+        }
+        .into();
+        let ValidationResult::InternalFailure(inner) = result else {
+            panic!("expected InternalFailure");
+        };
+        assert!(matches!(
+            inner.err(),
+            crate::block_validation::ValidationError::TaskPanicked { .. }
+        ));
     }
 
     fn entry_at(height: u64, hash_byte: u8) -> BlockTreeEntry {

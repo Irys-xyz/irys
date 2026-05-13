@@ -526,8 +526,9 @@ pub enum ValidationError {
 
 impl ValidationError {
     /// Returns true for variants representing local/runtime failures that must
-    /// NEVER be treated as a consensus rejection of the block. Mirrors
-    /// `PreValidationError::is_internal_failure` at the outer enum so a single
+    /// NEVER be treated as a consensus rejection of the block. Delegates to
+    /// `PreValidationError::is_internal_failure` for the `PreValidation` arm
+    /// and classifies the ValidationError-level variants directly, so a single
     /// `From<ValidationError> for ValidationResult` impl can dispatch the
     /// correct outcome (`InternalFailure` vs `Invalid`) for every call site.
     /// Grow this method as new ValidationError-level local failures are added.
