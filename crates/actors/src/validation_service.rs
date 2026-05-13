@@ -241,10 +241,7 @@ impl ValidationService {
                     msg_rx: rx,
                     reorg_rx,
                     inner: Arc::new(ValidationServiceInner {
-                        pool: rayon::ThreadPoolBuilder::new()
-                            .num_threads(config.vdf.parallel_verification_thread_limit)
-                            .build()
-                            .expect("to be able to build vdf validation pool"),
+                        pool: irys_vdf::build_verification_pool(&config.vdf),
                         block_index_guard,
                         vdf_state: vdf_state_readonly,
                         config,

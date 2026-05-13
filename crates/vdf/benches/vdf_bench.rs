@@ -113,9 +113,6 @@ fn bench_vdf_sha_verification(c: &mut Criterion) {
 
 fn bench_parallel_verification(c: &mut Criterion) {
     let tiers = build_tiers();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
     let mut group = c.benchmark_group("parallel_verification");
 
     for tier in &tiers {
@@ -147,13 +144,12 @@ fn bench_parallel_verification(c: &mut Criterion) {
             next_vdf_difficulty: None,
         };
 
+        let pool = irys_vdf::build_verification_pool(config);
+
         group.sample_size(tier.sample_size);
         group.measurement_time(tier.measurement_time);
         group.bench_function(BenchmarkId::from_parameter(tier.name), |b| {
-            b.iter(|| {
-                rt.block_on(last_step_checkpoints_is_valid(&vdf_info, config))
-                    .unwrap()
-            });
+            b.iter(|| last_step_checkpoints_is_valid(&pool, &vdf_info, config).unwrap());
         });
     }
 

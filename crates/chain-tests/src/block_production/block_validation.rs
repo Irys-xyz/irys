@@ -65,11 +65,15 @@ impl PrevalidationTestContext {
     }
 
     async fn prevalidate(&self, block: &SealedBlock) -> Result<(), PreValidationError> {
+        let pool = Arc::new(irys_vdf::build_verification_pool(
+            &self.node.node_ctx.config.vdf,
+        ));
         prevalidate_block(
             block,
             &self.parent_block,
             self.parent_epoch_snapshot.clone(),
             self.node.node_ctx.config.clone(),
+            pool,
             self.node.node_ctx.reward_curve.clone(),
             &self.parent_ema_snapshot,
         )
@@ -242,11 +246,15 @@ async fn test_future_block_rejection() -> Result<()> {
     };
 
     // Verify prevalidation fails with TimestampTooFarInFuture
+    let pool = Arc::new(irys_vdf::build_verification_pool(
+        &genesis_node.node_ctx.config.vdf,
+    ));
     let result = prevalidate_block(
         &block,
         &parent_block_header,
         parent_epoch_snapshot,
         genesis_node.node_ctx.config.clone(),
+        pool,
         genesis_node.node_ctx.reward_curve.clone(),
         &parent_ema_snapshot,
     )

@@ -2294,6 +2294,14 @@ impl IrysNode {
             mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
+            // TODO: share this rayon pool with the one in `ValidationService`
+            // (crates/actors/src/validation_service.rs). Each is sized to
+            // `vdf.parallel_verification_thread_limit`, so two long-lived pools
+            // double the effective thread budget vs. operator guidance in
+            // MAINNET_BETA.md. `rayon::ThreadPool` is Send+Sync and safe for
+            // concurrent `install` calls, so a single `Arc<ThreadPool>` plumbed
+            // through `ServiceSenders` (or built once here) would suffice.
+            pool: Arc::new(irys_vdf::build_verification_pool(&config.vdf)),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,
