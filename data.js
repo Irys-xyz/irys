@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778670285280,
+  "lastUpdate": 1778705432029,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3175,6 +3175,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4a08aa380a9a7b6da48215662542ef58425d9393",
+          "message": "perf(efficient-sampling): skip HashMap on validation reconstruct path (#1418)\n\nBlock validation only needs the final recall range, but the freestanding\nget_recall_range was driving Ranges::reconstruct which inserts each\nintermediate pick into last_recall_ranges and updates last_step_num. On\nmainnet (64_840 ranges per partition) that's ~64k wasted HashMap inserts\nper recall_range_is_valid call.\n\nExtract the pure swap-pick into Ranges::pick_next (no HashMap, no\nlast_step_num) and have the freestanding get_recall_range loop on it\ndirectly, keeping only the final value. The mining path\n(Ranges::next_recall_range, used by partition_mining_service) is\nunchanged - it still goes through pick_next and then updates its\nbookkeeping. get_last_recall_range was orphaned by the change and is\nremoved.\n\nBench (crates/efficient-sampling/benches/recall_range.rs, criterion,\np < 0.05 at every size):\n\n  steps      before      after       delta\n  100        12.77 us    10.23 us    -20.9%\n  1000       132.5 us    102.9 us    -23.0%\n  10000      1.327 ms    1.048 ms    -20.4%\n  64840      9.30 ms     6.82 ms     -26.6%\n\nThe win scales with N as expected (HashMap rehash cost dominates the\ntail). Existing determinism/uniqueness proptests confirm behavior is\nunchanged.",
+          "timestamp": "2026-05-13T21:35:09+01:00",
+          "tree_id": "f5152bed17f21714b9dc85cfaac8e3a5883236e5",
+          "url": "https://github.com/Irys-xyz/irys/commit/4a08aa380a9a7b6da48215662542ef58425d9393"
+        },
+        "date": 1778705431018,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015633,
+            "range": "± 0.000728",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.156961,
+            "range": "± 0.003039",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.602502,
+            "range": "± 0.040545",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.698956,
+            "range": "± 0.235592",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083356,
+            "range": "± 0.001224",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 779.306915,
+            "range": "± 34.248714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.269544,
+            "range": "± 13.217994",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.123681,
+            "range": "± 0.003193",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1230.294701,
+            "range": "± 96.343181",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1542.41204,
+            "range": "± 14.240158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034156,
+            "range": "± 0.001321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.214735,
+            "range": "± 1.686418",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.402562,
+            "range": "± 1.428315",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
