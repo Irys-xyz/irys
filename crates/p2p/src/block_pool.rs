@@ -28,7 +28,7 @@ use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
@@ -125,6 +125,17 @@ pub(crate) enum ProcessBlockResult {
     ParentTooFarAhead,
 }
 
+/// Outcome of waiting for a `InTreePendingValidation` parent to leave the
+/// pending-validation state.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ParentValidationOutcome {
+    /// Parent transitioned to a validated state.
+    Valid,
+    /// Parent was removed from the tree (validation failed, reorg, or prune),
+    /// or the event channel disappeared. The child should be discarded.
+    Invalid,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockPool<B, M>
 where
@@ -196,6 +207,10 @@ impl Display for BlockRemovalReason {
 #[derive(Clone, Debug)]
 pub(crate) enum FailureReason {
     ParentIsAPartOfAPrunedFork,
+    /// The parent block was in the tree pending validation when this block
+    /// arrived; the parent's validation then failed (block was removed from
+    /// the tree). The child is unreachable on any valid chain.
+    ParentValidationFailed,
     WasNotAbleToFetchRethPayload,
     BlockPrevalidationFailed,
     FailedToPull(GossipError),
@@ -206,6 +221,9 @@ impl Display for FailureReason {
         match self {
             Self::ParentIsAPartOfAPrunedFork => {
                 write!(f, "Parent block is a part of a pruned fork")
+            }
+            Self::ParentValidationFailed => {
+                write!(f, "Parent block failed validation")
             }
             Self::WasNotAbleToFetchRethPayload => {
                 write!(f, "Was not able to fetch Reth execution payload")
@@ -713,7 +731,7 @@ where
             return Err(err.into());
         }
 
-        if !previous_block_status.is_processed() {
+        if !previous_block_status.is_in_tree() {
             // For orphan blocks, we already have ordered transactions from SealedBlock
             let block_transactions = block.transactions();
 
@@ -816,6 +834,51 @@ where
                     prev_block_hash, current_block_hash
                 );
                 return Ok(ProcessBlockResult::ParentRequested);
+            }
+        }
+
+        // If the parent is in the tree but its validation has not completed yet,
+        // pause this block before adding it to the tree. Adding the child eagerly
+        // and letting validation_service handle the parent-wait is what caused
+        // the storm: when the parent later turned out to be invalid and was
+        // removed, every descendant we already added cascade-failed with
+        // `Parent block not found` and got re-pulled from the network.
+        if matches!(previous_block_status, BlockStatus::InTreePendingValidation) {
+            debug!(
+                "Block pool: Parent block {:?} for block {:?} is in tree pending validation; waiting for parent's validation to complete",
+                prev_block_hash, current_block_hash
+            );
+            match self
+                .wait_for_parent_validation(prev_block_hash, block_height.saturating_sub(1))
+                .await
+            {
+                ParentValidationOutcome::Valid => {
+                    debug!(
+                        "Block pool: Parent block {:?} for block {:?} validated; resuming processing",
+                        prev_block_hash, current_block_hash
+                    );
+                }
+                ParentValidationOutcome::Invalid => {
+                    warn!(
+                        "Block pool: Parent block {:?} for block {:?} failed validation; dropping child",
+                        prev_block_hash, current_block_hash
+                    );
+                    self.blocks_cache
+                        .remove_block(
+                            &block_hash,
+                            BlockRemovalReason::FailedToProcess(
+                                FailureReason::ParentValidationFailed,
+                            ),
+                        )
+                        .await;
+                    let err = CriticalBlockPoolError::BlockError(format!(
+                        "parent {:?} of block {:?} failed validation",
+                        prev_block_hash, current_block_hash
+                    ));
+                    self.sync_state
+                        .record_block_processing_error(err.to_string());
+                    return Err(err.into());
+                }
             }
         }
 
@@ -1175,11 +1238,70 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        self.blocks_cache.is_block_processing(block_hash).await
-            || self
+        if self.blocks_cache.is_block_processing(block_hash).await {
+            return true;
+        }
+        let status = self
+            .block_status_provider
+            .block_status(block_height, block_hash);
+        // A block that is in the tree pending validation has also been observed
+        // already; we do not want gossip handlers to re-enter `process_block`
+        // for it.
+        status.is_processed() || status.is_in_tree()
+    }
+
+    /// Wait until the parent's `ChainState` leaves the pending-validation set
+    /// (either it transitions to a validated state, or it is removed from the
+    /// tree because validation failed).
+    ///
+    /// Subscribes to `block_state_events` *before* re-reading the parent state,
+    /// so a transition that fires between the initial check and the subscription
+    /// is not lost. Lagged events are tolerated — the loop re-reads parent state
+    /// from the block tree on every iteration, so a missed update only delays
+    /// the next exit check by one event.
+    async fn wait_for_parent_validation(
+        &self,
+        parent_hash: BlockHash,
+        parent_height: u64,
+    ) -> ParentValidationOutcome {
+        let mut rx = self.service_senders.subscribe_block_state_updates();
+        loop {
+            match self
                 .block_status_provider
-                .block_status(block_height, block_hash)
-                .is_processed()
+                .block_status(parent_height, &parent_hash)
+            {
+                BlockStatus::InTreePendingValidation => {
+                    // still pending — fall through to await the next event
+                }
+                BlockStatus::ProcessedButCanBeReorganized | BlockStatus::Finalized => {
+                    return ParentValidationOutcome::Valid;
+                }
+                BlockStatus::NotProcessed | BlockStatus::PartOfAPrunedFork => {
+                    return ParentValidationOutcome::Invalid;
+                }
+            }
+
+            match rx.recv().await {
+                Ok(_event) => {
+                    // Re-read parent state on every event, regardless of which
+                    // block the event was for. Cheap, and avoids races against
+                    // out-of-order state transitions on a busy node.
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        "BlockPool: block_state_events lagged by {} while waiting for parent {:?}; re-checking state",
+                        skipped, parent_hash
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    error!(
+                        "BlockPool: block_state_events channel closed while waiting for parent {:?}",
+                        parent_hash
+                    );
+                    return ParentValidationOutcome::Invalid;
+                }
+            }
+        }
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
@@ -1308,6 +1430,15 @@ fn check_block_status(
 
     match block_status {
         BlockStatus::NotProcessed => Ok(()),
+        BlockStatus::InTreePendingValidation => {
+            debug!(
+                "Block pool: Block {:?} (height {}) is already in tree pending validation",
+                block_hash, block_height,
+            );
+            Err(BlockPoolError::Advisory(
+                AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
+            ))
+        }
         BlockStatus::ProcessedButCanBeReorganized => {
             debug!(
                 "Block pool: Block {:?} (height {}) is already processed",
