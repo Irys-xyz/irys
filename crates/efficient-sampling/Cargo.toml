@@ -14,6 +14,11 @@ tracing.workspace = true
 rstest.workspace = true
 proptest.workspace = true
 test-log.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "recall_range"
+harness = false
 
 [lints]
 workspace = true
