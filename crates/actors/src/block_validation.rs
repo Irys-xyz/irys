@@ -219,8 +219,6 @@ pub enum PreValidationError {
     ParentEpochSnapshotNotFound { block_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
-    #[error("Failed to fetch transactions: {0}")]
-    TransactionFetchFailed(String),
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
@@ -359,7 +357,31 @@ impl PreValidationError {
     /// safety-critical doc for the full invariant. Grow this method as new
     /// non-consensus variants are added.
     pub fn is_internal_failure(&self) -> bool {
-        matches!(self, Self::InternalTaskJoin(_))
+        matches!(
+            self,
+            // Verifier-thread panic captured by spawn_blocking.
+            Self::InternalTaskJoin(_)
+            // Local MDBX I/O failure during prevalidation lookups.
+            | Self::DatabaseError { .. }
+            // Local channel/actor failure when querying historical inclusions.
+            | Self::PreviousTxInclusionsFailed(_)
+            // Local in-memory block-tree cache mutation failure.
+            | Self::AddBlockFailed { .. }
+            | Self::UpdateCacheForScheduledValidationError(_)
+            // Local validation-service channel is dead.
+            | Self::ValidationServiceUnreachable
+            // OS clock failure.
+            | Self::SystemTimeError(_)
+            // Local arithmetic on locally-derived inputs (height * block_time);
+            // the peer-supplied reward is checked separately via RewardMismatch.
+            | Self::RewardCurveError(_)
+            // Local arithmetic with local config inputs; per-tx fee comparisons
+            // use the separate Insufficient*Fee variants.
+            | Self::FeeCalculationFailed(_)
+            // Local snapshot computation; has no real failure path today, but
+            // if it ever fires it's a local bug, not a consensus failure.
+            | Self::EmaSnapshotError(_)
+        )
     }
 }
 
@@ -397,10 +419,6 @@ pub enum ValidationError {
     /// Shadow transaction validation failed
     #[error("Shadow transaction validation failed: {0}")]
     ShadowTransactionInvalid(String),
-
-    /// Failed to fetch commitment transactions from mempool or database
-    #[error("Failed to fetch commitment transactions: {0}")]
-    CommitmentTransactionFetchFailed(String),
 
     /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
     #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
@@ -1237,6 +1255,38 @@ mod prevalidation_error_classification_tests {
         assert!(
             !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
+    }
+
+    /// Local/runtime variants (DB I/O, channel failure, OS clock, internal
+    /// arithmetic, cache mutation) must classify as internal so block_pool
+    /// does not peer-attribute or record the block as invalid.
+    #[test]
+    fn local_runtime_variants_are_internal_failures() {
+        assert!(
+            PreValidationError::DatabaseError {
+                error: "mdbx".to_string()
+            }
+            .is_internal_failure()
+        );
+        assert!(
+            PreValidationError::PreviousTxInclusionsFailed("ch".to_string()).is_internal_failure()
+        );
+        assert!(
+            PreValidationError::AddBlockFailed {
+                block_hash: H256::zero(),
+                reason: "x".to_string(),
+            }
+            .is_internal_failure()
+        );
+        assert!(
+            PreValidationError::UpdateCacheForScheduledValidationError(H256::zero())
+                .is_internal_failure()
+        );
+        assert!(PreValidationError::ValidationServiceUnreachable.is_internal_failure());
+        assert!(PreValidationError::SystemTimeError("clk".to_string()).is_internal_failure());
+        assert!(PreValidationError::RewardCurveError("ovf".to_string()).is_internal_failure());
+        assert!(PreValidationError::FeeCalculationFailed("ovf".to_string()).is_internal_failure());
+        assert!(PreValidationError::EmaSnapshotError("ema".to_string()).is_internal_failure());
     }
 }
 
