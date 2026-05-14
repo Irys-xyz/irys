@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778705432029,
+  "lastUpdate": 1778756889312,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3283,6 +3283,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "9b6d3d2e2eebead2c248a3451115efac02f81f89",
+          "message": "feat(snapshot): portable chain-state import/export tooling",
+          "timestamp": "2026-05-13T20:35:15Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1419/commits/9b6d3d2e2eebead2c248a3451115efac02f81f89"
+        },
+        "date": 1778756888002,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011897,
+            "range": "± 0.000346",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.118631,
+            "range": "± 0.000156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.189027,
+            "range": "± 0.008139",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.83876,
+            "range": "± 0.023742",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074651,
+            "range": "± 0.000243",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.350133,
+            "range": "± 0.823775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.16113,
+            "range": "± 1.094014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120383,
+            "range": "± 0.000186",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.102448,
+            "range": "± 0.857798",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1555.764692,
+            "range": "± 1.071303",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034332,
+            "range": "± 0.001125",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.87706,
+            "range": "± 0.205157",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.676761,
+            "range": "± 5.727308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000008",
             "unit": "ms/iter"
           }
         ]
