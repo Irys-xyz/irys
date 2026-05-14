@@ -224,6 +224,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     genesis
         .send_full_block(&peer, &head_header, head_payload, head_txs)
         .await?;
+    let delivery_instant = Instant::now();
     tracing::info!(block.hash = %head_hash, "head delivered to peer via send_full_block");
 
     // -- Wait for peer's validation_service to die from the Stalled panic.
@@ -295,18 +296,43 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
             }
         }
 
-        // Only treat a closed validation_service as success once the head
-        // has reached peer's block_tree (i.e. prevalidation completed and
-        // the validation message was scheduled). This rules out the
-        // false-positive where an unrelated panic in validation_service
-        // closes the sender before our scenario plays out.
-        let head_reached_tree = peer
+        // Only treat a closed validation_service as success when:
+        //   1. The head has reached peer's block_tree (prevalidation
+        //      completed → validation message was scheduled), AND
+        //   2. At least `SHORT_PROGRESS_TIMEOUT_SECS` has elapsed since
+        //      delivery (the Stalled panic cannot fire before the
+        //      progress timer expires), AND
+        //   3. The head's chain state is still pre-validation
+        //      (NotOnchain(Unknown|ValidationScheduled) or
+        //      Validated(Unknown|ValidationScheduled)) — a Stalled panic
+        //      kills the task before `on_block_validation_finished`
+        //      runs, so the head must not have transitioned past
+        //      `ValidationScheduled`.
+        //
+        // These three gates together rule out an unrelated panic in
+        // validation_service satisfying the success condition for the
+        // wrong reason.
+        let head_state = peer
             .node_ctx
             .block_tree_guard
             .read()
-            .get_block(&head_hash)
-            .is_some();
-        if peer.node_ctx.service_senders.validation_service.is_closed() && head_reached_tree {
+            .get_block_and_status(&head_hash)
+            .map(|(_, state)| *state);
+        let head_reached_tree = head_state.is_some();
+        let head_still_pending = matches!(
+            head_state,
+            Some(
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled)
+                    | ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled)
+            )
+        );
+        let stall_window_elapsed =
+            delivery_instant.elapsed() >= Duration::from_secs(SHORT_PROGRESS_TIMEOUT_SECS);
+        if peer.node_ctx.service_senders.validation_service.is_closed()
+            && head_reached_tree
+            && stall_window_elapsed
+            && head_still_pending
+        {
             peer_validation_dead = true;
             break;
         }
