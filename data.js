@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778769106709,
+  "lastUpdate": 1778784664366,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3391,6 +3391,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000118,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1df9e88009491e756e2a84cd333f30ad1b157d0c",
+          "message": "refactor(telemetry): remove Axiom log broadcasting (#1420)",
+          "timestamp": "2026-05-14T19:35:47+01:00",
+          "tree_id": "e0c8ef42e3dbb86e59785d81b47cf7dea0b99552",
+          "url": "https://github.com/Irys-xyz/irys/commit/1df9e88009491e756e2a84cd333f30ad1b157d0c"
+        },
+        "date": 1778784662518,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015307,
+            "range": "± 0.000306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126065,
+            "range": "± 0.00369",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.284002,
+            "range": "± 0.014121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.349129,
+            "range": "± 0.141339",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075568,
+            "range": "± 0.001543",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 761.838653,
+            "range": "± 28.470832",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 981.391292,
+            "range": "± 22.522578",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147832,
+            "range": "± 0.00269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1202.277946,
+            "range": "± 26.341195",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1562.28336,
+            "range": "± 11.045859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03198,
+            "range": "± 0.002412",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.26765,
+            "range": "± 1.882062",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.301377,
+            "range": "± 2.083133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
