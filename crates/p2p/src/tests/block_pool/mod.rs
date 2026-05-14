@@ -928,7 +928,10 @@ async fn should_not_fast_track_block_already_in_index() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests for Fix 2 — InTreePendingValidation orphan-cascade prevention
+// Tests for InTreePendingValidation orphan-cascade prevention: when a child
+// arrives whose parent is in the tree but not yet validated, `process_block`
+// must wait for the parent's validation event rather than entering the orphan
+// re-pull path.
 // ---------------------------------------------------------------------------
 
 /// Build a BlockPool wired to a fresh mocked-services bundle. Returns the
@@ -961,9 +964,9 @@ fn build_test_pool(
     (pool, services, sync_receiver)
 }
 
-/// True iff `msg` is one of the orphan-cascade messages that Fix 2 is
-/// supposed to suppress when the parent is already in the tree
-/// (`InTreePendingValidation`).
+/// True iff `msg` is one of the orphan-cascade messages that
+/// `process_block` must suppress when the parent is already in the tree
+/// as `InTreePendingValidation` (the wait-for-parent path replaces these).
 fn is_orphan_cascade_message(msg: &crate::chain_sync::SyncChainServiceMessage) -> bool {
     matches!(
         msg,

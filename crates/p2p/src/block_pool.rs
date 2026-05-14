@@ -1269,11 +1269,11 @@ where
     /// state + VDF steps), and stuck-validation detection is the upstream VDF
     /// watchdog's job (see `record_validation_task_force_aborted` in
     /// `validation_service`). A timeout here would either force-drop a child
-    /// whose parent is legitimately still validating — triggering the network
-    /// re-pull storm that the surrounding fix (commit b0b8db85c) was built to
-    /// prevent — or be a pure no-op continue. The terminal "validation system
-    /// is dead" case is already covered by `broadcast::error::RecvError::Closed`.
-    /// We instead emit a periodic warn log every [`PARENT_WAIT_WARN_INTERVAL`]
+    /// whose parent is legitimately still validating — re-triggering the
+    /// network re-pull cascade this orphan-cascade fix was built to prevent —
+    /// or be a pure no-op continue. The terminal "validation system is dead"
+    /// case is already covered by `broadcast::error::RecvError::Closed`. We
+    /// instead emit a periodic warn log every [`PARENT_WAIT_WARN_INTERVAL`]
     /// and record total wait duration to a histogram for observability.
     async fn wait_for_parent_validation(
         &self,
