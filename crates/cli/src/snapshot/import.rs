@@ -5,12 +5,13 @@ use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::tables::IrysBlockHeaders;
 use reth_node_core::version::default_client_version;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, ManifestFile, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
-
-const IRYS_CONSENSUS_SUBDIR: &str = "irys_consensus_data";
+use super::{IRYS_CONSENSUS_SUBDIR, STORAGE_MODULES_SUBDIR, SUBMODULES_FILE};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportOpts {
@@ -21,11 +22,25 @@ pub(crate) struct ImportOpts {
     pub expected_irys_schema_version: u32,
 }
 
-/// Drive a snapshot import: verify, extract, checksum, and place into `data_dir`.
+/// Drive a snapshot import: verify, extract, checksum, sanity-check, then place into `data_dir`.
 ///
 /// The imported node still needs its own `config.toml` with a fresh mining key
 /// and node-local sidecars (the snapshot intentionally omits identity data).
 /// Storage modules must be re-packed by the node on first boot.
+///
+/// Security ordering:
+/// 1. Read root manifest, validate format/chain/schema before doing any I/O.
+/// 2. Extract to a temp staging dir.
+/// 3. Verify SHA-256 of every manifest-declared file.
+/// 4. Refuse any extracted entry not declared in the manifest (closes the
+///    "smuggle `jwt.hex` inside a valid archive" attack).
+/// 5. Sanity-open the staged consensus DB. A bad archive fails here and the
+///    target is never touched.
+/// 6. Under `--force`, also purge node-local packing state that the snapshot
+///    intentionally omits (`storage_modules/`, `irys_submodules.toml`) — these
+///    are bound to the previous tenant's mining address and would conflict
+///    with the new consensus DB on boot.
+/// 7. Place each manifest-declared file into the target.
 pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     let manifest = archive::read_manifest_from_archive(&opts.input)?;
     verify_compatibility(&manifest, &opts)?;
@@ -36,22 +51,28 @@ pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     let extracted = archive::unpack(&opts.input, staging.path())?;
     verify_checksums(staging.path(), &extracted.files)?;
 
+    let allowed_roots = manifest_root_entries(&extracted.files);
+    verify_no_extra_entries(staging.path(), &allowed_roots)?;
+    sanity_check_consensus_db(staging.path())?;
+
     std::fs::create_dir_all(&opts.data_dir)
         .with_context(|| format!("creating data dir {}", opts.data_dir.display()))?;
-    place_extracted(staging.path(), &opts.data_dir, opts.force)?;
-    sanity_check_consensus_db(&opts.data_dir)?;
+    if opts.force {
+        purge_node_local_state(&opts.data_dir, &allowed_roots)?;
+    }
+    place_manifest_files(staging.path(), &opts.data_dir, &extracted.files, opts.force)?;
     Ok(())
 }
 
-/// After placing the extracted files, open the consensus mdbx env RO and walk
-/// one block header. A truncated `mdbx.dat` from an interrupted extract will
-/// fail to open here; an empty DB will fail the header check. Drops the env
-/// before returning so the node's normal open path is unaffected.
-fn sanity_check_consensus_db(data_dir: &Path) -> eyre::Result<()> {
-    let consensus_dir = data_dir.join(IRYS_CONSENSUS_SUBDIR);
+/// Open the consensus mdbx env RO and walk one block header. A truncated
+/// `mdbx.dat` fails to open here; an empty DB fails the header check. Run
+/// against the staging dir BEFORE placement so bad archives never overwrite
+/// the target.
+fn sanity_check_consensus_db(root: &Path) -> eyre::Result<()> {
+    let consensus_dir = root.join(IRYS_CONSENSUS_SUBDIR);
     if !consensus_dir.join("mdbx.dat").is_file() {
         eyre::bail!(
-            "imported consensus DB is missing mdbx.dat at {}",
+            "snapshot consensus DB is missing mdbx.dat at {}",
             consensus_dir.display()
         );
     }
@@ -64,13 +85,13 @@ fn sanity_check_consensus_db(data_dir: &Path) -> eyre::Result<()> {
     )
     .with_context(|| {
         format!(
-            "sanity opening imported consensus DB at {}",
+            "sanity opening snapshot consensus DB at {}",
             consensus_dir.display()
         )
     })?;
     let tx = env
         .tx()
-        .context("starting RO tx on imported consensus DB")?;
+        .context("starting RO tx on snapshot consensus DB")?;
     let mut cursor = tx
         .cursor_read::<IrysBlockHeaders>()
         .context("opening IrysBlockHeaders cursor for sanity check")?;
@@ -80,7 +101,7 @@ fn sanity_check_consensus_db(data_dir: &Path) -> eyre::Result<()> {
         .is_none()
     {
         eyre::bail!(
-            "imported consensus DB at {} has no block headers — snapshot appears empty or corrupt",
+            "snapshot consensus DB at {} has no block headers — appears empty or corrupt",
             consensus_dir.display()
         );
     }
@@ -89,10 +110,24 @@ fn sanity_check_consensus_db(data_dir: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Move each top-level entry from `staging` into `target`, skipping the manifest
-/// (which lives inside the archive for verification but is not part of the
-/// node's runtime state).
-fn place_extracted(staging: &Path, target: &Path, force: bool) -> eyre::Result<()> {
+/// Top-level components of every manifest-declared file path. A manifest entry
+/// of `irys_consensus_data/mdbx.dat` yields root `irys_consensus_data`. Used
+/// to validate that nothing extra was extracted and to know which target dirs
+/// to clear before placement.
+fn manifest_root_entries(files: &[ManifestFile]) -> BTreeSet<OsString> {
+    files
+        .iter()
+        .filter_map(|f| match Path::new(&f.path).components().next()? {
+            Component::Normal(s) => Some(s.to_os_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every top-level entry in `staging` must be either the manifest or one of
+/// the manifest-declared roots. Crafted archives smuggling in extra files
+/// (e.g., `reth/jwt.hex`) are rejected here.
+fn verify_no_extra_entries(staging: &Path, allowed_roots: &BTreeSet<OsString>) -> eyre::Result<()> {
     for entry in
         std::fs::read_dir(staging).with_context(|| format!("reading {}", staging.display()))?
     {
@@ -101,52 +136,74 @@ fn place_extracted(staging: &Path, target: &Path, force: bool) -> eyre::Result<(
         if name == MANIFEST_FILENAME {
             continue;
         }
-        let src = entry.path();
-        let dst = target.join(&name);
-        if dst.exists() {
-            if !force {
-                eyre::bail!(
-                    "target entry {} already exists (use --force to overwrite)",
-                    dst.display()
-                );
-            }
-            if dst.is_dir() {
-                std::fs::remove_dir_all(&dst)
-                    .with_context(|| format!("removing existing {}", dst.display()))?;
-            } else {
-                std::fs::remove_file(&dst)
-                    .with_context(|| format!("removing existing {}", dst.display()))?;
-            }
-        }
-        // rename first (fast, atomic on same fs); fall back to recursive copy
-        // when the target is on a different filesystem.
-        if let Err(rename_err) = std::fs::rename(&src, &dst) {
-            move_by_copy(&src, &dst).with_context(|| {
-                format!(
-                    "moving {} to {} (rename failed: {rename_err})",
-                    src.display(),
-                    dst.display()
-                )
-            })?;
+        if !allowed_roots.contains(&name) {
+            eyre::bail!(
+                "archive contains unexpected top-level entry {:?} not declared in manifest",
+                name
+            );
         }
     }
     Ok(())
 }
 
-fn move_by_copy(src: &Path, dst: &Path) -> eyre::Result<()> {
-    let metadata = std::fs::symlink_metadata(src)?;
+/// Under `--force`, remove any pre-existing manifest roots from the target
+/// (so the new files don't merge with stale ones) plus the explicit
+/// non-portable state that the snapshot omits by design.
+fn purge_node_local_state(target: &Path, allowed_roots: &BTreeSet<OsString>) -> eyre::Result<()> {
+    for root in allowed_roots {
+        remove_if_exists(&target.join(root))?;
+    }
+    remove_if_exists(&target.join(STORAGE_MODULES_SUBDIR))?;
+    remove_if_exists(&target.join(SUBMODULES_FILE))?;
+    Ok(())
+}
+
+fn remove_if_exists(path: &Path) -> eyre::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(eyre::Report::new(e).wrap_err(format!("stat {}", path.display()))),
+    };
     if metadata.is_dir() {
-        std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
-        for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-            let entry = entry?;
-            move_by_copy(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-        std::fs::remove_dir(src)
-            .with_context(|| format!("removing source dir {}", src.display()))?;
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
     } else {
-        std::fs::copy(src, dst)
-            .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
-        std::fs::remove_file(src).with_context(|| format!("removing source {}", src.display()))?;
+        std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Place every manifest-declared file from staging into the target, creating
+/// parent directories as needed. Extracted entries NOT in the manifest are
+/// ignored — refusing to place them is what makes the smuggling attack inert.
+fn place_manifest_files(
+    staging: &Path,
+    target: &Path,
+    files: &[ManifestFile],
+    force: bool,
+) -> eyre::Result<()> {
+    for entry in files {
+        let src = staging.join(&entry.path);
+        let dst = target.join(&entry.path);
+        if dst.exists() {
+            if !force {
+                eyre::bail!(
+                    "target file {} already exists (use --force to overwrite)",
+                    dst.display()
+                );
+            }
+            std::fs::remove_file(&dst)
+                .with_context(|| format!("removing existing {}", dst.display()))?;
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent {}", parent.display()))?;
+        }
+        // rename first (fast, atomic on same fs); fall back to copy when the
+        // target is on a different filesystem.
+        if std::fs::rename(&src, &dst).is_err() {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+        }
     }
     Ok(())
 }
@@ -244,7 +301,6 @@ mod tests {
     use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use rstest::rstest;
-    use tempfile::TempDir;
 
     #[derive(Debug, Clone, Copy)]
     enum BadConsensus {
@@ -292,9 +348,9 @@ mod tests {
         );
     }
 
-    fn make_archive(manifest: &SnapshotManifest) -> (TempDir, PathBuf) {
-        let dir = TempDir::new().unwrap();
-        let staging = TempDir::new().unwrap();
+    fn make_archive(manifest: &SnapshotManifest) -> (tempfile::TempDir, PathBuf) {
+        let dir = TempDirBuilder::new().build();
+        let staging = TempDirBuilder::new().build();
         std::fs::write(
             staging.path().join(MANIFEST_FILENAME),
             serde_json::to_string_pretty(manifest).unwrap(),

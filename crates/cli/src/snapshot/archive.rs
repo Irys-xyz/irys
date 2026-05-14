@@ -114,6 +114,10 @@ pub(crate) fn read_manifest_from_dir(dir: &Path) -> eyre::Result<SnapshotManifes
 
 /// Stream just the manifest entry out of an archive without extracting other files.
 /// Useful for verifying compatibility before committing to a full extraction.
+///
+/// Only matches the root-level manifest (`./manifest.json` or `manifest.json`).
+/// A crafted archive cannot smuggle a decoy manifest under a nested path —
+/// the import preflight and `unpack()` must agree on the same manifest entry.
 pub(crate) fn read_manifest_from_archive(archive: &Path) -> eyre::Result<SnapshotManifest> {
     let f =
         File::open(archive).with_context(|| format!("opening snapshot {}", archive.display()))?;
@@ -121,29 +125,48 @@ pub(crate) fn read_manifest_from_archive(archive: &Path) -> eyre::Result<Snapsho
     let mut tar = tar::Archive::new(decoder);
     for entry in tar.entries()? {
         let mut entry = entry?;
-        let is_manifest = entry
-            .path()?
-            .file_name()
-            .is_some_and(|s| s == MANIFEST_FILENAME);
-        if is_manifest {
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf)?;
-            return serde_json::from_str(&buf).context("parsing manifest from archive");
+        if !is_root_manifest_path(&entry.path()?) {
+            continue;
         }
+        let mut buf = String::new();
+        entry.read_to_string(&mut buf)?;
+        return serde_json::from_str(&buf).context("parsing manifest from archive");
     }
     eyre::bail!(
-        "{MANIFEST_FILENAME} not found in archive {}",
+        "{MANIFEST_FILENAME} not found at archive root in {}",
         archive.display()
     )
+}
+
+/// Accept only the archive's root manifest: bare `manifest.json` or `./manifest.json`.
+/// Reject anything nested (e.g. `foo/manifest.json`) — those would let a crafted
+/// archive bypass `verify_compatibility` while `unpack()` later reads a different
+/// root manifest.
+fn is_root_manifest_path(path: &std::path::Path) -> bool {
+    let mut comps = path.components();
+    let Some(first) = comps.next() else {
+        return false;
+    };
+    let first = match first {
+        std::path::Component::CurDir => match comps.next() {
+            Some(c) => c,
+            None => return false,
+        },
+        other => other,
+    };
+    if comps.next().is_some() {
+        return false;
+    }
+    matches!(first, std::path::Component::Normal(n) if n == MANIFEST_FILENAME)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::snapshot::manifest::SNAPSHOT_FORMAT_VERSION;
+    use irys_testing_utils::utils::TempDirBuilder;
     use proptest::prelude::*;
     use std::collections::HashSet;
-    use tempfile::TempDir;
 
     fn write_manifest(staging: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {
         std::fs::write(
@@ -195,9 +218,9 @@ mod tests {
                 .collect();
             prop_assume!(!unique.is_empty());
 
-            let src = TempDir::new().unwrap();
-            let dst = TempDir::new().unwrap();
-            let archive_dir = TempDir::new().unwrap();
+            let src = TempDirBuilder::new().build();
+            let dst = TempDirBuilder::new().build();
+            let archive_dir = TempDirBuilder::new().build();
             let archive_path = archive_dir.path().join("snap.tar.zst");
 
             write_tree(src.path(), &unique);
@@ -229,8 +252,8 @@ mod tests {
 
     #[test]
     fn read_manifest_from_archive_returns_same_manifest() {
-        let src = TempDir::new().unwrap();
-        let archive_dir = TempDir::new().unwrap();
+        let src = TempDirBuilder::new().build();
+        let archive_dir = TempDirBuilder::new().build();
         let archive_path = archive_dir.path().join("snap.tar.zst");
 
         let tree = vec![
@@ -255,5 +278,74 @@ mod tests {
 
         let streamed = read_manifest_from_archive(&archive_path).unwrap();
         assert_eq!(streamed, manifest);
+    }
+
+    /// CONS-1: a manifest nested under a subdirectory must NOT be accepted as
+    /// the archive's root manifest. Without this guard, a crafted archive
+    /// with `foo/manifest.json` could lie about chain_id/schema_version and
+    /// bypass `verify_compatibility`.
+    #[test]
+    fn read_manifest_archive_rejects_nested_manifest() {
+        let src = TempDirBuilder::new().build();
+        let nested = src.path().join("foo");
+        std::fs::create_dir(&nested).expect("mkdir");
+        let bogus = SnapshotManifest {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            chain_id: 9999,
+            irys_schema_version: 99,
+            irys_tip_height: None,
+            reth_tip_height: None,
+            includes_caches: false,
+            created_at_unix_secs: 0,
+            created_by: "decoy".to_owned(),
+            files: vec![],
+        };
+        std::fs::write(
+            nested.join(MANIFEST_FILENAME),
+            serde_json::to_string_pretty(&bogus).unwrap(),
+        )
+        .unwrap();
+        // No root manifest — only the decoy at foo/manifest.json.
+        // We can't use pack() (it asserts a root manifest), so build the tar manually.
+        let archive_dir = TempDirBuilder::new().build();
+        let archive_path = archive_dir.path().join("snap.tar.zst");
+        let f = File::create(&archive_path).unwrap();
+        let encoder = zstd::Encoder::new(BufWriter::new(f), ZSTD_COMPRESSION_LEVEL).unwrap();
+        let mut tar_builder = tar::Builder::new(encoder);
+        tar_builder.follow_symlinks(false);
+        tar_builder.append_dir_all(".", src.path()).unwrap();
+        tar_builder.into_inner().unwrap().finish().unwrap();
+
+        let err = read_manifest_from_archive(&archive_path).unwrap_err();
+        assert!(
+            err.to_string().contains("manifest.json"),
+            "expected manifest-not-found error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_manifest_archive_accepts_root_dot_prefix() {
+        // `tar::Builder::append_dir_all(".", staging)` emits entries with
+        // `./manifest.json` paths. Confirm both bare and ./ root forms match.
+        for prefix in ["", "./"] {
+            assert!(is_root_manifest_path(Path::new(&format!(
+                "{prefix}{MANIFEST_FILENAME}"
+            ))));
+        }
+    }
+
+    #[test]
+    fn read_manifest_archive_rejects_nested_paths() {
+        for nested in [
+            "foo/manifest.json",
+            "a/b/manifest.json",
+            "./foo/manifest.json",
+            "../manifest.json",
+        ] {
+            assert!(
+                !is_root_manifest_path(Path::new(nested)),
+                "nested path {nested:?} must not be accepted as root manifest"
+            );
+        }
     }
 }

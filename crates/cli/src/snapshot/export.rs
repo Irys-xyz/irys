@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
-use irys_database::snapshot::{CopyFlags, copy_mdbx_env, strip_node_local};
+use irys_database::snapshot::{CopyFlags, copy_dir_recursive, copy_mdbx_env, strip_node_local};
 use irys_database::tables::IrysTables;
 use irys_database::{
     IrysDatabaseArgs as _, block_index_latest_height, database_schema_version, open_or_create_db,
@@ -14,12 +14,9 @@ use reth_node_core::version::default_client_version;
 
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
-
-const IRYS_CONSENSUS_SUBDIR: &str = "irys_consensus_data";
-const BLOCK_INDEX_SUBDIR: &str = "block_index";
-const RETH_SUBDIR: &str = "reth";
-const GENESIS_FILE: &str = ".irys_genesis.json";
-const GENESIS_COMMITMENTS_FILE: &str = ".irys_genesis_commitments.json";
+use super::{
+    BLOCK_INDEX_SUBDIR, GENESIS_COMMITMENTS_FILE, GENESIS_FILE, IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExportOpts {
@@ -30,8 +27,6 @@ pub(crate) struct ExportOpts {
     /// Schema version of the binary running this export. Used as a fallback
     /// when the source DB has no `Metadata::DBSchemaVersion` row.
     pub irys_schema_version: u32,
-    pub irys_tip_height: Option<u64>,
-    pub reth_tip_height: Option<u64>,
     pub copy_flags: CopyFlags,
 }
 
@@ -56,8 +51,8 @@ pub(crate) fn run_export(opts: ExportOpts) -> eyre::Result<()> {
         format_version: SNAPSHOT_FORMAT_VERSION,
         chain_id: opts.chain_id,
         irys_schema_version: effective_schema_version,
-        irys_tip_height: source_tip.or(opts.irys_tip_height),
-        reth_tip_height: reth_tip.or(opts.reth_tip_height),
+        irys_tip_height: source_tip,
+        reth_tip_height: reth_tip,
         includes_caches: opts.include_caches,
         created_at_unix_secs: now_unix_secs(),
         created_by: env!("CARGO_PKG_VERSION").to_owned(),
@@ -97,7 +92,8 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
     let copy_db = open_or_create_db(
         &dest_path,
         IrysTables::ALL,
-        DatabaseArguments::irys_testing().context("default db args for copy")?,
+        DatabaseArguments::irys_default(irys_types::DbSyncMode::SafeNoSync)
+            .context("default db args for copy")?,
     )
     .with_context(|| format!("opening copied Irys consensus at {}", dest_path.display()))?;
     strip_node_local(&copy_db, opts.include_caches)
@@ -153,28 +149,6 @@ fn open_consensus_ro(path: &Path) -> eyre::Result<DatabaseEnv> {
             .with_exclusive(Some(false)),
     )
     .with_context(|| format!("opening Irys consensus RO at {}", path.display()))
-}
-
-fn copy_dir_recursive(src: &Path, dest: &Path) -> eyre::Result<()> {
-    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
-    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let file_type = entry.file_type()?;
-        let dest_path = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry_path, &dest_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&entry_path, &dest_path).with_context(|| {
-                format!(
-                    "copying {} to {}",
-                    entry_path.display(),
-                    dest_path.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
 }
 
 fn write_manifest(staging: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {
@@ -259,7 +233,7 @@ mod tests {
             .expect("rw inner");
     }
 
-    fn build_fixture_data_dir() -> (tempfile::TempDir, PathBuf) {
+    fn build_fixture_data_dir() -> (tempfile::TempDir, PathBuf, irys_types::H256) {
         let dir = TempDirBuilder::new().build();
         let data_dir = dir.path().to_path_buf();
 
@@ -291,8 +265,7 @@ mod tests {
         // Node-local sidecars that must NOT survive.
         std::fs::write(reth_dir.join("jwt.hex"), b"secret").expect("write jwt");
 
-        let _ = block_hash;
-        (dir, data_dir)
+        (dir, data_dir, block_hash)
     }
 
     fn peer_count(env: &DatabaseEnv) -> usize {
@@ -317,7 +290,7 @@ mod tests {
 
     #[test]
     fn end_to_end_export_archive() {
-        let (_data_keep, data_dir) = build_fixture_data_dir();
+        let (_data_keep, data_dir, block_hash) = build_fixture_data_dir();
         let out_dir = TempDirBuilder::new().build();
         let archive_path = out_dir.path().join("snap.tar.zst");
 
@@ -327,8 +300,6 @@ mod tests {
             include_caches: false,
             chain_id: 12345,
             irys_schema_version: 3,
-            irys_tip_height: None,
-            reth_tip_height: None,
             copy_flags: CopyFlags {
                 compact: true,
                 throttle_mvcc: true,
@@ -367,7 +338,7 @@ mod tests {
         );
 
         // Re-open the extracted Irys DB and verify that peers were stripped
-        // but the block header survives.
+        // but the specific block header survives.
         let copy_db = open_or_create_db(
             &extracted_irys,
             IrysTables::ALL,
@@ -376,6 +347,14 @@ mod tests {
         .expect("open extracted irys db");
         assert_eq!(peer_count(&copy_db), 0, "peers stripped");
         assert_eq!(block_count(&copy_db), 1, "block header carried over");
+        let tx = copy_db.tx().expect("ro tx");
+        assert!(
+            tx.get::<IrysBlockHeaders>(block_hash)
+                .expect("get header")
+                .is_some(),
+            "specific block_hash {:?} preserved",
+            block_hash
+        );
     }
 
     #[test]
@@ -388,8 +367,6 @@ mod tests {
             include_caches: false,
             chain_id: 1,
             irys_schema_version: 3,
-            irys_tip_height: None,
-            reth_tip_height: None,
             copy_flags: CopyFlags::default(),
         })
         .unwrap_err();

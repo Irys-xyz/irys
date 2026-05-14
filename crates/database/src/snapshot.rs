@@ -85,6 +85,42 @@ pub fn copy_mdbx_env(src: &DatabaseEnv, dest_dir: &Path, flags: CopyFlags) -> ey
     Ok(())
 }
 
+/// Recursively copy `src` into `dest`, creating `dest` if needed.
+///
+/// Only regular files and directories are followed. Symlinks fail loudly so a
+/// surprising layout cannot silently produce an incomplete snapshot.
+pub fn copy_dir_recursive(src: &Path, dest: &Path) -> eyre::Result<()> {
+    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type()?;
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry_path, &dest_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&entry_path, &dest_path).with_context(|| {
+                format!(
+                    "copying {} to {}",
+                    entry_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        } else if file_type.is_symlink() {
+            eyre::bail!(
+                "snapshot source must not contain symlinks; found {}",
+                entry_path.display()
+            );
+        } else {
+            eyre::bail!(
+                "unsupported file type at {}; expected regular file or directory",
+                entry_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Clear node-local tables in an opened consensus-DB env.
 ///
 /// `PeerListItems` is always cleared. Cache tables (`CachedDataRoots`,

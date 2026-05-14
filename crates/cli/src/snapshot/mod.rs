@@ -9,8 +9,17 @@ pub(crate) mod export;
 pub(crate) mod import;
 pub(crate) mod manifest;
 
+pub(crate) const IRYS_CONSENSUS_SUBDIR: &str = "irys_consensus_data";
+pub(crate) const BLOCK_INDEX_SUBDIR: &str = "block_index";
+pub(crate) const RETH_SUBDIR: &str = "reth";
+pub(crate) const GENESIS_FILE: &str = ".irys_genesis.json";
+pub(crate) const GENESIS_COMMITMENTS_FILE: &str = ".irys_genesis_commitments.json";
+pub(crate) const SUBMODULES_FILE: &str = "irys_submodules.toml";
+pub(crate) const STORAGE_MODULES_SUBDIR: &str = "storage_modules";
+
 #[cfg(test)]
 mod round_trip_tests {
+    use super::IRYS_CONSENSUS_SUBDIR;
     use super::export::{ExportOpts, run_export};
     use super::import::{ImportOpts, run_import};
     use irys_database::reth_db::cursor::DbCursorRO as _;
@@ -47,7 +56,7 @@ mod round_trip_tests {
     }
 
     fn build_source(data_dir: &Path) -> irys_types::H256 {
-        let irys_path = data_dir.join("irys_consensus_data");
+        let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let irys_db = open_or_create_db(
             &irys_path,
             IrysTables::ALL,
@@ -119,8 +128,6 @@ mod round_trip_tests {
             include_caches: false,
             chain_id: 7777,
             irys_schema_version: 3,
-            irys_tip_height: None,
-            reth_tip_height: None,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
                 throttle_mvcc: true,
@@ -166,7 +173,7 @@ mod round_trip_tests {
         );
 
         let imported = open_or_create_db(
-            target_dir.join("irys_consensus_data"),
+            target_dir.join(IRYS_CONSENSUS_SUBDIR),
             IrysTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
@@ -180,6 +187,210 @@ mod round_trip_tests {
         let tx = imported.tx().expect("ro tx");
         let header: Option<_> = tx.get::<IrysBlockHeaders>(block_hash).expect("get header");
         assert!(header.is_some(), "specific block_hash present");
+    }
+
+    /// Helper: build a valid snapshot archive from a source dir, returning its path.
+    fn build_snapshot(src_dir: &Path, chain_id: u64) -> (tempfile::TempDir, PathBuf) {
+        let out = TempDirBuilder::new().build();
+        let archive_path = out.path().join("snap.tar.zst");
+        run_export(ExportOpts {
+            data_dir: src_dir.to_path_buf(),
+            output: archive_path.clone(),
+            include_caches: false,
+            chain_id,
+            irys_schema_version: 3,
+            copy_flags: irys_database::snapshot::CopyFlags {
+                compact: true,
+                throttle_mvcc: true,
+            },
+        })
+        .expect("export");
+        (out, archive_path)
+    }
+
+    /// Helper: repack a snapshot archive after injecting an extra unrelated
+    /// file into the staging dir. Used to test that the importer refuses to
+    /// place files that aren't declared in the manifest.
+    fn repack_with_smuggled_file(
+        original: &Path,
+        extra_rel: &Path,
+        extra_bytes: &[u8],
+    ) -> (tempfile::TempDir, PathBuf) {
+        let staging = TempDirBuilder::new().build();
+        // Unpack the original to staging.
+        let f = std::fs::File::open(original).expect("open original");
+        let dec = zstd::Decoder::new(std::io::BufReader::new(f)).expect("zstd dec");
+        let mut tar = tar::Archive::new(dec);
+        tar.unpack(staging.path()).expect("unpack original");
+
+        // Inject the smuggled file inside an existing manifest root.
+        let smuggled = staging.path().join(extra_rel);
+        std::fs::create_dir_all(smuggled.parent().unwrap()).expect("mkdir for smuggled");
+        std::fs::write(&smuggled, extra_bytes).expect("write smuggled");
+
+        // Repack — note this archive will still have a valid manifest.json with
+        // checksums for the original files; the smuggled file is NOT in it.
+        let out_dir = TempDirBuilder::new().build();
+        let out_path = out_dir.path().join("smuggled.tar.zst");
+        let out_f = std::fs::File::create(&out_path).expect("create out");
+        let enc = zstd::Encoder::new(std::io::BufWriter::new(out_f), 3).expect("zstd enc");
+        let mut builder = tar::Builder::new(enc);
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", staging.path()).expect("append");
+        builder.into_inner().unwrap().finish().expect("finish");
+        (out_dir, out_path)
+    }
+
+    /// CDX-1: an archive that smuggles in `reth/jwt.hex` (NOT in manifest.files)
+    /// must not result in that file being placed in the target data dir.
+    #[test]
+    fn import_does_not_place_smuggled_files() {
+        let src_keep = TempDirBuilder::new().build();
+        build_source(src_keep.path());
+        let (_orig_keep, original) = build_snapshot(src_keep.path(), 4242);
+
+        let (_keep, smuggled_archive) = repack_with_smuggled_file(
+            &original,
+            Path::new("reth/jwt.hex"),
+            b"ATTACKER_CONTROLLED_SECRET",
+        );
+
+        let target_keep = TempDirBuilder::new().build();
+        let target_dir = target_keep.path().join("victim");
+
+        run_import(ImportOpts {
+            input: smuggled_archive,
+            data_dir: target_dir.clone(),
+            force: false,
+            expected_chain_id: 4242,
+            expected_irys_schema_version: 3,
+        })
+        .expect("import succeeds (smuggled file is silently dropped)");
+
+        assert!(
+            !target_dir.join("reth/jwt.hex").exists(),
+            "smuggled jwt.hex must not appear in target after import"
+        );
+        // Legitimate manifest-declared files are still placed.
+        assert!(
+            target_dir.join("reth/db/mdbx.dat").is_file(),
+            "legitimate reth mdbx still placed"
+        );
+    }
+
+    /// CDX-3: importing with `--force` against a data dir that still has the
+    /// previous tenant's `storage_modules/` and `irys_submodules.toml` must
+    /// remove those non-portable sidecars so the new consensus DB doesn't
+    /// conflict with stale packing params on boot.
+    #[test]
+    fn import_with_force_purges_stale_storage_modules() {
+        let src_keep = TempDirBuilder::new().build();
+        build_source(src_keep.path());
+        let (_keep, archive) = build_snapshot(src_keep.path(), 4243);
+
+        let target_keep = TempDirBuilder::new().build();
+        let target_dir = target_keep.path().join("populated");
+        std::fs::create_dir_all(target_dir.join("storage_modules/sm0")).expect("mk stale sm");
+        std::fs::write(
+            target_dir.join("storage_modules/sm0/packing_params.toml"),
+            b"# previous tenant",
+        )
+        .expect("write stale params");
+        std::fs::write(target_dir.join("irys_submodules.toml"), b"old = true")
+            .expect("write stale submodules");
+
+        run_import(ImportOpts {
+            input: archive,
+            data_dir: target_dir.clone(),
+            force: true,
+            expected_chain_id: 4243,
+            expected_irys_schema_version: 3,
+        })
+        .expect("force import succeeds");
+
+        assert!(
+            !target_dir.join("storage_modules").exists(),
+            "stale storage_modules/ must be purged under --force"
+        );
+        assert!(
+            !target_dir.join("irys_submodules.toml").exists(),
+            "stale irys_submodules.toml must be purged under --force"
+        );
+        assert!(
+            target_dir.join("irys_consensus_data/mdbx.dat").is_file(),
+            "new consensus DB placed"
+        );
+    }
+
+    /// CDX-4: a corrupt archive (sanity check fails) must NOT modify the
+    /// pre-existing target — sanity runs against staging before placement.
+    #[test]
+    fn import_aborts_before_modifying_target_on_bad_archive() {
+        let src_keep = TempDirBuilder::new().build();
+        build_source(src_keep.path());
+        let (_keep, archive) = build_snapshot(src_keep.path(), 4244);
+
+        // Corrupt by stamping over the consensus mdbx with garbage post-pack.
+        let staging = TempDirBuilder::new().build();
+        let f = std::fs::File::open(&archive).expect("open");
+        let dec = zstd::Decoder::new(std::io::BufReader::new(f)).expect("dec");
+        tar::Archive::new(dec)
+            .unpack(staging.path())
+            .expect("unpack");
+        std::fs::write(
+            staging.path().join("irys_consensus_data/mdbx.dat"),
+            b"not-a-real-mdbx",
+        )
+        .expect("corrupt mdbx");
+
+        // Rebuild manifest checksums against the now-corrupted file so checksum
+        // validation passes during import; sanity check is the layer under test.
+        let files = super::archive::build_file_list(staging.path()).unwrap();
+        let mut manifest: super::manifest::SnapshotManifest = serde_json::from_str(
+            &std::fs::read_to_string(staging.path().join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        manifest.files = files;
+        std::fs::write(
+            staging.path().join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .expect("rewrite manifest");
+
+        // Output the archive into a SEPARATE dir so it isn't picked up by
+        // build_file_list above.
+        let out_dir = TempDirBuilder::new().build();
+        let bad_path = out_dir.path().join("bad.tar.zst");
+        let out_f = std::fs::File::create(&bad_path).expect("create");
+        let enc = zstd::Encoder::new(std::io::BufWriter::new(out_f), 3).expect("enc");
+        let mut builder = tar::Builder::new(enc);
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", staging.path()).expect("append");
+        builder.into_inner().unwrap().finish().expect("finish");
+
+        let target_keep = TempDirBuilder::new().build();
+        let target_dir = target_keep.path().join("preserve_me");
+        std::fs::create_dir_all(target_dir.join("storage_modules")).expect("pre-populate target");
+        std::fs::write(target_dir.join("storage_modules/keep_me"), b"untouched")
+            .expect("write witness");
+
+        let err = run_import(ImportOpts {
+            input: bad_path,
+            data_dir: target_dir.clone(),
+            force: true,
+            expected_chain_id: 4244,
+            expected_irys_schema_version: 3,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("sanity opening")
+                || err.to_string().contains("no block headers"),
+            "expected sanity-check failure, got: {err}"
+        );
+        assert!(
+            target_dir.join("storage_modules/keep_me").is_file(),
+            "target must be untouched when archive fails sanity check"
+        );
     }
 
     #[test]
@@ -196,8 +407,6 @@ mod round_trip_tests {
             include_caches: false,
             chain_id: 11,
             irys_schema_version: 3,
-            irys_tip_height: None,
-            reth_tip_height: None,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
                 throttle_mvcc: true,

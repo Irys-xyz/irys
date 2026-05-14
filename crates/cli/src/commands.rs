@@ -88,14 +88,13 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
             no_throttle_mvcc,
         } => {
             let data_dir = data_dir.unwrap_or_else(|| node_config.base_directory.clone());
+            let chain_id = verified_chain_id_for_export(&node_config, &data_dir, chain_id)?;
             run_export(ExportOpts {
                 data_dir,
                 output,
                 include_caches,
                 chain_id,
                 irys_schema_version,
-                irys_tip_height: None,
-                reth_tip_height: None,
                 copy_flags: irys_database::snapshot::CopyFlags {
                     compact: !no_compact,
                     throttle_mvcc: !no_throttle_mvcc,
@@ -116,6 +115,46 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
                 expected_irys_schema_version: irys_schema_version,
             })
         }
+    }
+}
+
+/// Refuse to label an export with `chain_id` when the snapshotted data dir
+/// has a `.irys_genesis.json` that does not match the active config's
+/// `base_directory/.irys_genesis.json`. Genesis blocks are deterministic per
+/// chain, so a byte mismatch means the data dir belongs to a different
+/// network than the config — labelling the archive with the config's
+/// chain_id would mis-stamp the snapshot.
+fn verified_chain_id_for_export(
+    node_config: &NodeConfig,
+    data_dir: &std::path::Path,
+    chain_id: u64,
+) -> eyre::Result<u64> {
+    let local_path = node_config
+        .base_directory
+        .join(crate::snapshot::GENESIS_FILE);
+    let target_path = data_dir.join(crate::snapshot::GENESIS_FILE);
+    let local_bytes = read_optional_file(&local_path)?;
+    let target_bytes = read_optional_file(&target_path)?;
+    if let (Some(local), Some(target)) = (local_bytes, target_bytes)
+        && local != target
+    {
+        eyre::bail!(
+            "--data-dir {} has a different {} than the configured base_directory {}; \
+             the data dir appears to belong to a different chain. Refusing to label \
+             the snapshot with chain_id={chain_id}.",
+            data_dir.display(),
+            crate::snapshot::GENESIS_FILE,
+            node_config.base_directory.display(),
+        );
+    }
+    Ok(chain_id)
+}
+
+fn read_optional_file(path: &std::path::Path) -> eyre::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(eyre::Report::new(e).wrap_err(format!("reading {}", path.display()))),
     }
 }
 

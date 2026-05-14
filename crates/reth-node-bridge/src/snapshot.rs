@@ -18,7 +18,7 @@
 //! * `rocksdb/` — unused in this build
 
 use eyre::Context as _;
-use irys_database::snapshot::{CopyFlags, copy_mdbx_env};
+use irys_database::snapshot::{CopyFlags, copy_dir_recursive, copy_mdbx_env};
 use reth_db::mdbx::DatabaseArguments;
 use reth_db::transaction::DbTx as _;
 use reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind, DatabaseError, StageCheckpoints};
@@ -114,28 +114,6 @@ fn open_reth_db_read_only(db_path: &Path) -> eyre::Result<DatabaseEnv> {
             .with_exclusive(Some(false)),
     )
     .with_context(|| format!("opening reth db at {}", db_path.display()))
-}
-
-fn copy_dir_recursive(src: &Path, dest: &Path) -> eyre::Result<()> {
-    std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
-    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let file_type = entry.file_type()?;
-        let dest_path = dest.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry_path, &dest_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&entry_path, &dest_path).with_context(|| {
-                format!(
-                    "copying {} to {}",
-                    entry_path.display(),
-                    dest_path.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -234,6 +212,16 @@ mod tests {
         assert!(
             !dest_reth.join("discovery-secret").exists(),
             "node-local discovery-secret must NOT be copied"
+        );
+    }
+
+    #[test]
+    fn finish_stage_constant_matches_reth() {
+        assert_eq!(
+            RETH_FINISH_STAGE,
+            reth_stages_types::StageId::Finish.to_string(),
+            "RETH_FINISH_STAGE drifted from reth_stages_types::StageId::Finish — \
+             tip extraction would silently start returning None"
         );
     }
 
