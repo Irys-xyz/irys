@@ -435,11 +435,13 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
 
     let cascade_active = {
         let tree = ctx.node.node_ctx.block_tree_guard.read();
-        let epoch_snapshot = tree.canonical_epoch_snapshot();
+        let parent_epoch_snapshot = tree
+            .get_epoch_snapshot(&bad_block.header().previous_block_hash)
+            .expect("parent epoch snapshot");
         config_override
             .consensus
             .hardforks
-            .is_cascade_active_for_epoch(&epoch_snapshot)
+            .is_cascade_active_for_epoch(&parent_epoch_snapshot)
     };
 
     let result = irys_actors::block_validation::data_txs_are_valid(
