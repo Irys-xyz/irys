@@ -414,9 +414,12 @@ impl BlockTreeServiceInner {
 
         // Handle internal/runtime validation failures first. Block validity
         // is unknown locally — DO NOT remove the block from cache or mark it
-        // discarded. Validation can be retried when the cause clears (e.g.
-        // the parent reappears, the transient I/O recovers, the block is
-        // re-gossiped).
+        // discarded. We leave the cache entry intact so the block isn't
+        // false-attributed to the peer; recovery today is passive — the
+        // entry sits in `ValidationScheduled` until normal depth-pruning
+        // evicts it, at which point fresh gossip can re-enter the
+        // prevalidate path. There is no automatic re-scheduler keyed off
+        // this event yet (TODO).
         if let ValidationResult::InternalFailure(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,

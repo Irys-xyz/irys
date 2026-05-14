@@ -357,9 +357,10 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
-                                self.send_validation_result(hash, ValidationResult::Invalid(
-                                    ValidationError::VdfValidationFailed(vdf_error.to_string())
-                                ));
+                                self.send_validation_result(
+                                    hash,
+                                    ValidationError::VdfValidationFailed(vdf_error.to_string()).into(),
+                                );
                             }
                             VdfValidationResult::Cancelled => {
                                 metrics::record_validation_result("vdf", "cancelled");
@@ -446,12 +447,19 @@ impl ValidationService {
                                 metrics::record_validation_full_duration_ms(
                                     enqueued_at.elapsed().as_secs_f64() * 1000.0,
                                 );
-                                if !self.send_validation_result(hash, ValidationResult::Invalid(
+                                // Route through `.into()` so the From dispatcher
+                                // classifies TaskPanicked as InternalFailure
+                                // (validity unknown, do not peer-attribute).
+                                // Constructing `Invalid(TaskPanicked)` directly
+                                // here would defeat the seal.
+                                if !self.send_validation_result(
+                                    hash,
                                     ValidationError::TaskPanicked {
                                         task: "concurrent_validation".to_string(),
                                         details: e.to_string(),
-                                    },
-                                )) {
+                                    }
+                                    .into(),
+                                ) {
                                     // Block tree won't handle diagnostics since send failed,
                                     // so record directly as a fallback.
                                     self.inner.chain_sync_state.record_validation_finished(&hash);

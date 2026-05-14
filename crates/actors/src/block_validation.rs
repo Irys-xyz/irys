@@ -121,6 +121,13 @@ pub enum PreValidationError {
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
     PoAChunkOffsetOutOfBlockBounds,
+    /// Peer-supplied PoA references a ledger id that the local chain has
+    /// no committed chunks for. Consensus-invalid (the chain hasn't
+    /// activated that ledger yet, or the peer is on a different fork).
+    /// Distinct from `BlockBoundsLookupError` so the latter only carries
+    /// genuine local lookup failures.
+    #[error("PoA ledger {ledger_id} inactive in local chain")]
+    PoALedgerInactive { ledger_id: u32 },
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
     #[error("Missing partition assignment for partition hash {partition_hash}")]
@@ -394,14 +401,23 @@ impl PreValidationError {
             | Self::LocalEmaSnapshotMissing { .. }
             | Self::LocalEpochSnapshotMissing { .. }
             // Block-bounds lookup failures: the PoA-validation construction
-            // site pre-checks peer-supplied offsets against the chain max and
-            // rejects out-of-range offsets via PoAChunkOffsetOutOfBlockBounds
-            // first, so by the time this variant is constructed the failure
-            // is local (empty index, DB I/O, ledger missing). The
-            // get_assigned_ingress_proofs sites only operate on block hashes
-            // already present in our DB, so any lookup failure there is
-            // likewise a local DB consistency issue.
+            // site pre-checks peer-supplied offsets against the chain max,
+            // rejects out-of-range offsets via PoAChunkOffsetOutOfBlockBounds,
+            // and rejects peer-supplied ledger ids absent from the latest
+            // indexed block via PoALedgerInactive — so by the time this
+            // variant is constructed the failure is local (empty index,
+            // DB I/O). The get_assigned_ingress_proofs sites only operate on
+            // block hashes already present in our DB, so any lookup failure
+            // there is likewise a local DB consistency issue.
             | Self::BlockBoundsLookupError(_)
+            // Block-tree RwLock poisoned by a prior panic. Local corruption
+            // — caller should escalate (see `is_fatal_corruption`). Listed
+            // here so any caller that routes this through `.into()` doesn't
+            // mistakenly peer-attribute the block.
+            | Self::CachePoisoned { .. }
+            // Parent missing from the in-memory block-tree cache due to a
+            // local prune/reorg race. Peer is innocent.
+            | Self::ParentNotInCache { .. }
         )
     }
 }
@@ -557,8 +573,9 @@ pub enum ValidationError {
     ///
     /// Classified as internal: this is an eviction race against the in-memory
     /// snapshot window — the parent's snapshot may have been there moments
-    /// before we looked. Validity is unknown; the block stays in cache for
-    /// retry on re-gossip.
+    /// before we looked. Validity is unknown; the block stays in cache. There
+    /// is no automatic re-scheduler today — recovery is passive (depth-prune
+    /// → fresh gossip re-enters the prevalidate path).
     #[error("Parent commitment snapshot missing for block {block_hash}")]
     ParentCommitmentSnapshotMissing { block_hash: H256 },
 
@@ -574,7 +591,9 @@ pub enum ValidationError {
     ///
     /// Classified as internal: the parent could have been present a moment
     /// ago and got evicted just before we looked. The block's validity is
-    /// genuinely unknown — re-gossip + retry can succeed.
+    /// genuinely unknown. Recovery is passive (cache entry persists until
+    /// depth-pruning evicts it, then fresh gossip re-enters the prevalidate
+    /// path); no automatic re-scheduler today.
     ///
     /// DISTINCT from [`ValidationCancelReason::ParentMissing`], which fires
     /// from inside the parent-wait stage *after* prevalidation already
@@ -1467,6 +1486,27 @@ mod prevalidation_error_classification_tests {
         assert!(
             PreValidationError::BlockBoundsLookupError("db gone".to_string()).is_internal_failure()
         );
+        assert!(
+            PreValidationError::CachePoisoned { at: "test" }.is_internal_failure(),
+            "CachePoisoned is a local corruption, must not be peer-attributed"
+        );
+        assert!(
+            PreValidationError::ParentNotInCache {
+                parent_hash: H256::zero(),
+                expected_height: 0,
+            }
+            .is_internal_failure(),
+            "ParentNotInCache is a local prune/reorg race, must not be peer-attributed"
+        );
+    }
+
+    /// Peer-supplied PoA referencing a ledger that the local chain has no
+    /// committed chunks for is consensus-invalid, NOT internal. Guards against
+    /// the regression where the PoA short-circuit's previous formulation fell
+    /// through to BlockBoundsLookupError (now classified internal).
+    #[test]
+    fn poa_ledger_inactive_is_not_internal_failure() {
+        assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_internal_failure());
     }
 }
 
@@ -1590,22 +1630,24 @@ pub fn poa_is_valid(
         let ledger = DataLedger::try_from(ledger_id)
             .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
-        // Disambiguate at source: if the peer-supplied offset is past what
-        // any indexed block has committed for this ledger, the PoA references
-        // data that doesn't exist — unambiguously consensus-invalid. Reject
-        // here so the BlockBoundsLookupError variant below only carries
-        // genuine internal failures (empty index, DB I/O, ledger missing).
+        // Disambiguate at source so the BlockBoundsLookupError variant below
+        // only carries genuine local failures (empty index, DB I/O):
+        //  - offset past chain-max for this ledger     → consensus-invalid
+        //  - ledger absent from the latest indexed item → consensus-invalid
+        //    (the chain has no committed data for it yet, or the peer is on
+        //    a different fork)
         let bb = {
             let index = block_index_guard.read();
-            if let Some(latest) = index.get_latest_item()
-                && let Some(chain_max) = latest
-                    .ledgers
-                    .iter()
-                    .find(|l| l.ledger == ledger)
-                    .map(|l| l.total_chunks)
-                && ledger_chunk_offset >= chain_max
-            {
-                return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+            if let Some(latest) = index.get_latest_item() {
+                match latest.ledgers.iter().find(|l| l.ledger == ledger) {
+                    Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
+                        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+                    }
+                    None => {
+                        return Err(PreValidationError::PoALedgerInactive { ledger_id });
+                    }
+                    Some(_) => {}
+                }
             }
             index
                 .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
@@ -2177,10 +2219,11 @@ pub fn is_seed_data_valid(
             "Seed data is invalid. Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
         );
-        ValidationResult::Invalid(ValidationError::SeedDataInvalid(format!(
+        ValidationError::SeedDataInvalid(format!(
             "Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
-        )))
+        ))
+        .into()
     }
 }
 
