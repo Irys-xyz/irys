@@ -2896,6 +2896,8 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
     transactions: &BlockTransactions,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
 ) -> Result<(), PreValidationError> {
     // Extract transaction slices from BlockTransactions
     let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
@@ -2954,33 +2956,12 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Get the parent block's EMA snapshot for fee calculations.
-    // Missing parent snapshot at this stage is a local race (parent existed at
-    // prevalidation time, evicted between then and now), not a consensus failure.
-    let block_ema = block_tree_guard
-        .read()
-        .get_ema_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::LocalEmaSnapshotMissing {
-            parent_hash: block.previous_block_hash,
-        })?;
-
-    // Get the parent block's epoch snapshot for ingress proof validation
-    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation).
-    let parent_epoch_snapshot = block_tree_guard
-        .read()
-        .get_epoch_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::LocalEpochSnapshotMissing {
-            parent_hash: block.previous_block_hash,
-        })?;
-
-    // Derive cascade activation from the snapshot we just fetched — the
-    // single source of truth. Previously this came in as a `cascade_active`
-    // parameter computed from a *different* epoch-snapshot read in the
-    // caller's outer scope; that gave us two reads where only one was the
-    // authoritative one for this validation pass. The reads always agreed
-    // in practice (same parent block hash, immutable `Arc<EpochSnapshot>`)
-    // but the parameter was a footgun for any future caller that cached or
-    // recomputed the bool from a different snapshot.
+    // Cascade activation is derived from the parent epoch snapshot the
+    // caller fetched — single source of truth. The previous `cascade_active`
+    // bool parameter computed it from a separate snapshot read, which gave
+    // two reads where only one was authoritative; the reads always agreed
+    // (same parent hash, immutable `Arc<EpochSnapshot>`) but the bool was a
+    // footgun for any future caller computing it from a stale snapshot.
     let cascade_active = config
         .consensus
         .hardforks
@@ -3098,7 +3079,7 @@ pub async fn data_txs_are_valid(
                             tx,
                             block.height,
                             timestamp_secs,
-                            &block_ema,
+                            &parent_ema_snapshot,
                             config,
                         )?;
                         debug!("Transaction {} is new in Submit ledger", tx.id);
@@ -3110,7 +3091,7 @@ pub async fn data_txs_are_valid(
                             *ledger_current,
                             block.height,
                             timestamp_secs,
-                            &block_ema,
+                            &parent_ema_snapshot,
                             config,
                         )?;
                         debug!(
@@ -3136,7 +3117,7 @@ pub async fn data_txs_are_valid(
                                         tx,
                                         block.height,
                                         timestamp_secs,
-                                        &block_ema,
+                                        &parent_ema_snapshot,
                                         config,
                                     )?;
                                 }
@@ -3819,6 +3800,21 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
+/// FORK-DETERMINISM GAP (TODO, out of scope for this branch):
+/// The `block_tree`/`db` lookups inside `get_block_header` are themselves
+/// fork-deterministic (content-addressed by `block_hash`), but the SET of
+/// hashes we feed into them comes from `CachedDataRoots.block_set`, a global
+/// index keyed by `data_root` that records every block — across ALL forks —
+/// the local node has ever observed a given data_root in. As a result, the
+/// `block_ranges` computed below can include ranges from blocks on a fork
+/// the block-being-validated is NOT on, biasing the
+/// "any-intersection-with-slot-range" check that drives `assigned_miners`.
+///
+/// Validation should be parent-deterministic: given `(block, parent
+/// snapshots)`, two honest peers on the same fork must produce identical
+/// outcomes regardless of which other forks they've witnessed. Walking the
+/// parent's submit-ledger lineage instead of indexing globally by data_root
+/// is the fix, but it's a larger design pass — tracked separately.
 pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
@@ -3831,7 +3827,9 @@ pub fn get_assigned_ingress_proofs(
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
 
-    //  a) Get the block hashes from the cached data_root (invariant across all proofs)
+    //  a) Get the block hashes from the cached data_root (invariant across all proofs).
+    //     NOTE: this set is fork-spanning — see the fork-determinism gap on the
+    //     function's doc comment.
     let block_hashes = db
         .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
         .map_err(|e| PreValidationError::DatabaseError {

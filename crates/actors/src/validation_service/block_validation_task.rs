@@ -513,27 +513,55 @@ impl BlockValidationTask {
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
 
-        // Get parent epoch snapshot for expired ledger fee calculation
-        let parent_epoch_snapshot = match self
-            .block_tree_guard
-            .read()
-            .get_epoch_snapshot(&block.previous_block_hash)
-        {
-            Some(snapshot) => snapshot,
-            None => {
-                tracing::error!(
-                    block.parent_hash = %block.previous_block_hash,
-                    "Parent epoch snapshot not found for shadow tx validation"
-                );
-                return ValidationError::ParentEpochSnapshotMissing {
-                    block_hash: block.previous_block_hash,
+        // Fetch parent epoch + EMA snapshots once in the outer scope under
+        // a single `block_tree.read()` and hand them to the concurrent
+        // tasks below. Previously each task did its own `get_*_snapshot`
+        // read, giving us multiple lock acquisitions for the same parent
+        // hash and multiple eviction-race classification sites. Centralising
+        // the fetch means one read, one eviction-race error variant, and
+        // each task can be tested with a constructed `Arc<EpochSnapshot>` /
+        // `Arc<EmaSnapshot>` without needing a populated block-tree.
+        let (parent_epoch_snapshot, parent_ema_snapshot) = {
+            let tree = self.block_tree_guard.read();
+            let epoch = match tree.get_epoch_snapshot(&block.previous_block_hash) {
+                Some(s) => s,
+                None => {
+                    tracing::error!(
+                        block.parent_hash = %block.previous_block_hash,
+                        "Parent epoch snapshot not found"
+                    );
+                    return ValidationError::ParentEpochSnapshotMissing {
+                        block_hash: block.previous_block_hash,
+                    }
+                    .into();
                 }
-                .into();
-            }
+            };
+            let ema = match tree.get_ema_snapshot(&block.previous_block_hash) {
+                Some(s) => s,
+                None => {
+                    tracing::error!(
+                        block.parent_hash = %block.previous_block_hash,
+                        "Parent EMA snapshot not found"
+                    );
+                    return crate::block_validation::PreValidationError::LocalEmaSnapshotMissing {
+                        parent_hash: block.previous_block_hash,
+                    }
+                    .into();
+                }
+            };
+            (epoch, ema)
         };
 
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
+
+        // Each `async move` task that needs the snapshots clones the Arc up
+        // front. `Arc::clone` is cheap (atomic refcount bump) and lets us
+        // hand the same underlying snapshot to multiple concurrent tasks
+        // without giving up the single outer-scope fetch.
+        let shadow_tx_epoch_snapshot = parent_epoch_snapshot.clone();
+        let data_txs_epoch_snapshot = parent_epoch_snapshot.clone();
+        let data_txs_ema_snapshot = parent_ema_snapshot.clone();
 
         let sealed_block_for_shadow = self.sealed_block.clone();
         let shadow_tx_task = async move {
@@ -582,7 +610,7 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.db,
                 &execution_data,
-                parent_epoch_snapshot,
+                shadow_tx_epoch_snapshot,
                 parent_commitment_snapshot,
                 block_index,
                 sealed_block_for_shadow.transactions(),
@@ -692,7 +720,8 @@ impl BlockValidationTask {
             result
         };
 
-        // Data transaction fee validation
+        // Data transaction fee validation. Snapshots were cloned up-front
+        // alongside the shadow_tx clones (see comment above shadow_tx_task).
         let sealed_block_for_data = self.sealed_block.clone();
         let data_txs_validation_task = async move {
             let started = Instant::now();
@@ -704,6 +733,8 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
                 txs,
+                data_txs_epoch_snapshot,
+                data_txs_ema_snapshot,
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",

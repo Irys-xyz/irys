@@ -433,8 +433,19 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     node_config.consensus = ConsensusOptions::Custom(consensus);
     let config_override = Config::new_with_random_peer_id(node_config);
 
-    // `data_txs_are_valid` derives `cascade_active` from the parent epoch
-    // snapshot it fetches internally — no longer plumbed via the caller.
+    // Caller fetches parent epoch + EMA snapshots once and passes them in;
+    // `data_txs_are_valid` derives `cascade_active` from the epoch snapshot.
+    let (parent_epoch_snapshot, parent_ema_snapshot) = {
+        let tree = ctx.node.node_ctx.block_tree_guard.read();
+        let parent_hash = bad_block.header().previous_block_hash;
+        (
+            tree.get_epoch_snapshot(&parent_hash)
+                .expect("parent epoch snapshot"),
+            tree.get_ema_snapshot(&parent_hash)
+                .expect("parent ema snapshot"),
+        )
+    };
+
     let result = irys_actors::block_validation::data_txs_are_valid(
         &config_override,
         &service_senders,
@@ -442,6 +453,8 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
         &ctx.node.node_ctx.db,
         &ctx.node.node_ctx.block_tree_guard,
         transactions,
+        parent_epoch_snapshot,
+        parent_ema_snapshot,
     )
     .await;
 
