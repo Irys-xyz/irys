@@ -414,17 +414,42 @@ impl BlockTreeServiceInner {
 
         // Handle internal/runtime validation failures first. Block validity
         // is unknown locally — DO NOT remove the block from cache or mark it
-        // discarded. We leave the cache entry intact so the block isn't
-        // false-attributed to the peer; recovery today is passive — the
-        // entry sits in `ValidationScheduled` until normal depth-pruning
-        // evicts it, at which point fresh gossip can re-enter the
-        // prevalidate path. There is no automatic re-scheduler keyed off
-        // this event yet (TODO).
+        // discarded. Two sub-cases:
+        //
+        // 1. Node fault (`is_node_fault()` — panic, DB I/O, poisoned lock,
+        //    local arithmetic bug, internal channel dead, OS clock failure):
+        //    the fault is in this node, not the peer's block. Retrying will
+        //    hit the same fault, so we abort. We panic instead of marking
+        //    the block Invalid because of the never-mislabel rule: a node
+        //    fault does not tell us whether the block is valid or invalid,
+        //    and either misclassification forks us off the network.
+        //    `setup_panic_hook` catches the panic, raises SIGINT for
+        //    graceful shutdown, and arms a force-abort watchdog so the
+        //    supervisor restarts the node clean. Same precedent as the VDF
+        //    stall watchdog in `validation_service`.
+        // 2. Soft internal (eviction race — parent snapshot pruned mid-
+        //    validation): the cache entry stays in `ValidationScheduled`
+        //    until normal depth-pruning evicts it, at which point fresh
+        //    gossip can re-enter the prevalidate path. No re-enqueue here;
+        //    that would loop if the race keeps re-occurring.
         if let ValidationResult::InternalFailure(validation_error) = &validation_result {
+            if validation_error.is_node_fault() {
+                let height = self
+                    .cache
+                    .read()
+                    .ok()
+                    .and_then(|c| c.get_block(&block_hash).map(|b| b.height))
+                    .unwrap_or(0);
+                panic!(
+                    "block validation hit a node fault (block={}, height={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
+                    block_hash, height, validation_error
+                );
+            }
+
             error!(
                 block.hash = %block_hash,
                 error = %validation_error,
-                "block validation hit an internal failure; leaving block in cache, not marking invalid"
+                "block validation hit an internal failure (soft race); leaving block in cache, not marking invalid"
             );
             self.chain_sync_state.record_block_validation_error(format!(
                 "block={} internal_error={}",
@@ -1162,6 +1187,14 @@ impl InternalFailureError {
     pub fn err(&self) -> &crate::block_validation::ValidationError {
         &self.0
     }
+
+    /// Convenience accessor: returns true when the wrapped error is a node
+    /// fault (see [`crate::block_validation::ValidationError::is_node_fault`]).
+    /// Callers use this to distinguish genuine faults (panic, DB I/O, local
+    /// arithmetic bug, poisoned lock) from soft eviction races.
+    pub fn is_node_fault(&self) -> bool {
+        self.0.is_node_fault()
+    }
 }
 
 impl std::fmt::Display for InternalFailureError {
@@ -1330,6 +1363,35 @@ mod tests {
             inner.err(),
             crate::block_validation::ValidationError::TaskPanicked { .. }
         ));
+    }
+
+    /// `InternalFailureError::is_node_fault()` must reflect the wrapped
+    /// error's classification. The handler keys its abort-vs-passive
+    /// decision on this — a wrong answer here would either let a node fault
+    /// silently continue, or trip the abort path on a soft eviction race.
+    #[test]
+    fn internal_failure_error_node_fault_accessor() {
+        // TaskPanicked is a node fault.
+        let result: ValidationResult = crate::block_validation::ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "boom".into(),
+        }
+        .into();
+        let ValidationResult::InternalFailure(inner) = result else {
+            panic!("expected InternalFailure for TaskPanicked");
+        };
+        assert!(inner.is_node_fault());
+
+        // ParentBlockMissing is an eviction race, not a node fault.
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            }
+            .into();
+        let ValidationResult::InternalFailure(inner) = result else {
+            panic!("expected InternalFailure for ParentBlockMissing");
+        };
+        assert!(!inner.is_node_fault());
     }
 
     fn entry_at(height: u64, hash_byte: u8) -> BlockTreeEntry {

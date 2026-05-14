@@ -365,6 +365,39 @@ impl PreValidationError {
         matches!(self, Self::CachePoisoned { .. })
     }
 
+    /// Returns true for the strict subset of `is_internal_failure()` variants
+    /// that indicate a genuine node-level fault (verifier panic, MDBX I/O
+    /// error, local arithmetic bug, poisoned lock, internal channel dead,
+    /// local cache mutation failure, OS clock failure). These are NOT
+    /// retry-plausible: the underlying issue is in this node, not in the
+    /// peer's block, and re-running the same path will hit the same fault.
+    /// The consensus-safe response is to abort the node so the supervisor
+    /// can restart it clean — running on with an undefined-state local
+    /// failure risks forking off the network with silent data-level errors.
+    ///
+    /// Pruning/eviction races (`LocalEmaSnapshotMissing`,
+    /// `LocalEpochSnapshotMissing`, `ParentNotInCache`) remain
+    /// `is_internal_failure()` but are NOT node faults — they're recoverable
+    /// via passive depth-prune + fresh gossip re-entering the prevalidate
+    /// path.
+    pub fn is_node_fault(&self) -> bool {
+        matches!(
+            self,
+            Self::InternalTaskJoin(_)
+                | Self::DatabaseError { .. }
+                | Self::PreviousTxInclusionsFailed(_)
+                | Self::AddBlockFailed { .. }
+                | Self::UpdateCacheForScheduledValidationError(_)
+                | Self::ValidationServiceUnreachable
+                | Self::SystemTimeError(_)
+                | Self::RewardCurveError(_)
+                | Self::FeeCalculationFailed(_)
+                | Self::EmaSnapshotError(_)
+                | Self::BlockBoundsLookupError(_)
+                | Self::CachePoisoned { .. }
+        )
+    }
+
     /// Returns true for variants representing local/runtime failures (verifier
     /// panics, transient task-join errors, etc.) that must NEVER be attributed
     /// to the peer or used to mark a block as consensus-invalid. See the enum
@@ -626,6 +659,36 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
+    /// Returns true for the strict subset of `is_internal_failure()` variants
+    /// that indicate a genuine node-level fault (see
+    /// [`PreValidationError::is_node_fault`] for the rationale). The handler
+    /// must abort the node on `is_node_fault()` rather than leaving the block
+    /// in the cache, because the failure is in this node — retrying will hit
+    /// the same fault.
+    ///
+    /// Eviction-race variants (`ParentCommitmentSnapshotMissing`,
+    /// `ParentEpochSnapshotMissing`, `ParentBlockMissing`) remain
+    /// `is_internal_failure()` but are NOT node faults — recovery is passive
+    /// via depth-prune + re-gossip.
+    pub fn is_node_fault(&self) -> bool {
+        match self {
+            Self::PreValidation(e) => e.is_node_fault(),
+            // Task panic is always a node fault: a verifier thread crashed.
+            Self::TaskPanicked { .. } => true,
+            // Every current cancellation reason maps to "chain has moved on,
+            // discard" (see ValidationCancelReason::is_internal). Delegate so
+            // a future retry-plausible reason doesn't silently become a node
+            // fault — that decision should be explicit at the reason site.
+            Self::ValidationCancelled { .. } => false,
+            // Prevalidation-time parent/snapshot lookups: eviction races, not
+            // node faults. Recovery is passive via depth-prune + re-gossip.
+            Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentBlockMissing { .. } => false,
+            _ => false,
+        }
+    }
+
     /// Returns true for variants representing local/runtime failures that must
     /// NEVER be treated as a consensus rejection of the block. Delegates to
     /// `PreValidationError::is_internal_failure` for the `PreValidation` arm
@@ -1507,6 +1570,138 @@ mod prevalidation_error_classification_tests {
     #[test]
     fn poa_ledger_inactive_is_not_internal_failure() {
         assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_internal_failure());
+    }
+
+    /// Genuine node faults (panic, DB I/O, local arithmetic, channel dead,
+    /// OS clock, local cache mutation, poisoned lock) must classify as
+    /// `is_node_fault()` so handlers abort the node instead of leaving the
+    /// block in cache for a retry that will hit the same fault.
+    #[test]
+    fn node_fault_variants_classify_as_node_fault() {
+        let cases: &[PreValidationError] = &[
+            PreValidationError::InternalTaskJoin("panic".to_string()),
+            PreValidationError::DatabaseError {
+                error: "mdbx".to_string(),
+            },
+            PreValidationError::PreviousTxInclusionsFailed("ch".to_string()),
+            PreValidationError::AddBlockFailed {
+                block_hash: H256::zero(),
+                reason: "x".to_string(),
+            },
+            PreValidationError::UpdateCacheForScheduledValidationError(H256::zero()),
+            PreValidationError::ValidationServiceUnreachable,
+            PreValidationError::SystemTimeError("clk".to_string()),
+            PreValidationError::RewardCurveError("ovf".to_string()),
+            PreValidationError::FeeCalculationFailed("ovf".to_string()),
+            PreValidationError::EmaSnapshotError("ema".to_string()),
+            PreValidationError::BlockBoundsLookupError("db gone".to_string()),
+            PreValidationError::CachePoisoned { at: "test" },
+        ];
+        for err in cases {
+            assert!(err.is_node_fault(), "{:?} must classify as node fault", err);
+            assert!(
+                err.is_internal_failure(),
+                "{:?} node-fault must also be internal-failure (strict subset)",
+                err
+            );
+        }
+    }
+
+    /// Pruning/eviction races are `is_internal_failure()` but must NOT be
+    /// node faults — they're recoverable via passive depth-prune + re-gossip,
+    /// and aborting the node on every race would defeat the recovery path.
+    #[test]
+    fn eviction_race_variants_are_not_node_faults() {
+        let cases: &[PreValidationError] = &[
+            PreValidationError::LocalEmaSnapshotMissing {
+                parent_hash: H256::zero(),
+            },
+            PreValidationError::LocalEpochSnapshotMissing {
+                parent_hash: H256::zero(),
+            },
+            PreValidationError::ParentNotInCache {
+                parent_hash: H256::zero(),
+                expected_height: 0,
+            },
+        ];
+        for err in cases {
+            assert!(
+                !err.is_node_fault(),
+                "{:?} is an eviction race, must not classify as node fault",
+                err
+            );
+            assert!(
+                err.is_internal_failure(),
+                "{:?} must still be internal-failure (peer is innocent)",
+                err
+            );
+        }
+    }
+
+    /// Consensus-validation variants must NOT classify as node faults — they
+    /// indicate a bad block, not a node problem. Aborting on these would
+    /// hand a DoS vector to any peer who sends a bad block.
+    #[test]
+    fn consensus_variants_are_not_node_faults() {
+        assert!(!PreValidationError::BlockSignatureInvalid.is_node_fault());
+        assert!(!PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_node_fault());
+        assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_node_fault());
+    }
+
+    /// `ValidationError::TaskPanicked` is a node fault (verifier thread
+    /// crashed); cancellations and parent-missing races are not.
+    #[test]
+    fn validation_error_node_fault_dispatch() {
+        assert!(
+            ValidationError::TaskPanicked {
+                task: "poa".to_string(),
+                details: "x".to_string(),
+            }
+            .is_node_fault()
+        );
+
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+        ] {
+            assert!(
+                !ValidationError::ValidationCancelled { reason }.is_node_fault(),
+                "cancellation reason {:?} must not be a node fault",
+                reason
+            );
+        }
+
+        assert!(
+            !ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentEpochSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+
+        // PreValidation delegation.
+        assert!(
+            ValidationError::PreValidation(PreValidationError::DatabaseError {
+                error: "mdbx".to_string(),
+            })
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::PreValidation(PreValidationError::BlockSignatureInvalid)
+                .is_node_fault()
+        );
     }
 }
 

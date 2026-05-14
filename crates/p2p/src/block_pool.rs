@@ -939,6 +939,27 @@ where
                     );
                 }
 
+                // Node fault (verifier panic, DB I/O, local arithmetic bug,
+                // internal channel dead, OS clock failure, local cache
+                // mutation failure): the fault is in this node, not the
+                // peer's block. Retrying will hit the same fault. Panic so
+                // `setup_panic_hook` converts to a graceful SIGINT and the
+                // supervisor restarts the node clean. Same never-mislabel
+                // rationale as the VDF stall watchdog: a node fault tells
+                // us nothing about block validity, and either
+                // misclassification forks us off the network.
+                //
+                // `is_fatal_corruption()` is a strict subset of
+                // `is_node_fault()`; it's checked above so the well-tested
+                // `FatalCacheCorruption` graceful-shutdown path remains
+                // for that one specific variant.
+                if pre_err.is_node_fault() {
+                    panic!(
+                        "block pool: prevalidation hit a node fault (block={:?}, error={}); aborting node — see PreValidationError::is_node_fault for rationale",
+                        block_hash, pre_err
+                    );
+                }
+
                 if matches!(pre_err, PreValidationError::ParentNotInCache { .. }) {
                     warn!(
                         block.hash = ?block_hash,
