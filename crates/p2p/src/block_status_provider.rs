@@ -403,6 +403,32 @@ impl BlockStatusProvider {
             .expect("to add block to the tree");
     }
 
+    /// Like `add_block_mock_to_the_tree` but inserts the block in an arbitrary
+    /// `ChainState` via `add_common` directly — used to exercise the
+    /// `Validated(Unknown|ValidationScheduled)` branches of `block_status`.
+    #[cfg(test)]
+    pub fn add_block_mock_with_state(&self, block: &IrysBlockHeader, chain_state: ChainState) {
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+        use irys_types::{BlockTransactions, SealedBlock};
+
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(block.clone()),
+            BlockTransactions::default(),
+        ));
+
+        self.block_tree_read_guard
+            .write()
+            .add_common(
+                block.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                Arc::new(EmaSnapshot::default()),
+                chain_state,
+            )
+            .expect("to add block to the tree with chain_state");
+    }
+
     #[cfg(test)]
     pub fn set_tip_for_testing(&self, block_hash: &BlockHash) {
         self.block_tree_read_guard.write().tip = *block_hash;
@@ -521,6 +547,50 @@ mod tests {
         let status = provider.block_status(7, &unknown_hash);
         assert_eq!(status, BlockStatus::NotProcessed);
         assert!(!status.is_in_tree());
+        assert!(!status.is_processed());
+    }
+
+    /// Locally-produced blocks are inserted directly as
+    /// `ChainState::Validated(BlockState::Unknown)` (see `BlockTree::add_common`
+    /// call sites) — `block_status` must still treat this as
+    /// `InTreePendingValidation` so children of a not-yet-fully-validated local
+    /// block don't enter the orphan re-pull path.
+    #[test]
+    fn block_status_returns_in_tree_pending_validation_for_validated_unknown_state() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let pending = &chain[0];
+
+        provider.add_block_mock_with_state(
+            pending,
+            ChainState::Validated(irys_domain::BlockState::Unknown),
+        );
+
+        let status = provider.block_status(pending.height, &pending.block_hash);
+        assert_eq!(status, BlockStatus::InTreePendingValidation);
+        assert!(status.is_in_tree());
+        assert!(!status.is_processed());
+    }
+
+    /// Same as above for `Validated(ValidationScheduled)` — the state a locally
+    /// produced block transitions to once `mark_block_as_validation_scheduled`
+    /// fires but before validation completes.
+    #[test]
+    fn block_status_returns_in_tree_pending_validation_for_validated_validation_scheduled_state() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let pending = &chain[0];
+
+        provider.add_block_mock_with_state(
+            pending,
+            ChainState::Validated(irys_domain::BlockState::ValidationScheduled),
+        );
+
+        let status = provider.block_status(pending.height, &pending.block_hash);
+        assert_eq!(status, BlockStatus::InTreePendingValidation);
+        assert!(status.is_in_tree());
         assert!(!status.is_processed());
     }
 }

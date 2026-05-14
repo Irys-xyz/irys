@@ -17,9 +17,9 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId, MempoolConfig,
-    NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
-    RethPeerInfo, SealedBlock,
+    BlockBody, BlockHash, Config, DatabaseProvider, DbSyncMode, IrysAddress, IrysPeerId,
+    MempoolConfig, NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+    ProtocolVersion, RethPeerInfo, SealedBlock,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -1189,6 +1189,104 @@ async fn process_block_rejects_block_already_in_tree_pending_validation() {
         services.block_discovery_stub.get_blocks().is_empty(),
         "already-in-tree block must not re-enter block_discovery"
     );
+}
+
+/// `wait_for_parent_validation` must survive `broadcast::RecvError::Lagged` —
+/// the loop's contract is that it re-reads parent state from the tree on every
+/// event (or lag), so a missed window of events only delays the next exit
+/// check by one iteration. This drives that path deterministically by
+/// overflowing the 100-capacity `block_state_events` channel in a single sync
+/// burst (no await points → receiver task can't keep up) and then resolving
+/// the parent normally.
+#[tokio::test]
+async fn wait_for_parent_validation_tolerates_lagged_events() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, mut sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
+    let parent = &chain[0];
+    let child = &chain[1];
+
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(parent);
+
+    let child_sealed =
+        create_test_sealed_block(child.clone(), create_test_block_body(child.block_hash));
+    let pool_clone = pool.clone();
+    let process_fut =
+        tokio::spawn(async move { pool_clone.process_block(child_sealed, false).await });
+
+    // Give the spawned task time to enter wait_for_parent_validation, subscribe,
+    // and park on the first `rx.recv()`. After this sleep the receiver task is
+    // suspended on the await and won't run again until this task yields.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Burst-fill the 100-cap broadcast buffer synchronously: no `.await` in
+    // this block, so the receiver task stays parked while we shove 200 events
+    // through. The receiver's cursor falls ~100 behind → next recv returns
+    // `RecvError::Lagged`. We use an unrelated dummy block_hash so the wait
+    // loop's status re-read still sees the parent as `InTreePendingValidation`.
+    let spam_hash = BlockHash::repeat_byte(0xAB);
+    let spam_event = irys_actors::block_tree_service::BlockStateUpdated {
+        block_hash: spam_hash,
+        height: 999,
+        state: irys_domain::ChainState::NotOnchain(irys_domain::BlockState::Unknown),
+        discarded: false,
+        validation_result: irys_actors::block_tree_service::ValidationResult::Valid,
+    };
+    for _ in 0..200 {
+        services
+            .service_senders
+            .block_state_events
+            .send(spam_event.clone())
+            .expect("broadcast spam event");
+    }
+
+    // Promote the parent to a validated state, still synchronously, then send
+    // one final event. The receiver wakes up to find a Lagged ring, re-reads
+    // tree state, observes `ProcessedButCanBeReorganized`, and exits cleanly.
+    {
+        let tree_guard = services.block_status_provider_mock.block_tree_read_guard();
+        let mut tree = tree_guard.write();
+        tree.mark_block_as_validation_scheduled(&parent.block_hash)
+            .expect("schedule validation");
+        tree.mark_block_as_valid(&parent.block_hash)
+            .expect("mark valid");
+    }
+    let parent_event = irys_actors::block_tree_service::BlockStateUpdated {
+        block_hash: parent.block_hash,
+        height: parent.height,
+        state: irys_domain::ChainState::Validated(irys_domain::BlockState::ValidBlock),
+        discarded: false,
+        validation_result: irys_actors::block_tree_service::ValidationResult::Valid,
+    };
+    services
+        .service_senders
+        .block_state_events
+        .send(parent_event)
+        .expect("broadcast parent valid event");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), process_fut)
+        .await
+        .expect("process_block must complete after parent resolves despite lag")
+        .expect("join handle")
+        .expect("process_block must succeed");
+    assert!(matches!(
+        result,
+        crate::block_pool::ProcessBlockResult::Processed
+    ));
+
+    let discovered = services.block_discovery_stub.get_blocks();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].block_hash, child.block_hash);
+    while let Ok(msg) = sync_receiver.try_recv() {
+        assert!(
+            !is_orphan_cascade_message(&msg),
+            "lagged-event path must not fall back to orphan re-pull, got: {msg:?}"
+        );
+    }
 }
 
 /// `is_block_processing_or_processed` must return true for a block that is
