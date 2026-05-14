@@ -21,8 +21,8 @@
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
-    ValidationError, commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid,
-    poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
+    ValidationCancelReason, ValidationError, commitment_txs_are_valid, data_txs_are_valid,
+    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
     submit_payload_to_reth,
 };
 use crate::metrics;
@@ -41,8 +41,10 @@ use tracing::{Instrument as _, debug, error, warn};
 enum ParentValidationResult {
     /// Parent validation is complete, task can proceed
     Ready,
-    /// Task should be cancelled due to height difference from canonical tip
-    Cancelled,
+    /// Task should be cancelled. The reason carries through to
+    /// `ValidationError::ValidationCancelled` so that `is_internal_failure`
+    /// can distinguish "block too old, discard" from "local race, retry".
+    Cancelled(ValidationCancelReason),
 }
 
 /// Handles the execution of a single block validation task
@@ -150,17 +152,13 @@ impl BlockValidationTask {
     pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let concurrent_started = Instant::now();
         let block_timestamp_ms = self.sealed_block.header().timestamp.as_millis();
-        let parent_got_cancelled = || {
-            // Task was cancelled due to height difference
-            // Return invalid to prevent this block from being accepted
+        let into_cancelled_result = |reason: ValidationCancelReason| -> ValidationResult {
             tracing::warn!(
                 block.hash = %self.sealed_block.header().block_hash,
-                "Validation cancelled due to height difference"
+                cancel.reason = %reason,
+                "Validation cancelled"
             );
-            ValidationError::ValidationCancelled {
-                reason: "height difference".to_string(),
-            }
-            .into()
+            ValidationError::ValidationCancelled { reason }.into()
         };
 
         let wait_for_parent_validation = self
@@ -178,28 +176,43 @@ impl BlockValidationTask {
                             parent_wait_started.elapsed().as_secs_f64() * 1000.0,
                         );
                         match parent_wait_outcome {
-                            ParentValidationResult::Cancelled => parent_got_cancelled(),
+                            ParentValidationResult::Cancelled(reason) => {
+                                into_cancelled_result(reason)
+                            }
                             ParentValidationResult::Ready => validation_result,
                         }
                     } else {
                         validation_result
                     }
                 }
-                futures::future::Either::Right((_, _validation_task)) => parent_got_cancelled(),
+                futures::future::Either::Right((parent_wait_outcome, _validation_task)) => {
+                    match parent_wait_outcome {
+                        ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
+                        // exit_if_block_is_too_old only returns `Ready` from
+                        // `extra_checks`; the trivial-continue closure above
+                        // never breaks with `Ready`, so this arm is unreachable.
+                        ParentValidationResult::Ready => unreachable!(
+                            "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
+                        ),
+                    }
+                }
             };
 
         metrics::record_validation_stage_duration_ms(
             "concurrent_overall",
             concurrent_started.elapsed().as_secs_f64() * 1000.0,
         );
-        // Preserve the existing "cancelled" / "panicked" sub-labels even
-        // though those variants now classify as InternalFailure — they were
-        // already split out for observability.
+        // Split "cancelled" out of the generic "invalid" bucket for
+        // observability: every `ValidationCancelled` reason today dispatches
+        // to `Invalid` (see `ValidationCancelReason::is_internal`) and we
+        // want the cancellation rate visible separately from real consensus
+        // rejections. `TaskPanicked` retains its own label on the
+        // InternalFailure arm.
         let result_label = match &final_result {
             ValidationResult::Valid => "valid",
+            ValidationResult::Invalid(ValidationError::ValidationCancelled { .. }) => "cancelled",
             ValidationResult::Invalid(_) => "invalid",
             ValidationResult::InternalFailure(inner) => match inner.err() {
-                ValidationError::ValidationCancelled { .. } => "cancelled",
                 ValidationError::TaskPanicked { .. } => "panicked",
                 _ => "internal_error",
             },
@@ -219,14 +232,23 @@ impl BlockValidationTask {
         let parent_chain_state_check =
             |parent_hash: BlockHash| match self.get_parent_chain_state(&parent_hash) {
                 None => {
-                    // Parent doesn't exist in tree - this is an error condition
+                    // Parent doesn't exist in tree — this only happens from
+                    // inside the parent-wait stage *after* prevalidation
+                    // already observed the parent, so the parent disappearing
+                    // now implies cache pruning past it (chain has advanced
+                    // beyond `block_tree_depth`). Treat as "block too old,
+                    // discard" via the non-internal `ParentMissing` reason,
+                    // distinct from the retry-plausible prevalidation-time
+                    // `ValidationError::ParentBlockMissing`.
                     error!(
                         block.parent_hash = %parent_hash,
                         block.hash = %self.sealed_block.header().block_hash,
                         block.height = %self.sealed_block.header().height,
                         "CRITICAL: Parent block not found"
                     );
-                    ControlFlow::Break(ParentValidationResult::Cancelled)
+                    ControlFlow::Break(ParentValidationResult::Cancelled(
+                        ValidationCancelReason::ParentMissing,
+                    ))
                 }
                 Some(parent_state) if self.is_parent_ready(&parent_state) => {
                     debug!("Parent validation complete");
@@ -273,13 +295,13 @@ impl BlockValidationTask {
                     );
                 }
                 metrics::record_validation_cancellation("height_diff");
-                return ParentValidationResult::Cancelled;
+                return ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference);
             }
 
             match extra_checks(parent_hash) {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(result) => {
-                    if matches!(result, ParentValidationResult::Cancelled) {
+                    if matches!(result, ParentValidationResult::Cancelled(_)) {
                         metrics::record_validation_cancellation("parent_missing");
                     }
                     return result;
@@ -306,7 +328,7 @@ impl BlockValidationTask {
                         "Block state channel closed while waiting for parent"
                     );
                     metrics::record_validation_cancellation("channel_closed");
-                    return ParentValidationResult::Cancelled;
+                    return ParentValidationResult::Cancelled(ValidationCancelReason::ChannelClosed);
                 }
             }
         }

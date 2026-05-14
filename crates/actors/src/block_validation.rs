@@ -406,6 +406,63 @@ impl PreValidationError {
     }
 }
 
+/// Why a block validation task was cancelled before producing a verdict.
+///
+/// Sub-classifications drive [`ValidationCancelReason::is_internal`], which
+/// in turn dictates whether the wrapping `ValidationError::ValidationCancelled`
+/// routes through `ValidationResult::InternalFailure` (validity unknown,
+/// retry plausible) or `ValidationResult::Invalid` (we've given up,
+/// discard the block).
+///
+/// NOTE: cancellation-time "parent missing" is distinct from prevalidation-time
+/// `ValidationError::ParentBlockMissing`. Prevalidation parent-missing is a
+/// true eviction race against an active block (validity unknown, retry on
+/// re-gossip → internal). Cancellation parent-missing only fires from inside
+/// the parent-wait stage, i.e. after prevalidation already saw the parent —
+/// the parent disappearing now means the tip has advanced past
+/// `block_tree_depth` and the block can no longer become canonical (discard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationCancelReason {
+    /// Canonical tip moved past this block by more than `block_tree_depth`.
+    /// The block can never become canonical; discard rather than retry.
+    HeightDifference,
+    /// Parent block disappeared from the in-memory block tree during the
+    /// parent-wait stage. Parent was observed at prevalidation, so its
+    /// removal now implies the cache has pruned it — i.e. the chain has
+    /// advanced past `block_tree_depth`. The block can no longer become
+    /// canonical; discard rather than retry.
+    ParentMissing,
+    /// Block-state broadcast channel closed (typically during node shutdown).
+    /// Treated as a "give up, discard" outcome — on shutdown there is no
+    /// future retry opportunity from this in-memory task.
+    ChannelClosed,
+}
+
+impl ValidationCancelReason {
+    /// Returns true when the cancellation indicates a local/runtime issue
+    /// where the block's validity is genuinely unknown and a future retry
+    /// could resolve it. Today every cancellation reason indicates "the
+    /// chain has moved on, discard" so this always returns false — but the
+    /// sub-classifier is in place so a future reason (e.g. transient I/O
+    /// race during a stage handoff) can opt in to retry-on-cache without
+    /// reclassifying every existing cancellation site.
+    pub fn is_internal(&self) -> bool {
+        match self {
+            Self::HeightDifference | Self::ParentMissing | Self::ChannelClosed => false,
+        }
+    }
+}
+
+impl std::fmt::Display for ValidationCancelReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeightDifference => write!(f, "height difference"),
+            Self::ParentMissing => write!(f, "parent missing"),
+            Self::ChannelClosed => write!(f, "channel closed"),
+        }
+    }
+}
+
 /// Validation error type that covers all block validation failures.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
@@ -413,9 +470,14 @@ pub enum ValidationError {
     #[error("Pre-validation failed: {0}")]
     PreValidation(#[from] PreValidationError),
 
-    /// Validation was cancelled due to block tree state changes
+    /// Validation was cancelled before producing a verdict.
+    ///
+    /// The `reason` sub-variant determines whether the cancellation is
+    /// treated as an internal/runtime failure (validity unknown, retry
+    /// plausible) or as a "give up and discard" outcome — see
+    /// [`ValidationCancelReason::is_internal`].
     #[error("Validation cancelled: {reason}")]
-    ValidationCancelled { reason: String },
+    ValidationCancelled { reason: ValidationCancelReason },
 
     /// A validation task panicked unexpectedly
     #[error("Validation task panicked: {task}: {details}")]
@@ -491,15 +553,35 @@ pub enum ValidationError {
         signer: IrysAddress,
     },
 
-    /// Parent commitment snapshot not found
+    /// Parent commitment snapshot not found at validation entry.
+    ///
+    /// Classified as internal: this is an eviction race against the in-memory
+    /// snapshot window — the parent's snapshot may have been there moments
+    /// before we looked. Validity is unknown; the block stays in cache for
+    /// retry on re-gossip.
     #[error("Parent commitment snapshot missing for block {block_hash}")]
     ParentCommitmentSnapshotMissing { block_hash: H256 },
 
-    /// Parent epoch snapshot not found
+    /// Parent epoch snapshot not found at validation entry.
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`].
     #[error("Parent epoch snapshot missing for block {block_hash}")]
     ParentEpochSnapshotMissing { block_hash: H256 },
 
-    /// Parent block not found in block tree
+    /// Parent block not found in block tree at validation entry (looked up
+    /// during seed-data validation, before the parent-wait stage).
+    ///
+    /// Classified as internal: the parent could have been present a moment
+    /// ago and got evicted just before we looked. The block's validity is
+    /// genuinely unknown — re-gossip + retry can succeed.
+    ///
+    /// DISTINCT from [`ValidationCancelReason::ParentMissing`], which fires
+    /// from inside the parent-wait stage *after* prevalidation already
+    /// observed the parent. That cancellation-time variant is classified as
+    /// not-internal because the parent disappearing mid-wait implies the
+    /// cache has pruned past it (i.e. the tip advanced beyond
+    /// `block_tree_depth`), and the block can no longer become canonical.
     #[error("Parent block {block_hash} not found in block tree")]
     ParentBlockMissing { block_hash: H256 },
 
@@ -536,11 +618,22 @@ impl ValidationError {
         match self {
             // Delegate to PreValidationError's classifier.
             Self::PreValidation(e) => e.is_internal_failure(),
-            // Task panic / cancellation are local; the block's validity is
-            // unknown, not bad.
-            Self::TaskPanicked { .. } | Self::ValidationCancelled { .. } => true,
-            // Parent lookup missing == local block-tree window eviction race
-            // (same shape as PreValidationError::LocalEmaSnapshotMissing).
+            // Task panic is always local; the block's validity is unknown,
+            // not bad.
+            Self::TaskPanicked { .. } => true,
+            // Cancellation classification is sub-variant-dependent — every
+            // reason on `ValidationCancelReason` today maps to "chain has
+            // moved on, discard" (see the type-level doc), but the hook is
+            // in place for future retry-plausible reasons.
+            Self::ValidationCancelled { reason } => reason.is_internal(),
+            // Prevalidation-time parent/snapshot lookups: classified internal
+            // because they fire *before* the parent-wait stage, i.e. the
+            // parent could legitimately have been there moments earlier and
+            // got evicted in a race. Retry on re-gossip can succeed.
+            //
+            // The cancellation-time `ValidationCancelReason::ParentMissing`
+            // is intentionally NOT classified the same way — see the doc on
+            // `ValidationError::ParentBlockMissing` for the distinction.
             Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentBlockMissing { .. } => true,
@@ -1303,6 +1396,30 @@ mod prevalidation_error_classification_tests {
         assert!(
             !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
+    }
+
+    /// Every current cancellation reason indicates "the chain has moved on,
+    /// discard" — so all three must route to `Invalid`, not `InternalFailure`.
+    /// (The sub-classifier is wired in so that a future "retry plausible"
+    /// reason can opt in without churning every existing site.)
+    #[test]
+    fn validation_cancel_reason_classifier_dispatch() {
+        assert!(!ValidationCancelReason::HeightDifference.is_internal());
+        assert!(!ValidationCancelReason::ParentMissing.is_internal());
+        assert!(!ValidationCancelReason::ChannelClosed.is_internal());
+
+        // ValidationError::is_internal_failure must delegate to the reason.
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+        ] {
+            assert!(
+                !ValidationError::ValidationCancelled { reason }.is_internal_failure(),
+                "reason {:?} should classify as not-internal",
+                reason
+            );
+        }
     }
 
     /// Local/runtime variants (DB I/O, channel failure, OS clock, internal

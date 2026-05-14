@@ -1288,6 +1288,29 @@ mod tests {
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
 
+    /// Every current `ValidationCancelled` sub-reason means "the chain has
+    /// moved on, discard" and must dispatch to `Invalid`. The sub-classifier
+    /// is in place so a future retry-plausible reason can opt in without
+    /// reclassifying these existing sites.
+    #[test]
+    fn validation_cancelled_converts_per_reason() {
+        use crate::block_validation::ValidationCancelReason;
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+        ] {
+            let result: ValidationResult =
+                crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
+            assert!(
+                matches!(result, ValidationResult::Invalid(_)),
+                "reason {:?} should dispatch to Invalid",
+                reason
+            );
+            assert_eq!(result.metric_label(), "invalid");
+        }
+    }
+
     /// `InternalFailureError::err()` exposes the underlying ValidationError
     /// for inspection (e.g. sub-variant matching in metric labelling).
     #[test]
