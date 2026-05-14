@@ -165,38 +165,37 @@ impl BlockValidationTask {
             .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
             .boxed();
         let validate_block = self.validate_block().boxed();
-        let final_result =
-            match futures::future::select(validate_block, wait_for_parent_validation).await {
-                futures::future::Either::Left((validation_result, _block_too_old_future)) => {
-                    // If validation is successful, wait for parent to be validated before reporting
-                    if matches!(validation_result, ValidationResult::Valid) {
-                        let parent_wait_started = Instant::now();
-                        let parent_wait_outcome = self.wait_for_parent_validation().await;
-                        metrics::record_parent_wait_duration_ms(
-                            parent_wait_started.elapsed().as_secs_f64() * 1000.0,
-                        );
-                        match parent_wait_outcome {
-                            ParentValidationResult::Cancelled(reason) => {
-                                into_cancelled_result(reason)
-                            }
-                            ParentValidationResult::Ready => validation_result,
-                        }
-                    } else {
-                        validation_result
-                    }
-                }
-                futures::future::Either::Right((parent_wait_outcome, _validation_task)) => {
+        let final_result = match futures::future::select(validate_block, wait_for_parent_validation)
+            .await
+        {
+            futures::future::Either::Left((validation_result, _block_too_old_future)) => {
+                // If validation is successful, wait for parent to be validated before reporting
+                if matches!(validation_result, ValidationResult::Valid) {
+                    let parent_wait_started = Instant::now();
+                    let parent_wait_outcome = self.wait_for_parent_validation().await;
+                    metrics::record_parent_wait_duration_ms(
+                        parent_wait_started.elapsed().as_secs_f64() * 1000.0,
+                    );
                     match parent_wait_outcome {
                         ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
-                        // exit_if_block_is_too_old only returns `Ready` from
-                        // `extra_checks`; the trivial-continue closure above
-                        // never breaks with `Ready`, so this arm is unreachable.
-                        ParentValidationResult::Ready => unreachable!(
-                            "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
-                        ),
+                        ParentValidationResult::Ready => validation_result,
                     }
+                } else {
+                    validation_result
                 }
-            };
+            }
+            futures::future::Either::Right((parent_wait_outcome, _validation_task)) => {
+                match parent_wait_outcome {
+                    ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
+                    // exit_if_block_is_too_old only returns `Ready` from
+                    // `extra_checks`; the trivial-continue closure above
+                    // never breaks with `Ready`, so this arm is unreachable.
+                    ParentValidationResult::Ready => unreachable!(
+                        "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
+                    ),
+                }
+            }
+        };
 
         metrics::record_validation_stage_duration_ms(
             "concurrent_overall",
@@ -328,7 +327,9 @@ impl BlockValidationTask {
                         "Block state channel closed while waiting for parent"
                     );
                     metrics::record_validation_cancellation("channel_closed");
-                    return ParentValidationResult::Cancelled(ValidationCancelReason::ChannelClosed);
+                    return ParentValidationResult::Cancelled(
+                        ValidationCancelReason::ChannelClosed,
+                    );
                 }
             }
         }
