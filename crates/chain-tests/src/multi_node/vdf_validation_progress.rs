@@ -246,21 +246,23 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // regression of the very scenario this test is meant to lock in.
     let deadline = Instant::now() + Duration::from_secs(FAILURE_DEADLINE_SECS);
     let mut peer_validation_dead = false;
-    // Only treat a closed validation_service as success after we've
-    // observed at least one block-state event for `head_hash`. Otherwise
-    // an unrelated panic elsewhere in validation_service (which also
-    // closes the sender) could make this test pass without exercising
-    // the Stage A progress check at all.
-    let mut saw_head_update = false;
     while Instant::now() < deadline {
         // Drain any pending state events with a small timeout so we
         // don't sleep through the whole wait. A `Valid` event for the
         // head would mean fast-forward bridged the gap — fail loudly.
+        //
+        // Note: in the expected Stalled-panic path no `BlockStateUpdated`
+        // event for `head_hash` is ever emitted — `BlockStateUpdated` is
+        // broadcast from `on_block_validation_finished`, but the panic in
+        // `active_validations.rs` re-unwinds through the validation_service
+        // select loop (`std::panic::resume_unwind`), so validation never
+        // "finishes" with a result. We still subscribe here as a regression
+        // detector for the `Valid` and (legacy) `Invalid(VdfValidationFailed)`
+        // paths that would emit an event.
         if let Ok(Ok(event)) =
             tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await
             && event.block_hash == head_hash
         {
-            saw_head_update = true;
             tracing::info!(
                 block.hash = ?event.block_hash,
                 state = ?event.state,
@@ -293,7 +295,18 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
             }
         }
 
-        if peer.node_ctx.service_senders.validation_service.is_closed() && saw_head_update {
+        // Only treat a closed validation_service as success once the head
+        // has reached peer's block_tree (i.e. prevalidation completed and
+        // the validation message was scheduled). This rules out the
+        // false-positive where an unrelated panic in validation_service
+        // closes the sender before our scenario plays out.
+        let head_reached_tree = peer
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_block(&head_hash)
+            .is_some();
+        if peer.node_ctx.service_senders.validation_service.is_closed() && head_reached_tree {
             peer_validation_dead = true;
             break;
         }
