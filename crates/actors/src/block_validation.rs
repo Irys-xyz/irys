@@ -1719,7 +1719,7 @@ mod prevalidation_error_classification_tests {
 
         // Local reth never delivered the EVM payload — node fault. Routing
         // this as `is_node_fault()` is what makes the shadow_tx_task's
-        // missing-payload path abort+restart instead of being mis-bucketed
+        // missing-payload path abort+restart instead of being misbucketed
         // into `ShadowTransactionInvalid` (consensus rejection).
         let payload_unavailable = ValidationError::ExecutionPayloadUnavailable {
             evm_block_hash: Default::default(),

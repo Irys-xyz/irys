@@ -573,7 +573,7 @@ impl BlockValidationTask {
             // (already `is_internal_failure`, not `is_node_fault`) keeps it
             // out of the consensus-rejection bucket — previously this path
             // was bucketed into `ShadowTransactionInvalid` via the eyre
-            // `?`, which mis-classified an honest peer's block.
+            // `?`, which misclassified an honest peer's block.
             let parent_commitment_snapshot = self
                 .block_tree_guard
                 .read()
