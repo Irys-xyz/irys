@@ -246,6 +246,12 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // regression of the very scenario this test is meant to lock in.
     let deadline = Instant::now() + Duration::from_secs(FAILURE_DEADLINE_SECS);
     let mut peer_validation_dead = false;
+    // Only treat a closed validation_service as success after we've
+    // observed at least one block-state event for `head_hash`. Otherwise
+    // an unrelated panic elsewhere in validation_service (which also
+    // closes the sender) could make this test pass without exercising
+    // the Stage A progress check at all.
+    let mut saw_head_update = false;
     while Instant::now() < deadline {
         // Drain any pending state events with a small timeout so we
         // don't sleep through the whole wait. A `Valid` event for the
@@ -254,6 +260,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
             tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await
             && event.block_hash == head_hash
         {
+            saw_head_update = true;
             tracing::info!(
                 block.hash = ?event.block_hash,
                 state = ?event.state,
@@ -286,7 +293,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
             }
         }
 
-        if peer.node_ctx.service_senders.validation_service.is_closed() {
+        if peer.node_ctx.service_senders.validation_service.is_closed() && saw_head_update {
             peer_validation_dead = true;
             break;
         }
