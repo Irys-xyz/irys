@@ -8,12 +8,6 @@ irys_utils::define_metrics! {
     histogram PROCESSING_MS("irys.gossip.chunks.processing_duration_ms", "Gossip chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
     counter INBOUND_ERRORS("irys.gossip.inbound.errors_total", "Gossip inbound processing errors by type");
     counter OUTBOUND_ERRORS("irys.gossip.outbound.errors_total", "Gossip outbound send errors by type");
-
-    histogram PARENT_WAIT_DURATION_MS(
-        "irys.block_pool.parent_wait_duration_ms",
-        "Time block_pool waits for an InTreePendingValidation parent to resolve, in milliseconds (labelled by outcome)",
-        vec![10.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 30000.0, 60000.0, 300000.0, 600000.0]
-    );
 }
 
 pub(crate) fn record_gossip_chunk_received(bytes: u64) {
@@ -37,8 +31,4 @@ pub(crate) fn record_gossip_inbound_error(error_type: &'static str, is_advisory:
 
 pub(crate) fn record_gossip_outbound_error(error_type: &'static str) {
     OUTBOUND_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
-}
-
-pub(crate) fn record_block_pool_parent_wait_duration_ms(outcome: &'static str, ms: f64) {
-    PARENT_WAIT_DURATION_MS.record(ms, &[KeyValue::new("outcome", outcome)]);
 }

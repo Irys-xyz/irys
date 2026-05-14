@@ -12,15 +12,16 @@
 //! peer's `global_step` has caught up and the progress check correctly
 //! does not fire.
 //!
-//! The `BlockStatus::InTreePendingValidation` branch is necessary for
-//! this test to be expressible, but on its own it isn't sufficient —
-//! even with that branch in place, a head whose parent is
-//! `NotProcessed` still triggers the cascade. We also need a way to
-//! deliver the head whose parent is in peer's tree *but whose validated
-//! steps were never fast-forwarded into peer's VDF state*. The cleanest
-//! way to do that in an integration test is to inject the parent block
-//! into peer's `block_tree` directly via the `test-utils`-gated write
-//! guard, marking it as `Validated`. The head is then delivered via
+//! Gating the orphan re-pull on `!is_in_tree()` (so a parent that's in
+//! the tree but pending validation doesn't trigger the cascade) is part
+//! of what makes this test expressible, but it isn't sufficient on its
+//! own — a head whose parent is `NotProcessed` still triggers the
+//! cascade. We also need a way to deliver the head whose parent is in
+//! peer's tree *but whose validated steps were never fast-forwarded
+//! into peer's VDF state*. The cleanest way to do that in an
+//! integration test is to inject the parent block into peer's
+//! `block_tree` directly via the `test-utils`-gated write guard,
+//! marking it as `Validated`. The head is then delivered via
 //! `send_full_block`, which calls `block_discovery.handle_block`
 //! directly and goes through normal prevalidation + validation_service
 //! — without going through `block_pool` and without re-validating the
@@ -102,10 +103,9 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // `on_block_prevalidated` to derive snapshots from it. The parent's
     // chain state is then promoted Unknown → ValidationScheduled →
     // ValidBlock so it is observable as `ProcessedButCanBeReorganized`
-    // by `block_status`, and `block_pool` would not enter the
-    // `InTreePendingValidation` wait-for-parent path (this test still
-    // delivers the child via `send_full_block`, which bypasses
-    // `block_pool`).
+    // by `block_status`. This test bypasses `block_pool` anyway by
+    // delivering the child via `send_full_block`, so the orphan/in-tree
+    // gating is not on the path under test.
     {
         // Build a SealedBlock with an empty body; the body isn't read
         // along the failure path we want to exercise.
@@ -154,10 +154,8 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
         // `mark_block_as_valid` from `NotOnchain(Unknown)` →
         // `NotOnchain(ValidationScheduled)` → `NotOnchain(ValidBlock)` (not
         // `Validated(...)`, which is reached via `mark_tip` walking back
-        // through `mark_on_chain`). Either way, the block is "validated" as
-        // far as `block_status` and `wait_for_parent_validation` are
-        // concerned (both bucket `NotOnchain(ValidBlock)` into
-        // `ProcessedButCanBeReorganized`).
+        // through `mark_on_chain`). Either way, `block_status` buckets
+        // `NotOnchain(ValidBlock)` into `ProcessedButCanBeReorganized`.
         let (_h, state) = tree
             .get_block_and_status(&parent_hash)
             .expect("parent must be in peer's tree after injection");

@@ -17,10 +17,12 @@ pub enum BlockStatus {
     NotProcessed,
     /// The block exists in the in-memory tree but its validation has not
     /// completed (`ChainState::NotOnchain(Unknown|ValidationScheduled)` or
-    /// `Validated(Unknown|ValidationScheduled)`). Children of a block in this
-    /// state must not be added to the tree yet — if the parent's validation
-    /// fails it will be removed, and any descendants we already added would
-    /// cascade-fail with `Parent block not found`.
+    /// `Validated(Unknown|ValidationScheduled)`). Distinguished from
+    /// `NotProcessed` so the orphan re-pull branch in
+    /// `block_pool::process_block` recognises the parent as locally known
+    /// and does not re-pull from the network; distinguished from
+    /// `ProcessedButCanBeReorganized` so `is_processed()` still reflects
+    /// that validation hasn't finished.
     InTreePendingValidation,
     /// The block is in the in-memory tree and has been validated (either
     /// canonical `Onchain` or a `Validated`/`NotOnchain(ValidBlock)` fork).
@@ -41,8 +43,8 @@ impl BlockStatus {
 
     /// True iff the block is observable in the in-memory tree or has been
     /// finalized into the block index. Used to distinguish "parent genuinely
-    /// missing" (orphan re-pull is appropriate) from "parent in tree but not
-    /// yet validated" (waiting for the parent's validation event is appropriate).
+    /// missing" (orphan re-pull is appropriate) from "parent locally known"
+    /// (no re-pull needed — the child can proceed through prevalidation).
     pub fn is_in_tree(&self) -> bool {
         matches!(
             self,
@@ -114,10 +116,10 @@ impl BlockStatusProvider {
             }
         }
 
-        // Index has nothing at this height. Distinguish "block missing from tree" from
-        // "block in tree pending validation" so children of a not-yet-validated parent
-        // don't trigger the orphan re-pull path (and don't get added to the tree where
-        // they would cascade-fail if the parent later turns out to be invalid).
+        // Index has nothing at this height. Distinguish "block missing from tree"
+        // (orphan — re-pull from network) from "block in tree, validation pending"
+        // (parent is locally known — children of such a parent must not trigger
+        // the orphan re-pull path).
         match self
             .block_tree_read_guard
             .read()
