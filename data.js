@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778705432029,
+  "lastUpdate": 1778769106709,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3283,6 +3283,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "47923f41902e11765b36d14b409dac2b60db0ba3",
+          "message": "fix: block pool race (#1417)\n\n* fix(block_pool): wait for in-tree pending parent instead of orphan re-pull\n\nThe old `block_status_provider` collapsed every in-tree block into\n`ProcessedButCanBeReorganized`, so `block_pool::process_block` could\nnot tell \"parent in tree, validation still pending\" from \"parent in\ntree, validated\". Descendants of an unvalidated parent fell through to\n`block_discovery.handle_block`, which added them to the tree, scheduled\ntheir validation, and left the parent-wait to `validation_service`'s\n`wait_for_parent_validation`. If the parent then failed validation it\nwas removed from the tree, and every descendant already added\ncascade-failed with `Parent block not found` → `Cancelled` → invalid →\nalso removed. On the testnet `GogWkmVot…` divergence this produced\n628 orphan events / 354 redundant validation cycles for a single\nnot-yet-validated parent.\n\nSurface the parent's `ChainState` through `BlockStatus`:\n\n- `BlockStatus::InTreePendingValidation` for `ChainState::NotOnchain`\n  /`Validated` paired with `Unknown` or `ValidationScheduled`.\n- `is_in_tree()` predicate covering `InTreePendingValidation |\n  ProcessedButCanBeReorganized | Finalized`. `is_processed()` stays\n  strict (only the validated/finalized/pruned-fork set).\n- `block_status()` reads `BlockTree::get_block_and_status` and maps\n  `ChainState` into the new variants.\n\nIn `block_pool::process_block`:\n\n- Gate the orphan re-pull branch on `!is_in_tree()` instead of\n  `!is_processed()`. The orphan branch now only fires when the parent\n  is genuinely missing.\n- When the parent is `InTreePendingValidation`, hold the child via a\n  new `wait_for_parent_validation` helper. The helper subscribes to\n  `service_senders.block_state_events` *before* re-reading parent\n  state (so a transition between the initial check and the subscribe\n  is not lost), tolerates `Lagged` events by re-reading from the\n  tree, and treats `Closed` as `Invalid`.\n- On `Valid` the child resumes the normal `process_block` path. On\n  `Invalid` the child is removed from `blocks_cache` with a new\n  `FailureReason::ParentValidationFailed` and the sync state records\n  the failure. The descendant never reaches the tree, so a failed\n  parent does not cascade through its children.\n- `check_block_status` adds an `InTreePendingValidation` arm returning\n  `Advisory::AlreadyProcessed` (gossip handlers must not re-enter\n  `process_block` for an already-in-tree block).\n- `is_block_processing_or_processed` includes `is_in_tree()` so gossip\n  handlers also skip blocks that are in the tree but still pending.\n\nInline unit tests in `block_status_provider` cover the three status\ntransitions (in-tree pending → validated → missing).\n\n* test(block_pool): cover InTreePendingValidation wait-for-parent path\n\nFour functional tests against the real `BlockPool` (with a mocked\nblock_discovery / mempool / service_senders) plus two helpers:\n\n- `process_block_does_not_re_pull_parent_in_tree_pending_validation`:\n  adds a parent to the mock tree (default state = InTreePendingValidation),\n  spawns `process_block(child)`, asserts no orphan-cascade message\n  (`RequestBlockFromTheNetwork` / `AttemptReprocessingBlock`) reaches\n  the sync channel during the wait and that the child has not fallen\n  through to block_discovery. Then fires a `BlockStateUpdated` event\n  promoting the parent to `Validated(ValidBlock)`, verifies the\n  spawned future resolves with `Processed`, and that the child finally\n  reaches block_discovery.\n- `process_block_drops_child_when_pending_parent_validation_fails`:\n  removes the parent from the tree mid-flight and broadcasts a\n  discarded `BlockStateUpdated`, asserts `process_block` returns\n  `BlockError(... failed validation ...)`, child is not in\n  block_discovery, child is not in the block_pool cache, and no\n  orphan-cascade message was emitted.\n- `process_block_rejects_block_already_in_tree_pending_validation`:\n  exercises `check_block_status`'s new arm — a process_block call for\n  a block already in the tree as InTreePendingValidation returns\n  `Advisory::AlreadyProcessed` and does not re-enter block_discovery.\n- `is_block_processing_or_processed_true_for_in_tree_pending_validation`:\n  exercises the gossip-handler gate — before adding to the tree the\n  predicate is false; after, it is true.\n\n`build_test_pool` collapses the 8-line per-test setup, and\n`is_orphan_cascade_message` is the narrow predicate the wait-path\ntests use against the sync channel (allowing the expected\n`BlockProcessedByThePool` notification to pass through).\n\n* test(vdf): wire up stalled-peer integration test via direct tree injection\n\n`heavy_test_vdf_progress_check_fails_stalled_peer` was added in\ne9bca3026 as `#[ignore]`d documentation, pending a way to deliver a\nblock to the peer whose parent is in the tree but whose VDF steps\nwere never fast-forwarded into the peer's `vdf_state`. The original\n\"gossip the head only\" setup cannot exercise the progress check on\nits own: when the head's parent is `NotProcessed`, `block_pool` runs\nthe orphan-fetch cascade, each fetched ancestor's\n`ensure_vdf_is_valid` calls `fast_forward_validated_steps`, and by the\ntime the head reaches VDF validation the gap has been bridged.\n\nRework the test to use direct tree injection:\n\n- Enable `irys-domain`'s `test-utils` feature in `chain-tests/Cargo.toml`\n  so `BlockTreeReadGuard::write()` is available outside `#[cfg(test)]`.\n- Mine the head's parent privately on genesis, then drop it straight\n  into peer's `block_tree` via `add_block` + `mark_block_as_validation_scheduled`\n  + `mark_block_as_valid`. Snapshots are inherited from the grandparent\n  (peer's height-2 tip) — valid for a no-commitment, non-epoch block.\n  Crucially, this skips block_discovery / block_tree_service /\n  validation_service entirely for the parent, so its VDF steps are\n  never fast-forwarded into peer's `vdf_state`.\n- Mine the head privately, then deliver it via `send_full_block`. That\n  call bypasses `block_pool` and the orphan cascade; block_discovery\n  finds the parent already in the tree, schedules `ValidateBlock` for\n  the head, and `ensure_vdf_is_valid` enters Stage A\n  (`wait_for_step(prev_output_step)`). Peer cannot reach that step\n  (mining is stopped, no fast-forward source for the intermediate\n  steps), and after `progress_timeout_secs` the wait bails with\n  `WaitForStepError::Stalled`.\n\nUpdate the assertion to match the current consensus-safety contract:\na `Stalled` wait must panic per the never-mislabel rule (see\n`active_validations.rs:150` and `design/docs/vdf-validation-stall-detection.md`).\nThe cleanest in-test signal is the validation_service task's `mpsc`\nreceiver being dropped when it unwinds — poll\n`service_senders.validation_service.is_closed()`. The test also\nsubscribes to `block_state_events` as a regression detector: a `Valid`\nevent for the head would mean fast-forward bridged the gap somehow,\nand is treated as a loud test failure. As defense-in-depth, the test\nalso asserts peer's `global_step` did not advance during the wait.\n\nStable: 5/5 passes in ~9s each.\n\n* fix: peer_base_url_format proptest\n\n* feat: add wait_for_parent_validation metrics/logging\n\n* test(block_pool): cover Validated(_) pending mapping and Lagged event path\n\nFills two of the four gaps called out in review.md P2:\n\n- Two unit tests for `block_status`: locally-produced blocks inserted as\n  `Validated(Unknown)` and `Validated(ValidationScheduled)` must map to\n  `InTreePendingValidation`, the new branch added in b0b8db85c.\n- One integration test that deterministically drives\n  `broadcast::RecvError::Lagged` inside `wait_for_parent_validation` by\n  burst-sending 201 events synchronously into the 100-cap channel before\n  promoting the parent to valid — verifies the wait loop re-reads tree\n  state on lag and still exits cleanly.\n\nAdds `BlockStatusProvider::add_block_mock_with_state` test helper that\nwraps `BlockTree::add_common` so tests can plant arbitrary `ChainState`.\n\nTwo gaps deferred: `RecvError::Closed` (Sender lives inside Arc held by\nthe running BlockPool; not testable as black-box without DI refactor)\nand the subscribe-vs-initial-check race window (µs-scale; safety is\nstructural ordering in source).\n\n* docs: scrub external report references from in-tree comments\n\nReplaces \"Fix 2\" / \"commit b0b8db85c\" / numbered-issue references with\nself-contained summaries describing what the code actually does. The\nexternal post-mortem doc those numbers were keyed to lives outside this\nrepo, so the citations would rot. Comment-only; no behavior change.\n\n* feat: re-do the fix\n\n* fix: address feedback\n\n* fix(test): gate validation_service closure on tree presence, not BlockStateUpdated\n\nThe prior `saw_head_update` gate required a `BlockStateUpdated{block_hash:\nhead_hash}` event before accepting `validation_service.is_closed()` as\nsuccess. That event is never emitted in the Stalled-panic path this test\nexercises: `BlockStateUpdated` only fires from `on_block_validation_finished`,\nbut the VDF-wait panic in `active_validations.rs` re-unwinds through the\nvalidation_service select loop via `std::panic::resume_unwind` (per the\n\"never mislabel\" rule), so validation never \"finishes\". The gate therefore\nsat unsatisfied until the 23s deadline and the test asserted failure.\n\nReplace with a `block_tree.get_block(&head_hash).is_some()` check — proves\nprevalidation reached peer's tree (i.e. the head was scheduled into\nvalidation_service) before declaring its closure attributable to our\nscenario. Addresses the reviewer's underlying concern (rule out unrelated\npanics) using a signal that actually exists in this flow.\n\n* fix: address feedback",
+          "timestamp": "2026-05-14T15:16:20+01:00",
+          "tree_id": "128519c0a7a0e13f24ffd2a63112ae7893e44aa1",
+          "url": "https://github.com/Irys-xyz/irys/commit/47923f41902e11765b36d14b409dac2b60db0ba3"
+        },
+        "date": 1778769104809,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015311,
+            "range": "± 0.000336",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125547,
+            "range": "± 0.003824",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.258821,
+            "range": "± 0.02195",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.853734,
+            "range": "± 0.133154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078966,
+            "range": "± 0.000624",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 776.130622,
+            "range": "± 19.269645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 984.504879,
+            "range": "± 18.478321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147864,
+            "range": "± 0.004396",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1206.588365,
+            "range": "± 130.544275",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.884936,
+            "range": "± 17.247889",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034317,
+            "range": "± 0.001526",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.200682,
+            "range": "± 1.193731",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.509775,
+            "range": "± 1.763668",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
