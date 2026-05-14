@@ -27,9 +27,8 @@ use crate::block_validation::{
 };
 use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
-use eyre::Context as _;
 use futures::FutureExt as _;
-use irys_domain::{BlockState, BlockTreeReadGuard, ChainState, HardforkConfigExt as _};
+use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -318,8 +317,26 @@ impl BlockValidationTask {
                     // Not our parent, continue waiting
                     continue;
                 }
-                Err(_) => {
-                    // Channel closed - treat as error
+                // `broadcast::Receiver::recv` returns `Lagged` when the
+                // sender outpaced this subscriber — the missed events MUST
+                // NOT be conflated with `Closed`. Lagging means we skipped
+                // some state updates but the channel is still live; the
+                // next `recv()` will reset and continue. If we treated this
+                // as `Closed` we'd return `Cancelled` → `Invalid` → remove
+                // a valid block from the cache under load (broadcast queue
+                // pressure while validation is slow). The poll loop's
+                // initial `parent_chain_state_check` re-reads the block-tree
+                // state directly, so any missed event will be picked up.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.sealed_block.header().block_hash,
+                        missed = n,
+                        "Block state broadcast lagged; re-polling parent state"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     error!(
                         block.parent_hash = %parent_hash,
                         block.hash = %self.sealed_block.header().block_hash,
@@ -515,35 +532,56 @@ impl BlockValidationTask {
             }
         };
 
-        // Determine cascade activation from the parent epoch snapshot
-        let cascade_active = config
-            .consensus
-            .hardforks
-            .is_cascade_active_for_epoch(&parent_epoch_snapshot);
-
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
         let sealed_block_for_shadow = self.sealed_block.clone();
         let shadow_tx_task = async move {
             let started = Instant::now();
+
+            // Eviction-race: parent's commitment snapshot was present at
+            // prevalidation but the in-memory window has since rotated.
+            // Surfacing this as the typed `ParentCommitmentSnapshotMissing`
+            // (already `is_internal_failure`, not `is_node_fault`) keeps it
+            // out of the consensus-rejection bucket — previously this path
+            // was bucketed into `ShadowTransactionInvalid` via the eyre
+            // `?`, which mis-classified an honest peer's block.
             let parent_commitment_snapshot = self
                 .block_tree_guard
                 .read()
                 .get_commitment_snapshot(&block.previous_block_hash)
-                .with_context(|| {
-                    format!(
-                        "parent block {} should have a commitment snapshot in the block_tree",
-                        block.previous_block_hash
-                    )
+                .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
+                    block_hash: block.previous_block_hash,
                 })?;
+
+            // Local reth never delivered the EVM payload. This is a
+            // node-level fault (the EL is broken on this node, not the
+            // peer's block), so route it as the typed
+            // `ExecutionPayloadUnavailable` — `is_node_fault()` will then
+            // panic + supervisor-restart instead of peer-attributing.
+            // Previously this was `eyre::bail!` → `ShadowTransactionInvalid`.
+            let execution_data = match self
+                .service_inner
+                .execution_payload_provider
+                .wait_for_payload(&block.evm_block_hash)
+                .in_current_span()
+                .await
+            {
+                Some(d) => d,
+                None => {
+                    return Err(ValidationError::ExecutionPayloadUnavailable {
+                        evm_block_hash: block.evm_block_hash,
+                    });
+                }
+            };
+
             let result = shadow_transactions_are_valid(
                 config,
                 &self.block_tree_guard,
                 &self.service_inner.mempool_guard,
                 block,
                 &self.service_inner.db,
-                self.service_inner.execution_payload_provider.clone(),
+                &execution_data,
                 parent_epoch_snapshot,
                 parent_commitment_snapshot,
                 block_index,
@@ -569,7 +607,13 @@ impl BlockValidationTask {
                     );
                 }
             }
+            // Remaining errors out of `shadow_transactions_are_valid` are
+            // genuine consensus mismatches (bad payload type, EIP-4844
+            // blobs present, shadow-tx mismatch, etc.) — keep stringified
+            // as `ShadowTransactionInvalid` for consensus rejection.
             result
+                .map(|()| execution_data)
+                .map_err(|e| ValidationError::ShadowTransactionInvalid(e.to_string()))
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
@@ -660,7 +704,6 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
                 txs,
-                cascade_active,
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",
@@ -703,12 +746,16 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
-        // Check shadow_tx_result first to extract ExecutionData
+        // shadow_tx_task now returns a typed `ValidationError`, so we route
+        // through `.into()` which dispatches local/runtime failures
+        // (`ParentCommitmentSnapshotMissing`, `ExecutionPayloadUnavailable`)
+        // to `ValidationResult::InternalFailure` and genuine consensus
+        // mismatches (`ShadowTransactionInvalid`) to `Invalid`.
         let execution_data = match shadow_tx_result {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                return ValidationError::ShadowTransactionInvalid(err.to_string()).into();
+                return err.into();
             }
         };
 

@@ -5,7 +5,7 @@ use irys_actors::block_validation::{PreValidationError, prevalidate_block};
 use irys_actors::test_helpers::build_test_service_senders;
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
-use irys_domain::{EmaSnapshot, EpochSnapshot, HardforkConfigExt as _};
+use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusOptions, DataLedger, DataTransactionHeader,
     H256, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemLedger, U256,
@@ -433,17 +433,8 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     node_config.consensus = ConsensusOptions::Custom(consensus);
     let config_override = Config::new_with_random_peer_id(node_config);
 
-    let cascade_active = {
-        let tree = ctx.node.node_ctx.block_tree_guard.read();
-        let parent_epoch_snapshot = tree
-            .get_epoch_snapshot(&bad_block.header().previous_block_hash)
-            .expect("parent epoch snapshot");
-        config_override
-            .consensus
-            .hardforks
-            .is_cascade_active_for_epoch(&parent_epoch_snapshot)
-    };
-
+    // `data_txs_are_valid` derives `cascade_active` from the parent epoch
+    // snapshot it fetches internally — no longer plumbed via the caller.
     let result = irys_actors::block_validation::data_txs_are_valid(
         &config_override,
         &service_senders,
@@ -451,7 +442,6 @@ async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
         &ctx.node.node_ctx.db,
         &ctx.node.node_ctx.block_tree_guard,
         transactions,
-        cascade_active,
     )
     .await;
 

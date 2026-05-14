@@ -11,8 +11,7 @@ use eyre::{OptionExt as _, ensure, eyre};
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
-    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    HardforkConfigExt as _,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
@@ -21,7 +20,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
-use irys_types::{BlockHash, LedgerChunkRange};
+use irys_types::{BlockHash, EvmBlockHash, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
@@ -552,6 +551,15 @@ pub enum ValidationError {
     #[error("Shadow transaction validation failed: {0}")]
     ShadowTransactionInvalid(String),
 
+    /// Local reth execution payload never arrived for this block's
+    /// `evm_block_hash`. This is a node-level fault (local EL failed to
+    /// deliver), NOT a consensus rejection — classified as a node fault so
+    /// the handler aborts and restarts rather than peer-attributing the
+    /// block. Distinct from `ShadowTransactionInvalid`, which now only
+    /// carries genuine consensus mismatches.
+    #[error("Reth execution payload unavailable for evm_block_hash {evm_block_hash}")]
+    ExecutionPayloadUnavailable { evm_block_hash: EvmBlockHash },
+
     /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
     #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
     CommitmentValueInvalid {
@@ -675,6 +683,9 @@ impl ValidationError {
             Self::PreValidation(e) => e.is_node_fault(),
             // Task panic is always a node fault: a verifier thread crashed.
             Self::TaskPanicked { .. } => true,
+            // Local reth never delivered the payload — the EL is broken on
+            // this node, not the peer's block. Abort + supervisor restart.
+            Self::ExecutionPayloadUnavailable { .. } => true,
             // Every current cancellation reason maps to "chain has moved on,
             // discard" (see ValidationCancelReason::is_internal). Delegate so
             // a future retry-plausible reason doesn't silently become a node
@@ -719,6 +730,9 @@ impl ValidationError {
             Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentBlockMissing { .. } => true,
+            // Local reth failure — internal (and a node fault, see
+            // `is_node_fault`). Must never be peer-attributed.
+            Self::ExecutionPayloadUnavailable { .. } => true,
             // Everything else is treated as a consensus-level rejection until
             // its construction sites are individually audited.
             _ => false,
@@ -1702,6 +1716,22 @@ mod prevalidation_error_classification_tests {
             !ValidationError::PreValidation(PreValidationError::BlockSignatureInvalid)
                 .is_node_fault()
         );
+
+        // Local reth never delivered the EVM payload — node fault. Routing
+        // this as `is_node_fault()` is what makes the shadow_tx_task's
+        // missing-payload path abort+restart instead of being mis-bucketed
+        // into `ShadowTransactionInvalid` (consensus rejection).
+        let payload_unavailable = ValidationError::ExecutionPayloadUnavailable {
+            evm_block_hash: Default::default(),
+        };
+        assert!(payload_unavailable.is_node_fault());
+        assert!(
+            payload_unavailable.is_internal_failure(),
+            "node-fault must also be internal-failure (strict subset)",
+        );
+        // Round-trip through the From dispatcher: must land on InternalFailure.
+        let result: ValidationResult = payload_unavailable.into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
     }
 }
 
@@ -1940,7 +1970,12 @@ pub fn poa_is_valid(
 
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
-/// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
+///
+/// The caller is responsible for fetching `execution_data` (via
+/// `ExecutionPayloadCache::wait_for_payload`) so that a missing payload —
+/// a local reth failure — can be surfaced as a typed node-fault
+/// (`ValidationError::ExecutionPayloadUnavailable`) instead of being
+/// stringified into `ShadowTransactionInvalid`.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
@@ -1948,19 +1983,12 @@ pub async fn shadow_transactions_are_valid(
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
-    payload_provider: ExecutionPayloadCache,
+    execution_data: &ExecutionData,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<ExecutionData> {
-    // 1. Get the execution payload for validation
-    let execution_data = payload_provider
-        .wait_for_payload(&block.evm_block_hash)
-        .in_current_span()
-        .await
-        .ok_or_eyre("reth execution payload never arrived")?;
-
+) -> eyre::Result<()> {
     let ExecutionData { payload, sidecar } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
@@ -2083,8 +2111,7 @@ pub async fn shadow_transactions_are_valid(
     // 4. Validate they match
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
 
-    // 5. Return the execution data for reuse
-    Ok(execution_data)
+    Ok(())
 }
 
 /// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
@@ -2869,7 +2896,6 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
     transactions: &BlockTransactions,
-    cascade_active: bool,
 ) -> Result<(), PreValidationError> {
     // Extract transaction slices from BlockTransactions
     let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
@@ -2946,6 +2972,19 @@ pub async fn data_txs_are_valid(
         .ok_or(PreValidationError::LocalEpochSnapshotMissing {
             parent_hash: block.previous_block_hash,
         })?;
+
+    // Derive cascade activation from the snapshot we just fetched — the
+    // single source of truth. Previously this came in as a `cascade_active`
+    // parameter computed from a *different* epoch-snapshot read in the
+    // caller's outer scope; that gave us two reads where only one was the
+    // authoritative one for this validation pass. The reads always agreed
+    // in practice (same parent block hash, immutable `Arc<EpochSnapshot>`)
+    // but the parameter was a footgun for any future caller that cached or
+    // recomputed the bool from a different snapshot.
+    let cascade_active = config
+        .consensus
+        .hardforks
+        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
 
     // Extract publish ledger for ingress proofs validation
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)

@@ -1204,8 +1204,10 @@ where
             .block_status(block_height, block_hash);
         // A block that is in the tree pending validation has also been observed
         // already; we do not want gossip handlers to re-enter `process_block`
-        // for it.
-        status.is_processed() || status.is_in_tree()
+        // for it. `is_in_tree()` covers `InTreePendingValidation` plus every
+        // variant `is_processed()` covers, so it's the full "already-known
+        // locally" predicate.
+        status.is_in_tree()
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
