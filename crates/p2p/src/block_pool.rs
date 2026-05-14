@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, instrument, warn};
@@ -34,6 +35,10 @@ use tracing::{debug, error, info, instrument, warn};
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 const RECENTLY_PROCESSED_CACHE_SIZE: usize = 20;
 const BACKFILL_DEPTH: u64 = 100;
+/// Interval at which `wait_for_parent_validation` emits a "still waiting"
+/// warn log while the parent remains `InTreePendingValidation`. Not a hard
+/// timeout — see the function's docstring.
+const PARENT_WAIT_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum CriticalBlockPoolError {
@@ -1259,13 +1264,25 @@ where
     /// is not lost. Lagged events are tolerated — the loop re-reads parent state
     /// from the block tree on every iteration, so a missed update only delays
     /// the next exit check by one event.
+    ///
+    /// **No hard timeout.** Block validation is unbounded by design (PoA + EVM
+    /// state + VDF steps), and stuck-validation detection is the upstream VDF
+    /// watchdog's job (see `record_validation_task_force_aborted` in
+    /// `validation_service`). A timeout here would either force-drop a child
+    /// whose parent is legitimately still validating — triggering the network
+    /// re-pull storm that the surrounding fix (commit b0b8db85c) was built to
+    /// prevent — or be a pure no-op continue. The terminal "validation system
+    /// is dead" case is already covered by `broadcast::error::RecvError::Closed`.
+    /// We instead emit a periodic warn log every [`PARENT_WAIT_WARN_INTERVAL`]
+    /// and record total wait duration to a histogram for observability.
     async fn wait_for_parent_validation(
         &self,
         parent_hash: BlockHash,
         parent_height: u64,
     ) -> ParentValidationOutcome {
         let mut rx = self.service_senders.subscribe_block_state_updates();
-        loop {
+        let started = Instant::now();
+        let outcome = loop {
             match self
                 .block_status_provider
                 .block_status(parent_height, &parent_hash)
@@ -1274,34 +1291,55 @@ where
                     // still pending — fall through to await the next event
                 }
                 BlockStatus::ProcessedButCanBeReorganized | BlockStatus::Finalized => {
-                    return ParentValidationOutcome::Valid;
+                    break ParentValidationOutcome::Valid;
                 }
                 BlockStatus::NotProcessed | BlockStatus::PartOfAPrunedFork => {
-                    return ParentValidationOutcome::Invalid;
+                    break ParentValidationOutcome::Invalid;
                 }
             }
 
-            match rx.recv().await {
-                Ok(_event) => {
+            match tokio::time::timeout(PARENT_WAIT_WARN_INTERVAL, rx.recv()).await {
+                Ok(Ok(_event)) => {
                     // Re-read parent state on every event, regardless of which
                     // block the event was for. Cheap, and avoids races against
                     // out-of-order state transitions on a busy node.
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                     warn!(
                         "BlockPool: block_state_events lagged by {} while waiting for parent {:?}; re-checking state",
                         skipped, parent_hash
                     );
                 }
-                Err(broadcast::error::RecvError::Closed) => {
+                Ok(Err(broadcast::error::RecvError::Closed)) => {
                     error!(
                         "BlockPool: block_state_events channel closed while waiting for parent {:?}",
                         parent_hash
                     );
-                    return ParentValidationOutcome::Invalid;
+                    break ParentValidationOutcome::Invalid;
+                }
+                Err(_elapsed) => {
+                    // Observability only — not a timeout. Loop re-reads state
+                    // and continues waiting. The VDF watchdog upstream is
+                    // responsible for breaking truly stuck validations.
+                    warn!(
+                        parent.hash = %parent_hash,
+                        parent.height = parent_height,
+                        waited_ms = started.elapsed().as_millis() as u64,
+                        "BlockPool: still waiting for parent validation"
+                    );
                 }
             }
-        }
+        };
+
+        let label = match outcome {
+            ParentValidationOutcome::Valid => "valid",
+            ParentValidationOutcome::Invalid => "invalid",
+        };
+        crate::metrics::record_block_pool_parent_wait_duration_ms(
+            label,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+        outcome
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
