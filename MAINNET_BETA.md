@@ -185,3 +185,50 @@ A full node that tracks the current network state without participating in minin
 
 1. Since the node will not provide storage, the `irys_submodules.toml` file should remain empty.
 2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.
+
+# Snapshots
+A snapshot is a portable, content-addressed archive of an Irys node's chain state. It bundles the Irys consensus DB, the Reth execution DB, the Reth `static_files/`, the block index, and the genesis files into a single `.tar.zst` archive. A lagging node can be brought up to the snapshot's height without going through P2P sync.
+
+Snapshots intentionally exclude node-identity material (mining key, peer list, JWT, discovery secret) and storage-module packing (chunks are XOR-packed with the source miner's address — non-portable). The importing node must supply its own `config.toml`, and partitions will be re-packed by the node on first boot.
+
+## Exporting a snapshot
+The node should be stopped before exporting against its data directory. The tool can also run against a running node thanks to MDBX's MVCC, but a stopped node guarantees a clean tip.
+
+```sh
+irys-cli snapshot export \
+  --output /tmp/snapshot.tar.zst
+```
+
+The `--data-dir` is read from `config.toml`'s `base_directory` by default. Override with `--data-dir <path>` if needed. The schema and chain ID embedded in the archive are validated on import.
+
+Flags:
+
+- `--include-caches` — keep `CachedDataRoots`, `CachedChunksIndex`, `CachedChunks`, `IngressProofs` in the export. Off by default; these tables are rebuildable from canonical state.
+- `--no-compact` — skip MDBX page compaction during the copy. Produces a larger archive faster.
+- `--no-throttle-mvcc` — skip MVCC throttling. Faster but may stall a busy writer; only use against a stopped node.
+
+## Importing a snapshot
+The target data directory must be empty (or absent) unless `--force` is passed.
+
+```sh
+irys-cli snapshot import \
+  --input /tmp/snapshot.tar.zst \
+  --data-dir /var/lib/irys/.irys
+```
+
+The import flow validates the archive's `format_version` and `chain_id` against the binary, verifies SHA-256 checksums on every file, places state into `data-dir/`, then performs a sanity open of the imported consensus DB. A mismatched `irys_schema_version` requires `--force` to override.
+
+After import, populate `config.toml` with a fresh mining key and start the node normally. Storage modules will be re-packed on first boot.
+
+## Snapshot contents
+| Layer | Included | Notes |
+| --- | --- | --- |
+| `irys_consensus_data/` (MDBX) | yes | `PeerListItems` always cleared; cache tables cleared unless `--include-caches`. |
+| `reth/db/` (MDBX) | yes | All execution state. |
+| `reth/static_files/` | yes | Header / receipt segments. |
+| `block_index/` | yes | If present (some versions migrate this into the consensus DB). |
+| `.irys_genesis.json` / `.irys_genesis_commitments.json` | yes | If present. |
+| `reth/jwt.hex`, `reth/discovery-secret` | **no** | Node-local identity. |
+| `reth/known-peers.json`, `reth/reth.toml`, `reth/blobstore/`, `reth/logs/`, `reth/invalid_block_hooks/` | **no** | Node-local or rebuildable. |
+| `config.toml`, `irys_submodules.toml` | **no** | Per-node operator config. |
+| Storage modules (packed chunks) | **no** | Bound to source miner's address; not portable. |

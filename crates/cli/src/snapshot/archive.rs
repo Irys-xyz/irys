@@ -1,0 +1,259 @@
+use eyre::Context as _;
+use sha2::{Digest as _, Sha256};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read as _},
+    path::Path,
+};
+
+use super::manifest::{MANIFEST_FILENAME, ManifestFile, SnapshotManifest};
+
+const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Walk `staging_dir`, hashing every regular file (excluding `manifest.json`)
+/// and producing a sorted file list suitable for embedding in a `SnapshotManifest`.
+pub(crate) fn build_file_list(staging_dir: &Path) -> eyre::Result<Vec<ManifestFile>> {
+    let mut entries: Vec<ManifestFile> = Vec::new();
+    walk(staging_dir, staging_dir, &mut entries)?;
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(entries)
+}
+
+fn walk(root: &Path, dir: &Path, out: &mut Vec<ManifestFile>) -> eyre::Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            walk(root, &path, out)?;
+        } else if file_type.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .expect("path is under root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == MANIFEST_FILENAME {
+                continue;
+            }
+            let (size_bytes, sha256_hex) = hash_file(&path)?;
+            out.push(ManifestFile {
+                path: rel,
+                size_bytes,
+                sha256_hex,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> eyre::Result<(u64, String)> {
+    let mut reader = BufReader::new(
+        File::open(path).with_context(|| format!("opening {} for hashing", path.display()))?,
+    );
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total = total
+            .checked_add(u64::try_from(n).expect("read len fits in u64"))
+            .ok_or_else(|| eyre::eyre!("file size overflow while hashing {}", path.display()))?;
+    }
+    Ok((total, hex::encode(hasher.finalize())))
+}
+
+/// Pack `staging_dir` (which must already contain `manifest.json`) into a
+/// zstd-compressed tarball at `output`.
+pub(crate) fn pack(staging_dir: &Path, output: &Path) -> eyre::Result<()> {
+    if !staging_dir.join(MANIFEST_FILENAME).is_file() {
+        eyre::bail!(
+            "staging dir {} is missing {}",
+            staging_dir.display(),
+            MANIFEST_FILENAME
+        );
+    }
+    let output_file = File::create(output)
+        .with_context(|| format!("creating snapshot output {}", output.display()))?;
+    let encoder = zstd::Encoder::new(BufWriter::new(output_file), ZSTD_COMPRESSION_LEVEL)
+        .context("initializing zstd encoder")?;
+    let mut tar_builder = tar::Builder::new(encoder);
+    tar_builder.follow_symlinks(false);
+    tar_builder
+        .append_dir_all(".", staging_dir)
+        .with_context(|| format!("packing {} into tar", staging_dir.display()))?;
+    let encoder = tar_builder.into_inner().context("finalizing tar")?;
+    encoder.finish().context("finalizing zstd")?;
+    Ok(())
+}
+
+/// Decompress and untar `archive` into `target_dir`, then read and return the manifest.
+pub(crate) fn unpack(archive: &Path, target_dir: &Path) -> eyre::Result<SnapshotManifest> {
+    std::fs::create_dir_all(target_dir)
+        .with_context(|| format!("creating target dir {}", target_dir.display()))?;
+    let f =
+        File::open(archive).with_context(|| format!("opening snapshot {}", archive.display()))?;
+    let decoder = zstd::Decoder::new(BufReader::new(f)).context("initializing zstd decoder")?;
+    let mut tar = tar::Archive::new(decoder);
+    tar.unpack(target_dir)
+        .with_context(|| format!("extracting to {}", target_dir.display()))?;
+    read_manifest_from_dir(target_dir)
+}
+
+/// Read the manifest from an already-extracted snapshot directory.
+pub(crate) fn read_manifest_from_dir(dir: &Path) -> eyre::Result<SnapshotManifest> {
+    let path = dir.join(MANIFEST_FILENAME);
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading manifest {}", path.display()))?;
+    serde_json::from_str(&contents).with_context(|| format!("parsing manifest {}", path.display()))
+}
+
+/// Stream just the manifest entry out of an archive without extracting other files.
+/// Useful for verifying compatibility before committing to a full extraction.
+pub(crate) fn read_manifest_from_archive(archive: &Path) -> eyre::Result<SnapshotManifest> {
+    let f =
+        File::open(archive).with_context(|| format!("opening snapshot {}", archive.display()))?;
+    let decoder = zstd::Decoder::new(BufReader::new(f)).context("initializing zstd decoder")?;
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let is_manifest = entry
+            .path()?
+            .file_name()
+            .is_some_and(|s| s == MANIFEST_FILENAME);
+        if is_manifest {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf)?;
+            return serde_json::from_str(&buf).context("parsing manifest from archive");
+        }
+    }
+    eyre::bail!(
+        "{MANIFEST_FILENAME} not found in archive {}",
+        archive.display()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::manifest::SNAPSHOT_FORMAT_VERSION;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+    use tempfile::TempDir;
+
+    fn write_manifest(staging: &Path, manifest: &SnapshotManifest) -> eyre::Result<()> {
+        std::fs::write(
+            staging.join(MANIFEST_FILENAME),
+            serde_json::to_string_pretty(manifest)?,
+        )?;
+        Ok(())
+    }
+
+    fn write_tree(root: &Path, files: &[(String, Vec<u8>)]) {
+        for (rel, content) in files {
+            let full = root.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dir");
+            }
+            std::fs::write(&full, content).expect("write file");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn pack_unpack_roundtrip_preserves_content(
+            files in proptest::collection::vec(
+                (
+                    "[a-z]{1,8}(/[a-z]{1,8}){0,3}",
+                    proptest::collection::vec(any::<u8>(), 0..2048),
+                ),
+                1..6,
+            )
+        ) {
+            // Dedupe paths, drop any that would collide with the manifest filename,
+            // and drop any pair where one path is an ancestor of another (would create
+            // a file/directory conflict on the filesystem).
+            let mut seen = HashSet::new();
+            let deduped: Vec<(String, Vec<u8>)> = files
+                .into_iter()
+                .filter(|(p, _)| p != MANIFEST_FILENAME && seen.insert(p.clone()))
+                .collect();
+            let paths: Vec<String> = deduped.iter().map(|(p, _)| p.clone()).collect();
+            let unique: Vec<(String, Vec<u8>)> = deduped
+                .into_iter()
+                .filter(|(p, _)| {
+                    !paths.iter().any(|other| {
+                        other != p
+                            && (other.starts_with(&format!("{p}/"))
+                                || p.starts_with(&format!("{other}/")))
+                    })
+                })
+                .collect();
+            prop_assume!(!unique.is_empty());
+
+            let src = TempDir::new().unwrap();
+            let dst = TempDir::new().unwrap();
+            let archive_dir = TempDir::new().unwrap();
+            let archive_path = archive_dir.path().join("snap.tar.zst");
+
+            write_tree(src.path(), &unique);
+
+            let file_list = build_file_list(src.path()).unwrap();
+            let manifest = SnapshotManifest {
+                format_version: SNAPSHOT_FORMAT_VERSION,
+                chain_id: 42,
+                irys_schema_version: 3,
+                irys_tip_height: None,
+                reth_tip_height: None,
+                includes_caches: false,
+                created_at_unix_secs: 0,
+                created_by: "proptest".to_owned(),
+                files: file_list,
+            };
+            write_manifest(src.path(), &manifest).unwrap();
+
+            pack(src.path(), &archive_path).unwrap();
+            let read_back = unpack(&archive_path, dst.path()).unwrap();
+            prop_assert_eq!(&read_back, &manifest);
+
+            for (rel, content) in &unique {
+                let got = std::fs::read(dst.path().join(rel)).unwrap();
+                prop_assert_eq!(&got, content);
+            }
+        }
+    }
+
+    #[test]
+    fn read_manifest_from_archive_returns_same_manifest() {
+        let src = TempDir::new().unwrap();
+        let archive_dir = TempDir::new().unwrap();
+        let archive_path = archive_dir.path().join("snap.tar.zst");
+
+        let tree = vec![
+            ("irys/.irys_genesis.json".to_owned(), b"{}".to_vec()),
+            ("reth/db/mdbx.dat".to_owned(), vec![1_u8; 100]),
+        ];
+        write_tree(src.path(), &tree);
+
+        let manifest = SnapshotManifest {
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            chain_id: 1024,
+            irys_schema_version: 3,
+            irys_tip_height: Some(7),
+            reth_tip_height: Some(7),
+            includes_caches: false,
+            created_at_unix_secs: 1_000,
+            created_by: "test".to_owned(),
+            files: build_file_list(src.path()).unwrap(),
+        };
+        write_manifest(src.path(), &manifest).unwrap();
+        pack(src.path(), &archive_path).unwrap();
+
+        let streamed = read_manifest_from_archive(&archive_path).unwrap();
+        assert_eq!(streamed, manifest);
+    }
+}

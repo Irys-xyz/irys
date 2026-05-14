@@ -1,8 +1,10 @@
 use crate::cli_args::{
-    Commands, IrysCli, RollbackMode, RollbackTarget, parse_rollback_target,
+    Commands, IrysCli, RollbackMode, RollbackTarget, SnapshotMode, parse_rollback_target,
     timestamp_millis_to_secs,
 };
 use crate::db_utils::{cli_init_irys_db, cli_init_reth_provider, import_genesis_to_db};
+use crate::snapshot::export::{ExportOpts, run_export};
+use crate::snapshot::import::{ImportOpts, run_import};
 use crate::snapshot_output::{
     cli_compare_output, cli_config, cli_snapshot_output, replay_current_network_snapshot,
     snapshot_from_genesis_dir,
@@ -67,6 +69,52 @@ fn resolve_signing_key(
                  --signing-key-file <path> / IRYS_SIGNING_KEY_FILE env var\n  \
                  mining_key in config.toml"
             )
+        }
+    }
+}
+
+fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
+    let node_config: NodeConfig = load_config()?;
+    let config = Config::new_with_random_peer_id(node_config.clone());
+    let chain_id = config.consensus.chain_id;
+    let irys_schema_version = irys_types::DatabaseVersion::CURRENT as u32;
+
+    match mode {
+        SnapshotMode::Export {
+            data_dir,
+            output,
+            include_caches,
+            no_compact,
+            no_throttle_mvcc,
+        } => {
+            let data_dir = data_dir.unwrap_or_else(|| node_config.base_directory.clone());
+            run_export(ExportOpts {
+                data_dir,
+                output,
+                include_caches,
+                chain_id,
+                irys_schema_version,
+                irys_tip_height: None,
+                reth_tip_height: None,
+                copy_flags: irys_database::snapshot::CopyFlags {
+                    compact: !no_compact,
+                    throttle_mvcc: !no_throttle_mvcc,
+                },
+            })
+        }
+        SnapshotMode::Import {
+            input,
+            data_dir,
+            force,
+        } => {
+            let data_dir = data_dir.unwrap_or_else(|| node_config.base_directory.clone());
+            run_import(ImportOpts {
+                input,
+                data_dir,
+                force,
+                expected_chain_id: chain_id,
+                expected_irys_schema_version: irys_schema_version,
+            })
         }
     }
 }
@@ -369,6 +417,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
             Ok(())
         }
+        Commands::Snapshot { mode } => run_snapshot(mode),
         Commands::Tui {
             node_urls,
             config,

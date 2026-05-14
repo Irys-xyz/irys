@@ -116,6 +116,14 @@ pub(crate) enum Commands {
         #[arg(long)]
         list_retained_partition_hashes: bool,
     },
+    #[command(
+        name = "snapshot",
+        about = "Export or import a portable snapshot of Irys + Reth chain state"
+    )]
+    Snapshot {
+        #[command(subcommand)]
+        mode: SnapshotMode,
+    },
     #[command(name = "tui", about = "Launch the Irys cluster monitoring TUI")]
     Tui {
         /// Node URLs to connect to
@@ -129,6 +137,57 @@ pub(crate) enum Commands {
         /// Record node info to SQLite database (irys-tui-records.db)
         #[arg(short, long)]
         record: bool,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum SnapshotMode {
+    #[command(
+        name = "export",
+        about = "Capture a portable snapshot of chain state (excludes node identity)"
+    )]
+    Export {
+        /// Path to the .irys data directory to snapshot.
+        /// Defaults to the base_directory from config.toml.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Path to write the resulting `.tar.zst` archive.
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Include cache tables (CachedDataRoots, CachedChunksIndex, CachedChunks,
+        /// IngressProofs). Off by default — caches are rebuildable from canonical data.
+        #[arg(long)]
+        include_caches: bool,
+
+        /// Skip MDBX page compaction during copy. Produces a larger archive but
+        /// completes faster. Compaction is on by default and reclaims free pages.
+        #[arg(long)]
+        no_compact: bool,
+
+        /// Skip MVCC throttling during copy. Faster but may stall a busy writer.
+        /// Throttling is on by default; safe when the source DB is busy.
+        #[arg(long)]
+        no_throttle_mvcc: bool,
+    },
+    #[command(
+        name = "import",
+        about = "Restore chain state from a snapshot archive into a fresh data directory"
+    )]
+    Import {
+        /// Path to the snapshot `.tar.zst` archive.
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Target .irys data directory (must be empty unless --force is set).
+        /// Defaults to the base_directory from config.toml.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Override schema-version mismatch check. Use with care.
+        #[arg(long)]
+        force: bool,
     },
 }
 
