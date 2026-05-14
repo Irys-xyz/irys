@@ -1,87 +1,59 @@
-//! Integration test (currently `#[ignore]`d — see "Why ignored" below).
+//! Integration test verifying that a peer whose local VDF state cannot
+//! reach a block's required `prev_output_step_number` surfaces a
+//! `WaitForStepError::Stalled` (turned into `Invalid(VdfValidationFailed)`
+//! at the validation-service boundary) within `progress_timeout_secs`,
+//! rather than hanging the validation pipeline indefinitely.
 //!
-//! Goal: verify end-to-end that a peer whose local VDF state cannot reach a
-//! block's required `global_step_number` surfaces a `WaitForStepError::Stalled`
-//! within `progress_timeout_secs` rather than hanging the validation
-//! pipeline.
+//! Why a normal "gossip the head only" setup doesn't exercise this:
+//! when peer receives a head whose parent isn't in its tree,
+//! `block_pool` runs the orphan-fetch cascade — each fetched ancestor is
+//! validated and `fast_forward_vdf_steps_from_block` bridges the peer's
+//! VDF state over the gap. By the time the head reaches VDF validation,
+//! peer's `global_step` has caught up and the progress check correctly
+//! does not fire.
 //!
-//! Setup:
-//! - Genesis (Peer A) and Peer B reach a common baseline height via gossip.
-//! - Peer B stops mining (its `run_vdf` thread halts; `is_mining_enabled = false`).
-//! - Peer A privately mines a divergent chain (no gossip), advancing its
-//!   global_step well beyond Peer B's.
-//! - Peer A gossips only the head block to Peer B and is then stopped.
-//! - Expectation: Peer B cannot reach the head's `prev_output_step_number`,
-//!   `wait_for_step` bails on the progress check with `Stalled`, and Peer B
-//!   panics (the "never mislabel" rule: a local liveness failure must not
-//!   be reported as block-Invalid to the block tree). The test body still
-//!   asserts on the legacy `Invalid(VdfValidationFailed)` path and will need
-//!   to be reworked to observe a process exit instead — out of scope for
-//!   this branch.
+//! Gating the orphan re-pull on `!is_in_tree()` (so a parent that's in
+//! the tree but pending validation doesn't trigger the cascade) is part
+//! of what makes this test expressible, but it isn't sufficient on its
+//! own — a head whose parent is `NotProcessed` still triggers the
+//! cascade. We also need a way to deliver the head whose parent is in
+//! peer's tree *but whose validated steps were never fast-forwarded
+//! into peer's VDF state*. The cleanest way to do that in an
+//! integration test is to inject the parent block into peer's
+//! `block_tree` directly via the `test-utils`-gated write guard,
+//! marking it as `Validated`. The head is then delivered via
+//! `send_full_block`, which calls `block_discovery.handle_block`
+//! directly and goes through normal prevalidation + validation_service
+//! — without going through `block_pool` and without re-validating the
+//! parent.
 //!
-//! Why ignored: the assumption that Peer B "cannot reach `prev_output_step`"
-//! does not hold under the current `block_pool`. When Peer B receives the
-//! head block whose parent is unknown, it walks the orphan-fetch cascade:
-//! `AttemptReprocessingBlock` + `RequestBlockFromTheNetwork` pull each
-//! intermediate block from genesis (or from any other peer that still has
-//! them). Each fetched block carries its own `vdf_info.steps`, and
-//! `ensure_vdf_is_valid` calls `fast_forward_vdf_steps_from_block` for
-//! every block it validates. By the time the head block reaches VDF
-//! validation, Peer B's `global_step` has already been bridged across the
-//! gap and the progress check correctly does not fire. The test still
-//! observes a hang in shadow_tx_validation's EVM-payload fetch, which is
-//! an out-of-scope path.
-//!
-//! For this test to actually exercise the VDF progress check, we need
-//! either:
-//! 1. The orphan-storm fix (Defect 2 in `claude/issue.md`) plus a way to
-//!    deliver only the head without triggering the cascade — i.e. a block
-//!    whose parent is in the tree but unvalidated, so the new
-//!    `InTreePendingValidation` path applies and no parent fetch is
-//!    triggered; OR
-//! 2. A direct injection helper that posts a `ValidateBlock` message to a
-//!    peer's `validation_service` without going through `block_pool`,
-//!    paired with a synthetic block builder that produces a properly
-//!    signed block with malicious `vdf_info`.
-//!
-//! Both prerequisites are out of scope for this branch (see
-//! `design/docs/vdf-validation-stall-detection.md`). The unit tests in
-//! `crates/vdf/src/state.rs`
-//! (`wait_for_step_bails_when_no_progress`,
-//! `wait_for_step_bails_on_cancel`,
-//! `wait_for_step_completes_when_state_advances`) are the canonical
-//! coverage of the progress-check semantics until one of those
-//! prerequisites lands.
-//!
-//! Status: this test is kept in-tree intentionally — the scenario it
-//! describes is the one we ultimately want covered end-to-end. It will be
-//! re-activated in a follow-up PR once the orphan-storm fix (Defect 2) or
-//! the direct `ValidateBlock` injection helper lands; the test body itself
-//! is otherwise correct against the design.
+//! Peer's `run_vdf` thread is left running so the fast-forward channel
+//! is still drained (otherwise validation would panic on a closed/full
+//! channel, masking the progress-check failure), but local mining is
+//! stopped via `stop_mining` so the peer cannot advance the step itself.
+//! The injected parent is *not* sent through validation, so the
+//! parent's VDF steps never enter peer's `vdf_state` buffer — the head's
+//! `prev_output_step_number` is therefore beyond peer's `global_step`,
+//! and the wait stalls.
 
 use crate::utils::IrysNodeTest;
 use irys_actors::{block_tree_service::ValidationResult, block_validation::ValidationError};
+use irys_domain::{BlockState, ChainState};
 use irys_types::NodeConfig;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Aggressively short progress timeout so the test runs quickly.
-/// Must be > 1s so Stage A doesn't false-positive while the peer is
-/// receiving the gossiped block header.
+/// Aggressively short progress timeout so the test runs quickly. Must be
+/// > 1s so the wait doesn't false-positive while the peer is receiving
+/// the gossiped block header / payload.
 const SHORT_PROGRESS_TIMEOUT_SECS: u64 = 3;
 
-/// Slack for event-channel + scheduling latency on top of the progress
-/// timeout. The full deadline must comfortably exceed
-/// `SHORT_PROGRESS_TIMEOUT_SECS`.
-const FAILURE_DEADLINE_SECS: u64 = SHORT_PROGRESS_TIMEOUT_SECS + 30;
+/// Slack on top of the progress timeout for event-channel + scheduling latency.
+const FAILURE_DEADLINE_SECS: u64 = SHORT_PROGRESS_TIMEOUT_SECS + 20;
 
-#[ignore = "see file-level docs: orphan-fetch cascade fast-forwards the peer's VDF state, so the progress check correctly does not fire under the current block_pool semantics; re-enable once Defect 2 lands or direct ValidateBlock injection helpers exist"]
 #[test_log::test(tokio::test)]
 async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> {
     // -- Genesis (Peer A) ------------------------------------------------
     let mut genesis_cfg = NodeConfig::testing();
-    // Both nodes share the short progress timeout. The peer is the one
-    // we expect to bail; setting the genesis to the same value is harmless.
     genesis_cfg.vdf.progress_timeout_secs = SHORT_PROGRESS_TIMEOUT_SECS;
     let genesis = IrysNodeTest::new_genesis(genesis_cfg.clone())
         .start_and_wait_for_packing("GENESIS", 30)
@@ -98,91 +70,296 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     genesis.mine_block().await?;
     peer.wait_until_height(2, 30).await?;
 
-    // -- Freeze the peer's VDF ------------------------------------------
-    // After this point, peer.global_step is pinned at whatever was last
-    // fast-forwarded from genesis. NB: we must not call `wait_until_height`
-    // on the peer after this point, since that helper auto-restarts the
-    // peer's VDF for sync purposes.
+    // Capture peer's "frozen" baseline VDF step. After this point the
+    // peer is not allowed to mine new steps locally, so anything past
+    // this value would have to arrive via fast-forward — and the
+    // injected parent below is never sent through validation, so its
+    // steps will never reach the fast-forward channel.
     peer.stop_mining();
+    let peer_frozen_step = peer.node_ctx.vdf_steps_guard.read().global_step;
+    tracing::info!(
+        peer.frozen_global_step = peer_frozen_step,
+        "peer mining stopped"
+    );
+
+    // -- Mine the parent privately on genesis ----------------------------
+    // This block (height 3) will be injected directly into peer's tree
+    // as `Validated(ValidBlock)`, bypassing block_discovery /
+    // block_tree_service / validation_service entirely. Its VDF steps
+    // are therefore NEVER fast-forwarded into peer's `vdf_state`.
+    let (parent_header, _parent_payload, _parent_txs) = genesis.mine_block_without_gossip().await?;
+    let parent_hash = parent_header.block_hash;
+    let parent_height = parent_header.height;
+    tracing::info!(
+        block.hash = %parent_hash,
+        block.height = parent_height,
+        vdf.global_step_number = parent_header.vdf_limiter_info.global_step_number,
+        "private parent block mined on genesis"
+    );
+
+    // Inject the parent into peer's block_tree. We reuse the parent's
+    // own parent's snapshots (a no-commitment, non-epoch block inherits
+    // them) so the entry is coherent enough for the child's
+    // `on_block_prevalidated` to derive snapshots from it. The parent's
+    // chain state is then promoted Unknown → ValidationScheduled →
+    // ValidBlock so it is observable as `ProcessedButCanBeReorganized`
+    // by `block_status`. This test bypasses `block_pool` anyway by
+    // delivering the child via `send_full_block`, so the orphan/in-tree
+    // gating is not on the path under test.
+    {
+        // Build a SealedBlock with an empty body; the body isn't read
+        // along the failure path we want to exercise.
+        let sealed_parent = std::sync::Arc::new(irys_types::SealedBlock::new(
+            parent_header.as_ref().clone(),
+            irys_types::BlockBody {
+                block_hash: parent_hash,
+                ..Default::default()
+            },
+        )?);
+
+        // Pull cloned snapshots from the parent's parent (height 2 in
+        // peer's tree). For a non-epoch, no-commitment block these are
+        // identical to what `on_block_prevalidated` would derive itself.
+        let (grandparent_commitment, grandparent_epoch, grandparent_ema, grandparent_header) = {
+            let tree = peer.node_ctx.block_tree_guard.read();
+            let grandparent_hash = parent_header.previous_block_hash;
+            (
+                tree.get_commitment_snapshot(&grandparent_hash)
+                    .map_err(|e| eyre::eyre!("grandparent commitment snapshot missing: {e}"))?,
+                tree.get_epoch_snapshot(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent epoch snapshot missing"))?,
+                tree.get_ema_snapshot(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent ema snapshot missing"))?,
+                tree.get_block(&grandparent_hash)
+                    .ok_or_else(|| eyre::eyre!("grandparent header missing"))?
+                    .clone(),
+            )
+        };
+        let next_ema = grandparent_ema.next_snapshot(
+            &parent_header,
+            &grandparent_header,
+            &peer.node_ctx.config.consensus,
+        )?;
+
+        let mut tree = peer.node_ctx.block_tree_guard.write();
+        tree.add_block(
+            &sealed_parent,
+            grandparent_commitment,
+            grandparent_epoch,
+            next_ema,
+        )?;
+        tree.mark_block_as_validation_scheduled(&parent_hash)?;
+        tree.mark_block_as_valid(&parent_hash)?;
+        // Sanity: the injected parent is now in a validated state.
+        // `mark_block_as_valid` from `NotOnchain(Unknown)` →
+        // `NotOnchain(ValidationScheduled)` → `NotOnchain(ValidBlock)` (not
+        // `Validated(...)`, which is reached via `mark_tip` walking back
+        // through `mark_on_chain`). Either way, `block_status` buckets
+        // `NotOnchain(ValidBlock)` into `ProcessedButCanBeReorganized`.
+        let (_h, state) = tree
+            .get_block_and_status(&parent_hash)
+            .expect("parent must be in peer's tree after injection");
+        assert!(
+            matches!(
+                state,
+                ChainState::Validated(BlockState::ValidBlock)
+                    | ChainState::NotOnchain(BlockState::ValidBlock)
+                    | ChainState::Onchain
+            ),
+            "injected parent must be in a validated state, got {state:?}"
+        );
+    }
+    tracing::info!(
+        block.hash = %parent_hash,
+        block.height = parent_height,
+        "parent injected into peer's tree as Validated(ValidBlock)"
+    );
+
+    // -- Mine the head privately on genesis ------------------------------
+    // Height 4. Its `prev_output_step_number` equals the parent's last
+    // VDF step, which is strictly greater than peer's frozen step. Its
+    // own steps are in `vdf_info.steps`, so once validation reaches
+    // Stage D it would fast-forward — but we never get past Stage A
+    // (`wait_for_step(prev_output_step_number)`), because peer cannot
+    // reach the parent's last step without local mining and the
+    // parent's steps were never fast-forwarded into peer's state.
+    let (head_header, head_payload, head_txs) = genesis.mine_block_without_gossip().await?;
+    let head_hash = head_header.block_hash;
+    tracing::info!(
+        block.hash = %head_hash,
+        block.height = head_header.height,
+        vdf.prev_output_step = head_header.vdf_limiter_info.first_step_number().saturating_sub(1),
+        vdf.global_step_number = head_header.vdf_limiter_info.global_step_number,
+        peer.frozen_step = peer_frozen_step,
+        "head block mined; expect peer Stage A to stall"
+    );
+    let head_prev_output_step = head_header
+        .vdf_limiter_info
+        .first_step_number()
+        .saturating_sub(1);
+    assert!(
+        head_prev_output_step > peer_frozen_step,
+        "test invariant: head's prev_output_step ({head_prev_output_step}) must exceed peer's frozen step ({peer_frozen_step})"
+    );
 
     // -- Subscribe to the peer's block-state events *before* delivering
-    //    the block, so we don't miss the failure event.
+    //    the head, so we'd catch a spurious Valid event if the gap
+    //    somehow got bridged (regression detector).
     let mut event_rx = peer
         .node_ctx
         .service_senders
         .subscribe_block_state_updates();
 
-    // -- Genesis privately advances --------------------------------------
-    // Mining without gossip: blocks land on genesis only. Genesis's VDF
-    // jumps several steps; the peer's `global_step` does not budge.
-    genesis.mine_blocks_without_gossip(5).await?;
-    let private_tip_height = genesis.get_canonical_chain_height().await;
-    assert!(
-        private_tip_height >= 7,
-        "genesis should have advanced privately, got height {private_tip_height}"
-    );
-    let private_tip = genesis.get_block_by_height(private_tip_height).await?;
-    let target_hash = private_tip.block_hash;
-    let head = Arc::new(private_tip);
+    // Snapshot peer's vdf step *before* delivery; we'll assert it
+    // doesn't advance during the wait (peer is supposed to be unable
+    // to reach the parent's last step).
+    let pre_delivery_step = peer.node_ctx.vdf_steps_guard.read().global_step;
 
-    // -- Deliver only the head, then take genesis offline ----------------
-    // The gossip is fire-and-forget; the peer's gossip task picks up the
-    // header and routes it through block_pool -> block_discovery ->
-    // block_tree_service -> validation_service. We must take genesis
-    // offline *after* the gossip has had a chance to enqueue, otherwise
-    // the broadcast itself can race the shutdown.
-    genesis.gossip_block_to_peers(&head)?;
-    // Give the gossip a moment to be received before we kill genesis,
-    // so the peer can't fetch missing parents from the now-dead trusted
-    // peer. Without this, the peer's block_pool would walk the parent
-    // cascade (each parent block carries its own VDF checkpoints, so
-    // fast-forward would let the peer reach `global_step_number`
-    // legitimately, and the progress guard would never fire).
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    genesis.stop().await;
+    // -- Deliver the head via direct block_discovery + payload injection.
+    //    This bypasses block_pool entirely, so the orphan-fetch cascade
+    //    cannot trigger. block_discovery.handle_block runs prevalidation
+    //    on the head, on_block_prevalidated adds it to the tree as
+    //    NotOnchain(ValidationScheduled), and validation_service then
+    //    picks it up and runs ensure_vdf_is_valid.
+    genesis
+        .send_full_block(&peer, &head_header, head_payload, head_txs)
+        .await?;
+    let delivery_instant = Instant::now();
+    tracing::info!(block.hash = %head_hash, "head delivered to peer via send_full_block");
 
-    // -- Wait for the failure event --------------------------------------
+    // -- Wait for peer's validation_service to die from the Stalled panic.
+    //
+    // `ensure_vdf_is_valid` Stage A polls `vdf_state.global_step` and
+    // returns `WaitForStepError::Stalled` once `progress_timeout_secs`
+    // elapses without local progress. `PreemptibleVdfTask::execute` then
+    // panics with "VDF wait stalled" (see
+    // `active_validations.rs` ~line 150 and
+    // `design/docs/vdf-validation-stall-detection.md` — never-mislabel
+    // rule: a local liveness failure must not be reported as block-Invalid
+    // to the block tree). The validation_service task ends, which drops
+    // its `mpsc` receiver and flips
+    // `service_senders.validation_service.is_closed()` to true.
+    //
+    // That sender-closed transition is the cleanest in-test signal that
+    // the progress check fired. We also assert (separately) that no
+    // `Valid` event was emitted for the head — that would mean peer's
+    // VDF state somehow got bridged across the gap, which would be a
+    // regression of the very scenario this test is meant to lock in.
     let deadline = Instant::now() + Duration::from_secs(FAILURE_DEADLINE_SECS);
-    let mut saw_failure = false;
+    let mut peer_validation_dead = false;
     while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, event_rx.recv()).await {
-            Ok(Ok(event)) => {
-                if event.block_hash != target_hash {
-                    continue;
-                }
-                tracing::info!(
-                    block.hash = ?event.block_hash,
-                    block.height = event.height,
-                    discarded = event.discarded,
-                    state = ?event.state,
-                    result = ?event.validation_result,
-                    "peer block-state event for target block",
+        // Drain any pending state events with a small timeout so we
+        // don't sleep through the whole wait. A `Valid` event for the
+        // head would mean fast-forward bridged the gap — fail loudly.
+        //
+        // Note: in the expected Stalled-panic path no `BlockStateUpdated`
+        // event for `head_hash` is ever emitted — `BlockStateUpdated` is
+        // broadcast from `on_block_validation_finished`, but the panic in
+        // `active_validations.rs` re-unwinds through the validation_service
+        // select loop (`std::panic::resume_unwind`), so validation never
+        // "finishes" with a result. We still subscribe here as a regression
+        // detector for the `Valid` and (legacy) `Invalid(VdfValidationFailed)`
+        // paths that would emit an event.
+        if let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await
+            && event.block_hash == head_hash
+        {
+            tracing::info!(
+                block.hash = ?event.block_hash,
+                state = ?event.state,
+                discarded = event.discarded,
+                result = ?event.validation_result,
+                "peer block-state event for head"
+            );
+            if matches!(event.validation_result, ValidationResult::Valid) {
+                panic!(
+                    "head was unexpectedly validated as Valid — peer's VDF must \
+                     have caught up across the gap (regression of the stalled-peer \
+                     scenario)"
                 );
-                if let ValidationResult::Invalid(err) = &event.validation_result {
-                    let reason = err.to_string();
-                    let is_progress_check = matches!(err, ValidationError::VdfValidationFailed(_))
-                        || reason.contains("did not advance")
-                        || reason.contains("VDF validation failed");
-                    assert!(
-                        is_progress_check,
-                        "validation failed for unexpected reason: {reason}"
-                    );
-                    saw_failure = true;
-                    break;
-                }
             }
-            // Channel closed or recv error: the peer has shut down before us;
-            // treat as missed event and exit the loop so the assert below
-            // produces a clear diagnostic.
-            Ok(Err(_)) | Err(_) => break,
+            if let ValidationResult::Invalid(err) = &event.validation_result {
+                // Defensive: if the wait stage ever gets converted into
+                // an Invalid result via a different code path (rather
+                // than the current "panic on Stalled" behaviour), still
+                // accept it — but require the reason to mention VDF.
+                let reason = err.to_string();
+                assert!(
+                    matches!(err, ValidationError::VdfValidationFailed(_))
+                        || reason.contains("VDF")
+                        || reason.contains("Stalled")
+                        || reason.contains("did not advance"),
+                    "head failed validation for an unexpected non-VDF reason: {reason}"
+                );
+                peer_validation_dead = true;
+                break;
+            }
+        }
+
+        // Only treat a closed validation_service as success when:
+        //   1. The head has reached peer's block_tree (prevalidation
+        //      completed → validation message was scheduled), AND
+        //   2. At least `SHORT_PROGRESS_TIMEOUT_SECS` has elapsed since
+        //      delivery (the Stalled panic cannot fire before the
+        //      progress timer expires), AND
+        //   3. The head's chain state is still pre-validation
+        //      (NotOnchain(Unknown|ValidationScheduled) or
+        //      Validated(Unknown|ValidationScheduled)) — a Stalled panic
+        //      kills the task before `on_block_validation_finished`
+        //      runs, so the head must not have transitioned past
+        //      `ValidationScheduled`.
+        //
+        // These three gates together rule out an unrelated panic in
+        // validation_service satisfying the success condition for the
+        // wrong reason.
+        let head_state = peer
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_block_and_status(&head_hash)
+            .map(|(_, state)| *state);
+        let head_reached_tree = head_state.is_some();
+        let head_still_pending = matches!(
+            head_state,
+            Some(
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled)
+                    | ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled)
+            )
+        );
+        let stall_window_elapsed =
+            delivery_instant.elapsed() >= Duration::from_secs(SHORT_PROGRESS_TIMEOUT_SECS);
+        if peer.node_ctx.service_senders.validation_service.is_closed()
+            && head_reached_tree
+            && stall_window_elapsed
+            && head_still_pending
+        {
+            peer_validation_dead = true;
+            break;
         }
     }
     assert!(
-        saw_failure,
-        "expected VdfValidationFailed for {target_hash} within {FAILURE_DEADLINE_SECS}s"
+        peer_validation_dead,
+        "expected peer's validation_service to die within {FAILURE_DEADLINE_SECS}s \
+         (either via Stalled panic or Invalid(VdfValidationFailed) on the legacy \
+         path) — Stage A's progress check did not fire"
     );
 
-    peer.stop().await;
+    // Peer's local VDF must not have advanced (mining is stopped, no
+    // fast-forward arrived). Any advancement would mean a different
+    // code path bridged the gap.
+    let post_step = peer.node_ctx.vdf_steps_guard.read().global_step;
+    assert_eq!(
+        post_step, pre_delivery_step,
+        "peer's local global_step changed during the wait \
+         (pre={pre_delivery_step}, post={post_step}) — fast-forward must not run \
+         on the stalled path"
+    );
+
+    // Cluster teardown. Peer's validation_service has already panicked,
+    // and the panic hook in testing-utils raised SIGINT — peer is
+    // already mid-shutdown. We swallow any teardown errors here; the
+    // important assertions above have already passed.
+    let _ = peer.stop().await;
+    let _ = genesis.stop().await;
     Ok(())
 }

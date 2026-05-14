@@ -713,7 +713,7 @@ where
             return Err(err.into());
         }
 
-        if !previous_block_status.is_processed() {
+        if !previous_block_status.is_in_tree() {
             // For orphan blocks, we already have ordered transactions from SealedBlock
             let block_transactions = block.transactions();
 
@@ -1175,11 +1175,16 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        self.blocks_cache.is_block_processing(block_hash).await
-            || self
-                .block_status_provider
-                .block_status(block_height, block_hash)
-                .is_processed()
+        if self.blocks_cache.is_block_processing(block_hash).await {
+            return true;
+        }
+        let status = self
+            .block_status_provider
+            .block_status(block_height, block_hash);
+        // A block that is in the tree pending validation has also been observed
+        // already; we do not want gossip handlers to re-enter `process_block`
+        // for it.
+        status.is_processed() || status.is_in_tree()
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
@@ -1308,6 +1313,15 @@ fn check_block_status(
 
     match block_status {
         BlockStatus::NotProcessed => Ok(()),
+        BlockStatus::InTreePendingValidation => {
+            debug!(
+                "Block pool: Block {:?} (height {}) is already in tree pending validation",
+                block_hash, block_height,
+            );
+            Err(BlockPoolError::Advisory(
+                AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
+            ))
+        }
         BlockStatus::ProcessedButCanBeReorganized => {
             debug!(
                 "Block pool: Block {:?} (height {}) is already processed",

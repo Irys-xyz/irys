@@ -926,3 +926,154 @@ async fn should_not_fast_track_block_already_in_index() {
         ))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests for the `InTreePendingValidation` status mapping: blocks whose parent
+// is in the tree but not yet validated must still bypass the orphan re-pull
+// path (see `block_status_provider.rs`), and the predicates that gate gossip
+// dedup must continue to treat them as observed.
+// ---------------------------------------------------------------------------
+
+/// Build a BlockPool wired to a fresh mocked-services bundle. Returns the
+/// pool plus everything tests need to inspect outcomes (discovery stub,
+/// sync_sender's receiver, service_senders for firing events, mock provider
+/// so the test can mutate tree state).
+fn build_test_pool(
+    config: &Config,
+) -> (
+    Arc<BlockPool<BlockDiscoveryStub, MempoolStub>>,
+    MockedServices,
+    tokio::sync::mpsc::UnboundedReceiver<crate::chain_sync::SyncChainServiceMessage>,
+) {
+    let services = MockedServices::new(config);
+    let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let sync_state = ChainSyncState::new(false, false);
+    let pool = Arc::new(BlockPool::new(
+        services.db.clone(),
+        services.block_discovery_stub.clone(),
+        services.mempool_stub.clone(),
+        sync_sender,
+        sync_state,
+        services.block_status_provider_mock.clone(),
+        services.execution_payload_provider.clone(),
+        config.clone(),
+        services.service_senders.clone(),
+        MempoolReadGuard::stub(),
+        tokio::runtime::Handle::current(),
+    ));
+    (pool, services, sync_receiver)
+}
+
+/// When the parent is in the tree as `InTreePendingValidation`,
+/// `process_block(child)` must NOT emit `RequestBlockFromTheNetwork` or
+/// `AttemptReprocessingBlock` — the parent is locally known, so the orphan
+/// re-pull branch must be skipped. This is the storm-prevention invariant
+/// upheld by `is_in_tree()` in `block_status_provider`.
+#[tokio::test]
+async fn process_block_does_not_re_pull_parent_in_tree_pending_validation() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, mut sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
+    let parent = &chain[0];
+    let child = &chain[1];
+
+    // Put the parent into the tree only (not the index). Default state is
+    // `ChainState::NotOnchain(BlockState::Unknown)` → `InTreePendingValidation`.
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(parent);
+
+    let child_sealed =
+        create_test_sealed_block(child.clone(), create_test_block_body(child.block_hash));
+    pool.process_block(child_sealed, false)
+        .await
+        .expect("process_block must succeed when parent is in tree");
+
+    // The child must have reached block_discovery (i.e. the in-tree path was
+    // exercised, not skipped by an early-out).
+    let discovered = services.block_discovery_stub.get_blocks();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].block_hash, child.block_hash);
+
+    // No orphan-cascade message must have been emitted on the sync channel.
+    while let Ok(msg) = sync_receiver.try_recv() {
+        assert!(
+            !matches!(
+                msg,
+                crate::chain_sync::SyncChainServiceMessage::RequestBlockFromTheNetwork { .. }
+                    | crate::chain_sync::SyncChainServiceMessage::AttemptReprocessingBlock(_)
+            ),
+            "process_block must not emit orphan-cascade messages when the parent is in tree pending validation, got: {msg:?}"
+        );
+    }
+}
+
+/// `check_block_status` must treat `InTreePendingValidation` as
+/// "already processed" so the gossip/process pipeline doesn't re-enter
+/// `process_block` for a block that's already in the tree awaiting validation.
+#[tokio::test]
+async fn process_block_rejects_block_already_in_tree_pending_validation() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+
+    // Put the block into the tree as pending validation directly.
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(block);
+
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+
+    let err = pool
+        .process_block(sealed, false)
+        .await
+        .expect_err("processing an already-in-tree block should error");
+    assert!(
+        matches!(
+            err,
+            BlockPoolError::Advisory(crate::block_pool::AdvisoryBlockPoolError::AlreadyProcessed(
+                _
+            ))
+        ),
+        "expected AlreadyProcessed advisory, got: {err:?}"
+    );
+    assert!(
+        services.block_discovery_stub.get_blocks().is_empty(),
+        "already-in-tree block must not re-enter block_discovery"
+    );
+}
+
+/// `is_block_processing_or_processed` must return true for a block that is
+/// already in the tree pending validation, so gossip handlers skip it instead
+/// of re-driving `process_block`.
+#[tokio::test]
+async fn is_block_processing_or_processed_true_for_in_tree_pending_validation() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+
+    // Sanity: before adding to the tree the predicate is false.
+    assert!(
+        !pool
+            .is_block_processing_or_processed(&block.block_hash, block.height)
+            .await
+    );
+
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(block);
+
+    assert!(
+        pool.is_block_processing_or_processed(&block.block_hash, block.height)
+            .await,
+        "InTreePendingValidation parent must be treated as processed by gossip handlers"
+    );
+}

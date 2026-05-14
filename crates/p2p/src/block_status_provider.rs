@@ -1,4 +1,4 @@
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard};
+use irys_domain::{BlockIndexReadGuard, BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, BlockIndexItem, H256, VDFLimiterInfo, block_provider::BlockProvider};
 use tracing::debug;
 #[cfg(test)]
@@ -12,12 +12,20 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-// TODO: expand these enum variants to account for all the actual states
 pub enum BlockStatus {
     /// The block is not in the index or tree.
     NotProcessed,
-    /// The block is still in the tree. It might or might not
-    /// be in the block index.
+    /// The block exists in the in-memory tree but its validation has not
+    /// completed (`ChainState::NotOnchain(Unknown|ValidationScheduled)` or
+    /// `Validated(Unknown|ValidationScheduled)`). Distinguished from
+    /// `NotProcessed` so the orphan re-pull branch in
+    /// `block_pool::process_block` recognises the parent as locally known
+    /// and does not re-pull from the network; distinguished from
+    /// `ProcessedButCanBeReorganized` so `is_processed()` still reflects
+    /// that validation hasn't finished.
+    InTreePendingValidation,
+    /// The block is in the in-memory tree and has been validated (either
+    /// canonical `Onchain` or a `Validated`/`NotOnchain(ValidBlock)` fork).
     ProcessedButCanBeReorganized,
     /// The block is in the index, but the tree has already pruned it.
     Finalized,
@@ -30,6 +38,17 @@ impl BlockStatus {
         matches!(
             self,
             Self::Finalized | Self::ProcessedButCanBeReorganized | Self::PartOfAPrunedFork
+        )
+    }
+
+    /// True iff the block is observable in the in-memory tree or has been
+    /// finalized into the block index. Used to distinguish "parent genuinely
+    /// missing" (orphan re-pull is appropriate) from "parent locally known"
+    /// (no re-pull needed — the child can proceed through prevalidation).
+    pub fn is_in_tree(&self) -> bool {
+        matches!(
+            self,
+            Self::InTreePendingValidation | Self::ProcessedButCanBeReorganized | Self::Finalized
         )
     }
 
@@ -72,13 +91,15 @@ impl BlockStatusProvider {
     /// Returns the status of a block based on its height and hash.
     /// Possible statuses:
     /// - `NotProcessed`: The block is not in the index or tree.
-    /// - `ProcessedButCanBeReorganized`: The block is still in the tree. It might or might not
-    ///   be in the block index.
+    /// - `InTreePendingValidation`: The block is in the tree but validation has not completed.
+    /// - `ProcessedButCanBeReorganized`: The block is in the tree and has been validated; it
+    ///   may or may not be in the block index.
     /// - `Finalized`: The block is in the index, but the tree has already pruned it.
+    /// - `PartOfAPrunedFork`: A different block has been migrated at this height.
+    ///
     /// TODO: this needs to handle migrated block reorgs, it does not currently :)
     /// NOTE: block height is UNTRUSTED here, we haven't validated it yet
     pub fn block_status(&self, block_height: u64, block_hash: &BlockHash) -> BlockStatus {
-        let block_is_anywhere_in_the_tree = self.is_block_in_the_tree(block_hash);
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
         let height_is_in_the_index = index_item.is_some();
@@ -95,14 +116,26 @@ impl BlockStatusProvider {
             }
         }
 
-        if !height_is_in_the_index && block_is_anywhere_in_the_tree {
-            // All blocks in the tree are a subject of reorganization
-            BlockStatus::ProcessedButCanBeReorganized
-        } else
-        /* !height_is_in_the_index && !block_is_anywhere_in_the_tree */
+        // Index has nothing at this height. Distinguish "block missing from tree"
+        // (orphan — re-pull from network) from "block in tree, validation pending"
+        // (parent is locally known — children of such a parent must not trigger
+        // the orphan re-pull path).
+        match self
+            .block_tree_read_guard
+            .read()
+            .get_block_and_status(block_hash)
+            .map(|(_, state)| *state)
         {
-            // No information about the block in the index or tree
-            BlockStatus::NotProcessed
+            None => BlockStatus::NotProcessed,
+            Some(
+                ChainState::NotOnchain(BlockState::Unknown | BlockState::ValidationScheduled)
+                | ChainState::Validated(BlockState::Unknown | BlockState::ValidationScheduled),
+            ) => BlockStatus::InTreePendingValidation,
+            Some(
+                ChainState::Onchain
+                | ChainState::Validated(BlockState::ValidBlock)
+                | ChainState::NotOnchain(BlockState::ValidBlock),
+            ) => BlockStatus::ProcessedButCanBeReorganized,
         }
     }
 
@@ -372,6 +405,32 @@ impl BlockStatusProvider {
             .expect("to add block to the tree");
     }
 
+    /// Like `add_block_mock_to_the_tree` but inserts the block in an arbitrary
+    /// `ChainState` via `add_common` directly — used to exercise the
+    /// `Validated(Unknown|ValidationScheduled)` branches of `block_status`.
+    #[cfg(test)]
+    pub fn add_block_mock_with_state(&self, block: &IrysBlockHeader, chain_state: ChainState) {
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+        use irys_types::{BlockTransactions, SealedBlock};
+
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(block.clone()),
+            BlockTransactions::default(),
+        ));
+
+        self.block_tree_read_guard
+            .write()
+            .add_common(
+                block.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                Arc::new(EmaSnapshot::default()),
+                chain_state,
+            )
+            .expect("to add block to the tree with chain_state");
+    }
+
     #[cfg(test)]
     pub fn set_tip_for_testing(&self, block_hash: &BlockHash) {
         self.block_tree_read_guard.write().tip = *block_hash;
@@ -415,5 +474,125 @@ impl BlockProvider for BlockStatusProvider {
         binding
             .get_block(&latest_canonical_hash)
             .map(|block| block.vdf_limiter_info.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig};
+    use std::sync::Arc;
+
+    fn mock_provider() -> (BlockStatusProvider, IrysBlockHeader, tempfile::TempDir) {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("block-status-provider-test-")
+            .build();
+        let db_env =
+            open_or_create_irys_consensus_data_db(tmp_dir.path(), DbSyncMode::UtterlyNoSync)
+                .expect("to open consensus db");
+        let db = DatabaseProvider(Arc::new(db_env));
+        let node_config = NodeConfig::testing();
+        let provider = BlockStatusProvider::mock(&node_config, db);
+        let genesis = provider.genesis_header();
+        (provider, genesis, tmp_dir)
+    }
+
+    #[test]
+    fn block_status_returns_in_tree_pending_validation_for_unvalidated_block() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let pending = &chain[0];
+
+        // Add to tree only. Default chain_state after `BlockTree::add_block`
+        // is `NotOnchain(Unknown)` — the "in tree pending validation" state.
+        provider.add_block_mock_to_the_tree(pending);
+
+        let status = provider.block_status(pending.height, &pending.block_hash);
+        assert_eq!(status, BlockStatus::InTreePendingValidation);
+        assert!(status.is_in_tree());
+        assert!(!status.is_processed());
+    }
+
+    #[test]
+    fn block_status_returns_processed_for_validated_block() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let validated = &chain[0];
+
+        provider.add_block_mock_to_the_tree(validated);
+        // Mark validation scheduled, then valid.
+        provider
+            .block_tree_read_guard
+            .write()
+            .mark_block_as_validation_scheduled(&validated.block_hash)
+            .expect("schedule validation");
+        provider
+            .block_tree_read_guard
+            .write()
+            .mark_block_as_valid(&validated.block_hash)
+            .expect("mark valid");
+
+        let status = provider.block_status(validated.height, &validated.block_hash);
+        assert_eq!(status, BlockStatus::ProcessedButCanBeReorganized);
+        assert!(status.is_in_tree());
+        assert!(status.is_processed());
+    }
+
+    #[test]
+    fn block_status_returns_not_processed_for_missing_block() {
+        let (provider, _genesis, _tmp) = mock_provider();
+        let unknown_hash = BlockHash::repeat_byte(0x42);
+        let status = provider.block_status(7, &unknown_hash);
+        assert_eq!(status, BlockStatus::NotProcessed);
+        assert!(!status.is_in_tree());
+        assert!(!status.is_processed());
+    }
+
+    /// Locally-produced blocks are inserted directly as
+    /// `ChainState::Validated(BlockState::Unknown)` (see `BlockTree::add_common`
+    /// call sites) — `block_status` must still treat this as
+    /// `InTreePendingValidation` so children of a not-yet-fully-validated local
+    /// block don't enter the orphan re-pull path.
+    #[test]
+    fn block_status_returns_in_tree_pending_validation_for_validated_unknown_state() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let pending = &chain[0];
+
+        provider.add_block_mock_with_state(
+            pending,
+            ChainState::Validated(irys_domain::BlockState::Unknown),
+        );
+
+        let status = provider.block_status(pending.height, &pending.block_hash);
+        assert_eq!(status, BlockStatus::InTreePendingValidation);
+        assert!(status.is_in_tree());
+        assert!(!status.is_processed());
+    }
+
+    /// Same as above for `Validated(ValidationScheduled)` — the state a locally
+    /// produced block transitions to once `mark_block_as_validation_scheduled`
+    /// fires but before validation completes.
+    #[test]
+    fn block_status_returns_in_tree_pending_validation_for_validated_validation_scheduled_state() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let consensus = NodeConfig::testing().consensus_config();
+        let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &consensus);
+        let pending = &chain[0];
+
+        provider.add_block_mock_with_state(
+            pending,
+            ChainState::Validated(irys_domain::BlockState::ValidationScheduled),
+        );
+
+        let status = provider.block_status(pending.height, &pending.block_hash);
+        assert_eq!(status, BlockStatus::InTreePendingValidation);
+        assert!(status.is_in_tree());
+        assert!(!status.is_processed());
     }
 }

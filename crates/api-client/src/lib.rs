@@ -650,7 +650,9 @@ mod tests {
             let addr: SocketAddr = addr_str.parse().unwrap();
             let url = peer_base_url(addr).unwrap();
             prop_assert_eq!(url.scheme(), "http");
-            prop_assert_eq!(url.port(), Some(port));
+            // `Url::port()` returns `None` for scheme-default ports (80 for http),
+            // so use `port_or_known_default()` which reflects the effective port.
+            prop_assert_eq!(url.port_or_known_default(), Some(port));
             prop_assert_eq!(url.path(), "/v1");
         }
 
