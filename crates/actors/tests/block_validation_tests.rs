@@ -117,9 +117,14 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         data_path: Some(Base64(vec![])),
     };
 
+    // The test indexes three blocks at heights 0/1/2 with Publish
+    // total_chunks of [0, 10, 20]. With offset=10, anchoring on the
+    // top block (height=2) keeps the offset in range (10 < 20) so the
+    // pre-check passes and the merkle proof is the failure source.
     let res = poa_is_valid(
         &poa,
         &block_index_guard,
+        2,
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,

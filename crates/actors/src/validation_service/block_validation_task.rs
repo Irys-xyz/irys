@@ -21,9 +21,9 @@
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
-    ValidationCancelReason, ValidationError, commitment_txs_are_valid, data_txs_are_valid,
-    is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid, shadow_transactions_are_valid,
-    submit_payload_to_reth,
+    SubmitPayloadError, ValidationCancelReason, ValidationError, commitment_txs_are_valid,
+    data_txs_are_valid, is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid,
+    shadow_transactions_are_valid, submit_payload_to_reth,
 };
 use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
@@ -463,6 +463,7 @@ impl BlockValidationTask {
                     poa_is_valid(
                         &poa,
                         &block_index_guard,
+                        block_height.saturating_sub(1),
                         &parent_epoch_snapshot,
                         &consensus_config,
                         &miner_address,
@@ -777,22 +778,30 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
-        // shadow_tx_task now returns a typed `ValidationError`, so we route
-        // through `.into()` which dispatches local/runtime failures
+        // shadow_tx_task returns a typed `ValidationError` on failure;
+        // route through `.into()` so eviction races / node-fault paths
         // (`ParentCommitmentSnapshotMissing`, `ExecutionPayloadUnavailable`)
-        // to `ValidationResult::InternalFailure` and genuine consensus
-        // mismatches (`ShadowTransactionInvalid`) to `Invalid`.
-        let execution_data = match shadow_tx_result {
-            Ok(data) => data,
+        // dispatch to `InternalFailure` and genuine consensus mismatches
+        // (`ShadowTransactionInvalid`) dispatch to `Invalid`. The success
+        // side carries `execution_data` for the reth-submission stage —
+        // keep it separately so shadow_tx still participates in the
+        // multi-stage `Invalid`-over-`InternalFailure` merger below.
+        // (Previously the failure path early-returned and bypassed the
+        // merger, which could leave a known-bad block in cache when shadow
+        // hit an internal failure while another stage proved the block
+        // bad.)
+        let (shadow_tx_result, execution_data) = match shadow_tx_result {
+            Ok(data) => (ValidationResult::Valid, Some(data)),
             Err(err) => {
                 tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
-                return err.into();
+                (err.into(), None)
             }
         };
 
         match (
             &recall_result,
             &poa_result,
+            &shadow_tx_result,
             &seeds_validation_result,
             &commitment_ordering_result,
             &data_txs_result,
@@ -803,10 +812,15 @@ impl BlockValidationTask {
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
+                ValidationResult::Valid,
             ) => {
                 tracing::debug!("All consensus validations successful, submitting to reth");
 
-                // All consensus layer validations passed, now submit to execution layer
+                // All consensus layer validations passed, now submit to
+                // execution layer. `execution_data` is guaranteed Some
+                // because shadow_tx_result is Valid above.
+                let execution_data = execution_data
+                    .expect("shadow_tx validation succeeded; execution_data must be present");
                 let reth_started = Instant::now();
                 let reth_result = submit_payload_to_reth(
                     self.sealed_block.header(),
@@ -831,7 +845,20 @@ impl BlockValidationTask {
                     }
                     Err(err) => {
                         tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
-                        ValidationError::ExecutionLayerFailed(err.to_string()).into()
+                        // Dispatch on the typed error: local transport
+                        // failures are node faults (broken local EL,
+                        // not the peer's block); structural and
+                        // payload-rejection failures are consensus
+                        // rejections.
+                        match err {
+                            SubmitPayloadError::LocalTransport(msg) => {
+                                ValidationError::ExecutionLayerTransportFailed(msg).into()
+                            }
+                            SubmitPayloadError::PayloadStructure(msg)
+                            | SubmitPayloadError::PayloadRejected(msg) => {
+                                ValidationError::ExecutionLayerFailed(msg).into()
+                            }
+                        }
                     }
                 };
                 metrics::record_validation_result("reth_submission", result.metric_label());
@@ -846,6 +873,7 @@ impl BlockValidationTask {
                 let stage_results = [
                     &recall_result,
                     &poa_result,
+                    &shadow_tx_result,
                     &seeds_validation_result,
                     &commitment_ordering_result,
                     &data_txs_result,

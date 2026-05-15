@@ -7,7 +7,7 @@ use crate::{
 };
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use eyre::{OptionExt as _, ensure, eyre};
+use eyre::ensure;
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -539,17 +539,43 @@ pub enum ValidationError {
     #[error("Seed data invalid: {0}")]
     SeedDataInvalid(String),
 
-    /// Execution layer (Reth) validation failed
+    /// Execution layer (Reth) rejected the payload — consensus rejection
+    /// (the block's payload is genuinely invalid: bad state root, structure
+    /// mismatch, etc., reported by reth as `PayloadStatusEnum::Invalid`).
+    /// Distinct from [`Self::ExecutionLayerTransportFailed`], which is a
+    /// local-EL transport hiccup and must NOT be peer-attributed.
     #[error("Execution layer validation failed: {0}")]
     ExecutionLayerFailed(String),
+
+    /// Local reth engine RPC transport failure during payload submission
+    /// (engine HTTP client unreachable, request error, etc.). This is a
+    /// node-level fault — the EL is broken on this node, not the peer's
+    /// block. Classified as `is_node_fault()` so the handler aborts and
+    /// the supervisor restarts the node clean.
+    #[error("Execution layer transport failure: {0}")]
+    ExecutionLayerTransportFailed(String),
 
     /// Recall range validation failed
     #[error("Recall range validation failed: {0}")]
     RecallRangeInvalid(String),
 
-    /// Shadow transaction validation failed
+    /// Shadow transaction validation failed (consensus rejection — the
+    /// peer's payload doesn't match the expected shadow transactions, has
+    /// invalid structure, or carries a treasury mismatch). Construction
+    /// is reserved for genuine consensus mismatches — local DB/mempool/
+    /// snapshot failures during shadow-tx *generation* route through
+    /// [`Self::ShadowTxGenerationFailed`] instead.
     #[error("Shadow transaction validation failed: {0}")]
     ShadowTransactionInvalid(String),
+
+    /// A local computation or lookup inside the shadow-tx generation
+    /// pipeline failed (DB read, mempool tx absent, snapshot derivation,
+    /// ledger-expiry walk, etc.). Classified as `is_internal_failure()`
+    /// so the block stays in cache for retry rather than being
+    /// peer-attributed; NOT a node fault by default — promote to a typed
+    /// node-fault variant once specific deep call sites are audited.
+    #[error("Shadow transaction generation failed: {0}")]
+    ShadowTxGenerationFailed(String),
 
     /// Local reth execution payload never arrived for this block's
     /// `evm_block_hash`. This is a node-level fault (local EL failed to
@@ -686,6 +712,10 @@ impl ValidationError {
             // Local reth never delivered the payload — the EL is broken on
             // this node, not the peer's block. Abort + supervisor restart.
             Self::ExecutionPayloadUnavailable { .. } => true,
+            // Local reth engine RPC transport failure — same rationale as
+            // `ExecutionPayloadUnavailable` (local EL broken, not the
+            // peer's block). Abort + supervisor restart.
+            Self::ExecutionLayerTransportFailed(_) => true,
             // Every current cancellation reason maps to "chain has moved on,
             // discard" (see ValidationCancelReason::is_internal). Delegate so
             // a future retry-plausible reason doesn't silently become a node
@@ -732,7 +762,14 @@ impl ValidationError {
             | Self::ParentBlockMissing { .. } => true,
             // Local reth failure — internal (and a node fault, see
             // `is_node_fault`). Must never be peer-attributed.
-            Self::ExecutionPayloadUnavailable { .. } => true,
+            Self::ExecutionPayloadUnavailable { .. } | Self::ExecutionLayerTransportFailed(_) => {
+                true
+            }
+            // Local computation/lookup failures inside shadow-tx
+            // generation. Internal so the block stays in cache for
+            // retry rather than being misclassified as a consensus
+            // rejection. See `Self::ShadowTxGenerationFailed`.
+            Self::ShadowTxGenerationFailed(_) => true,
             // Everything else is treated as a consensus-level rejection until
             // its construction sites are individually audited.
             _ => false,
@@ -1817,6 +1854,7 @@ pub fn get_recall_range(
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
+    parent_height: u64,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &IrysAddress,
@@ -1857,14 +1895,23 @@ pub fn poa_is_valid(
 
         // Disambiguate at source so the BlockBoundsLookupError variant below
         // only carries genuine local failures (empty index, DB I/O):
-        //  - offset past chain-max for this ledger     → consensus-invalid
-        //  - ledger absent from the latest indexed item → consensus-invalid
+        //  - offset past chain-max for this ledger at parent's height
+        //                                                  → consensus-invalid
+        //  - ledger absent from the parent's indexed item → consensus-invalid
         //    (the chain has no committed data for it yet, or the peer is on
         //    a different fork)
+        //
+        // Anchored on the parent's indexed item (`get_item(parent_height)`)
+        // rather than the local tip (`get_latest_item()`) so that two honest
+        // peers on the same fork produce identical pre-validation outcomes
+        // regardless of how far their local indices have advanced past
+        // `parent_height`. If the parent is too recent to be in the index
+        // yet (in the block tree but not migrated), the pre-check is
+        // skipped and the lookup falls through to `get_block_bounds`.
         let bb = {
             let index = block_index_guard.read();
-            if let Some(latest) = index.get_latest_item() {
-                match latest.ledgers.iter().find(|l| l.ledger == ledger) {
+            if let Some(parent_item) = index.get_item(parent_height) {
+                match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
                     Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
                         return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
                     }
@@ -1976,6 +2023,15 @@ pub fn poa_is_valid(
 /// a local reth failure — can be surfaced as a typed node-fault
 /// (`ValidationError::ExecutionPayloadUnavailable`) instead of being
 /// stringified into `ShadowTransactionInvalid`.
+///
+/// Returns a typed [`ValidationError`] on failure so the caller can
+/// dispatch local/runtime failures to `InternalFailure` and genuine
+/// consensus mismatches (`ShadowTransactionInvalid`) to `Invalid`.
+/// Payload-structure rejections and the actual-vs-expected match are
+/// consensus; downstream lookups inside
+/// [`generate_expected_shadow_transactions`] surface their own typed
+/// errors (eviction races, local DB/mempool failures) for accurate
+/// classification.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
@@ -1988,16 +2044,20 @@ pub async fn shadow_transactions_are_valid(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<()> {
+) -> Result<(), ValidationError> {
+    // Helper: payload-structure rejections are always consensus.
+    fn reject(msg: impl Into<String>) -> ValidationError {
+        ValidationError::ShadowTransactionInvalid(msg.into())
+    }
+
     let ExecutionData { payload, sidecar } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
-        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+        return Err(reject("irys-reth expects that all payloads are of v3 type"));
     };
-    ensure!(
-        payload_v3.withdrawals().is_empty(),
-        "withdrawals must always be empty"
-    );
+    if !payload_v3.withdrawals().is_empty() {
+        return Err(reject("withdrawals must always be empty"));
+    }
 
     // Reject any blob gas usage in the payload
     if payload_v3.blob_gas_used != 0 {
@@ -2007,7 +2067,7 @@ pub async fn shadow_transactions_are_valid(
             payload.blob_gas_used = payload_v3.blob_gas_used,
             "Rejecting block: blob_gas_used must be zero",
         );
-        eyre::bail!("block has non-zero blob_gas_used which is disabled");
+        return Err(reject("block has non-zero blob_gas_used which is disabled"));
     }
     if payload_v3.excess_blob_gas != 0 {
         tracing::debug!(
@@ -2016,7 +2076,9 @@ pub async fn shadow_transactions_are_valid(
             payload.excess_blob_gas = payload_v3.excess_blob_gas,
             "Rejecting block: excess_blob_gas must be zero",
         );
-        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+        return Err(reject(
+            "block has non-zero excess_blob_gas which is disabled",
+        ));
     }
 
     // Reject any block that carries blob sidecars (EIP-4844).
@@ -2030,7 +2092,9 @@ pub async fn shadow_transactions_are_valid(
             block.versioned_hashes_len = versioned_hashes.len(),
             "Rejecting block: EIP-4844 blobs/sidecars are not supported",
         );
-        eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+        return Err(reject(
+            "block contains EIP-4844 blobs/sidecars which are disabled",
+        ));
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
     if let Some(requests) = sidecar.requests()
@@ -2042,7 +2106,9 @@ pub async fn shadow_transactions_are_valid(
             block.versioned_hashes_len = requests.len(),
             "Rejecting block: EIP-7685 requests which are disabled",
         );
-        eyre::bail!("block contains EIP-7685 requests which are disabled");
+        return Err(reject(
+            "block contains EIP-7685 requests which are disabled",
+        ));
     }
     // Note: `requests_hash` may be present even when the requests list is empty.
     // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
@@ -2051,12 +2117,15 @@ pub async fn shadow_transactions_are_valid(
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
     let block_timestamp_sec: u128 = block.timestamp_secs().as_secs().into();
-    ensure!(
-        payload_timestamp == block_timestamp_sec,
-        "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
-    );
+    if payload_timestamp != block_timestamp_sec {
+        return Err(reject(format!(
+            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        )));
+    }
 
-    let evm_block: Block = payload_v3.try_into_block()?;
+    let evm_block: Block = payload_v3
+        .try_into_block()
+        .map_err(|e| reject(format!("payload conversion failed: {e}")))?;
 
     // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
     if evm_block.header.requests_hash.is_some() {
@@ -2065,7 +2134,9 @@ pub async fn shadow_transactions_are_valid(
             block.evm_block_hash = %block.evm_block_hash,
             "Rejecting block: EIP-7685 requests_hash present which is disabled",
         );
-        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
+        return Err(reject(
+            "block contains EIP-7685 requests_hash which is disabled",
+        ));
     }
 
     // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
@@ -2076,15 +2147,18 @@ pub async fn shadow_transactions_are_valid(
                 block.evm_block_hash = %block.evm_block_hash,
                 "Rejecting block: contains EIP-4844 transaction which is disabled",
             );
-            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+            return Err(reject(
+                "block contains EIP-4844 transaction which is disabled",
+            ));
         }
     }
 
-    // 3. Extract shadow transactions from the beginning of the block lazily
+    // 3. Extract shadow transactions from the beginning of the block lazily.
+    // Per-item errors here (signer recovery, miner mismatch, malformed
+    // shadow tx) are payload-level → consensus.
     let txs_slice = &evm_block.body.transactions;
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
-        // Verify signer for each yielded shadow tx (must be the miner)
         let (stx, tx_ref) = res?;
         let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
         ensure!(
@@ -2094,7 +2168,11 @@ pub async fn shadow_transactions_are_valid(
         Ok(stx)
     });
 
-    // 3. Generate expected shadow transactions
+    // 4. Generate expected shadow transactions. This call returns a
+    // typed `ValidationError`; local/runtime failures (eviction races,
+    // DB I/O, etc.) surface as `is_internal_failure` variants and are
+    // propagated unchanged, while peer-attributable structural failures
+    // (e.g. missing publish ledger) surface as `ShadowTransactionInvalid`.
     let expected_txs = generate_expected_shadow_transactions(
         config,
         block_tree_guard,
@@ -2108,8 +2186,9 @@ pub async fn shadow_transactions_are_valid(
     )
     .await?;
 
-    // 4. Validate they match
-    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
+    // 5. Validate they match — any error here is a consensus mismatch.
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
+        .map_err(|e| reject(e.to_string()))?;
 
     Ok(())
 }
@@ -2156,6 +2235,28 @@ fn extract_leading_shadow_txs(
     })
 }
 
+/// Typed error from [`submit_payload_to_reth`]. Distinguishes local EL
+/// transport failures (node fault) from genuine consensus rejections of
+/// the payload, so the caller can dispatch the correct
+/// `ValidationResult` variant instead of bucketing every failure as
+/// `Invalid`.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitPayloadError {
+    /// Local engine-RPC transport failure (HTTP client unreachable, request
+    /// failed mid-flight, etc.). The local EL is broken, not the peer's
+    /// block — classify as node fault.
+    #[error("local reth engine transport failure: {0}")]
+    LocalTransport(String),
+    /// Payload structure rejected before submission (non-V3 payload,
+    /// missing versioned hashes). Consensus rejection.
+    #[error("payload structure invalid: {0}")]
+    PayloadStructure(String),
+    /// Reth's engine returned `PayloadStatusEnum::Invalid` for the payload.
+    /// Consensus rejection — the block is genuinely bad.
+    #[error("reth rejected payload: {0}")]
+    PayloadRejected(String),
+}
+
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(level = "trace", skip_all, err, fields(
@@ -2167,16 +2268,20 @@ pub async fn submit_payload_to_reth(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     execution_data: ExecutionData,
-) -> eyre::Result<()> {
+) -> Result<(), SubmitPayloadError> {
     let ExecutionData { payload, sidecar } = execution_data;
 
     let ExecutionPayload::V3(payload_v3) = payload else {
-        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+        return Err(SubmitPayloadError::PayloadStructure(
+            "irys-reth expects that all payloads are of v3 type".to_string(),
+        ));
     };
 
     let versioned_hashes = sidecar
         .versioned_hashes()
-        .ok_or_eyre("version hashes must be present")?
+        .ok_or_else(|| {
+            SubmitPayloadError::PayloadStructure("version hashes must be present".to_string())
+        })?
         .clone();
 
     // Submit to reth execution layer
@@ -2189,10 +2294,11 @@ pub async fn submit_payload_to_reth(
                 block.previous_block_hash.into(),
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
-            .await?;
+            .await
+            .map_err(|e| SubmitPayloadError::LocalTransport(e.to_string()))?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error));
+                return Err(SubmitPayloadError::PayloadRejected(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
                 tracing::debug!(
@@ -2216,7 +2322,16 @@ pub async fn submit_payload_to_reth(
     Ok(())
 }
 
-/// Generates expected shadow transactions
+/// Generates expected shadow transactions.
+///
+/// Returns a typed [`ValidationError`] on failure: parent/snapshot lookup
+/// races surface as `ParentBlockMissing` (internal, retry-plausible);
+/// peer-supplied structural failures (e.g. missing publish ledger) surface
+/// as `ShadowTransactionInvalid` (consensus rejection); all other local
+/// computation / DB / mempool failures surface as
+/// `ShadowTxGenerationFailed` (internal, not peer-attributed). The
+/// caller's existing `.into()` dispatch handles routing each variant to
+/// the correct `ValidationResult`.
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions(
     config: &Config,
@@ -2228,15 +2343,31 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<Vec<ShadowTransaction>> {
-    // Look up previous block to get EVM hash
+) -> Result<Vec<ShadowTransaction>, ValidationError> {
+    // Helpers: classify common failure shapes.
+    let parent_hash = block.previous_block_hash;
+    let parent_missing = || ValidationError::ParentBlockMissing {
+        block_hash: parent_hash,
+    };
+    fn internal(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTxGenerationFailed(err.to_string())
+    }
+    fn consensus(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTransactionInvalid(err.to_string())
+    }
+
+    // Look up previous block to get EVM hash. Local lookup failures
+    // (DB I/O, parent evicted) → ParentBlockMissing (internal,
+    // retry-plausible); a missing parent at this stage is not a
+    // consensus statement about the block.
     let prev_block = crate::block_tree_service::get_block_header(
         block_tree_guard,
         db,
         block.previous_block_hash,
         false,
-    )?
-    .ok_or_eyre("Previous block not found")?;
+    )
+    .map_err(internal)?
+    .ok_or_else(parent_missing)?;
 
     // Calculate is_epoch_block early since it's needed for multiple checks
     let is_epoch_block = block
@@ -2255,12 +2386,14 @@ async fn generate_expected_shadow_transactions(
     let one_year_txs = transactions.get_ledger_txs(DataLedger::OneYear).to_vec();
     let thirty_day_txs = transactions.get_ledger_txs(DataLedger::ThirtyDay).to_vec();
 
-    // Use pre-fetched publish ledger transactions with proofs from block header
+    // Use pre-fetched publish ledger transactions with proofs from block header.
+    // `extract_data_ledgers` validates peer-supplied structure → consensus.
     let cascade_active = config
         .consensus
         .hardforks
         .is_cascade_active_for_epoch(&parent_epoch_snapshot);
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)?;
+    let (publish_ledger, _submit_ledger) =
+        extract_data_ledgers(block, cascade_active).map_err(consensus)?;
     let publish_ledger_with_txs = PublishLedgerWithTxs {
         txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
         proofs: publish_ledger.proofs.clone(),
@@ -2269,7 +2402,9 @@ async fn generate_expected_shadow_transactions(
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
 
-    // Calculate expired ledger fees for epoch blocks
+    // Calculate expired ledger fees for epoch blocks. The walk reads
+    // locally-cached blocks and mempool state; any failure is local in
+    // nature → `ShadowTxGenerationFailed`.
     let expired_ledger_fees = if is_epoch_block {
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -2283,7 +2418,8 @@ async fn generate_expected_shadow_transactions(
             true, // expect txs to be promoted — return perm fee refund if not
         )
         .in_current_span()
-        .await?;
+        .await
+        .map_err(internal)?;
 
         // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
         let cascade_active = config
@@ -2304,7 +2440,8 @@ async fn generate_expected_shadow_transactions(
                     false, // no promotion for these ledgers
                 )
                 .in_current_span()
-                .await?;
+                .await
+                .map_err(internal)?;
                 result.merge(delta);
             }
         }
@@ -2314,13 +2451,15 @@ async fn generate_expected_shadow_transactions(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
-    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot.
+    // These derive purely from local snapshot state → internal on failure.
     let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
         if is_epoch_block {
             crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
                 &parent_commitment_snapshot,
                 &config.consensus,
-            )?
+            )
+            .map_err(internal)?
         } else {
             Vec::new()
         };
@@ -2328,11 +2467,16 @@ async fn generate_expected_shadow_transactions(
         crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
             &parent_commitment_snapshot,
             &config.consensus,
-        )?
+        )
+        .map_err(internal)?
     } else {
         Vec::new()
     };
 
+    // ShadowTxGenerator::new and its iteration operate on already-loaded
+    // local data (parent block, snapshots, mempool-resolved txs). Any
+    // failure is a local computation issue (arithmetic, invariant
+    // violation) → `ShadowTxGenerationFailed`.
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -2351,25 +2495,25 @@ async fn generate_expected_shadow_transactions(
         &unstake_refund_events,
         &parent_epoch_snapshot,
     )
-    .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
+    .map_err(|e| internal(format!("Failed to create shadow tx generator: {}", e)))?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
-        let metadata = result?;
+        let metadata = result.map_err(internal)?;
         shadow_txs_vec.push(metadata.shadow_tx);
     }
 
     // Get final treasury balance after processing all transactions
     let expected_treasury = shadow_tx_generator.treasury_balance();
 
-    // Validate that the block's treasury matches the expected value
-    ensure!(
-        block.treasury == expected_treasury,
-        "Treasury mismatch: expected {} but found {} at block height {}",
-        expected_treasury,
-        block.treasury,
-        block.height
-    );
+    // Treasury mismatch is a peer-attributable consensus rejection — the
+    // peer's block claims a treasury value we can prove wrong.
+    if block.treasury != expected_treasury {
+        return Err(consensus(format!(
+            "Treasury mismatch: expected {} but found {} at block height {}",
+            expected_treasury, block.treasury, block.height
+        )));
+    }
 
     Ok(shadow_txs_vec)
 }
@@ -4504,9 +4648,15 @@ mod tests {
             "end_chunk_offset should be 9, tx has 9 chunks"
         );
 
+        // Parent-anchored pre-check: the indexed block sits at `height`
+        // (just pushed above), so anchoring on its height lets the
+        // pre-check use the same view of total_chunks the rest of the
+        // test exercises (the chunks the PoA references were committed
+        // by this block).
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            height,
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
@@ -4747,9 +4897,13 @@ mod tests {
             "end_chunk_offset should be 9, tx has 9 chunks"
         );
 
+        // See parent-anchor comment in `poa_test`: use the just-pushed
+        // block's height so the pre-check sees the same `total_chunks`
+        // the rest of the assertions exercise.
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            height,
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
