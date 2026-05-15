@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778841455742,
+  "lastUpdate": 1778842233918,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3715,6 +3715,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "f8c67ab6d7bc17d7030a8a8ee5b6e89f1334be08",
+          "message": "feat(config): replace hardcoded thread defaults with dynamic CPU detection",
+          "timestamp": "2026-05-15T10:21:12Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1242/commits/f8c67ab6d7bc17d7030a8a8ee5b6e89f1334be08"
+        },
+        "date": 1778842232947,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013482,
+            "range": "± 0.00041",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.140808,
+            "range": "± 0.006317",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.312785,
+            "range": "± 0.058853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.685099,
+            "range": "± 0.600567",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.079132,
+            "range": "± 0.000893",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.759772,
+            "range": "± 33.431455",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1010.854253,
+            "range": "± 10.284047",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.123961,
+            "range": "± 0.003596",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1251.183774,
+            "range": "± 20.254337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1628.169337,
+            "range": "± 26.630124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.04006,
+            "range": "± 0.000727",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.799802,
+            "range": "± 0.210175",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.354239,
+            "range": "± 0.414298",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
