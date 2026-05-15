@@ -1,10 +1,13 @@
 //! Read-only inspection of `IrysDataTxHeaders`, `IrysDataTxMetadata`, and
 //! `MigratedBlockHashes` for a specific tx id.
 //!
-//! Usage: inspect_tx <db_path> <tx_id_base58>
+//! Usage: inspect_tx <db_path> <tx_id_base58> [lca_height]
 //!
 //! `<db_path>` is the irys_consensus_data directory (the one containing `mdbx.dat`).
 //! `<tx_id_base58>` is the base58-encoded transaction id.
+//! `[lca_height]` is an optional block height — when provided, the tool also
+//! dumps `MigratedBlockHashes[lca_height]` for cross-referencing against a
+//! known fork point during divergence post-mortems.
 //!
 //! Opens the env in RO mode with `with_exclusive(false)` so it can run alongside
 //! a live node if needed.
@@ -24,13 +27,22 @@ fn main() -> eyre::Result<()> {
     let mut args = std::env::args().skip(1);
     let db_path: PathBuf = args
         .next()
-        .ok_or_else(|| eyre!("usage: inspect_tx <db_path> <tx_id_base58>"))?
+        .ok_or_else(|| eyre!("usage: inspect_tx <db_path> <tx_id_base58> [lca_height]"))?
         .into();
     let tx_id_b58 = args
         .next()
-        .ok_or_else(|| eyre!("usage: inspect_tx <db_path> <tx_id_base58>"))?;
+        .ok_or_else(|| eyre!("usage: inspect_tx <db_path> <tx_id_base58> [lca_height]"))?;
+    let lca_height: Option<u64> = args
+        .next()
+        .map(|s| {
+            s.parse()
+                .with_context(|| format!("parse lca_height {s:?} as u64"))
+        })
+        .transpose()?;
     if args.next().is_some() {
-        return Err(eyre!("usage: inspect_tx <db_path> <tx_id_base58>"));
+        return Err(eyre!(
+            "usage: inspect_tx <db_path> <tx_id_base58> [lca_height]"
+        ));
     }
 
     let tx_bytes = bs58::decode(&tx_id_b58)
@@ -125,22 +137,23 @@ fn main() -> eyre::Result<()> {
         }
     }
 
-    // 4. For context, also dump the LCA height entry
-    let lca_h: u64 = 832972;
-    let lca = tx
-        .get::<MigratedBlockHashes>(lca_h)
-        .context("read MigratedBlockHashes[LCA]")?;
-    println!(
-        "\n[MigratedBlockHashes][LCA={lca_h}] = {}",
-        match lca {
-            Some(h) => format!(
-                "{} (hex 0x{})",
-                bs58::encode(h.as_bytes()).into_string(),
-                hex::encode(h.as_bytes())
-            ),
-            None => "NONE".to_string(),
-        }
-    );
+    // 4. Optional: dump a specific LCA / fork-point height for cross-referencing.
+    if let Some(lca_h) = lca_height {
+        let lca = tx
+            .get::<MigratedBlockHashes>(lca_h)
+            .context("read MigratedBlockHashes[LCA]")?;
+        println!(
+            "\n[MigratedBlockHashes][LCA={lca_h}] = {}",
+            match lca {
+                Some(h) => format!(
+                    "{} (hex 0x{})",
+                    bs58::encode(h.as_bytes()).into_string(),
+                    hex::encode(h.as_bytes())
+                ),
+                None => "NONE".to_string(),
+            }
+        );
+    }
 
     Ok(())
 }
