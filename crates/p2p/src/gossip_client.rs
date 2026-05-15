@@ -23,6 +23,7 @@ use reqwest::{Client, StatusCode};
 use reth::revm::primitives::B256;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, error, instrument, warn};
@@ -45,6 +46,88 @@ fn gossip_base_url(addr: &SocketAddr, version: ProtocolVersion) -> String {
         ProtocolVersion::V1 => format!("http://{}/gossip", addr),
         ProtocolVersion::V2 => format!("http://{}/gossip/v2", addr),
     }
+}
+
+/// Decide whether a failed peer should be re-queued for the next inner round.
+/// `CircuitBreakerOpen` is never re-queued — CB state cannot change inside
+/// one `pull_data_from_network` call (cooldown 30s, inter-round delay 100ms).
+pub(crate) fn should_requeue_peer_after_error(err: &GossipError) -> bool {
+    !matches!(err, GossipError::CircuitBreakerOpen(_))
+}
+
+/// Map a [`GossipDataRequestV2`] to a stable `kind` label for telemetry.
+fn pull_kind_label(req: &GossipDataRequestV2) -> &'static str {
+    match req {
+        GossipDataRequestV2::BlockHeader(_) => "header",
+        GossipDataRequestV2::BlockBody(_) => "body",
+        GossipDataRequestV2::ExecutionPayload(_) => "payload",
+        GossipDataRequestV2::Chunk(_) => "chunk",
+        GossipDataRequestV2::Transaction(_) => "transaction",
+    }
+}
+
+/// Map a [`RejectionReason`] to a stable `reason` label for the pull-failure metric.
+/// Used at the rejection arms in `pull_data_from_network` where every variant is
+/// otherwise wrapped in `PeerNetworkError::FailedToRequestData(...)` and would
+/// collapse to a single label under [`pull_failure_reason`].
+fn pull_rejection_reason(reason: &RejectionReason) -> &'static str {
+    match reason {
+        RejectionReason::HandshakeRequired(_) => "handshake_required",
+        RejectionReason::GossipDisabled => "gossip_disabled",
+        RejectionReason::InvalidData => "invalid_data",
+        RejectionReason::RateLimited => "rate_limited",
+        RejectionReason::UnableToVerifyOrigin => "unable_to_verify_origin",
+        RejectionReason::InvalidCredentials => "invalid_credentials",
+        RejectionReason::ProtocolMismatch => "protocol_mismatch",
+        RejectionReason::UnsupportedProtocolVersion(_) => "unsupported_protocol_version",
+        RejectionReason::UnsupportedFeature => "unsupported_feature",
+    }
+}
+
+/// Map a [`GossipError`] to a stable `reason` label for the pull-failure metric.
+/// Gives finer resolution than [`gossip_error_type`] by unpacking the wrapped
+/// [`PeerNetworkError`] variants we care about for pull diagnostics.
+fn pull_failure_reason(err: &GossipError) -> &'static str {
+    match err {
+        GossipError::CircuitBreakerOpen(_) => "circuit_breaker_open",
+        GossipError::Network(_) => "network",
+        GossipError::InvalidPeer(_) => "invalid_peer",
+        GossipError::Cache(_) => "cache",
+        GossipError::Internal(_) => "internal",
+        GossipError::InvalidData(_) => "invalid_data",
+        GossipError::BlockPool(_) => "block_pool",
+        GossipError::TransactionIsAlreadyHandled => "already_handled",
+        GossipError::CommitmentValidation(_) => "commitment_validation",
+        GossipError::PeerNetwork(inner) => match inner {
+            PeerNetworkError::NoPeersAvailable => "no_peers_available",
+            PeerNetworkError::FailedToRequestData(_) => "failed_to_request_data",
+            PeerNetworkError::UnexpectedData(_) => "unexpected_data",
+            PeerNetworkError::InvalidBlockBody { .. } => "invalid_block_body",
+            _ => "peer_network_other",
+        },
+        GossipError::RateLimited => "rate_limited",
+        GossipError::Advisory(_) => "advisory",
+    }
+}
+
+/// Format a per-peer error breakdown into a deterministic multi-line summary.
+/// Iteration is by `IrysPeerId` key order (`BTreeMap`), so the output is stable
+/// across runs — required for log readability and snapshot tests.
+pub(crate) fn format_pull_failure_summary(
+    data_request: &str,
+    errors_by_peer: &BTreeMap<IrysPeerId, GossipError>,
+) -> String {
+    let summary = errors_by_peer
+        .iter()
+        .map(|(p, e)| format!("  {p}: {e}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Failed to pull {} after trying {} peers:\n{}",
+        data_request,
+        errors_by_peer.len(),
+        summary,
+    )
 }
 
 struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
@@ -1761,6 +1844,35 @@ impl GossipClient {
         }
     }
 
+    /// Build the candidate peer set for a network pull.
+    ///
+    /// Returns up to 5 shuffled peers (filtered to exclude peers whose
+    /// circuit-breaker is open), plus the count of peers excluded by the filter
+    /// (pre-truncate). Filter runs after shuffle so selection stays unbiased,
+    /// and before truncate so the surviving CB-closed set fills the 5 slots.
+    /// Trusted-only callers get the full trusted set; general callers get every
+    /// active+online peer sorted by reputation — capping the pool *before* the
+    /// CB filter would let a cluster of high-score CB-open peers starve the
+    /// pull even when healthy peers are available further down the list.
+    /// Caller must handle the empty-result case (no peers known).
+    pub(crate) fn select_candidates_for_pull(
+        &self,
+        peer_list: &PeerList,
+        use_trusted_peers_only: bool,
+    ) -> (Vec<(IrysPeerId, PeerListItem)>, usize) {
+        let mut peers = if use_trusted_peers_only {
+            peer_list.online_trusted_peers()
+        } else {
+            peer_list.top_active_peers(None, None)
+        };
+        peers.shuffle(&mut rand::thread_rng());
+        let before = peers.len();
+        peers.retain(|(peer_id, _)| self.circuit_breaker.is_available(peer_id));
+        let cb_filtered = before - peers.len();
+        peers.truncate(5);
+        (peers, cb_filtered)
+    }
+
     pub async fn pull_data_from_network<T>(
         &self,
         data_request: GossipDataRequestV2,
@@ -1769,30 +1881,33 @@ impl GossipClient {
         peer_list: &PeerList,
         map_data: impl Fn(GossipDataV2) -> Result<T, PeerNetworkError>,
     ) -> Result<(IrysPeerId, T), PeerNetworkError> {
-        let mut peers = if use_trusted_peers_only {
-            peer_list.online_trusted_peers()
-        } else {
-            // Get the top 10 most active peers
-            peer_list.top_active_peers(Some(10), None)
-        };
-
-        // Shuffle peers to randomize the selection
-        peers.shuffle(&mut rand::thread_rng());
-        // Take random 5
-        peers.truncate(5);
+        let (peers, cb_filtered_count) =
+            self.select_candidates_for_pull(peer_list, use_trusted_peers_only);
+        let kind = pull_kind_label(&data_request);
+        for _ in 0..cb_filtered_count {
+            crate::metrics::record_gossip_pull_failure(kind, "cb_filtered");
+        }
 
         if peers.is_empty() {
+            crate::metrics::record_gossip_pull_failure(kind, "no_peers_available");
             return Err(PeerNetworkError::NoPeersAvailable);
         }
 
         // Try up to DATA_REQUEST_RETRIES rounds across peers; only retry peers on transient errors.
-        let mut last_error = None;
+        // Last error per peer wins: when a peer is re-queued across rounds, each round's
+        // `insert(peer_id, ...)` overwrites the previous error. Intended for the diagnostic
+        // summary in `format_pull_failure_summary` — not a historical record. If you need
+        // per-attempt history, switch to `Vec<(IrysPeerId, GossipError)>` and update the
+        // summary formatter accordingly.
+        let mut errors_by_peer: BTreeMap<IrysPeerId, GossipError> = BTreeMap::new();
 
         // Track peers eligible for retry across rounds (transient failures only)
         let mut retryable_peers = peers.clone();
 
-        // Track if all failures were due to handshake requirements
-        let mut all_failures_were_handshake = true;
+        // Peers that responded HandshakeRequired in any round. After the inner loop
+        // we wait for handshakes to complete and retry these specifically, even
+        // when other peers in the round failed for non-handshake reasons.
+        let mut handshake_retry_candidates: Vec<(IrysPeerId, PeerListItem)> = Vec::new();
         let mut had_any_attempts = false;
 
         for attempt in 1..=DATA_REQUEST_RETRIES {
@@ -1840,16 +1955,30 @@ impl GossipClient {
                                         &peer_id,
                                         ScoreDecreaseReason::BogusData(format!("{err}")),
                                     );
-                                    last_error = Some(GossipError::from(err));
+                                    let synth = GossipError::from(err);
+                                    crate::metrics::record_gossip_pull_failure(
+                                        kind,
+                                        pull_failure_reason(&synth),
+                                    );
+                                    errors_by_peer.insert(peer_id, synth);
                                     // Not retriable: don't include this peer for future rounds
-                                    all_failures_were_handshake = false;
                                 }
                             },
                             None => {
-                                // Peer doesn't have this data; keep for future rounds to allow re-gossip
                                 debug!("Peer {} doesn't have {:?}", peer_id, data_request);
+                                let synth = GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {peer_id} did not have requested data {data_request:?}"
+                                    )),
+                                );
+                                crate::metrics::record_gossip_pull_failure(
+                                    kind,
+                                    pull_failure_reason(&synth),
+                                );
+                                errors_by_peer.insert(peer_id, synth);
+                                // Peer doesn't have this data yet; keep for future rounds in case
+                                // it receives the data via gossip between rounds.
                                 next_retryable.push(peer);
-                                all_failures_were_handshake = false;
                             }
                         }
                     }
@@ -1858,105 +1987,127 @@ impl GossipClient {
                             "Peer {} rejected the request: {:?}: {:?}",
                             peer_id, data_request, reason
                         );
+                        // Capture rejection-specific label before the move into `match reason`.
+                        // Each inner arm wraps its synth error in
+                        // PeerNetworkError::FailedToRequestData, which would otherwise collapse
+                        // every variant to "failed_to_request_data" via pull_failure_reason.
+                        let reason_label = pull_rejection_reason(&reason);
                         match reason {
-                            RejectionReason::HandshakeRequired(reason) => {
+                            RejectionReason::HandshakeRequired(handshake_reason) => {
                                 warn!(
                                     "Data request {:?} requires handshake: {:?}",
-                                    data_request, reason
+                                    data_request, handshake_reason
                                 );
                                 peer_list.initiate_handshake(
                                     peer.1.address.api,
                                     peer.1.address.gossip,
                                     true,
                                 );
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} requires a handshake",
                                         data_request, peer_id
                                     )),
-                                ));
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
+                                // Retry this peer after HANDSHAKE_WAIT_TIMEOUT, regardless of
+                                // other peers' outcomes — its handshake may complete by then.
+                                // Invariant: a peer can appear in `handshake_retry_candidates`
+                                // at most once per call, because this arm moves `peer` and does
+                                // NOT push it to `next_retryable`, so it drops out of
+                                // `retryable_peers` for subsequent rounds. Do not add a
+                                // `next_retryable.push(peer.clone())` here without also
+                                // deduping the candidates Vec — otherwise the post-loop retry
+                                // would send duplicate requests to the same peer.
+                                handshake_retry_candidates.push(peer);
                             }
                             RejectionReason::GossipDisabled => {
                                 peer_list.set_is_online_by_peer_id(&peer.0, false);
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} has gossip disabled",
                                         data_request, peer_id
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::InvalidData => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} reported invalid data",
                                         data_request, peer_id
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::RateLimited => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rate limited the request",
                                         data_request, peer_id
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::UnableToVerifyOrigin => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} unable to verify our origin",
                                         data_request, peer_id
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::InvalidCredentials
                             | RejectionReason::ProtocolMismatch => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rejected with {:?}",
                                         data_request, peer_id, reason
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} doesn't support protocol version {:?}",
                                         data_request, peer_id, unsupported_version
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::UnsupportedFeature => {
-                                last_error = Some(GossipError::from(
+                                let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} doesn't support the requested feature",
                                         data_request, peer_id
                                     )),
-                                ));
-                                all_failures_were_handshake = false;
+                                );
+                                crate::metrics::record_gossip_pull_failure(kind, reason_label);
+                                errors_by_peer.insert(peer_id, synth);
                             }
                         }
                         // Do not retry the same peer on rejection
                     }
                     Err(err) => {
-                        last_error = Some(err);
                         warn!(
                             "Failed to fetch {:?} from peer {:?} (attempt {}/{}): {}",
-                            data_request,
-                            peer_id,
-                            attempt,
-                            DATA_REQUEST_RETRIES,
-                            last_error.as_ref().unwrap()
+                            data_request, peer_id, attempt, DATA_REQUEST_RETRIES, &err
                         );
-                        // Transient failure: keep peer for next round
-                        next_retryable.push(peer);
-                        all_failures_were_handshake = false;
+                        crate::metrics::record_gossip_pull_failure(kind, pull_failure_reason(&err));
+                        let requeue = should_requeue_peer_after_error(&err);
+                        errors_by_peer.insert(peer_id, err);
+                        if requeue {
+                            next_retryable.push(peer);
+                        }
                     }
                 }
             }
@@ -1969,19 +2120,22 @@ impl GossipClient {
             }
         }
 
-        // If all failures were due to handshake requirements, wait for handshake and retry once
-        if had_any_attempts && all_failures_were_handshake && !peers.is_empty() {
+        // If any peer responded HandshakeRequired, wait for handshakes and retry just those.
+        // Runs even when other peers failed for non-handshake reasons — the targeted
+        // retry is cheap (only the handshake-required subset) and catches a peer whose
+        // handshake completes while the rest of the round is busy with unrelated failures.
+        if had_any_attempts && !handshake_retry_candidates.is_empty() {
             debug!(
-                "All attempts failed with HandshakeRequired for {:?}. Waiting {}s for handshake completion...",
+                "{} peer(s) requested handshake for {:?}. Waiting {}s for handshake completion...",
+                handshake_retry_candidates.len(),
                 data_request,
                 HANDSHAKE_WAIT_TIMEOUT.as_secs()
             );
 
             tokio::time::sleep(HANDSHAKE_WAIT_TIMEOUT).await;
 
-            // Retry with original peer set one more time
             let mut retry_futs = futures::stream::FuturesUnordered::new();
-            for peer in &peers {
+            for peer in &handshake_retry_candidates {
                 let gc = self.clone();
                 let dr = data_request.clone();
                 let pl = peer_list;
@@ -1994,8 +2148,8 @@ impl GossipClient {
             }
 
             while let Some((peer_id, result)) = retry_futs.next().await {
-                if let Ok(GossipResponse::Accepted(Some(data))) = result {
-                    match map_data(data) {
+                match result {
+                    Ok(GossipResponse::Accepted(Some(data))) => match map_data(data) {
                         Ok(data) => {
                             debug!(
                                 "Successfully retrieved {:?} from peer {} after handshake wait",
@@ -2012,17 +2166,49 @@ impl GossipClient {
                                 &peer_id,
                                 ScoreDecreaseReason::BogusData(format!("{err}")),
                             );
-                            last_error = Some(GossipError::from(err));
+                            let synth = GossipError::from(err);
+                            crate::metrics::record_gossip_pull_failure(
+                                kind,
+                                pull_failure_reason(&synth),
+                            );
+                            errors_by_peer.insert(peer_id, synth);
                         }
+                    },
+                    Ok(GossipResponse::Accepted(None)) => {
+                        let synth = GossipError::from(PeerNetworkError::FailedToRequestData(
+                            format!(
+                                "Peer {peer_id} did not have requested data {data_request:?} after handshake wait"
+                            ),
+                        ));
+                        crate::metrics::record_gossip_pull_failure(
+                            kind,
+                            pull_failure_reason(&synth),
+                        );
+                        errors_by_peer.insert(peer_id, synth);
+                    }
+                    Ok(GossipResponse::Rejected(reason)) => {
+                        let synth = GossipError::from(PeerNetworkError::FailedToRequestData(
+                            format!(
+                                "Peer {peer_id} rejected {data_request:?} after handshake wait: {reason:?}"
+                            ),
+                        ));
+                        crate::metrics::record_gossip_pull_failure(
+                            kind,
+                            pull_failure_reason(&synth),
+                        );
+                        errors_by_peer.insert(peer_id, synth);
+                    }
+                    Err(err) => {
+                        crate::metrics::record_gossip_pull_failure(kind, pull_failure_reason(&err));
+                        errors_by_peer.insert(peer_id, err);
                     }
                 }
             }
         }
 
-        Err(PeerNetworkError::FailedToRequestData(format!(
-            "Failed to pull {:?} after trying 5 peers: {:?}",
-            data_request, last_error
-        )))
+        Err(PeerNetworkError::FailedToRequestData(
+            format_pull_failure_summary(&format!("{:?}", data_request), &errors_by_peer),
+        ))
     }
 
     pub async fn hydrate_peers_online_status(&self, peer_list: &PeerList) {
@@ -2040,8 +2226,9 @@ impl GossipClient {
                 Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
                     debug!(
                         ?peer_id,
-                        "Circuit breaker open, skipping online status update"
+                        "Circuit breaker open — marking peer offline pending recovery"
                     );
+                    peer_list.set_is_online_by_peer_id(&peer_id, false);
                 }
                 Err(err) => {
                     warn!(
@@ -2920,6 +3107,224 @@ mod tests {
         }
     }
 
+    mod pull_data_from_network_tests {
+        use super::*;
+        use irys_types::IrysPeerId;
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        fn make_test_peer(id_byte: u8) -> (IrysPeerId, irys_types::PeerListItem) {
+            use irys_types::{
+                IrysAddress, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo,
+            };
+            use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+            let addr = IrysAddress::from([id_byte; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            let port: u16 = 9000_u16.saturating_add(u16::from(id_byte));
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port + 1)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            };
+            (peer_id, peer)
+        }
+
+        proptest! {
+            #[test]
+            fn cb_open_peers_excluded_from_candidate_set(
+                cb_open_flags in proptest::collection::vec(any::<bool>(), 1..=10),
+            ) {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime");
+                runtime.block_on(async {
+                    let fixture = TestFixture::new();
+                    let peer_list = irys_domain::PeerList::test_mock()
+                        .expect("test peer list");
+                    let mut expected_available_count: usize = 0;
+                    let mut expected_filtered_count: usize = 0;
+
+                    for (i, is_cb_open) in cb_open_flags.iter().enumerate() {
+                        let id_byte = u8::try_from(i + 1)
+                            .expect("test peer index fits in u8");
+                        let (peer_id, peer) = make_test_peer(id_byte);
+                        peer_list.add_or_update_peer(peer, true);
+                        if *is_cb_open {
+                            // Force CB open: record failures past the testing-config threshold (100).
+                            for _ in 0..100 {
+                                fixture.client.circuit_breaker.record_failure(&peer_id);
+                            }
+                            prop_assert!(
+                                !fixture.client.circuit_breaker.is_available(&peer_id),
+                                "CB should be open for peer {peer_id}"
+                            );
+                            expected_filtered_count += 1;
+                        } else {
+                            expected_available_count += 1;
+                        }
+                    }
+
+                    // use_trusted_peers_only = false: test_mock's NodeConfig has empty
+                    // trusted_peers, so online_trusted_peers() always returns empty.
+                    // The top_active_peers path exercises the same filter logic.
+                    let (candidates, cb_filtered) = fixture
+                        .client
+                        .select_candidates_for_pull(&peer_list, false);
+
+                    for (peer_id, _) in &candidates {
+                        prop_assert!(
+                            fixture.client.circuit_breaker.is_available(peer_id),
+                            "candidate {peer_id} should not have CB open"
+                        );
+                    }
+                    prop_assert!(
+                        candidates.len() <= expected_available_count.min(5),
+                        "candidate count {} exceeds available count {} (capped at 5)",
+                        candidates.len(),
+                        expected_available_count
+                    );
+                    prop_assert_eq!(
+                        cb_filtered,
+                        expected_filtered_count,
+                        "cb_filtered count must match the number of CB-open peers"
+                    );
+                    Ok(())
+                })?;
+            }
+        }
+
+        #[test]
+        fn pull_kind_label_covers_all_variants() {
+            use irys_types::v2::GossipDataRequestV2;
+            use irys_types::{BlockHash, ChunkPathHash, H256};
+            use reth::revm::primitives::B256;
+
+            assert_eq!(
+                pull_kind_label(&GossipDataRequestV2::BlockHeader(BlockHash::zero())),
+                "header"
+            );
+            assert_eq!(
+                pull_kind_label(&GossipDataRequestV2::BlockBody(BlockHash::zero())),
+                "body"
+            );
+            assert_eq!(
+                pull_kind_label(&GossipDataRequestV2::ExecutionPayload(B256::ZERO)),
+                "payload"
+            );
+            assert_eq!(
+                pull_kind_label(&GossipDataRequestV2::Chunk(ChunkPathHash::default())),
+                "chunk"
+            );
+            assert_eq!(
+                pull_kind_label(&GossipDataRequestV2::Transaction(H256::zero())),
+                "transaction"
+            );
+        }
+
+        #[test]
+        fn pull_failure_reason_distinguishes_cb_from_network() {
+            let peer_id = IrysPeerId::from([0x99_u8; 20]);
+            assert_eq!(
+                pull_failure_reason(&GossipError::CircuitBreakerOpen(peer_id)),
+                "circuit_breaker_open"
+            );
+            assert_eq!(
+                pull_failure_reason(&GossipError::Network("conn".to_string())),
+                "network"
+            );
+            assert_eq!(
+                pull_failure_reason(&GossipError::PeerNetwork(
+                    PeerNetworkError::NoPeersAvailable
+                )),
+                "no_peers_available"
+            );
+            assert_eq!(
+                pull_failure_reason(&GossipError::PeerNetwork(
+                    PeerNetworkError::FailedToRequestData("boom".to_string())
+                )),
+                "failed_to_request_data"
+            );
+        }
+
+        #[test]
+        fn record_gossip_pull_failure_does_not_panic() {
+            crate::metrics::record_gossip_pull_failure("body", "circuit_breaker_open");
+            crate::metrics::record_gossip_pull_failure("body", "cb_filtered");
+            crate::metrics::record_gossip_pull_failure("body", "no_peers_available");
+            crate::metrics::record_gossip_pull_failure("header", "network");
+        }
+
+        #[test]
+        fn cb_open_error_is_not_requeued() {
+            let peer_id = IrysPeerId::from([0x42_u8; 20]);
+            let cb_err = GossipError::CircuitBreakerOpen(peer_id);
+            assert!(
+                !should_requeue_peer_after_error(&cb_err),
+                "CB-open errors must not be re-queued for retry"
+            );
+        }
+
+        #[test]
+        fn transient_errors_are_requeued() {
+            let transient = GossipError::Network("conn reset".to_string());
+            assert!(
+                should_requeue_peer_after_error(&transient),
+                "transient errors must be re-queued for retry"
+            );
+        }
+
+        #[test]
+        fn pull_data_from_network_error_format_is_deterministic_per_peer() {
+            let p1 = IrysPeerId::from([0x10_u8; 20]);
+            let p2 = IrysPeerId::from([0x20_u8; 20]);
+            let p3 = IrysPeerId::from([0x30_u8; 20]);
+
+            let mut errors: BTreeMap<IrysPeerId, GossipError> = BTreeMap::new();
+            errors.insert(p1, GossipError::Network("conn refused".to_string()));
+            errors.insert(p2, GossipError::CircuitBreakerOpen(p2));
+            errors.insert(p3, GossipError::Cache("bogus tx".to_string()));
+
+            let msg = format_pull_failure_summary("BlockBody(0x…)", &errors);
+            let lines: Vec<&str> = msg.lines().collect();
+
+            assert_eq!(
+                lines.len(),
+                4,
+                "expected 4 lines (header + 3 peers), got: {msg}"
+            );
+            assert!(lines[0].contains("after trying 3 peers"));
+            // BTreeMap iteration is by key order — p1 < p2 < p3 by byte content.
+            assert!(
+                lines[1].contains(&format!("{p1}")),
+                "first peer line: {}",
+                lines[1]
+            );
+            assert!(
+                lines[2].contains(&format!("{p2}")),
+                "second peer line: {}",
+                lines[2]
+            );
+            assert!(
+                lines[3].contains(&format!("{p3}")),
+                "third peer line: {}",
+                lines[3]
+            );
+            assert!(lines[1].contains("conn refused"));
+            assert!(lines[2].contains("Circuit breaker open"));
+            assert!(lines[3].contains("bogus tx"));
+        }
+    }
+
     mod circuit_breaker_tests {
         use super::*;
         use irys_types::IrysAddress;
@@ -2957,6 +3362,73 @@ mod tests {
                 matches!(err, GossipClientError::CircuitBreakerOpen(_)),
                 "Error should indicate circuit breaker is open, got: {:?}",
                 err
+            );
+        }
+
+        #[tokio::test]
+        async fn hydrate_marks_cb_open_peer_offline() {
+            use irys_types::{
+                IrysAddress, PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo,
+            };
+            use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("peer list");
+            let addr = IrysAddress::from([0x55_u8; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9_500)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9_501)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            };
+            peer_list.add_or_update_peer(peer, true);
+
+            assert!(
+                peer_list.get_peer(&peer_id).expect("peer exists").is_online,
+                "pre-condition: peer is online"
+            );
+
+            for _ in 0..100 {
+                fixture.client.circuit_breaker.record_failure(&peer_id);
+            }
+            assert!(!fixture.client.circuit_breaker.is_available(&peer_id));
+
+            fixture.client.hydrate_peers_online_status(&peer_list).await;
+
+            assert!(
+                !peer_list.get_peer(&peer_id).expect("peer exists").is_online,
+                "post-condition: peer with CB-open is marked offline by hydrate"
+            );
+
+            // Recovery invariant 1: the offline peer must remain enumerable so
+            // subsequent hydrate cycles can revisit it. `hydrate_peers_online_status`
+            // iterates `all_peers_sorted_by_score()`, which includes offline peers;
+            // if a future change switched it to an online-only enumeration, an
+            // offline+CB-open peer would be stuck.
+            let all_peers = peer_list.all_peers_sorted_by_score();
+            assert!(
+                all_peers.iter().any(|(pid, _)| pid == &peer_id),
+                "offline peer must stay enumerable for hydrate to revisit it"
+            );
+
+            // Recovery invariant 2: once the CB recovers (here simulated by an
+            // explicit `record_success`; in production this happens after the
+            // 30 s cooldown allows a half-open trial that succeeds), the peer
+            // is eligible again so the next hydrate call's `check_health` will
+            // actually attempt the request instead of short-circuiting.
+            fixture.client.circuit_breaker.record_success(&peer_id);
+            assert!(
+                fixture.client.circuit_breaker.is_available(&peer_id),
+                "after CB recovery, peer must be eligible for re-onlining"
             );
         }
     }

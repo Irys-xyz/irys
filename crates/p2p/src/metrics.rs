@@ -8,6 +8,7 @@ irys_utils::define_metrics! {
     histogram PROCESSING_MS("irys.gossip.chunks.processing_duration_ms", "Gossip chunk processing latency in milliseconds", vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]);
     counter INBOUND_ERRORS("irys.gossip.inbound.errors_total", "Gossip inbound processing errors by type");
     counter OUTBOUND_ERRORS("irys.gossip.outbound.errors_total", "Gossip outbound send errors by type");
+    counter PULL_FAILURES("irys.gossip.pull.failures_total", "Gossip pull failures by request kind and reason");
 }
 
 pub(crate) fn record_gossip_chunk_received(bytes: u64) {
@@ -31,4 +32,11 @@ pub(crate) fn record_gossip_inbound_error(error_type: &'static str, is_advisory:
 
 pub(crate) fn record_gossip_outbound_error(error_type: &'static str) {
     OUTBOUND_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
+}
+
+pub(crate) fn record_gossip_pull_failure(kind: &'static str, reason: &'static str) {
+    PULL_FAILURES.add(
+        1,
+        &[KeyValue::new("kind", kind), KeyValue::new("reason", reason)],
+    );
 }
