@@ -2192,9 +2192,12 @@ impl GossipClient {
                                 "Peer {peer_id} rejected {data_request:?} after handshake wait: {reason:?}"
                             ),
                         ));
+                        // Use pull_rejection_reason to preserve the rejection taxonomy;
+                        // synth is wrapped in PeerNetworkError::FailedToRequestData and would
+                        // collapse to "failed_to_request_data" under pull_failure_reason.
                         crate::metrics::record_gossip_pull_failure(
                             kind,
-                            pull_failure_reason(&synth),
+                            pull_rejection_reason(&reason),
                         );
                         errors_by_peer.insert(peer_id, synth);
                     }
