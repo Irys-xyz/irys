@@ -106,6 +106,31 @@ fn is_parent_ready(parent_state: &ChainState) -> bool {
     )
 }
 
+/// Pick the cancellation reason for the child given the base reason and the
+/// parent's last-observed `ValidationResult`.
+///
+/// When the parent's last result was an `InternalFailure`, the parent itself
+/// stalled in `ValidationScheduled` because of a local/runtime issue on this
+/// node — so the child's "give up waiting" cancel is a cascade of that local
+/// issue, not a child-block defect. Promote the reason to
+/// `ParentInternalFailure` so the dispatch lands on
+/// `ValidationResult::InternalFailure` (block parks in cache for retry)
+/// instead of `ValidationResult::Invalid` (block discarded as consensus-bad).
+///
+/// For any other parent result (or no observed update), the base reason is
+/// the correct one: `Invalid` parent → discarding the child is appropriate;
+/// `Valid` parent → the cancel is genuinely the child's own height issue;
+/// `None` → no parent updates observed, no evidence of local cascade.
+fn cancel_reason_for_parent_state(
+    base: ValidationCancelReason,
+    parent_last_result: Option<&ValidationResult>,
+) -> ValidationCancelReason {
+    match parent_last_result {
+        Some(ValidationResult::InternalFailure(_)) => ValidationCancelReason::ParentInternalFailure,
+        _ => base,
+    }
+}
+
 impl BlockValidationTask {
     pub(super) fn new(
         sealed_block: Arc<SealedBlock>,
@@ -276,6 +301,19 @@ impl BlockValidationTask {
                     // discard" via the non-internal `ParentMissing` reason,
                     // distinct from the retry-plausible prevalidation-time
                     // `ValidationError::ParentBlockMissing`.
+                    //
+                    // NOTE: this site deliberately does NOT consult
+                    // `parent_last_validation_result` (no
+                    // `cancel_reason_for_parent_state` upgrade applied).
+                    // Even if a prior `InternalFailure` update was observed,
+                    // the parent being absent from the tree right now means
+                    // pruning has already advanced past it — at which point
+                    // the chain has moved on and retry can no longer help.
+                    // The closure also doesn't have access to the wait loop's
+                    // local history, so plumbing the upgrade here would
+                    // require widening the closure signature for a case that
+                    // wouldn't benefit from it. Keep `ParentMissing` as the
+                    // discard outcome.
                     error!(
                         block.parent_hash = %parent_hash,
                         block.hash = %self.sealed_block.header().block_hash,
@@ -313,6 +351,14 @@ impl BlockValidationTask {
             .service_senders
             .subscribe_block_state_updates();
 
+        // Track the last observed `ValidationResult` for the parent block.
+        // Used at cancellation sites below: when the parent stalled in
+        // `ValidationScheduled` because of a local `InternalFailure`, we
+        // upgrade the child's cancel reason to `ParentInternalFailure` so
+        // the child stays in cache for retry instead of being discarded
+        // as consensus-bad. See `cancel_reason_for_parent_state`.
+        let mut parent_last_validation_result: Option<ValidationResult> = None;
+
         loop {
             // 1. Check cancellation condition first
             if self.should_exit_due_to_height_diff() {
@@ -331,7 +377,10 @@ impl BlockValidationTask {
                     );
                 }
                 metrics::record_validation_cancellation("height_diff");
-                return ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference);
+                return ParentValidationResult::Cancelled(cancel_reason_for_parent_state(
+                    ValidationCancelReason::HeightDifference,
+                    parent_last_validation_result.as_ref(),
+                ));
             }
 
             match extra_checks(parent_hash) {
@@ -348,7 +397,14 @@ impl BlockValidationTask {
             debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
             match block_state_rx.recv().await {
                 Ok(event) if event.block_hash == parent_hash => {
-                    // Parent state changed, loop back to check
+                    // Parent state changed; remember the broadcast's
+                    // `validation_result` so a subsequent cancel can decide
+                    // whether the parent's stall was a local cascade
+                    // (InternalFailure → upgrade to ParentInternalFailure)
+                    // or a genuine "chain moved on" case (Valid/Invalid →
+                    // keep the base cancel reason).
+                    parent_last_validation_result = Some(event.validation_result);
+                    // Loop back to check readiness.
                     continue;
                 }
                 Ok(_) => {
@@ -365,6 +421,10 @@ impl BlockValidationTask {
                 // pressure while validation is slow). The poll loop's
                 // initial `parent_chain_state_check` re-reads the block-tree
                 // state directly, so any missed event will be picked up.
+                // Note: `parent_last_validation_result` may go stale across
+                // a lagged window, but staleness only weakens the upgrade
+                // (we may miss a now-resolved InternalFailure update) — it
+                // can never falsely promote a non-InternalFailure cancel.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(
                         block.parent_hash = %parent_hash,
@@ -382,9 +442,10 @@ impl BlockValidationTask {
                         "Block state channel closed while waiting for parent"
                     );
                     metrics::record_validation_cancellation("channel_closed");
-                    return ParentValidationResult::Cancelled(
+                    return ParentValidationResult::Cancelled(cancel_reason_for_parent_state(
                         ValidationCancelReason::ChannelClosed,
-                    );
+                        parent_last_validation_result.as_ref(),
+                    ));
                 }
             }
         }
@@ -1183,5 +1244,93 @@ mod merge_stage_results_tests {
             ValidationResult::Invalid(ValidationError::Other(_)) => {}
             other => panic!("expected Invalid(Other(..)), got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod cancel_reason_for_parent_state_tests {
+    //! Tests for the cancel-reason upgrade helper.
+    //!
+    //! The helper promotes the base cancel reason to `ParentInternalFailure`
+    //! IFF the parent's last observed `ValidationResult` was an
+    //! `InternalFailure`. In every other case the base reason passes through.
+    //! This locks in that the upgrade fires for the intended cascade scenario
+    //! and never falsely escalates a "chain moved on" cancel.
+    use super::*;
+    use crate::block_validation::ValidationError;
+    use irys_types::H256;
+    use rstest::rstest;
+
+    fn valid() -> ValidationResult {
+        ValidationResult::Valid
+    }
+
+    fn invalid_result() -> ValidationResult {
+        ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
+            "consensus mismatch".to_string(),
+        ))
+    }
+
+    fn internal_failure() -> ValidationResult {
+        // ParentBlockMissing is an eviction-race InternalFailure — soft,
+        // representative of the cascade we want to propagate.
+        ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        }
+        .into()
+    }
+
+    #[rstest]
+    #[case::height_diff_internal_failure_upgrades(
+        ValidationCancelReason::HeightDifference,
+        Some(internal_failure()),
+        ValidationCancelReason::ParentInternalFailure
+    )]
+    #[case::height_diff_valid_parent_passes_through(
+        ValidationCancelReason::HeightDifference,
+        Some(valid()),
+        ValidationCancelReason::HeightDifference
+    )]
+    #[case::height_diff_invalid_parent_passes_through(
+        ValidationCancelReason::HeightDifference,
+        Some(invalid_result()),
+        ValidationCancelReason::HeightDifference
+    )]
+    #[case::height_diff_no_history_passes_through(
+        ValidationCancelReason::HeightDifference,
+        None,
+        ValidationCancelReason::HeightDifference
+    )]
+    #[case::channel_closed_internal_failure_upgrades(
+        ValidationCancelReason::ChannelClosed,
+        Some(internal_failure()),
+        ValidationCancelReason::ParentInternalFailure
+    )]
+    #[case::channel_closed_valid_parent_passes_through(
+        ValidationCancelReason::ChannelClosed,
+        Some(valid()),
+        ValidationCancelReason::ChannelClosed
+    )]
+    #[case::channel_closed_invalid_parent_passes_through(
+        ValidationCancelReason::ChannelClosed,
+        Some(invalid_result()),
+        ValidationCancelReason::ChannelClosed
+    )]
+    #[case::channel_closed_no_history_passes_through(
+        ValidationCancelReason::ChannelClosed,
+        None,
+        ValidationCancelReason::ChannelClosed
+    )]
+    fn cancel_reason_dispatch(
+        #[case] base: ValidationCancelReason,
+        #[case] parent_last: Option<ValidationResult>,
+        #[case] expected: ValidationCancelReason,
+    ) {
+        let got = cancel_reason_for_parent_state(base, parent_last.as_ref());
+        assert_eq!(
+            got, expected,
+            "base={:?}, parent_last={:?} → expected {:?}, got {:?}",
+            base, parent_last, expected, got,
+        );
     }
 }
