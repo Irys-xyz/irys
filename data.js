@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778784664366,
+  "lastUpdate": 1778840405098,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3499,6 +3499,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "acbf85f92f7b611c001caec3169f51645baafdd1",
+          "message": "fix(p2p): break body-pull circuit-breaker cascade (#1412)\n\n* fix(p2p): break body-pull circuit-breaker cascade\n\n* fix(debug-utils): add bs58/hex deps and satisfy clippy for inspect_tx\n\n* fix(p2p, debug-utils): address review feedback\n\n* fix(debug-utils): tidy inspect_tx docs and reject extra CLI args\n\n* fix(debug-utils): make lca_height an optional CLI arg in inspect_tx\n\nReplace the hardcoded `lca_h: u64 = 832972` (an incident-specific block\nheight from the divergence post-mortem) with an optional third CLI arg.\nThe LCA-dump section is skipped when omitted, so the tool remains useful\non unrelated DBs without producing misleading `LCA = NONE` output.\n\n* docs(p2p): document pull-loop invariants and assert CB recovery in hydrate test\n\nPost-review clarifications to the rewritten `pull_data_from_network`:\n\n- Restore the re-gossip rationale on the `None =>` arm (the peer is kept\n  for future rounds because gossip may deliver the data between attempts).\n- Document the at-most-once invariant for `handshake_retry_candidates`:\n  the arm moves `peer` and does not push to `next_retryable`, so a peer\n  appears in the post-loop retry at most once per call. Note what would\n  break if someone added a `next_retryable.push(peer.clone())` there.\n- Note that `errors_by_peer` overwrites on re-insert (last error per peer\n  wins) — intended for the failure summary, not historical record.\n\nExpand `hydrate_marks_cb_open_peer_offline` with two recovery invariants:\nthe offline peer remains enumerable via `all_peers_sorted_by_score`, and\nafter `record_success` clears the CB, `is_available` returns true so the\nnext hydrate cycle's `check_health` will actually attempt the request\ninstead of short-circuiting.\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-05-15T11:06:59+01:00",
+          "tree_id": "e2a271cb16ed4fec20ce686289abacf98e59a851",
+          "url": "https://github.com/Irys-xyz/irys/commit/acbf85f92f7b611c001caec3169f51645baafdd1"
+        },
+        "date": 1778840404096,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015155,
+            "range": "± 0.002311",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15386,
+            "range": "± 0.064055",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.577134,
+            "range": "± 0.160424",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.452055,
+            "range": "± 0.457771",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083357,
+            "range": "± 0.00098",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 842.419363,
+            "range": "± 12.6734",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1082.243239,
+            "range": "± 29.443693",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.138647,
+            "range": "± 0.008162",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1387.864123,
+            "range": "± 93.5051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1681.489089,
+            "range": "± 141.449351",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.098857,
+            "range": "± 0.023671",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 234.165697,
+            "range": "± 13.440736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.015324,
+            "range": "± 2.887973",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
