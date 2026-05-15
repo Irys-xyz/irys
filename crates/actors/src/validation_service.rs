@@ -36,6 +36,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
     time::Duration,
@@ -575,51 +576,68 @@ impl ValidationService {
     /// Report a block's validation result to the block tree service.
     /// Returns `true` on success. On send failure, logs an error and returns `false`.
     ///
-    /// PANICS on node-fault delivery failure: if the channel send fails AND the
-    /// unsent payload is an `InternalFailure` classified as a node fault, this
-    /// function panics immediately rather than returning `false`. The block-tree
-    /// handler (`on_block_validation_finished`) is the normal site that converts
-    /// node faults into a panic+SIGINT for graceful shutdown; if delivery to it
-    /// fails we must not silently swallow the fault and keep running. The panic
-    /// is caught by `setup_panic_hook` in `crates/chain/src/main.rs`, which
-    /// raises SIGINT for graceful shutdown. Same never-mislabel rationale as
-    /// the block-tree node-fault site — see `ValidationError::is_node_fault`.
+    /// PANICS on node-fault delivery failure: see [`send_validation_result_via`].
     fn send_validation_result(
         &self,
         block_hash: BlockHash,
         validation_result: ValidationResult,
     ) -> bool {
-        if let Err(e) = self.inner.service_senders.block_tree.send_traced(
-            crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash,
-                validation_result,
-            },
-        ) {
-            error!(
-                block.hash = %block_hash,
-                custom.error = ?e,
-                "Failed to send validation result to block tree service"
-            );
-            // Recover the unsent payload from the send error so we can inspect
-            // its classification. If it's a node fault, the block-tree handler
-            // would have panicked on receipt — replicate that here so a dropped
-            // channel can't mask a node fault into silent continuation.
-            let (unsent_msg, _span) = e.0.into_parts();
-            if let crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                validation_result: ValidationResult::InternalFailure(inner),
-                ..
-            } = &unsent_msg
-                && inner.is_node_fault()
-            {
-                panic!(
-                    "validation result delivery failed for node-fault block (block={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
-                    block_hash, inner
-                );
-            }
-            return false;
-        }
-        true
+        send_validation_result_via(
+            &self.inner.service_senders.block_tree,
+            block_hash,
+            validation_result,
+        )
     }
+}
+
+/// Free-function form of `ValidationService::send_validation_result` so the
+/// delivery-failure behaviour can be unit-tested without standing up a full
+/// `ValidationService`.
+///
+/// PANICS on node-fault delivery failure: if the channel send fails AND the
+/// unsent payload is an `InternalFailure` classified as a node fault, this
+/// function panics immediately rather than returning `false`. The block-tree
+/// handler (`on_block_validation_finished`) is the normal site that converts
+/// node faults into a panic+SIGINT for graceful shutdown; if delivery to it
+/// fails we must not silently swallow the fault and keep running. The panic
+/// is caught by `setup_panic_hook` in `crates/chain/src/main.rs`, which
+/// raises SIGINT for graceful shutdown. Same never-mislabel rationale as
+/// the block-tree node-fault site — see `ValidationError::is_node_fault`.
+fn send_validation_result_via(
+    block_tree_sender: &UnboundedSender<Traced<crate::block_tree_service::BlockTreeServiceMessage>>,
+    block_hash: BlockHash,
+    validation_result: ValidationResult,
+) -> bool {
+    if let Err(e) = block_tree_sender.send_traced(
+        crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+            block_hash,
+            validation_result,
+        },
+    ) {
+        error!(
+            block.hash = %block_hash,
+            custom.error = ?e,
+            "Failed to send validation result to block tree service"
+        );
+        // Recover the unsent payload from the send error so we can inspect
+        // its classification. If it's a node fault, the block-tree handler
+        // would have panicked on receipt — replicate that here so a dropped
+        // channel can't mask a node fault into silent continuation.
+        let (unsent_msg, _span) = e.0.into_parts();
+        if let crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+            validation_result: ValidationResult::InternalFailure(inner),
+            ..
+        } = &unsent_msg
+            && inner.is_node_fault()
+        {
+            panic!(
+                "validation result delivery failed for node-fault block (block={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
+                block_hash, inner
+            );
+        }
+        return false;
+    }
+    true
 }
 
 impl ValidationServiceInner {
@@ -954,6 +972,91 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no fast-forward steps should be emitted for an invalid batch"
+        );
+    }
+
+    /// On send failure, a node-fault `InternalFailure` payload must trigger a
+    /// local panic so the supervisor restarts the node — the block-tree
+    /// handler would have panicked on receipt and we must not silently swallow
+    /// the fault when the channel is dead. See `ValidationError::is_node_fault`.
+    #[test]
+    #[should_panic(expected = "validation result delivery failed for node-fault block")]
+    fn send_validation_result_panics_on_node_fault_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        // Drop the receiver so the send fails.
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(1);
+        // TaskPanicked routes through `From<ValidationError>` to
+        // `ValidationResult::InternalFailure` and is classified as a node fault
+        // (verifier thread crashed).
+        let node_fault: ValidationResult = ValidationError::TaskPanicked {
+            task: "concurrent_validation".to_string(),
+            details: "boom".to_string(),
+        }
+        .into();
+        assert!(
+            matches!(&node_fault, ValidationResult::InternalFailure(inner) if inner.is_node_fault()),
+            "precondition: TaskPanicked must classify as node-fault InternalFailure"
+        );
+
+        let _ = super::send_validation_result_via(&tx, block_hash, node_fault);
+    }
+
+    /// A non-node-fault `InternalFailure` (e.g. shadow-tx generation hit a
+    /// mempool race) must NOT panic on delivery failure — these are soft
+    /// retry-plausible failures, and the recovery path is leaving the block
+    /// in cache for re-evaluation rather than crashing the node.
+    #[test]
+    fn send_validation_result_returns_false_for_soft_internal_failure_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(2);
+        // ShadowTxGenerationFailed is `is_internal_failure() = true` but
+        // `is_node_fault() = false` — a soft local failure.
+        let soft_internal: ValidationResult =
+            ValidationError::ShadowTxGenerationFailed("snapshot evicted".to_string()).into();
+        assert!(
+            matches!(&soft_internal, ValidationResult::InternalFailure(inner) if !inner.is_node_fault()),
+            "precondition: ShadowTxGenerationFailed must classify as non-node-fault InternalFailure"
+        );
+
+        let result = super::send_validation_result_via(&tx, block_hash, soft_internal);
+        assert!(
+            !result,
+            "send failure must surface as `false`, not panic, for soft internal failures"
+        );
+    }
+
+    /// A consensus-rejection (`Invalid`) payload must NOT panic on delivery
+    /// failure — the block is genuinely bad, the dropped channel is a
+    /// liveness/shutdown concern handled separately by the caller.
+    #[test]
+    fn send_validation_result_returns_false_for_invalid_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(3);
+        // ShadowTransactionInvalid is `is_internal_failure() = false` →
+        // routes to `ValidationResult::Invalid`.
+        let invalid: ValidationResult =
+            ValidationError::ShadowTransactionInvalid("bad tx".to_string()).into();
+        assert!(
+            matches!(&invalid, ValidationResult::Invalid(_)),
+            "precondition: ShadowTransactionInvalid must classify as Invalid"
+        );
+
+        let result = super::send_validation_result_via(&tx, block_hash, invalid);
+        assert!(
+            !result,
+            "send failure must surface as `false`, not panic, for consensus rejections"
         );
     }
 

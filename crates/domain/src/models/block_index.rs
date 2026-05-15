@@ -253,7 +253,10 @@ impl BlockIndex {
                 latest_height + 1
             );
 
-            // Binary search for the block containing this chunk offset
+            // Binary search for the block containing this chunk offset.
+            // A probed block lacking this ledger entirely (introduced at a
+            // later height) is equivalent to total_chunks = 0; the search
+            // just moves right.
             let (block_height, found_item) = {
                 let mut lo: u64 = 0;
                 let mut hi: u64 = latest_height;
@@ -266,9 +269,7 @@ impl BlockIndex {
                         .iter()
                         .find(|l| l.ledger == ledger)
                         .map(|l| l.total_chunks)
-                        .ok_or_else(|| {
-                            eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, mid)
-                        })?;
+                        .unwrap_or(0);
                     if chunk_offset_val < total {
                         hi = mid;
                     } else {
@@ -280,20 +281,19 @@ impl BlockIndex {
                 (lo, item)
             };
 
-            let previous_item = block_index_item_by_height(tx, &block_height.saturating_sub(1))?;
-
-            let prev_total = previous_item
-                .ledgers
-                .iter()
-                .find(|l| l.ledger == ledger)
-                .map(|l| l.total_chunks)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        block_height.saturating_sub(1)
-                    )
-                })?;
+            // prev_total is 0 for genesis (no predecessor) and for blocks
+            // that first introduce this ledger (predecessor has no entry).
+            let prev_total = if block_height == 0 {
+                0
+            } else {
+                let previous_item = block_index_item_by_height(tx, &(block_height - 1))?;
+                previous_item
+                    .ledgers
+                    .iter()
+                    .find(|l| l.ledger == ledger)
+                    .map(|l| l.total_chunks)
+                    .unwrap_or(0)
+            };
 
             let found_ledger = found_item
                 .ledgers
@@ -355,7 +355,9 @@ impl BlockIndex {
 
             // Binary search bounded by anchor_height (inclusive) so this never
             // consults blocks beyond the parent — fork-deterministic regardless
-            // of how far the local tip has advanced.
+            // of how far the local tip has advanced. A probed block lacking
+            // this ledger entirely (ledger introduced at a later height) is
+            // equivalent to total_chunks = 0; the search just moves right.
             let (block_height, found_item) = {
                 let mut lo: u64 = 0;
                 let mut hi: u64 = anchor_height;
@@ -368,9 +370,7 @@ impl BlockIndex {
                         .iter()
                         .find(|l| l.ledger == ledger)
                         .map(|l| l.total_chunks)
-                        .ok_or_else(|| {
-                            eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, mid)
-                        })?;
+                        .unwrap_or(0);
                     if chunk_offset_val < total {
                         hi = mid;
                     } else {
@@ -382,20 +382,19 @@ impl BlockIndex {
                 (lo, item)
             };
 
-            let previous_item = block_index_item_by_height(tx, &block_height.saturating_sub(1))?;
-
-            let prev_total = previous_item
-                .ledgers
-                .iter()
-                .find(|l| l.ledger == ledger)
-                .map(|l| l.total_chunks)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        block_height.saturating_sub(1)
-                    )
-                })?;
+            // prev_total is 0 for genesis (no predecessor) and for blocks that
+            // first introduce this ledger (predecessor has no entry).
+            let prev_total = if block_height == 0 {
+                0
+            } else {
+                let previous_item = block_index_item_by_height(tx, &(block_height - 1))?;
+                previous_item
+                    .ledgers
+                    .iter()
+                    .find(|l| l.ledger == ledger)
+                    .map(|l| l.total_chunks)
+                    .unwrap_or(0)
+            };
 
             let found_ledger = found_item
                 .ledgers
@@ -796,6 +795,283 @@ mod tests {
             bytes[32], EXPECTED_NUM_LEDGERS,
             "num_ledgers byte does not match EXPECTED_NUM_LEDGERS constant"
         );
+    }
+
+    /// Builds a `BlockIndex` with both Publish and Submit ledgers present in
+    /// every block, with linearly increasing chunk counts. Heights `0..n`:
+    /// Publish total_chunks = (h+1)*100, Submit total_chunks = (h+1)*1000.
+    fn build_uniform_index(n: u64) -> (irys_testing_utils::tempfile::TempDir, BlockIndex) {
+        // Note: NOT calling `.with_tracing()` here — it installs a panic hook
+        // that aborts the test process on `assert!`/`expect` failure, which
+        // would prevent independent reporting of expected-fail edge cases.
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("get_block_bounds_at_height_uniform")
+            .build();
+        let db = create_test_db(&tmp_dir.path().join("db"));
+        let block_index = BlockIndex::new_for_testing(db);
+
+        for h in 0..n {
+            let item = BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: 2,
+                ledgers: vec![
+                    LedgerIndexItem {
+                        total_chunks: (h + 1) * 100,
+                        tx_root: H256::random(),
+                        ledger: DataLedger::Publish,
+                    },
+                    LedgerIndexItem {
+                        total_chunks: (h + 1) * 1000,
+                        tx_root: H256::random(),
+                        ledger: DataLedger::Submit,
+                    },
+                ],
+            };
+            block_index.push_item(&item, h).unwrap();
+        }
+        (tmp_dir, block_index)
+    }
+
+    /// Builds a `BlockIndex` where the Publish ledger is introduced at
+    /// `publish_introduction_height`. Blocks below that height carry only the
+    /// Submit ledger; blocks at and above carry both.
+    ///
+    /// Submit total_chunks grows by +100 per block from genesis.
+    /// Publish total_chunks grows by +50 per block starting at introduction.
+    fn build_index_with_late_publish(
+        n: u64,
+        publish_introduction_height: u64,
+    ) -> (
+        irys_testing_utils::tempfile::TempDir,
+        BlockIndex,
+        Vec<BlockIndexItem>,
+    ) {
+        // Note: NOT calling `.with_tracing()` here — see uniform helper.
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("get_block_bounds_at_height_late_publish")
+            .build();
+        let db = create_test_db(&tmp_dir.path().join("db"));
+        let block_index = BlockIndex::new_for_testing(db);
+
+        let mut items = Vec::with_capacity(n as usize);
+        for h in 0..n {
+            let submit_total = (h + 1) * 100;
+            let mut ledgers = vec![LedgerIndexItem {
+                total_chunks: submit_total,
+                tx_root: H256::random(),
+                ledger: DataLedger::Submit,
+            }];
+            if h >= publish_introduction_height {
+                let publish_total = (h - publish_introduction_height + 1) * 50;
+                ledgers.push(LedgerIndexItem {
+                    total_chunks: publish_total,
+                    tx_root: H256::random(),
+                    ledger: DataLedger::Publish,
+                });
+            }
+            let item = BlockIndexItem {
+                block_hash: H256::random(),
+                num_ledgers: ledgers.len() as u8,
+                ledgers,
+            };
+            block_index.push_item(&item, h).unwrap();
+            items.push(item);
+        }
+        (tmp_dir, block_index, items)
+    }
+
+    /// Basic correctness: when `anchor_height == latest_height`, the anchored
+    /// variant must agree with `get_block_bounds` across a range of offsets and
+    /// both ledgers.
+    #[test]
+    fn get_block_bounds_at_height_matches_get_block_bounds_when_anchor_is_latest()
+    -> eyre::Result<()> {
+        let (_tmp, block_index) = build_uniform_index(5);
+        let latest = block_index.latest_height();
+        assert_eq!(latest, 4);
+
+        let cases = [
+            (DataLedger::Publish, 0_u64),
+            (DataLedger::Publish, 50),
+            (DataLedger::Publish, 100),
+            (DataLedger::Publish, 250),
+            (DataLedger::Publish, 499),
+            (DataLedger::Submit, 0),
+            (DataLedger::Submit, 999),
+            (DataLedger::Submit, 1500),
+            (DataLedger::Submit, 4999),
+        ];
+
+        for (ledger, offset) in cases {
+            let unanchored =
+                block_index.get_block_bounds(ledger, LedgerChunkOffset::from(offset))?;
+            let anchored = block_index.get_block_bounds_at_height(
+                ledger,
+                LedgerChunkOffset::from(offset),
+                latest,
+            )?;
+            assert_eq!(
+                anchored, unanchored,
+                "anchored vs unanchored differ at ledger={:?} offset={}",
+                ledger, offset
+            );
+        }
+        Ok(())
+    }
+
+    /// `anchor_height < latest_height` must restrict the search to the prefix
+    /// `[0, anchor_height]` and return historical bounds for offsets contained
+    /// within that prefix.
+    #[test]
+    fn get_block_bounds_at_height_returns_historical_bounds_for_lower_anchor() -> eyre::Result<()> {
+        let (_tmp, block_index) = build_uniform_index(5);
+        assert_eq!(block_index.latest_height(), 4);
+
+        // At anchor=2, Publish totals are: h0=100, h1=200, h2=300. Querying
+        // offset 150 must resolve to block 1 (covers [100, 200)).
+        let bounds = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(150),
+            2,
+        )?;
+        assert_eq!(bounds.height, 1);
+        assert_eq!(bounds.start_chunk_offset, 100);
+        assert_eq!(bounds.end_chunk_offset, 200);
+        assert_eq!(bounds.ledger, DataLedger::Publish);
+
+        // Offsets at or beyond anchor's max must error (offset 300 == anchor_max).
+        let err = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(300),
+            2,
+        );
+        assert!(
+            err.is_err(),
+            "offset at anchor's max should be rejected (exclusive upper bound)"
+        );
+
+        // Offset beyond anchor's max but within latest's range must still error
+        // — anchored variant must NOT see those blocks.
+        let err = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(350),
+            2,
+        );
+        assert!(
+            err.is_err(),
+            "offset beyond anchor's max must be rejected even if within latest's range"
+        );
+
+        Ok(())
+    }
+
+    /// Edge case (2): when the binary search lands on the block that FIRST
+    /// introduces the target ledger, the predecessor has no entry for that
+    /// ledger. The current code's `ok_or_else` on `prev_total` should treat
+    /// this as `prev_total = 0` (the ledger's chunk count before introduction
+    /// was, by definition, zero).
+    ///
+    /// In the index built here, Publish is first introduced at height 3 with
+    /// total_chunks=50. Querying Publish offset 25 anchored at h=3 should
+    /// resolve to `BlockBounds { height: 3, start: 0, end: 50, .. }`.
+    #[test]
+    fn get_block_bounds_at_height_handles_ledger_introduced_post_genesis() -> eyre::Result<()> {
+        let (_tmp, block_index, items) = build_index_with_late_publish(5, 3);
+
+        let bounds = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(25),
+            3,
+        )?;
+
+        assert_eq!(bounds.height, 3);
+        assert_eq!(bounds.ledger, DataLedger::Publish);
+        assert_eq!(
+            bounds.start_chunk_offset, 0,
+            "first-introducing block must report prev_total = 0"
+        );
+        assert_eq!(bounds.end_chunk_offset, 50);
+        assert_eq!(
+            bounds.tx_root,
+            items[3]
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == DataLedger::Publish)
+                .unwrap()
+                .tx_root
+        );
+        Ok(())
+    }
+
+    /// Edge case (1): the binary search must tolerate probing heights below
+    /// where the target ledger was introduced. Probed blocks without the
+    /// ledger should be treated as `total_chunks = 0` (move right), not
+    /// surface an error.
+    ///
+    /// Index here introduces Publish at height 2. Anchored at h=4 and querying
+    /// Publish offset 25, the binary search starts with lo=0, hi=4 and probes
+    /// mid=2 (Publish=50, descend left); then lo=0, hi=2 and probes mid=1
+    /// (no Publish ledger) — this is the descent-below-introduction case.
+    #[test]
+    fn get_block_bounds_at_height_handles_search_descending_below_ledger_introduction()
+    -> eyre::Result<()> {
+        let (_tmp, block_index, _items) = build_index_with_late_publish(5, 2);
+
+        let result = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(25),
+            4,
+        );
+
+        let bounds = result.expect(
+            "binary search descending past ledger-introduction height must not error; \
+             missing ledger should be treated as total_chunks = 0",
+        );
+        // Publish is introduced at h=2 with total=50, so offset 25 lives in
+        // block 2 with start=0, end=50.
+        assert_eq!(bounds.height, 2);
+        assert_eq!(bounds.start_chunk_offset, 0);
+        assert_eq!(bounds.end_chunk_offset, 50);
+        assert_eq!(bounds.ledger, DataLedger::Publish);
+        Ok(())
+    }
+
+    /// Edge case at genesis (height 0): `saturating_sub(1)` makes the
+    /// "previous" lookup land on the found block itself. The implementation
+    /// must still report `prev_total = 0` for the genesis block, not
+    /// `prev_total == found_ledger.total_chunks` (which would collapse the
+    /// bounds to an empty range).
+    #[test]
+    fn get_block_bounds_at_height_handles_genesis_offset() -> eyre::Result<()> {
+        let (_tmp, block_index) = build_uniform_index(3);
+
+        // Publish at h=0: total_chunks = 100. Offset 25 must resolve to
+        // block 0 with start=0, end=100.
+        let bounds = block_index.get_block_bounds_at_height(
+            DataLedger::Publish,
+            LedgerChunkOffset::from(25),
+            2,
+        )?;
+
+        assert_eq!(bounds.height, 0);
+        assert_eq!(bounds.ledger, DataLedger::Publish);
+        assert_eq!(
+            bounds.start_chunk_offset, 0,
+            "genesis block must report prev_total = 0 (saturating_sub(1) collides with self)"
+        );
+        assert_eq!(bounds.end_chunk_offset, 100);
+
+        // Same for Submit.
+        let bounds = block_index.get_block_bounds_at_height(
+            DataLedger::Submit,
+            LedgerChunkOffset::from(500),
+            2,
+        )?;
+        assert_eq!(bounds.height, 0);
+        assert_eq!(bounds.start_chunk_offset, 0);
+        assert_eq!(bounds.end_chunk_offset, 1000);
+
+        Ok(())
     }
 
     #[test]

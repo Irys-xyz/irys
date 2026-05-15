@@ -1841,6 +1841,76 @@ mod prevalidation_error_classification_tests {
         );
         assert!(shadow_soft.is_internal_failure());
     }
+
+    /// `ShadowTxNodeFault` is the hard-fault sibling of `ShadowTxGenerationFailed`.
+    /// Both route to `InternalFailure` (validity unknown), but only the node-fault
+    /// variant must preserve `is_node_fault() == true` on the wrapped inner error
+    /// so the `InternalFailureError::is_node_fault()` accessor — used by the
+    /// validation-result handler to trigger panic+restart — fires for genuine
+    /// local DB corruption and does NOT fire for soft retryable failures.
+    #[test]
+    fn shadow_tx_node_fault_roundtrip_preserves_classification() {
+        // Hard local fault: round-trip must land in InternalFailure AND the
+        // wrapped error must still classify as a node fault.
+        let hard = ValidationError::ShadowTxNodeFault("mdbx".to_string());
+        assert!(
+            hard.is_node_fault(),
+            "ShadowTxNodeFault must be a node fault"
+        );
+        assert!(
+            hard.is_internal_failure(),
+            "node-fault must also be internal-failure (strict subset)",
+        );
+        let hard_result: ValidationResult = hard.into();
+        match hard_result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "inner InternalFailureError must preserve is_node_fault() = true \
+                     so the handler triggers panic+restart on a corrupt MDBX read",
+                );
+                assert!(
+                    matches!(inner.err(), ValidationError::ShadowTxNodeFault(_)),
+                    "wrapped variant must remain ShadowTxNodeFault, got {:?}",
+                    inner.err(),
+                );
+            }
+            other => panic!(
+                "ShadowTxNodeFault must round-trip to InternalFailure, got {:?}",
+                other
+            ),
+        }
+
+        // Soft local failure: round-trip must land in InternalFailure but the
+        // wrapped error must NOT classify as a node fault — this is the
+        // distinction that prevents soft retryable failures (missing mempool
+        // tx, snapshot arithmetic) from triggering the node-restart path.
+        let soft = ValidationError::ShadowTxGenerationFailed("mempool tx absent".to_string());
+        assert!(
+            !soft.is_node_fault(),
+            "ShadowTxGenerationFailed must NOT be a node fault",
+        );
+        assert!(soft.is_internal_failure());
+        let soft_result: ValidationResult = soft.into();
+        match soft_result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "inner InternalFailureError must report is_node_fault() = false \
+                     so a soft shadow-tx generation failure does not trigger restart",
+                );
+                assert!(
+                    matches!(inner.err(), ValidationError::ShadowTxGenerationFailed(_)),
+                    "wrapped variant must remain ShadowTxGenerationFailed, got {:?}",
+                    inner.err(),
+                );
+            }
+            other => panic!(
+                "ShadowTxGenerationFailed must round-trip to InternalFailure, got {:?}",
+                other
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

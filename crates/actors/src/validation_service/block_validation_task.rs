@@ -91,6 +91,21 @@ impl Ord for BlockValidationTask {
     }
 }
 
+/// Check if the parent is ready for this block to be reported.
+///
+/// Parent validation must be fully complete before the child is reported,
+/// so `Validated(Unknown)` / `Validated(ValidationScheduled)` are deliberately
+/// excluded — these states match the `InTreePendingValidation` boundary in
+/// `block_status_provider`, meaning the parent is in the tree but not yet validated.
+fn is_parent_ready(parent_state: &ChainState) -> bool {
+    matches!(
+        parent_state,
+        ChainState::Onchain
+            | ChainState::Validated(BlockState::ValidBlock)
+            | ChainState::NotOnchain(BlockState::ValidBlock)
+    )
+}
+
 impl BlockValidationTask {
     pub(super) fn new(
         sealed_block: Arc<SealedBlock>,
@@ -271,7 +286,7 @@ impl BlockValidationTask {
                         ValidationCancelReason::ParentMissing,
                     ))
                 }
-                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                Some(parent_state) if is_parent_ready(&parent_state) => {
                     debug!("Parent validation complete");
                     ControlFlow::Break(ParentValidationResult::Ready)
                 }
@@ -396,21 +411,6 @@ impl BlockValidationTask {
         block_tree
             .get_block_and_status(parent_hash)
             .map(|(_header, state)| *state)
-    }
-
-    /// Check if the parent is ready for this block to be reported.
-    ///
-    /// Parent validation must be fully complete before the child is reported,
-    /// so `Validated(Unknown)` / `Validated(ValidationScheduled)` are deliberately
-    /// excluded — these states match the `InTreePendingValidation` boundary in
-    /// `block_status_provider`, meaning the parent is in the tree but not yet validated.
-    fn is_parent_ready(&self, parent_state: &ChainState) -> bool {
-        matches!(
-            parent_state,
-            ChainState::Onchain
-                | ChainState::Validated(BlockState::ValidBlock)
-                | ChainState::NotOnchain(BlockState::ValidBlock)
-        )
     }
 
     /// Perform block validation
@@ -935,5 +935,46 @@ impl BlockValidationTask {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod is_parent_ready_tests {
+    //! Boundary tests for `is_parent_ready`.
+    //!
+    //! The predicate was tightened from `Validated(_)` to
+    //! `Validated(BlockState::ValidBlock)` only so children whose parent is in
+    //! `Validated(Unknown)` or `Validated(ValidationScheduled)` continue to wait.
+    //! These tests lock in that boundary so a future refactor cannot
+    //! accidentally re-broaden it.
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::onchain(ChainState::Onchain, true)]
+    #[case::validated_valid_block(ChainState::Validated(BlockState::ValidBlock), true)]
+    #[case::not_onchain_valid_block(ChainState::NotOnchain(BlockState::ValidBlock), true)]
+    // Regression targets: prior buggy `Validated(_)` match accepted these.
+    #[case::validated_unknown(ChainState::Validated(BlockState::Unknown), false)]
+    #[case::validated_validation_scheduled(
+        ChainState::Validated(BlockState::ValidationScheduled),
+        false
+    )]
+    #[case::not_onchain_unknown(ChainState::NotOnchain(BlockState::Unknown), false)]
+    #[case::not_onchain_validation_scheduled(
+        ChainState::NotOnchain(BlockState::ValidationScheduled),
+        false
+    )]
+    fn is_parent_ready_chain_state_dispatch(
+        #[case] parent_state: ChainState,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            is_parent_ready(&parent_state),
+            expected,
+            "is_parent_ready({:?}) should be {}",
+            parent_state,
+            expected
+        );
     }
 }
