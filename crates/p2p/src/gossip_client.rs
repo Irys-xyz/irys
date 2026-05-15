@@ -1894,6 +1894,11 @@ impl GossipClient {
         }
 
         // Try up to DATA_REQUEST_RETRIES rounds across peers; only retry peers on transient errors.
+        // Last error per peer wins: when a peer is re-queued across rounds, each round's
+        // `insert(peer_id, ...)` overwrites the previous error. Intended for the diagnostic
+        // summary in `format_pull_failure_summary` — not a historical record. If you need
+        // per-attempt history, switch to `Vec<(IrysPeerId, GossipError)>` and update the
+        // summary formatter accordingly.
         let mut errors_by_peer: BTreeMap<IrysPeerId, GossipError> = BTreeMap::new();
 
         // Track peers eligible for retry across rounds (transient failures only)
@@ -1971,6 +1976,8 @@ impl GossipClient {
                                     pull_failure_reason(&synth),
                                 );
                                 errors_by_peer.insert(peer_id, synth);
+                                // Peer doesn't have this data yet; keep for future rounds in case
+                                // it receives the data via gossip between rounds.
                                 next_retryable.push(peer);
                             }
                         }
@@ -2006,6 +2013,13 @@ impl GossipClient {
                                 errors_by_peer.insert(peer_id, synth);
                                 // Retry this peer after HANDSHAKE_WAIT_TIMEOUT, regardless of
                                 // other peers' outcomes — its handshake may complete by then.
+                                // Invariant: a peer can appear in `handshake_retry_candidates`
+                                // at most once per call, because this arm moves `peer` and does
+                                // NOT push it to `next_retryable`, so it drops out of
+                                // `retryable_peers` for subsequent rounds. Do not add a
+                                // `next_retryable.push(peer.clone())` here without also
+                                // deduping the candidates Vec — otherwise the post-loop retry
+                                // would send duplicate requests to the same peer.
                                 handshake_retry_candidates.push(peer);
                             }
                             RejectionReason::GossipDisabled => {
@@ -3393,6 +3407,28 @@ mod tests {
             assert!(
                 !peer_list.get_peer(&peer_id).expect("peer exists").is_online,
                 "post-condition: peer with CB-open is marked offline by hydrate"
+            );
+
+            // Recovery invariant 1: the offline peer must remain enumerable so
+            // subsequent hydrate cycles can revisit it. `hydrate_peers_online_status`
+            // iterates `all_peers_sorted_by_score()`, which includes offline peers;
+            // if a future change switched it to an online-only enumeration, an
+            // offline+CB-open peer would be stuck.
+            let all_peers = peer_list.all_peers_sorted_by_score();
+            assert!(
+                all_peers.iter().any(|(pid, _)| pid == &peer_id),
+                "offline peer must stay enumerable for hydrate to revisit it"
+            );
+
+            // Recovery invariant 2: once the CB recovers (here simulated by an
+            // explicit `record_success`; in production this happens after the
+            // 30 s cooldown allows a half-open trial that succeeds), the peer
+            // is eligible again so the next hydrate call's `check_health` will
+            // actually attempt the request instead of short-circuiting.
+            fixture.client.circuit_breaker.record_success(&peer_id);
+            assert!(
+                fixture.client.circuit_breaker.is_available(&peer_id),
+                "after CB recovery, peer must be eligible for re-onlining"
             );
         }
     }
