@@ -906,10 +906,6 @@ impl BlockValidationTask {
             }
             _ => {
                 tracing::debug!("Consensus validation failed, not submitting to reth");
-                // Prefer the first explicit Invalid — a consensus rejection is
-                // the strongest signal even if another concurrent task surfaced
-                // an InternalFailure. If only InternalFailures, propagate the
-                // first one so the block is not falsely marked invalid.
                 let stage_results = [
                     &recall_result,
                     &poa_result,
@@ -918,24 +914,63 @@ impl BlockValidationTask {
                     &commitment_ordering_result,
                     &data_txs_result,
                 ];
-                if let Some(invalid) = stage_results.iter().find_map(|r| match r {
-                    ValidationResult::Invalid(e) => Some(e.clone()),
-                    _ => None,
-                }) {
-                    ValidationResult::Invalid(invalid)
-                } else if let Some(internal) = stage_results.iter().find_map(|r| match r {
-                    ValidationResult::InternalFailure(inner) => Some(inner.clone()),
-                    _ => None,
-                }) {
-                    ValidationResult::InternalFailure(internal)
-                } else {
-                    // No failure surfaced from any task yet we're in the
-                    // failure branch — defensive fallback.
-                    ValidationError::Other("consensus validation failed".to_string()).into()
-                }
+                merge_stage_results(&stage_results)
             }
         }
     }
+}
+
+/// Merge concurrent stage results into a single `ValidationResult` using a
+/// three-tier priority ordering:
+///
+/// 1. **Node-fault `InternalFailure` wins first.** Variants whose
+///    `is_node_fault()` is true (e.g. `TaskPanicked`,
+///    `ExecutionPayloadUnavailable`, `ExecutionLayerTransportFailed`,
+///    `ShadowTxNodeFault`) signal a broken local node. Surfacing these is
+///    SAFETY-CRITICAL: the block-pool's `is_node_fault()` check is what
+///    triggers panic + supervisor restart. If we let an `Invalid` from a
+///    sibling stage win, the block would be reported as a consensus rejection
+///    and the panic+SIGINT invariant would silently break at exactly the
+///    scenario where it matters most.
+/// 2. **`Invalid` next.** A consensus rejection is the strongest signal among
+///    non-fault outcomes — peer attribution / block discard is correct.
+/// 3. **Soft `InternalFailure` last.** Eviction-race variants
+///    (`ParentBlockMissing`, `Parent*SnapshotMissing`) classify as
+///    internal-failure but not node-fault; the block parks in cache for a
+///    later retry.
+///
+/// Order within each tier is the input array order so the priority is
+/// deterministic.
+fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult {
+    // Tier 1: node-fault InternalFailure must win over Invalid so the
+    // supervisor restarts the node.
+    if let Some(node_fault) = stage_results.iter().find_map(|r| match r {
+        ValidationResult::InternalFailure(inner) if inner.is_node_fault() => Some(inner.clone()),
+        _ => None,
+    }) {
+        return ValidationResult::InternalFailure(node_fault);
+    }
+
+    // Tier 2: consensus rejection.
+    if let Some(invalid) = stage_results.iter().find_map(|r| match r {
+        ValidationResult::Invalid(e) => Some(e.clone()),
+        _ => None,
+    }) {
+        return ValidationResult::Invalid(invalid);
+    }
+
+    // Tier 3: remaining (soft) InternalFailure — block parks in cache for
+    // retry, no peer attribution.
+    if let Some(internal) = stage_results.iter().find_map(|r| match r {
+        ValidationResult::InternalFailure(inner) => Some(inner.clone()),
+        _ => None,
+    }) {
+        return ValidationResult::InternalFailure(internal);
+    }
+
+    // No failure surfaced from any task yet we're in the failure branch —
+    // defensive fallback.
+    ValidationError::Other("consensus validation failed".to_string()).into()
 }
 
 #[cfg(test)]
@@ -976,5 +1011,182 @@ mod is_parent_ready_tests {
             parent_state,
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod merge_stage_results_tests {
+    //! Tests for the three-tier `merge_stage_results` priority ordering.
+    //!
+    //! The merger is SAFETY-CRITICAL: a node-fault `InternalFailure` must win
+    //! over a sibling stage's `Invalid` so that block-pool dispatch hits the
+    //! `is_node_fault()` panic+SIGINT path. Misclassifying a node fault as
+    //! `Invalid` would silently park a broken node and discard the block.
+    use super::*;
+    use crate::block_validation::ValidationError;
+    use irys_types::H256;
+    use rstest::rstest;
+
+    /// Consensus rejection — used for `Invalid` cases.
+    fn invalid() -> ValidationResult {
+        ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
+            "consensus mismatch".to_string(),
+        ))
+    }
+
+    /// Node-fault `InternalFailure` — must trigger supervisor restart.
+    fn node_fault_internal() -> ValidationResult {
+        ValidationError::TaskPanicked {
+            task: "poa".to_string(),
+            details: "verifier thread panicked".to_string(),
+        }
+        .into()
+    }
+
+    /// Soft (eviction-race) `InternalFailure` — block parks in cache for
+    /// retry, no peer attribution, no node restart.
+    fn soft_internal() -> ValidationResult {
+        ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        }
+        .into()
+    }
+
+    /// Sanity-check the fixtures — the merger's correctness depends on
+    /// `is_node_fault()` discriminating these construction paths.
+    #[test]
+    fn fixtures_classify_correctly() {
+        let ValidationResult::InternalFailure(inner) = node_fault_internal() else {
+            panic!("node_fault_internal() must produce InternalFailure");
+        };
+        assert!(
+            inner.is_node_fault(),
+            "TaskPanicked must classify as a node fault"
+        );
+
+        let ValidationResult::InternalFailure(inner) = soft_internal() else {
+            panic!("soft_internal() must produce InternalFailure");
+        };
+        assert!(
+            !inner.is_node_fault(),
+            "ParentBlockMissing must NOT classify as a node fault"
+        );
+    }
+
+    /// A node-fault `InternalFailure` must win over `Invalid` regardless of
+    /// position in the input array. This is the regression target for the
+    /// pre-fix bug where the first `Invalid` was returned and the node-fault
+    /// was discarded.
+    #[rstest]
+    #[case::node_fault_first(
+        vec![node_fault_internal(), invalid(), ValidationResult::Valid, ValidationResult::Valid]
+    )]
+    #[case::invalid_first(
+        vec![invalid(), node_fault_internal(), ValidationResult::Valid, ValidationResult::Valid]
+    )]
+    #[case::valid_then_invalid_then_node_fault(
+        vec![
+            ValidationResult::Valid,
+            invalid(),
+            ValidationResult::Valid,
+            node_fault_internal(),
+            ValidationResult::Valid,
+            ValidationResult::Valid,
+        ]
+    )]
+    #[case::mixed_with_soft_internal(
+        vec![
+            invalid(),
+            soft_internal(),
+            node_fault_internal(),
+            ValidationResult::Valid,
+        ]
+    )]
+    fn node_fault_internal_failure_wins_over_invalid(#[case] results: Vec<ValidationResult>) {
+        let refs: Vec<&ValidationResult> = results.iter().collect();
+        match merge_stage_results(&refs) {
+            ValidationResult::InternalFailure(inner) => assert!(
+                inner.is_node_fault(),
+                "expected node-fault InternalFailure, got soft InternalFailure: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected InternalFailure(node-fault), got {:?}", other),
+        }
+    }
+
+    /// In the absence of any node-fault InternalFailure, a consensus rejection
+    /// (`Invalid`) wins over a soft `InternalFailure`. This locks in the
+    /// pre-existing behavior (peer-attributable bad block beats local
+    /// eviction race).
+    #[test]
+    fn invalid_wins_over_soft_internal_failure() {
+        let results = [
+            ValidationResult::Valid,
+            soft_internal(),
+            invalid(),
+            ValidationResult::Valid,
+        ];
+        let refs: Vec<&ValidationResult> = results.iter().collect();
+        match merge_stage_results(&refs) {
+            ValidationResult::Invalid(_) => {}
+            other => panic!("expected Invalid, got {:?}", other),
+        }
+    }
+
+    /// Two `Invalid` results with no `InternalFailure` of any kind: merger
+    /// returns `Invalid` (regression target for the existing behavior).
+    #[test]
+    fn two_invalids_no_internal_failure_returns_invalid() {
+        let results = [
+            ValidationResult::Valid,
+            invalid(),
+            ValidationResult::Valid,
+            invalid(),
+            ValidationResult::Valid,
+            ValidationResult::Valid,
+        ];
+        let refs: Vec<&ValidationResult> = results.iter().collect();
+        match merge_stage_results(&refs) {
+            ValidationResult::Invalid(_) => {}
+            other => panic!("expected Invalid, got {:?}", other),
+        }
+    }
+
+    /// Only soft `InternalFailure`s and `Valid`s — merger returns the soft
+    /// failure so the block parks in cache for retry.
+    #[test]
+    fn only_soft_internal_failure_returns_internal_failure() {
+        let results = [
+            ValidationResult::Valid,
+            soft_internal(),
+            ValidationResult::Valid,
+        ];
+        let refs: Vec<&ValidationResult> = results.iter().collect();
+        match merge_stage_results(&refs) {
+            ValidationResult::InternalFailure(inner) => assert!(
+                !inner.is_node_fault(),
+                "expected soft InternalFailure, got node-fault: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected InternalFailure(soft), got {:?}", other),
+        }
+    }
+
+    /// All-`Valid` input is never produced by the call site (the merger only
+    /// runs in the consensus-failure branch), but the defensive fallback must
+    /// still produce a sensible `Invalid` rather than panicking or returning
+    /// `Valid`.
+    #[test]
+    fn all_valid_returns_defensive_fallback() {
+        let results = [
+            ValidationResult::Valid,
+            ValidationResult::Valid,
+            ValidationResult::Valid,
+        ];
+        let refs: Vec<&ValidationResult> = results.iter().collect();
+        match merge_stage_results(&refs) {
+            ValidationResult::Invalid(ValidationError::Other(_)) => {}
+            other => panic!("expected Invalid(Other(..)), got {:?}", other),
+        }
     }
 }
