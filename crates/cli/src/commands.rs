@@ -123,7 +123,7 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
 /// `base_directory/.irys_genesis.json`. Genesis blocks are deterministic per
 /// chain, so a byte mismatch means the data dir belongs to a different
 /// network than the config — labelling the archive with the config's
-/// chain_id would mis-stamp the snapshot.
+/// chain_id would incorrectly stamp the snapshot.
 fn verified_chain_id_for_export(
     node_config: &NodeConfig,
     data_dir: &std::path::Path,
