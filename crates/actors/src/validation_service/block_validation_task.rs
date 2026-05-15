@@ -31,8 +31,9 @@ use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio::task::AbortHandle;
 use tracing::{Instrument as _, debug, error, warn};
 
 /// Result of waiting for parent validation to complete
@@ -163,7 +164,17 @@ impl BlockValidationTask {
         let wait_for_parent_validation = self
             .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
             .boxed();
-        let validate_block = self.validate_block().boxed();
+        // Shared slot for the blocking PoA task's abort handle. When the
+        // outer `select` below picks the "wait_for_parent_validation won"
+        // (cancel) branch, `validate_block` is dropped — but the inner
+        // `spawn_blocking` PoA JoinHandle would otherwise be detached:
+        // panics on it get swallowed (never reaching the `TaskPanicked` /
+        // node-fault dispatch) and the work keeps consuming a blocking-pool
+        // thread. We thread an `Arc<OnceLock<AbortHandle>>` into
+        // `validate_block` so it can publish the handle as soon as the
+        // PoA task is spawned, then `.abort()` it from the cancel arm.
+        let poa_abort_slot: Arc<OnceLock<AbortHandle>> = Arc::new(OnceLock::new());
+        let validate_block = self.validate_block(Arc::clone(&poa_abort_slot)).boxed();
         let final_result = match futures::future::select(validate_block, wait_for_parent_validation)
             .await
         {
@@ -184,6 +195,18 @@ impl BlockValidationTask {
                 }
             }
             futures::future::Either::Right((parent_wait_outcome, _validation_task)) => {
+                // Cancel path: abort the detached blocking PoA task (if it
+                // was already spawned). `abort()` is fire-and-forget — the
+                // spawn_blocking thread won't actually be interrupted
+                // mid-computation, but its JoinHandle is no longer leaked
+                // and any panic surfaces via the JoinError that the inner
+                // awaiter would observe (the awaiter itself is being
+                // dropped here, but we've at least stopped detaching the
+                // handle; if the task hasn't started yet, `abort()` does
+                // prevent it from running).
+                if let Some(handle) = poa_abort_slot.get() {
+                    handle.abort();
+                }
                 match parent_wait_outcome {
                     ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
                     // exit_if_block_is_too_old only returns `Ready` from
@@ -375,19 +398,24 @@ impl BlockValidationTask {
             .map(|(_header, state)| *state)
     }
 
-    /// Check if the parent is ready for this block to be reported
+    /// Check if the parent is ready for this block to be reported.
+    ///
+    /// Parent validation must be fully complete before the child is reported,
+    /// so `Validated(Unknown)` / `Validated(ValidationScheduled)` are deliberately
+    /// excluded — these states match the `InTreePendingValidation` boundary in
+    /// `block_status_provider`, meaning the parent is in the tree but not yet validated.
     fn is_parent_ready(&self, parent_state: &ChainState) -> bool {
         matches!(
             parent_state,
             ChainState::Onchain
-                | ChainState::Validated(_)
+                | ChainState::Validated(BlockState::ValidBlock)
                 | ChainState::NotOnchain(BlockState::ValidBlock)
         )
     }
 
     /// Perform block validation
     #[tracing::instrument(skip_all, fields(block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height))]
-    async fn validate_block(&self) -> ValidationResult {
+    async fn validate_block(&self, poa_abort_slot: Arc<OnceLock<AbortHandle>>) -> ValidationResult {
         let skip_vdf_validation = self.skip_vdf_validation;
         let poa = self.sealed_block.header().poa.clone();
         let miner_address = self.sealed_block.header().miner_address;
@@ -454,7 +482,7 @@ impl BlockValidationTask {
                     block.hash = %block_hash,
                     block.height = %block_height
                 );
-                tokio::task::spawn_blocking(move || {
+                let handle = tokio::task::spawn_blocking(move || {
                     let _guard = poa_span.enter();
                     if skip_vdf_validation {
                         debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
@@ -469,7 +497,14 @@ impl BlockValidationTask {
                         &miner_address,
                     )
                     .map(|()| ValidationResult::Valid)
-                })
+                });
+                // Publish the abort handle so the outer `execute_concurrent`
+                // select-cancel arm can `.abort()` this blocking task
+                // instead of detaching it (panics would otherwise be
+                // swallowed and the blocking-pool thread would keep running
+                // until the PoA work finished naturally).
+                let _ = poa_abort_slot.set(handle.abort_handle());
+                handle
             }
         };
 
@@ -636,13 +671,18 @@ impl BlockValidationTask {
                     );
                 }
             }
-            // Remaining errors out of `shadow_transactions_are_valid` are
-            // genuine consensus mismatches (bad payload type, EIP-4844
-            // blobs present, shadow-tx mismatch, etc.) — keep stringified
-            // as `ShadowTransactionInvalid` for consensus rejection.
-            result
-                .map(|()| execution_data)
-                .map_err(|e| ValidationError::ShadowTransactionInvalid(e.to_string()))
+            // `shadow_transactions_are_valid` already returns a typed
+            // `ValidationError`. Propagate it unchanged so the outer
+            // dispatcher (`err.into()`) routes each variant correctly:
+            // internal-failure variants (`ParentBlockMissing`,
+            // `ShadowTxGenerationFailed`, `ShadowTxNodeFault`,
+            // `ParentEpochSnapshotMissing`, etc.) reach `InternalFailure`
+            // (and node-fault variants trigger abort+restart), while
+            // genuine consensus mismatches (`ShadowTransactionInvalid`)
+            // reach `Invalid`. Wrapping every error here as
+            // `ShadowTransactionInvalid` would erase that classification
+            // and peer-attribute local DB/snapshot failures.
+            result.map(|()| execution_data)
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;

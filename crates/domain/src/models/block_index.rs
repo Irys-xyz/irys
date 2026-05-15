@@ -317,6 +317,108 @@ impl BlockIndex {
         })
     }
 
+    /// Like [`Self::get_block_bounds`], but anchored on `anchor_height`
+    /// instead of the latest indexed height. This produces fork-deterministic
+    /// results across peers regardless of how far their local indices have
+    /// advanced past the anchor — the caller (e.g. PoA pre-validation) passes
+    /// the block's parent height so two honest peers on the same fork compute
+    /// identical bounds.
+    pub fn get_block_bounds_at_height(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        anchor_height: u64,
+    ) -> eyre::Result<BlockBounds> {
+        self.db.view_eyre(|tx| {
+            let anchor_item = block_index_item_by_height(tx, &anchor_height)?;
+            let anchor_max = anchor_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .map(|l| l.total_chunks)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        anchor_height
+                    )
+                })?;
+
+            let chunk_offset_val: u64 = chunk_offset.into();
+            eyre::ensure!(
+                chunk_offset_val < anchor_max,
+                "chunk_offset {} beyond anchor block's max_chunk_offset {}, anchor height {}",
+                chunk_offset_val,
+                anchor_max,
+                anchor_height
+            );
+
+            // Binary search bounded by anchor_height (inclusive) so this never
+            // consults blocks beyond the parent — fork-deterministic regardless
+            // of how far the local tip has advanced.
+            let (block_height, found_item) = {
+                let mut lo: u64 = 0;
+                let mut hi: u64 = anchor_height;
+
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let item = block_index_item_by_height(tx, &mid)?;
+                    let total = item
+                        .ledgers
+                        .iter()
+                        .find(|l| l.ledger == ledger)
+                        .map(|l| l.total_chunks)
+                        .ok_or_else(|| {
+                            eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, mid)
+                        })?;
+                    if chunk_offset_val < total {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
+                    }
+                }
+
+                let item = block_index_item_by_height(tx, &lo)?;
+                (lo, item)
+            };
+
+            let previous_item = block_index_item_by_height(tx, &block_height.saturating_sub(1))?;
+
+            let prev_total = previous_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .map(|l| l.total_chunks)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        block_height.saturating_sub(1)
+                    )
+                })?;
+
+            let found_ledger = found_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        block_height
+                    )
+                })?;
+
+            Ok(BlockBounds {
+                height: block_height,
+                ledger,
+                start_chunk_offset: prev_total,
+                end_chunk_offset: found_ledger.total_chunks,
+                tx_root: found_ledger.tx_root,
+            })
+        })
+    }
+
     /// Returns the block height + block index item containing the given chunk offset
     pub fn get_block_index_item(
         &self,

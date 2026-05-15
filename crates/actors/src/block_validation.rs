@@ -353,6 +353,18 @@ pub enum PreValidationError {
         parent_hash: H256,
         expected_height: u64,
     },
+
+    /// Parent block exists in the in-memory block tree but has not yet been
+    /// migrated into the persistent block index. PoA pre-validation needs the
+    /// parent's indexed item to compute fork-deterministic block bounds; if
+    /// it isn't there yet, we must NOT fall back to a latest-tip lookup
+    /// (which would re-introduce the local-tip dependency the parent-anchored
+    /// pre-check was meant to eliminate). Classified as `is_internal_failure`
+    /// (validity unknown, retry plausible once migration catches up) and NOT
+    /// a node fault — the peer is innocent and the local state will advance
+    /// on its own.
+    #[error("parent block at height {parent_height} not yet in block index (still in block tree)")]
+    ParentNotIndexedYet { parent_height: u64 },
 }
 
 impl PreValidationError {
@@ -450,6 +462,12 @@ impl PreValidationError {
             // Parent missing from the in-memory block-tree cache due to a
             // local prune/reorg race. Peer is innocent.
             | Self::ParentNotInCache { .. }
+            // Parent is in the block tree but not yet migrated into the
+            // block index. Retry plausible once migration catches up; peer
+            // is innocent. Surfacing this typed variant (instead of falling
+            // through to a latest-tip lookup) preserves fork-determinism of
+            // the PoA pre-check.
+            | Self::ParentNotIndexedYet { .. }
         )
     }
 }
@@ -576,6 +594,19 @@ pub enum ValidationError {
     /// node-fault variant once specific deep call sites are audited.
     #[error("Shadow transaction generation failed: {0}")]
     ShadowTxGenerationFailed(String),
+
+    /// A hard local I/O failure inside the shadow-tx generation pipeline
+    /// (block-header DB read, MDBX corruption, lock poisoning, etc.).
+    /// Distinct from [`Self::ShadowTxGenerationFailed`]: that variant
+    /// covers soft, retry-plausible local failures (mempool absence,
+    /// snapshot arithmetic) where the block legitimately sits in cache
+    /// awaiting re-attempt. This variant covers failures where retry
+    /// cannot help — the DB itself is broken on this node, not the
+    /// peer's block — so it is classified as `is_node_fault()` to abort
+    /// + supervisor-restart rather than accumulating known-bad blocks
+    /// in cache.
+    #[error("Shadow transaction generation node fault: {0}")]
+    ShadowTxNodeFault(String),
 
     /// Local reth execution payload never arrived for this block's
     /// `evm_block_hash`. This is a node-level fault (local EL failed to
@@ -716,6 +747,12 @@ impl ValidationError {
             // `ExecutionPayloadUnavailable` (local EL broken, not the
             // peer's block). Abort + supervisor restart.
             Self::ExecutionLayerTransportFailed(_) => true,
+            // Hard local I/O failure inside shadow-tx generation
+            // (block-header DB read, MDBX corruption, etc.) — retry
+            // cannot help, the DB is broken on this node. Abort +
+            // supervisor restart instead of letting known-bad-state
+            // blocks pile up in cache.
+            Self::ShadowTxNodeFault(_) => true,
             // Every current cancellation reason maps to "chain has moved on,
             // discard" (see ValidationCancelReason::is_internal). Delegate so
             // a future retry-plausible reason doesn't silently become a node
@@ -770,6 +807,10 @@ impl ValidationError {
             // retry rather than being misclassified as a consensus
             // rejection. See `Self::ShadowTxGenerationFailed`.
             Self::ShadowTxGenerationFailed(_) => true,
+            // Hard local I/O failure inside shadow-tx generation —
+            // internal (and a node fault, see `is_node_fault`). Must
+            // never be peer-attributed.
+            Self::ShadowTxNodeFault(_) => true,
             // Everything else is treated as a consensus-level rejection until
             // its construction sites are individually audited.
             _ => false,
@@ -1612,6 +1653,10 @@ mod prevalidation_error_classification_tests {
             .is_internal_failure(),
             "ParentNotInCache is a local prune/reorg race, must not be peer-attributed"
         );
+        assert!(
+            PreValidationError::ParentNotIndexedYet { parent_height: 0 }.is_internal_failure(),
+            "ParentNotIndexedYet is a migration-lag race, must not be peer-attributed"
+        );
     }
 
     /// Peer-supplied PoA referencing a ledger that the local chain has no
@@ -1674,6 +1719,7 @@ mod prevalidation_error_classification_tests {
                 parent_hash: H256::zero(),
                 expected_height: 0,
             },
+            PreValidationError::ParentNotIndexedYet { parent_height: 0 },
         ];
         for err in cases {
             assert!(
@@ -1769,6 +1815,31 @@ mod prevalidation_error_classification_tests {
         // Round-trip through the From dispatcher: must land on InternalFailure.
         let result: ValidationResult = payload_unavailable.into();
         assert!(matches!(result, ValidationResult::InternalFailure(_)));
+
+        // Hard local I/O failure inside shadow-tx generation — node
+        // fault. Routing as `is_node_fault()` is what makes a corrupt
+        // MDBX / failed parent-header DB read abort+restart rather
+        // than letting unprovable-but-not-bad blocks accumulate in the
+        // validation cache.
+        let shadow_node_fault = ValidationError::ShadowTxNodeFault("mdbx I/O".to_string());
+        assert!(shadow_node_fault.is_node_fault());
+        assert!(
+            shadow_node_fault.is_internal_failure(),
+            "node-fault must also be internal-failure (strict subset)",
+        );
+        let result: ValidationResult = shadow_node_fault.into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+
+        // Soft local failure inside shadow-tx generation — internal
+        // but NOT a node fault (retry is plausible: mempool absence,
+        // snapshot arithmetic, etc.).
+        let shadow_soft =
+            ValidationError::ShadowTxGenerationFailed("mempool tx absent".to_string());
+        assert!(
+            !shadow_soft.is_node_fault(),
+            "ShadowTxGenerationFailed is soft local failure, not a node fault",
+        );
+        assert!(shadow_soft.is_internal_failure());
     }
 }
 
@@ -1905,24 +1976,34 @@ pub fn poa_is_valid(
         // rather than the local tip (`get_latest_item()`) so that two honest
         // peers on the same fork produce identical pre-validation outcomes
         // regardless of how far their local indices have advanced past
-        // `parent_height`. If the parent is too recent to be in the index
-        // yet (in the block tree but not migrated), the pre-check is
-        // skipped and the lookup falls through to `get_block_bounds`.
+        // `parent_height`. The bounds lookup is likewise anchored on
+        // `parent_height` (via `get_block_bounds_at_height`) so the binary
+        // search never consults blocks beyond the parent — if we instead fell
+        // through to the latest-tip `get_block_bounds`, the local-tip
+        // dependency would re-enter through the back door. When the parent
+        // is too recent to be in the index yet (in the block tree but not
+        // migrated), we surface `ParentNotIndexedYet` so the block stays in
+        // cache for retry rather than being mis-validated against the tip.
         let bb = {
             let index = block_index_guard.read();
-            if let Some(parent_item) = index.get_item(parent_height) {
-                match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
-                    Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
-                        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
-                    }
-                    None => {
-                        return Err(PreValidationError::PoALedgerInactive { ledger_id });
-                    }
-                    Some(_) => {}
+            let parent_item = index
+                .get_item(parent_height)
+                .ok_or(PreValidationError::ParentNotIndexedYet { parent_height })?;
+            match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
+                Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
+                    return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
                 }
+                None => {
+                    return Err(PreValidationError::PoALedgerInactive { ledger_id });
+                }
+                Some(_) => {}
             }
             index
-                .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
+                .get_block_bounds_at_height(
+                    ledger,
+                    LedgerChunkOffset::from(ledger_chunk_offset),
+                    parent_height,
+                )
                 .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?
         };
         if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
@@ -2324,14 +2405,18 @@ pub async fn submit_payload_to_reth(
 
 /// Generates expected shadow transactions.
 ///
-/// Returns a typed [`ValidationError`] on failure: parent/snapshot lookup
-/// races surface as `ParentBlockMissing` (internal, retry-plausible);
-/// peer-supplied structural failures (e.g. missing publish ledger) surface
-/// as `ShadowTransactionInvalid` (consensus rejection); all other local
-/// computation / DB / mempool failures surface as
-/// `ShadowTxGenerationFailed` (internal, not peer-attributed). The
-/// caller's existing `.into()` dispatch handles routing each variant to
-/// the correct `ValidationResult`.
+/// Returns a typed [`ValidationError`] on failure:
+/// - parent/snapshot lookup races surface as `ParentBlockMissing`
+///   (internal, retry-plausible);
+/// - peer-supplied structural failures (e.g. missing publish ledger)
+///   surface as `ShadowTransactionInvalid` (consensus rejection);
+/// - hard local I/O failures (DB reads, MDBX corruption) surface as
+///   `ShadowTxNodeFault` (internal + node-fault → abort+restart);
+/// - other local computation / mempool / snapshot-arithmetic failures
+///   surface as `ShadowTxGenerationFailed` (internal, retry-plausible).
+///
+/// The caller's existing `.into()` dispatch handles routing each variant
+/// to the correct `ValidationResult`.
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions(
     config: &Config,
@@ -2349,24 +2434,36 @@ async fn generate_expected_shadow_transactions(
     let parent_missing = || ValidationError::ParentBlockMissing {
         block_hash: parent_hash,
     };
+    // Soft local failures (mempool absence, snapshot arithmetic, ledger-
+    // expiry walks) where retry can succeed. Block stays in cache.
     fn internal(err: impl std::fmt::Display) -> ValidationError {
         ValidationError::ShadowTxGenerationFailed(err.to_string())
+    }
+    // Hard local I/O failures (DB reads, MDBX corruption) where retry
+    // cannot help — DB is broken on this node. Triggers node-fault
+    // abort+restart rather than accumulating in cache.
+    fn node_fault(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTxNodeFault(err.to_string())
     }
     fn consensus(err: impl std::fmt::Display) -> ValidationError {
         ValidationError::ShadowTransactionInvalid(err.to_string())
     }
 
-    // Look up previous block to get EVM hash. Local lookup failures
-    // (DB I/O, parent evicted) → ParentBlockMissing (internal,
-    // retry-plausible); a missing parent at this stage is not a
-    // consensus statement about the block.
+    // Look up previous block to get EVM hash. The two failure shapes
+    // are distinct: a DB I/O error from the in-memory-miss fallback
+    // (`db.view_eyre`) is a hard node-local fault — retry cannot heal
+    // a broken MDBX — so route through `node_fault` to trigger
+    // abort+restart. A `None` result is the eviction race against the
+    // in-memory window and surfaces as `ParentBlockMissing` (internal,
+    // retry-plausible via depth-prune + re-gossip). Either way this
+    // is not a consensus statement about the block.
     let prev_block = crate::block_tree_service::get_block_header(
         block_tree_guard,
         db,
         block.previous_block_hash,
         false,
     )
-    .map_err(internal)?
+    .map_err(node_fault)?
     .ok_or_else(parent_missing)?;
 
     // Calculate is_epoch_block early since it's needed for multiple checks

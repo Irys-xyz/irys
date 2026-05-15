@@ -574,6 +574,16 @@ impl ValidationService {
 
     /// Report a block's validation result to the block tree service.
     /// Returns `true` on success. On send failure, logs an error and returns `false`.
+    ///
+    /// PANICS on node-fault delivery failure: if the channel send fails AND the
+    /// unsent payload is an `InternalFailure` classified as a node fault, this
+    /// function panics immediately rather than returning `false`. The block-tree
+    /// handler (`on_block_validation_finished`) is the normal site that converts
+    /// node faults into a panic+SIGINT for graceful shutdown; if delivery to it
+    /// fails we must not silently swallow the fault and keep running. The panic
+    /// is caught by `setup_panic_hook` in `crates/chain/src/main.rs`, which
+    /// raises SIGINT for graceful shutdown. Same never-mislabel rationale as
+    /// the block-tree node-fault site — see `ValidationError::is_node_fault`.
     fn send_validation_result(
         &self,
         block_hash: BlockHash,
@@ -590,6 +600,22 @@ impl ValidationService {
                 custom.error = ?e,
                 "Failed to send validation result to block tree service"
             );
+            // Recover the unsent payload from the send error so we can inspect
+            // its classification. If it's a node fault, the block-tree handler
+            // would have panicked on receipt — replicate that here so a dropped
+            // channel can't mask a node fault into silent continuation.
+            let (unsent_msg, _span) = e.0.into_parts();
+            if let crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                validation_result: ValidationResult::InternalFailure(inner),
+                ..
+            } = &unsent_msg
+                && inner.is_node_fault()
+            {
+                panic!(
+                    "validation result delivery failed for node-fault block (block={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
+                    block_hash, inner
+                );
+            }
             return false;
         }
         true
