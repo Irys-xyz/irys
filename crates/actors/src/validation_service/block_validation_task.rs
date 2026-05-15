@@ -449,22 +449,53 @@ impl BlockValidationTask {
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
-        let parent_epoch_snapshot = match self
-            .block_tree_guard
-            .read()
-            .get_epoch_snapshot(&block.previous_block_hash)
-        {
-            Some(snapshot) => snapshot,
-            None => {
-                tracing::error!(
-                    block.parent_hash = %block.previous_block_hash,
-                    "Parent epoch snapshot not found"
-                );
-                return ValidationError::ParentEpochSnapshotMissing {
-                    block_hash: block.previous_block_hash,
+        // Fetch parent epoch + EMA snapshots once in the outer scope under
+        // a single `block_tree.read()` and hand them to the concurrent
+        // tasks below. Previously each task did its own `get_*_snapshot`
+        // read, giving us multiple lock acquisitions for the same parent
+        // hash and multiple eviction-race classification sites. Centralising
+        // the fetch means one read, one eviction-race error variant, and
+        // each task can be tested with a constructed `Arc<EpochSnapshot>` /
+        // `Arc<EmaSnapshot>` without needing a populated block-tree.
+        //
+        // This fetch must run *before* the PoA `spawn_blocking` below. Any
+        // early-return path (snapshot missing) after the spawn would drop
+        // the blocking `JoinHandle` — the blocking thread would keep
+        // running and any panic in it would be swallowed instead of
+        // surfacing as `TaskPanicked` → node-fault → abort+restart. By
+        // resolving both snapshots before the spawn we guarantee the only
+        // way to exit `validate_block` after the PoA task exists is
+        // through the `select`/`merge_stage_results` path that observes
+        // the join result.
+        let (parent_epoch_snapshot, parent_ema_snapshot) = {
+            let tree = self.block_tree_guard.read();
+            let epoch = match tree.get_epoch_snapshot(&block.previous_block_hash) {
+                Some(s) => s,
+                None => {
+                    tracing::error!(
+                        block.parent_hash = %block.previous_block_hash,
+                        "Parent epoch snapshot not found"
+                    );
+                    return ValidationError::ParentEpochSnapshotMissing {
+                        block_hash: block.previous_block_hash,
+                    }
+                    .into();
                 }
-                .into();
-            }
+            };
+            let ema = match tree.get_ema_snapshot(&block.previous_block_hash) {
+                Some(s) => s,
+                None => {
+                    tracing::error!(
+                        block.parent_hash = %block.previous_block_hash,
+                        "Parent EMA snapshot not found"
+                    );
+                    return crate::block_validation::PreValidationError::LocalEmaSnapshotMissing {
+                        parent_hash: block.previous_block_hash,
+                    }
+                    .into();
+                }
+            };
+            (epoch, ema)
         };
         tracing::debug!("Using parent epoch snapshot for PoA validation");
 
@@ -476,6 +507,9 @@ impl BlockValidationTask {
             let block_index_guard = self.service_inner.block_index_guard.clone();
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
+            // Clone the Arc for the blocking task; the non-PoA tasks below
+            // get their own clones from the same single fetch.
+            let poa_epoch_snapshot = Arc::clone(&parent_epoch_snapshot);
             {
                 let poa_span = tracing::info_span!(
                     "poa_validation",
@@ -492,7 +526,7 @@ impl BlockValidationTask {
                         &poa,
                         &block_index_guard,
                         block_height.saturating_sub(1),
-                        &parent_epoch_snapshot,
+                        &poa_epoch_snapshot,
                         &consensus_config,
                         &miner_address,
                     )
@@ -548,45 +582,6 @@ impl BlockValidationTask {
         // Shadow transaction validation (pure validation, no reth submission)
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
-
-        // Fetch parent epoch + EMA snapshots once in the outer scope under
-        // a single `block_tree.read()` and hand them to the concurrent
-        // tasks below. Previously each task did its own `get_*_snapshot`
-        // read, giving us multiple lock acquisitions for the same parent
-        // hash and multiple eviction-race classification sites. Centralising
-        // the fetch means one read, one eviction-race error variant, and
-        // each task can be tested with a constructed `Arc<EpochSnapshot>` /
-        // `Arc<EmaSnapshot>` without needing a populated block-tree.
-        let (parent_epoch_snapshot, parent_ema_snapshot) = {
-            let tree = self.block_tree_guard.read();
-            let epoch = match tree.get_epoch_snapshot(&block.previous_block_hash) {
-                Some(s) => s,
-                None => {
-                    tracing::error!(
-                        block.parent_hash = %block.previous_block_hash,
-                        "Parent epoch snapshot not found"
-                    );
-                    return ValidationError::ParentEpochSnapshotMissing {
-                        block_hash: block.previous_block_hash,
-                    }
-                    .into();
-                }
-            };
-            let ema = match tree.get_ema_snapshot(&block.previous_block_hash) {
-                Some(s) => s,
-                None => {
-                    tracing::error!(
-                        block.parent_hash = %block.previous_block_hash,
-                        "Parent EMA snapshot not found"
-                    );
-                    return crate::block_validation::PreValidationError::LocalEmaSnapshotMissing {
-                        parent_hash: block.previous_block_hash,
-                    }
-                    .into();
-                }
-            };
-            (epoch, ema)
-        };
 
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
