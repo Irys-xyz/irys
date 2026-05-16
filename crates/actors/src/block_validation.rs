@@ -2086,13 +2086,21 @@ pub fn get_recall_range(
 /// Acquires `block_tree.read()` before `block_index.read()` when both are
 /// needed mid-fallback. Mirrors the writer order in
 /// `block_tree_service::on_block_validation_finished` and the reader order in
-/// `block_pool::fcu_markers`, so this helper cannot deadlock against either.
+/// `p2p::block_pool::fcu_markers`, so this helper cannot deadlock against either.
 ///
 /// ## Invariants the fallback relies on
 /// - `block_tree_depth > block_migration_depth` (config-enforced in
 ///   `Config::validate`). Walking backwards from `parent_block_hash`, we
 ///   are guaranteed to reach the migrated portion before running out of
 ///   block_tree entries.
+fn ledger_entry_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<(u64, H256)> {
+    header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == ledger as u32)
+        .map(|l| (l.total_chunks, l.tx_root))
+}
+
 fn get_data_poa_bounds_with_block_tree_fallback(
     block_index_guard: &BlockIndexReadGuard,
     block_tree_guard: &BlockTreeReadGuard,
@@ -2145,22 +2153,19 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 parent_hash: parent_block_hash,
                 expected_height: parent_height,
             })?;
-    let parent_ledger_entry = parent_header
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == ledger as u32)
-        .ok_or(PreValidationError::PoALedgerInactive {
+    let (parent_total, parent_tx_root) =
+        ledger_entry_in(parent_header, ledger).ok_or(PreValidationError::PoALedgerInactive {
             ledger_id: ledger as u32,
         })?;
-    if ledger_chunk_offset >= parent_ledger_entry.total_chunks {
+    if ledger_chunk_offset >= parent_total {
         return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
     }
 
     // Walk backwards: at each step `curr` is the candidate introducing block.
     // We accept it when `prev_total <= offset < curr_total`.
     let mut curr: &IrysBlockHeader = parent_header;
-    let mut curr_total: u64 = parent_ledger_entry.total_chunks;
-    let mut curr_tx_root: H256 = parent_ledger_entry.tx_root;
+    let mut curr_total: u64 = parent_total;
+    let mut curr_tx_root: H256 = parent_tx_root;
 
     loop {
         let prev_hash = curr.previous_block_hash;
@@ -2169,6 +2174,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
         // prev_total for the predecessor of `curr`:
         //  - genesis (curr_height == 0): no predecessor, prev_total = 0
         //  - predecessor in block_tree: read its data_ledgers entry
+        //    (missing entry ⇒ ledger introduced at `curr`, prev_total = 0)
         //  - predecessor not in block_tree: read from block_index
         //    (block_tree_depth > block_migration_depth guarantees this is
         //    always indexed; missing entry for this ledger ⇒ ledger not yet
@@ -2176,11 +2182,8 @@ fn get_data_poa_bounds_with_block_tree_fallback(
         let prev_total: u64 = if curr_height == 0 {
             0
         } else if let Some(prev_header) = tree.get_block(&prev_hash) {
-            prev_header
-                .data_ledgers
-                .iter()
-                .find(|l| l.ledger_id == ledger as u32)
-                .map(|l| l.total_chunks)
+            ledger_entry_in(prev_header, ledger)
+                .map(|(total, _)| total)
                 .unwrap_or(0)
         } else {
             let index = block_index_guard.read();
@@ -2210,8 +2213,8 @@ fn get_data_poa_bounds_with_block_tree_fallback(
         }
 
         // Descend to predecessor. We already proved `ledger_chunk_offset <
-        // parent_ledger_entry.total_chunks` above, so genesis is unreachable
-        // here in well-formed data — but guard against logic errors anyway.
+        // parent_total` above, so genesis is unreachable here in well-formed
+        // data — but guard against logic errors anyway.
         if curr_height == 0 {
             return Err(PreValidationError::BlockBoundsLookupError(format!(
                 "chunk offset {} not located in chain ending at parent {} (height {})",
@@ -2221,16 +2224,22 @@ fn get_data_poa_bounds_with_block_tree_fallback(
 
         match tree.get_block(&prev_hash) {
             Some(prev_header) => {
-                let prev_entry = prev_header
-                    .data_ledgers
-                    .iter()
-                    .find(|l| l.ledger_id == ledger as u32);
-                // For a block that doesn't yet have this ledger, treat as
-                // (0, default tx_root): the walk's next iteration will fall
-                // through to the prev_total==0 case and we'd return — but
-                // only if offset==0 is the target. Otherwise we continue.
-                curr_total = prev_entry.map(|e| e.total_chunks).unwrap_or(0);
-                curr_tx_root = prev_entry.map(|e| e.tx_root).unwrap_or_default();
+                // We only reach here when `prev_total > 0`. Since `prev_total`
+                // was sourced from `ledger_entry_in(prev_header, ledger)` in
+                // the same loop iteration, the entry must exist with a real
+                // tx_root. Re-look it up and trust it — no defensive defaults
+                // that could silently surface H256::zero() as
+                // `MerkleProofInvalid` (peer attribution) for a local-state
+                // inconsistency.
+                let (prev_total_check, prev_tx_root) = ledger_entry_in(prev_header, ledger).expect(
+                    "predecessor must have ledger entry: prev_total > 0 was sourced from it",
+                );
+                debug_assert_eq!(
+                    prev_total, prev_total_check,
+                    "ledger_entry_in must be stable across re-lookups within a single loop iteration"
+                );
+                curr_total = prev_total_check;
+                curr_tx_root = prev_tx_root;
                 curr = prev_header;
             }
             None => {
@@ -2260,7 +2269,6 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     config.entropy_packing_iterations = ?config.entropy_packing_iterations,
     config.chunk_size = ?config.chunk_size
 ), err)]
-
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
