@@ -345,7 +345,24 @@ impl BlockValidationTask {
     ) -> ParentValidationResult {
         let parent_hash = self.sealed_block.header().previous_block_hash;
 
-        // Subscribe to block state updates
+        // Subscribe to block state updates FIRST. This ordering is
+        // load-bearing for the seed read that follows: combined with the
+        // writer-side invariant that `record_validation_result` happens
+        // BEFORE the broadcast send (see `ServiceSenders::recent_validation_result`),
+        // it guarantees we cannot miss the parent's last result, no matter
+        // when the parent's event fired relative to us entering this
+        // function:
+        //   - parent event fired BEFORE our subscribe → not delivered via
+        //     `recv()` (broadcast does not replay), but the store-write
+        //     already landed, so the seed read below picks it up.
+        //   - parent event fired AFTER our subscribe → delivered through
+        //     `recv()` in the loop below; may also be visible via the
+        //     store, but the in-loop update at `parent_last_validation_result = Some(..)`
+        //     takes precedence either way.
+        //   - parent event fires concurrently with our subscribe → at
+        //     least one path delivers it (`recv()` if the broadcast send
+        //     races after our subscribe, store-read if the store-write
+        //     races before our seed-read).
         let mut block_state_rx = self
             .service_inner
             .service_senders
@@ -357,7 +374,19 @@ impl BlockValidationTask {
         // upgrade the child's cancel reason to `ParentInternalFailure` so
         // the child stays in cache for retry instead of being discarded
         // as consensus-bad. See `cancel_reason_for_parent_state`.
-        let mut parent_last_validation_result: Option<ValidationResult> = None;
+        //
+        // Seeded from the recent-validation-results store (populated by
+        // `BlockTreeService` before each broadcast) to close the race where
+        // the parent's `BlockStateUpdated { validation_result: InternalFailure(..) }`
+        // was broadcast BEFORE this subscription was created (common when
+        // the child gossiped in after the parent already stalled, and on
+        // re-entry to the second wait after primary validation succeeded
+        // — a fresh subscriber is created each time and would otherwise
+        // start with `None`).
+        let mut parent_last_validation_result: Option<ValidationResult> = self
+            .service_inner
+            .service_senders
+            .recent_validation_result(&parent_hash);
 
         loop {
             // 1. Check cancellation condition first
@@ -987,18 +1016,17 @@ impl BlockValidationTask {
 /// 1. **Node-fault `InternalFailure` wins first.** Variants whose
 ///    `is_node_fault()` is true (e.g. `TaskPanicked`,
 ///    `ExecutionLayerTransportFailed`, `ShadowTxNodeFault`) signal a broken
-///    local node. Surfacing these is
-///    SAFETY-CRITICAL: the block-pool's `is_node_fault()` check is what
-///    triggers panic + supervisor restart. If we let an `Invalid` from a
-///    sibling stage win, the block would be reported as a consensus rejection
-///    and the panic+SIGINT invariant would silently break at exactly the
-///    scenario where it matters most.
+///    local node. Surfacing these is SAFETY-CRITICAL: the block-pool's
+///    `is_node_fault()` check is what triggers panic + supervisor restart.
+///    If we let an `Invalid` from a sibling stage win, the block would be
+///    reported as a consensus rejection and the panic+SIGINT invariant
+///    would silently break at exactly the scenario where it matters most.
 /// 2. **`Invalid` next.** A consensus rejection is the strongest signal among
 ///    non-fault outcomes — peer attribution / block discard is correct.
-/// 3. **Soft `InternalFailure` last.** Eviction-race variants
-///    (`ParentBlockMissing`, `Parent*SnapshotMissing`) classify as
-///    internal-failure but not node-fault; the block parks in cache for a
-///    later retry.
+/// 3. **Soft `InternalFailure` last.** Eviction / saturation variants
+///    (`ParentBlockMissing`, `Parent*SnapshotMissing`,
+///    `ExecutionPayloadCacheEvicted`) classify as internal-failure but not
+///    node-fault; the block parks in cache for a later retry.
 ///
 /// Order within each tier is the input array order so the priority is
 /// deterministic.
@@ -1336,6 +1364,185 @@ mod cancel_reason_for_parent_state_tests {
             got, expected,
             "base={:?}, parent_last={:?} → expected {:?}, got {:?}",
             base, parent_last, expected, got,
+        );
+    }
+}
+
+#[cfg(test)]
+mod parent_seed_on_entry_tests {
+    //! Integration tests for the entry-sequence wiring in
+    //! `exit_if_block_is_too_old`: subscribe → seed-read → cancel.
+    //!
+    //! These tests don't drive the full `BlockValidationTask` (which would
+    //! require a fully wired node). Instead they replicate the exact
+    //! subscribe-then-seed pattern against a real `ServiceSenders` and
+    //! confirm the cancel-reason upgrade fires for the "parent failed
+    //! BEFORE child subscribed" scenario that the in-loop bookkeeping
+    //! alone (from commit `d28287b9e`) does not cover.
+    use super::*;
+    use crate::block_validation::ValidationError;
+    use crate::services::ServiceSenders;
+    use irys_types::H256;
+
+    fn soft_internal_failure() -> ValidationResult {
+        // ParentBlockMissing is a soft eviction-race InternalFailure —
+        // exactly the cascade we want to propagate to the child via the
+        // upgraded `ParentInternalFailure` cancel.
+        ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        }
+        .into()
+    }
+
+    /// Round-2 baseline: parent's `BlockStateUpdated` event arrives via
+    /// `recv()` in the wait loop (child was already subscribed). The
+    /// existing in-loop bookkeeping captures it. Included for contrast.
+    #[tokio::test]
+    async fn parent_event_received_via_recv_upgrades_cancel() {
+        let (senders, _receivers) = ServiceSenders::new();
+        let parent_hash = H256::random();
+
+        // Child subscribes FIRST.
+        let mut rx = senders.subscribe_block_state_updates();
+
+        // Parent fires its event (writes store, then broadcasts).
+        senders.record_validation_result(parent_hash, soft_internal_failure());
+        let _ = senders
+            .0
+            .block_state_events
+            .send(crate::block_tree_service::BlockStateUpdated {
+                block_hash: parent_hash,
+                height: 0,
+                state: irys_domain::ChainState::NotOnchain(irys_domain::BlockState::Unknown),
+                discarded: false,
+                validation_result: soft_internal_failure(),
+            });
+
+        // Seed-read on entry — empty path is fine here because the event
+        // is still in the broadcast queue for this pre-existing subscriber.
+        let mut parent_last_validation_result: Option<ValidationResult> =
+            senders.recent_validation_result(&parent_hash);
+
+        // Drain in-flight events into `parent_last_validation_result`
+        // (mirrors the `match block_state_rx.recv()` arm in the wait loop).
+        if let Ok(event) = rx.try_recv()
+            && event.block_hash == parent_hash
+        {
+            parent_last_validation_result = Some(event.validation_result);
+        }
+
+        let upgraded = cancel_reason_for_parent_state(
+            ValidationCancelReason::HeightDifference,
+            parent_last_validation_result.as_ref(),
+        );
+        assert!(matches!(
+            upgraded,
+            ValidationCancelReason::ParentInternalFailure
+        ));
+    }
+
+    /// **This is the bug this fix closes.** Parent's `BlockStateUpdated`
+    /// is broadcast BEFORE the child subscribes — the broadcast never
+    /// delivers it (`tokio::sync::broadcast` doesn't replay). Without the
+    /// seed-read on entry, `parent_last_validation_result` stays `None`
+    /// and the cancel returns `HeightDifference` (which dispatches to
+    /// `Invalid`), misattributing a parent's local failure as a child
+    /// consensus defect.
+    ///
+    /// With the seed-read against the recent-results store, the child
+    /// picks the parent's prior `InternalFailure` up and correctly
+    /// upgrades the cancel to `ParentInternalFailure` (dispatches to
+    /// `InternalFailure`, block parks in cache for retry).
+    #[tokio::test]
+    async fn parent_event_before_child_subscribe_upgrades_cancel() {
+        let (senders, _receivers) = ServiceSenders::new();
+        let parent_hash = H256::random();
+
+        // Parent fires its event FIRST (writes store, then broadcasts).
+        // No child subscriber exists yet — the broadcast is dropped on
+        // the floor by `tokio::sync::broadcast` (no replay). But the
+        // store-write is durable.
+        senders.record_validation_result(parent_hash, soft_internal_failure());
+        let _ = senders
+            .0
+            .block_state_events
+            .send(crate::block_tree_service::BlockStateUpdated {
+                block_hash: parent_hash,
+                height: 0,
+                state: irys_domain::ChainState::NotOnchain(irys_domain::BlockState::Unknown),
+                discarded: false,
+                validation_result: soft_internal_failure(),
+            });
+
+        // Child enters `exit_if_block_is_too_old`: subscribes THEN seeds.
+        // Mirrors the in-code ordering at `block_validation_task.rs:349-365`.
+        let _block_state_rx = senders.subscribe_block_state_updates();
+        let parent_last_validation_result: Option<ValidationResult> =
+            senders.recent_validation_result(&parent_hash);
+
+        // Without the store, `parent_last_validation_result` would be
+        // `None` here and the cancel would not upgrade.
+        assert!(
+            matches!(
+                parent_last_validation_result,
+                Some(ValidationResult::InternalFailure(_))
+            ),
+            "seed read must surface the parent's prior InternalFailure"
+        );
+
+        // Height-diff trips on entry (simulated by jumping straight to
+        // the cancel-reason call site). The upgrade must fire.
+        let upgraded = cancel_reason_for_parent_state(
+            ValidationCancelReason::HeightDifference,
+            parent_last_validation_result.as_ref(),
+        );
+        assert!(
+            matches!(upgraded, ValidationCancelReason::ParentInternalFailure),
+            "expected ParentInternalFailure, got {:?}",
+            upgraded
+        );
+    }
+
+    /// Re-entry scenario: the child completes its own primary validation
+    /// successfully, then enters the second wait at
+    /// `block_validation_task.rs:225` with a *brand-new* subscriber. Any
+    /// parent `BlockStateUpdated` that fired between the first and
+    /// second wait would be missed by the new subscriber. The seed-read
+    /// covers it.
+    #[tokio::test]
+    async fn second_wait_reentry_seeds_from_store() {
+        let (senders, _receivers) = ServiceSenders::new();
+        let parent_hash = H256::random();
+
+        // First wait: child subscribes; nothing has happened yet.
+        let _first_rx = senders.subscribe_block_state_updates();
+
+        // Primary validation completes — child drops its first subscriber.
+        // Between waits, the parent stalls with InternalFailure.
+        senders.record_validation_result(parent_hash, soft_internal_failure());
+        let _ = senders
+            .0
+            .block_state_events
+            .send(crate::block_tree_service::BlockStateUpdated {
+                block_hash: parent_hash,
+                height: 0,
+                state: irys_domain::ChainState::NotOnchain(irys_domain::BlockState::Unknown),
+                discarded: false,
+                validation_result: soft_internal_failure(),
+            });
+
+        // Second wait: re-enter `exit_if_block_is_too_old` with a fresh
+        // subscriber.
+        let _second_rx = senders.subscribe_block_state_updates();
+        let parent_last_validation_result: Option<ValidationResult> =
+            senders.recent_validation_result(&parent_hash);
+
+        assert!(
+            matches!(
+                parent_last_validation_result,
+                Some(ValidationResult::InternalFailure(_))
+            ),
+            "re-entry seed must surface the parent's between-waits InternalFailure"
         );
     }
 }

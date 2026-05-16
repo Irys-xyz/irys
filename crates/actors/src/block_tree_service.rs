@@ -468,6 +468,12 @@ impl BlockTreeServiceInner {
                     .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
                 (maybe_height.unwrap_or(0), state)
             };
+            // Update the recent-results store BEFORE the broadcast send so
+            // any subscriber that wakes from `recv()` can read the result
+            // synchronously. See `ServiceSenders::recent_validation_result`
+            // for the full ordering invariant.
+            self.service_senders
+                .record_validation_result(block_hash, validation_result.clone());
             let event = BlockStateUpdated {
                 block_hash,
                 height,
@@ -527,6 +533,10 @@ impl BlockTreeServiceInner {
                 );
             }
 
+            // Update the recent-results store BEFORE broadcasting — see
+            // `ServiceSenders::recent_validation_result`.
+            self.service_senders
+                .record_validation_result(block_hash, validation_result.clone());
             let event = BlockStateUpdated {
                 block_hash,
                 // todo: restructure the event so that `height` and `state` is not part of it
@@ -636,6 +646,10 @@ impl BlockTreeServiceInner {
 
                 drop(cache);
 
+                // Update the recent-results store BEFORE broadcasting — see
+                // `ServiceSenders::recent_validation_result`.
+                self.service_senders
+                    .record_validation_result(block_hash, ValidationResult::Valid);
                 let event = BlockStateUpdated {
                     block_hash,
                     height,
@@ -1015,6 +1029,10 @@ impl BlockTreeServiceInner {
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
         }
 
+        // Update the recent-results store BEFORE broadcasting — see
+        // `ServiceSenders::recent_validation_result`.
+        self.service_senders
+            .record_validation_result(block_hash, ValidationResult::Valid);
         let event = BlockStateUpdated {
             block_hash,
             height,
