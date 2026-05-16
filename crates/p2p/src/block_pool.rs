@@ -1202,12 +1202,19 @@ where
         let status = self
             .block_status_provider
             .block_status(block_height, block_hash);
-        // A block that is in the tree pending validation has also been observed
-        // already; we do not want gossip handlers to re-enter `process_block`
-        // for it. `is_in_tree()` covers `InTreePendingValidation` plus every
-        // variant `is_processed()` covers, so it's the full "already-known
-        // locally" predicate.
-        status.is_in_tree()
+        // Full "already-known locally" predicate: gossip handlers must not
+        // re-enter `process_block` for any block whose status we've already
+        // determined. The union covers two disjoint sets:
+        //   - `is_in_tree()` -> InTreePendingValidation |
+        //     ProcessedButCanBeReorganized | Finalized (in-memory tree, or
+        //     migrated into the index)
+        //   - `is_a_part_of_pruned_fork()` -> PartOfAPrunedFork (known to the
+        //     index at this height under a different canonical hash; would
+        //     re-classify as pruned on every gossip cycle if not short-
+        //     circuited here)
+        // Only `NotProcessed` returns false — the one variant where
+        // `process_block` legitimately needs to run.
+        status.is_in_tree() || status.is_a_part_of_pruned_fork()
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
