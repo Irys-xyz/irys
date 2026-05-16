@@ -668,14 +668,26 @@ pub enum ValidationError {
     #[error("Shadow transaction generation node fault: {0}")]
     ShadowTxNodeFault(String),
 
-    /// Local reth execution payload never arrived for this block's
-    /// `evm_block_hash`. This is a node-level fault (local EL failed to
-    /// deliver), NOT a consensus rejection — classified as a node fault so
-    /// the handler aborts and restarts rather than peer-attributing the
-    /// block. Distinct from `ShadowTransactionInvalid`, which now only
-    /// carries genuine consensus mismatches.
-    #[error("Reth execution payload unavailable for evm_block_hash {evm_block_hash}")]
-    ExecutionPayloadUnavailable { evm_block_hash: EvmBlockHash },
+    /// The local `ExecutionPayloadCache` tore down the in-process
+    /// oneshot wiring for this block's `evm_block_hash` before the
+    /// payload arrived. Today the only construction path is
+    /// `ExecutionPayloadCache::wait_for_payload` returning
+    /// `ExecutionPayloadWaitError::ReceiverDisrupted` — i.e. either
+    /// the `payload_senders` LRU evicting our slot under heavy
+    /// catch-up sync (>`PAYLOAD_RECEIVERS_CAPACITY = 1000` concurrent
+    /// waiters in flight), or an explicit `remove_payload_from_cache`
+    /// for the same hash.
+    ///
+    /// This is local cache saturation — the node is healthy, the EL
+    /// is fine, the peer's block is innocent. Classified as a soft
+    /// internal failure (block parks in cache, retry via fresh gossip
+    /// re-entry). Specifically NOT a node fault: panicking here on
+    /// every cache eviction would self-DoS healthy nodes during
+    /// catch-up. Distinct from `ExecutionLayerTransportFailed`, which
+    /// covers genuine local-EL RPC transport failures (those remain a
+    /// node fault).
+    #[error("Execution payload wait disrupted by local cache (evm_block_hash {evm_block_hash})")]
+    ExecutionPayloadCacheEvicted { evm_block_hash: EvmBlockHash },
 
     /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
     #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
@@ -800,13 +812,16 @@ impl ValidationError {
             Self::PreValidation(e) => e.is_node_fault(),
             // Task panic is always a node fault: a verifier thread crashed.
             Self::TaskPanicked { .. } => true,
-            // Local reth never delivered the payload — the EL is broken on
-            // this node, not the peer's block. Abort + supervisor restart.
-            Self::ExecutionPayloadUnavailable { .. } => true,
-            // Local reth engine RPC transport failure — same rationale as
-            // `ExecutionPayloadUnavailable` (local EL broken, not the
-            // peer's block). Abort + supervisor restart.
+            // Local reth engine RPC transport failure — the EL is broken
+            // on this node, not the peer's block. Abort + supervisor
+            // restart.
             Self::ExecutionLayerTransportFailed(_) => true,
+            // Local `ExecutionPayloadCache` tore down the wait receiver
+            // (LRU eviction under sync load, or explicit cache removal).
+            // The node is healthy and the EL is fine — cache is just
+            // saturated. Must NOT panic; the block parks in cache for
+            // retry. See the variant doc for the full rationale.
+            Self::ExecutionPayloadCacheEvicted { .. } => false,
             // Hard local I/O failure inside shadow-tx generation
             // (block-header DB read, MDBX corruption, etc.) — retry
             // cannot help, the DB is broken on this node. Abort +
@@ -857,11 +872,14 @@ impl ValidationError {
             Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentBlockMissing { .. } => true,
-            // Local reth failure — internal (and a node fault, see
-            // `is_node_fault`). Must never be peer-attributed.
-            Self::ExecutionPayloadUnavailable { .. } | Self::ExecutionLayerTransportFailed(_) => {
-                true
-            }
+            // Local reth engine RPC transport failure — internal (and a
+            // node fault, see `is_node_fault`). Must never be
+            // peer-attributed.
+            Self::ExecutionLayerTransportFailed(_) => true,
+            // Local cache evicted the payload-wait receiver — soft
+            // internal failure. See `is_node_fault` for the rationale on
+            // why this is NOT a node fault.
+            Self::ExecutionPayloadCacheEvicted { .. } => true,
             // Local computation/lookup failures inside shadow-tx
             // generation. Internal so the block stays in cache for
             // retry rather than being misclassified as a consensus
@@ -2004,21 +2022,41 @@ mod prevalidation_error_classification_tests {
                 .is_node_fault()
         );
 
-        // Local reth never delivered the EVM payload — node fault. Routing
-        // this as `is_node_fault()` is what makes the shadow_tx_task's
-        // missing-payload path abort+restart instead of being misbucketed
-        // into `ShadowTransactionInvalid` (consensus rejection).
-        let payload_unavailable = ValidationError::ExecutionPayloadUnavailable {
+        // Local cache evicted the payload-wait receiver under sync load
+        // — soft internal failure, NOT a node fault. The earlier
+        // `ExecutionPayloadUnavailable` variant misclassified this as a
+        // fault and self-DoS'd healthy nodes during catch-up; the
+        // replacement variant must route to `InternalFailure` so the
+        // block parks in cache for retry instead of panicking the node.
+        let cache_evicted = ValidationError::ExecutionPayloadCacheEvicted {
             evm_block_hash: Default::default(),
         };
-        assert!(payload_unavailable.is_node_fault());
         assert!(
-            payload_unavailable.is_internal_failure(),
-            "node-fault must also be internal-failure (strict subset)",
+            !cache_evicted.is_node_fault(),
+            "ExecutionPayloadCacheEvicted is local saturation, must NOT be a node fault — \
+             panicking here would self-DoS healthy nodes under catch-up sync load",
         );
-        // Round-trip through the From dispatcher: must land on InternalFailure.
-        let result: ValidationResult = payload_unavailable.into();
-        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        assert!(
+            cache_evicted.is_internal_failure(),
+            "ExecutionPayloadCacheEvicted is a soft local failure, must be internal",
+        );
+        // Round-trip through the From dispatcher: must land on
+        // InternalFailure with the wrapped `is_node_fault() == false`
+        // (so `send_validation_result`'s panic-guard does NOT fire).
+        let result: ValidationResult = cache_evicted.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "ExecutionPayloadCacheEvicted wrapped in InternalFailure must NOT \
+                     report is_node_fault() = true — that would re-introduce the panic loop",
+                );
+            }
+            other => panic!(
+                "ExecutionPayloadCacheEvicted must round-trip to InternalFailure, got {:?}",
+                other,
+            ),
+        }
 
         // Hard local I/O failure inside shadow-tx generation — node
         // fault. Routing as `is_node_fault()` is what makes a corrupt
@@ -2553,9 +2591,9 @@ pub fn poa_is_valid(
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 ///
 /// The caller is responsible for fetching `execution_data` (via
-/// `ExecutionPayloadCache::wait_for_payload`) so that a missing payload —
-/// a local reth failure — can be surfaced as a typed node-fault
-/// (`ValidationError::ExecutionPayloadUnavailable`) instead of being
+/// `ExecutionPayloadCache::wait_for_payload`) so that a local cache
+/// disruption can be surfaced as the typed soft variant
+/// (`ValidationError::ExecutionPayloadCacheEvicted`) instead of being
 /// stringified into `ShadowTransactionInvalid`.
 ///
 /// Returns a typed [`ValidationError`] on failure so the caller can

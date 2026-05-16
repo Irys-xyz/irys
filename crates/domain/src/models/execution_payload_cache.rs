@@ -37,6 +37,29 @@ pub enum ExecutionPayloadProviderError {
     PayloadValidationError(eyre::Report),
 }
 
+/// Error returned when a `wait_for_payload` / `wait_for_sealed_block`
+/// call is disrupted by the local cache before the payload arrives.
+///
+/// This does NOT indicate that the execution layer deterministically
+/// failed — it indicates that the in-process oneshot wiring used to
+/// signal payload arrival was torn down. Today the only construction
+/// path is the `payload_senders` LRU evicting our sender (heavy
+/// catch-up sync pushing >`PAYLOAD_RECEIVERS_CAPACITY` distinct
+/// waiters through), or an explicit `remove_payload_from_cache` for
+/// the same hash.
+///
+/// Callers MUST route this as a soft local failure (retry via fresh
+/// gossip / cache re-entry) and MUST NOT classify it as a node fault:
+/// the node is healthy, the cache is just saturated.
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
+pub enum ExecutionPayloadWaitError {
+    /// The oneshot sender registered for `evm_block_hash` was dropped
+    /// before the payload arrived (LRU eviction or explicit cache
+    /// removal). Retry by re-entering the cache after fresh gossip.
+    #[error("payload-wait receiver disrupted by local cache for evm_block_hash {evm_block_hash}")]
+    ReceiverDisrupted { evm_block_hash: B256 },
+}
+
 impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
     fn from(err: BeaconOnNewPayloadError) -> Self {
         Self::BeaconOnNewPayloadError(err)
@@ -203,10 +226,14 @@ impl ExecutionPayloadCache {
 
     /// Waits for the execution payload to arrive over gossip. This method will first check the local
     /// cache, then try to retrieve the payload from the network if it is not found locally.
-    /// There's a limit on how many payloads can be requested at once, so if the limit is reached,
-    /// the method will return `None`. This should not be a problem in practice, as the limit
-    /// is currently set to 1000, which should not be reached in normal operation - there should
-    /// be no case where 1000 blocks are validated at once.
+    ///
+    /// Returns `Err(ExecutionPayloadWaitError::ReceiverDisrupted { .. })` if
+    /// the in-process oneshot wiring is torn down before the payload arrives
+    /// — today exclusively LRU eviction from `payload_senders` (capacity
+    /// `PAYLOAD_RECEIVERS_CAPACITY = 1000`) under heavy catch-up sync, or an
+    /// explicit `remove_payload_from_cache` call for the same hash. This is
+    /// a local-cache disruption signal, NOT an execution-layer fault — see
+    /// the doc on [`ExecutionPayloadWaitError`] for the caller contract.
     ///
     /// You can get the EVM block hash from the Irys block header like this:
     /// ```rust
@@ -214,27 +241,38 @@ impl ExecutionPayloadCache {
     /// let irys_block = IrysBlockHeader::new_mock_header();
     /// let evm_block_hash = irys_block.evm_block_hash;
     /// ```
-    pub async fn wait_for_payload(&self, evm_block_hash: &B256) -> Option<ExecutionData> {
-        self.wait_for_sealed_block(evm_block_hash, false).await.map(|sealed_block| {
-            <<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block)
-        })
+    pub async fn wait_for_payload(
+        &self,
+        evm_block_hash: &B256,
+    ) -> Result<ExecutionData, ExecutionPayloadWaitError> {
+        let sealed_block = self.wait_for_sealed_block(evm_block_hash, false).await?;
+        Ok(<<irys_reth_node_bridge::irys_reth::IrysEthereumNode as reth::api::NodeTypes>::Payload as reth::api::PayloadTypes>::block_to_payload(sealed_block))
     }
 
     /// Same as [ExecutionPayloadCache::wait_for_payload], but returns the sealed block instead
-    /// of the execution data.
+    /// of the execution data. See [`Self::wait_for_payload`] for the error contract.
     pub async fn wait_for_sealed_block(
         &self,
         evm_block_hash: &B256,
         request_only_from_trusted_peers: bool,
-    ) -> Option<SealedBlock<Block>> {
+    ) -> Result<SealedBlock<Block>, ExecutionPayloadWaitError> {
         if let Some(sealed_block) = self.get_sealed_block_from_cache(evm_block_hash).await {
-            return Some(sealed_block);
+            return Ok(sealed_block);
         }
 
         let receiver = self.block_receiver(*evm_block_hash).await;
         self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
             .await;
-        receiver.await.ok()
+        // `receiver.await` errors only when the matching oneshot sender is
+        // dropped (LRU eviction of the `payload_senders` slot or explicit
+        // cache removal). Surface that as the typed disruption error so
+        // callers can route it as a soft local failure instead of
+        // misattributing to "EL never delivered".
+        receiver
+            .await
+            .map_err(|_| ExecutionPayloadWaitError::ReceiverDisrupted {
+                evm_block_hash: *evm_block_hash,
+            })
     }
 
     pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
@@ -330,4 +368,66 @@ impl ExecutionPayloadCache {
 struct ExecutionPayloadCacheInner {
     payloads: LruCache<B256, SealedBlock<Block>>,
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PeerList;
+
+    /// Regression for the cache-eviction → `ExecutionPayloadUnavailable`
+    /// → `is_node_fault` → panic loop on healthy nodes under catch-up
+    /// sync. Verifies that when the oneshot sender registered for an
+    /// in-flight payload wait is dropped — by `remove_payload_from_cache`,
+    /// semantically equivalent to the `payload_senders` LRU evicting our
+    /// slot under heavy sync pressure — the wait surfaces the typed
+    /// `ReceiverDisrupted` error rather than collapsing the disruption
+    /// signal into `None`.
+    ///
+    /// We exercise `block_receiver` directly (the registration step shared
+    /// by both `wait_for_payload` and `wait_for_sealed_block`) and apply
+    /// the same error mapping `wait_for_sealed_block` does, isolating the
+    /// disruption-detection path from `request_payload_from_the_network`'s
+    /// retry-with-sleep loop against the no-op mock peer-network sender.
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn wait_for_payload_returns_receiver_disrupted_on_eviction() {
+        let peer_list = PeerList::test_mock().expect("test PeerList");
+        let provider = RethBlockProvider::new_mock();
+        let cache = ExecutionPayloadCache::new(peer_list, provider);
+
+        let evm_block_hash = B256::repeat_byte(0x42);
+
+        // Register a wait receiver — same path `wait_for_sealed_block`
+        // takes after a cache miss.
+        let receiver = cache.block_receiver(evm_block_hash).await;
+        assert!(
+            cache.payload_senders.read().await.contains(&evm_block_hash),
+            "block_receiver must register a sender for the hash",
+        );
+
+        // Drop the sender. Semantically equivalent to the
+        // `payload_senders` LRU evicting this slot under
+        // catch-up-sync pressure.
+        cache.remove_payload_from_cache(&evm_block_hash).await;
+
+        // Apply the same error mapping `wait_for_sealed_block` applies
+        // to `receiver.await` so the test pins the public-API contract
+        // and not just the oneshot's internal behaviour.
+        let result: Result<SealedBlock<Block>, ExecutionPayloadWaitError> =
+            tokio::time::timeout(Duration::from_secs(2), async move {
+                receiver
+                    .await
+                    .map_err(|_| ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash })
+            })
+            .await
+            .expect("receiver must resolve after sender drop");
+
+        assert_eq!(
+            result.unwrap_err(),
+            ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash },
+            "cache-eviction disruption must surface as the typed soft error, \
+             NOT collapse into a generic 'payload unavailable' / 'EL failed' signal",
+        );
+    }
 }

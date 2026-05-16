@@ -678,26 +678,27 @@ impl BlockValidationTask {
                     block_hash: block.previous_block_hash,
                 })?;
 
-            // Local reth never delivered the EVM payload. This is a
-            // node-level fault (the EL is broken on this node, not the
-            // peer's block), so route it as the typed
-            // `ExecutionPayloadUnavailable` — `is_node_fault()` will then
-            // panic + supervisor-restart instead of peer-attributing.
-            // Previously this was `eyre::bail!` → `ShadowTransactionInvalid`.
-            let execution_data = match self
+            // `wait_for_payload` returns the typed `ReceiverDisrupted`
+            // error when its in-process oneshot wiring is torn down
+            // (today: `payload_senders` LRU eviction under catch-up sync,
+            // or explicit `remove_payload_from_cache`). That's a local
+            // cache disruption — NOT an execution-layer fault — so we
+            // route it to the soft `ExecutionPayloadCacheEvicted`
+            // (`is_internal_failure` true, `is_node_fault` false) and let
+            // the block re-enter via gossip. Previously this path bucketed
+            // into `ExecutionPayloadUnavailable` → `is_node_fault` →
+            // panic+SIGINT, self-DoS'ing healthy nodes during heavy sync.
+            let execution_data = self
                 .service_inner
                 .execution_payload_provider
                 .wait_for_payload(&block.evm_block_hash)
                 .in_current_span()
                 .await
-            {
-                Some(d) => d,
-                None => {
-                    return Err(ValidationError::ExecutionPayloadUnavailable {
-                        evm_block_hash: block.evm_block_hash,
-                    });
-                }
-            };
+                .map_err(|err| match err {
+                    irys_domain::ExecutionPayloadWaitError::ReceiverDisrupted {
+                        evm_block_hash,
+                    } => ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash },
+                })?;
 
             let result = shadow_transactions_are_valid(
                 config,
@@ -880,7 +881,7 @@ impl BlockValidationTask {
 
         // shadow_tx_task returns a typed `ValidationError` on failure;
         // route through `.into()` so eviction races / node-fault paths
-        // (`ParentCommitmentSnapshotMissing`, `ExecutionPayloadUnavailable`)
+        // (`ParentCommitmentSnapshotMissing`, `ExecutionPayloadCacheEvicted`)
         // dispatch to `InternalFailure` and genuine consensus mismatches
         // (`ShadowTransactionInvalid`) dispatch to `Invalid`. The success
         // side carries `execution_data` for the reth-submission stage —
@@ -985,8 +986,8 @@ impl BlockValidationTask {
 ///
 /// 1. **Node-fault `InternalFailure` wins first.** Variants whose
 ///    `is_node_fault()` is true (e.g. `TaskPanicked`,
-///    `ExecutionPayloadUnavailable`, `ExecutionLayerTransportFailed`,
-///    `ShadowTxNodeFault`) signal a broken local node. Surfacing these is
+///    `ExecutionLayerTransportFailed`, `ShadowTxNodeFault`) signal a broken
+///    local node. Surfacing these is
 ///    SAFETY-CRITICAL: the block-pool's `is_node_fault()` check is what
 ///    triggers panic + supervisor restart. If we let an `Invalid` from a
 ///    sibling stage win, the block would be reported as a consensus rejection

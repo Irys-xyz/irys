@@ -500,6 +500,8 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
         .wait_for_payload(&block.evm_block_hash)
         .await
         .expect("to wait for execution payload");
+    // `wait_for_payload` returns `Result` — `.expect()` on `Result` panics
+    // with the typed error, preserving the existing test semantics.
     // We compare the payloads because the execution data doesn't implement `PartialEq` directly
     assert_eq!(payload.payload, block_execution_data.payload);
 

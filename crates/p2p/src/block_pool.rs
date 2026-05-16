@@ -489,14 +489,20 @@ where
             ))
         })?;
 
-        // Fetch the execution data that was already pulled and sealed
+        // Fetch the execution data that was already pulled and sealed.
+        // `wait_for_payload` returns the typed `ReceiverDisrupted` error
+        // when the in-process oneshot wiring is torn down (LRU eviction
+        // of `payload_senders` under catch-up sync, or explicit cache
+        // removal). The block-pool repair path treats this as a soft
+        // `OtherInternal` so the caller retries via re-entry rather than
+        // misattributing to an EL fault.
         let execution_data = self
             .execution_payload_provider
             .wait_for_payload(&block_header.evm_block_hash)
             .await
-            .ok_or_else(|| {
+            .map_err(|err| {
                 CriticalBlockPoolError::OtherInternal(format!(
-                    "Failed to fetch execution payload for block {:?}",
+                    "Failed to fetch execution payload for block {:?}: {err}",
                     block_header.evm_block_hash
                 ))
             })?;
