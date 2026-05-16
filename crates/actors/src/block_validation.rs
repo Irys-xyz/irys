@@ -65,8 +65,32 @@ use tracing::{Instrument as _, debug, error, info, warn};
 /// validation variant.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
+    /// Local lookup failure during the PoA-anchored `block_bounds` binary
+    /// search. Construction sites in `get_block_bounds` /
+    /// `get_block_bounds_at_height` pre-check peer-supplied offsets against
+    /// the chain max and reject out-of-range / inactive-ledger cases first
+    /// (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`); by the time
+    /// this variant is constructed the failure is a local-index inconsistency
+    /// (empty index, MDBX I/O, missing predecessor that should be present).
+    /// Classified as `is_node_fault` — retry will hit the same broken state.
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
+
+    /// Soft sibling of `BlockBoundsLookupError` for the
+    /// `get_assigned_ingress_proofs` walk over `CachedDataRoots.block_set`.
+    /// That set is explicitly fork-spanning (see the doc on
+    /// `get_assigned_ingress_proofs`), accumulating every block hash —
+    /// across all observed forks — that referenced a given `data_root`. If a
+    /// side-fork block referenced in the set is later pruned from both
+    /// `block_tree` and the database, `get_ledger_range` returns `Ok(None)`
+    /// or a lookup error. The peer's block is innocent — this is a
+    /// fork-determinism gap in `block_set`, not a node fault. Classified as
+    /// `is_internal_failure` (block parks in cache, retry plausible) and
+    /// explicitly NOT a node fault.
+    #[error(
+        "Assigned-proof block {block_hash} for tx {tx_id} no longer resolvable in block_tree or DB (likely pruned side fork)"
+    )]
+    AssignedProofBlockMissing { block_hash: H256, tx_id: H256 },
     #[error("block signature is not valid")]
     BlockSignatureInvalid,
     #[error("Cascade hardfork not configured but term ledger tx {tx_id} was found")]
@@ -394,10 +418,10 @@ impl PreValidationError {
     /// failure risks forking off the network with silent data-level errors.
     ///
     /// Pruning/eviction races (`LocalEmaSnapshotMissing`,
-    /// `LocalEpochSnapshotMissing`, `ParentNotInCache`) remain
-    /// `is_internal_failure()` but are NOT node faults — they're recoverable
-    /// via passive depth-prune + fresh gossip re-entering the prevalidate
-    /// path.
+    /// `LocalEpochSnapshotMissing`, `ParentNotInCache`,
+    /// `AssignedProofBlockMissing`) remain `is_internal_failure()` but are
+    /// NOT node faults — they're recoverable via passive depth-prune + fresh
+    /// gossip re-entering the prevalidate path.
     pub fn is_node_fault(&self) -> bool {
         matches!(
             self,
@@ -451,16 +475,20 @@ impl PreValidationError {
             // not under any consensus-induced condition.
             | Self::LocalEmaSnapshotMissing { .. }
             | Self::LocalEpochSnapshotMissing { .. }
-            // Block-bounds lookup failures: the PoA-validation construction
-            // site pre-checks peer-supplied offsets against the chain max,
-            // rejects out-of-range offsets via PoAChunkOffsetOutOfBlockBounds,
-            // and rejects peer-supplied ledger ids absent from the latest
-            // indexed block via PoALedgerInactive — so by the time this
-            // variant is constructed the failure is local (empty index,
-            // DB I/O). The get_assigned_ingress_proofs sites only operate on
-            // block hashes already present in our DB, so any lookup failure
-            // there is likewise a local DB consistency issue.
+            // PoA-anchored block-bounds lookup failure: caller pre-checks
+            // peer-supplied offsets against the chain max
+            // (`PoAChunkOffsetOutOfBlockBounds`) and peer-supplied ledger ids
+            // against the parent's indexed item (`PoALedgerInactive`), so by
+            // the time this variant is constructed the failure is a local
+            // index inconsistency (empty index, DB I/O, missing predecessor).
+            // Internal + node-fault (see `is_node_fault`).
             | Self::BlockBoundsLookupError(_)
+            // Assigned-proof walk over `CachedDataRoots.block_set` hit a hash
+            // that is no longer resolvable — `block_set` is fork-spanning, so
+            // a hash for a now-pruned side-fork block is the expected cause.
+            // Internal but NOT a node fault: peer is innocent and the local
+            // condition is structural (fork-determinism gap in `block_set`).
+            | Self::AssignedProofBlockMissing { .. }
             // Block-tree RwLock poisoned by a prior panic. Local corruption
             // — caller should escalate (see `is_fatal_corruption`). Listed
             // here so any caller that routes this through `.into()` doesn't
@@ -1807,6 +1835,13 @@ mod prevalidation_error_classification_tests {
                 expected_height: 0,
             },
             PreValidationError::ParentNotIndexedYet { parent_height: 0 },
+            // `block_set` is fork-spanning — a hash that resolved at observe
+            // time can be pruned with its side fork by validation time.
+            // Innocent peer; not a node fault.
+            PreValidationError::AssignedProofBlockMissing {
+                block_hash: H256::zero(),
+                tx_id: H256::zero(),
+            },
         ];
         for err in cases {
             assert!(
@@ -1819,6 +1854,85 @@ mod prevalidation_error_classification_tests {
                 "{:?} must still be internal-failure (peer is innocent)",
                 err
             );
+        }
+    }
+
+    /// The PoA-anchored `BlockBoundsLookupError` retains `is_node_fault =
+    /// true` after the split: caller pre-checks at
+    /// `get_data_poa_bounds_with_block_tree_fallback` rule out the
+    /// peer-attributable cases (`PoAChunkOffsetOutOfBlockBounds`,
+    /// `PoALedgerInactive`) before this variant is constructible, so the
+    /// remaining failure modes are genuine local-index breakage. Guard
+    /// against an accidental "soften everything" reclassification when the
+    /// new soft sibling is added.
+    #[test]
+    fn block_bounds_lookup_error_retains_node_fault_classification() {
+        let err = PreValidationError::BlockBoundsLookupError("local index broken".to_string());
+        assert!(
+            err.is_node_fault(),
+            "PoA-anchored BlockBoundsLookupError must remain a node fault — \
+             callers pre-filter all peer-attributable cases before it can fire",
+        );
+        assert!(
+            err.is_internal_failure(),
+            "BlockBoundsLookupError node-fault must also be internal-failure (strict subset)",
+        );
+    }
+
+    /// `AssignedProofBlockMissing` is the soft sibling of
+    /// `BlockBoundsLookupError`, emitted from the
+    /// `CachedDataRoots.block_set` walk in `get_assigned_ingress_proofs`.
+    /// That set is fork-spanning, so a missing hash there means a side fork
+    /// was pruned — not a local-index inconsistency. Must classify as
+    /// internal-failure (block parks in cache) but explicitly NOT a node
+    /// fault (no restart; peer is innocent).
+    #[test]
+    fn assigned_proof_block_missing_is_internal_but_not_node_fault() {
+        let err = PreValidationError::AssignedProofBlockMissing {
+            block_hash: H256::zero(),
+            tx_id: H256::zero(),
+        };
+        assert!(
+            err.is_internal_failure(),
+            "AssignedProofBlockMissing must classify as internal so the block parks in cache",
+        );
+        assert!(
+            !err.is_node_fault(),
+            "AssignedProofBlockMissing is a fork-determinism gap in block_set, NOT a node fault — \
+             aborting the node here would self-DoS on every pruned side-fork data_root",
+        );
+        assert!(
+            !err.is_fatal_corruption(),
+            "AssignedProofBlockMissing is recoverable, not fatal corruption",
+        );
+    }
+
+    /// Round-trip the new soft variant through the
+    /// `From<PreValidationError> for ValidationResult` dispatcher: it must
+    /// land on `ValidationResult::InternalFailure`, never `Invalid` or a
+    /// panic. The wrapped `InternalFailureError::is_node_fault()` must also
+    /// report `false` so the `send_validation_result` panic-guard does not
+    /// fire on this path.
+    #[test]
+    fn assigned_proof_block_missing_routes_to_internal_failure() {
+        use crate::block_tree_service::ValidationResult;
+
+        let err = PreValidationError::AssignedProofBlockMissing {
+            block_hash: H256::zero(),
+            tx_id: H256::zero(),
+        };
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "AssignedProofBlockMissing must round-trip as a non-node-fault InternalFailure",
+                );
+            }
+            other => panic!(
+                "AssignedProofBlockMissing must route to InternalFailure, got {:?}",
+                other
+            ),
         }
     }
 
@@ -4442,21 +4556,36 @@ pub fn get_assigned_ingress_proofs(
     }
 
     //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
+    //
+    //  `block_hashes` comes from `CachedDataRoots.block_set` — explicitly
+    //  fork-spanning (see this function's doc). A hash here may belong to a
+    //  side fork that has since been pruned from both `block_tree` and the
+    //  database, so `Ok(None)` and `Err(_)` from `get_ledger_range` both
+    //  describe the same root cause: a no-longer-resolvable side-fork hash.
+    //  Both surface as the soft `AssignedProofBlockMissing` variant so the
+    //  caller parks the block in cache for retry rather than treating this
+    //  as a node-fault local-index inconsistency.
     let mut block_ranges = Vec::new();
     for block_hash in block_hashes.iter() {
         match get_ledger_range(block_hash, block_tree, db) {
             Ok(Some(block_range)) => block_ranges.push(block_range),
             Ok(None) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "get_ledger_range returned None for block {}, assigned_miners would remain unset (tx_id {})",
-                    block_hash, tx_header.id
-                )));
+                return Err(PreValidationError::AssignedProofBlockMissing {
+                    block_hash: *block_hash,
+                    tx_id: tx_header.id,
+                });
             }
             Err(e) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "Failed to get ledger range for block {}: {}",
-                    block_hash, e
-                )));
+                debug!(
+                    %block_hash,
+                    tx_id = %tx_header.id,
+                    error = %e,
+                    "get_ledger_range error for fork-spanning block_set hash; treating as pruned side fork"
+                );
+                return Err(PreValidationError::AssignedProofBlockMissing {
+                    block_hash: *block_hash,
+                    tx_id: tx_header.id,
+                });
             }
         }
     }
