@@ -1,5 +1,5 @@
 use crate::utils::IrysNodeTest;
-use irys_actors::block_validation::{PreValidationError, poa_is_valid};
+use irys_actors::block_validation::poa_is_valid;
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -121,6 +121,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 
     // Setup some working variables
     let block_index_guard = &genesis_node.node_ctx.block_index_guard.clone();
+    let block_tree_guard = &genesis_node.node_ctx.block_tree_guard.clone();
     let num_chunks_in_partition = node_config.consensus_config().num_chunks_in_partition;
     let entropy_packing_iterations = node_config.consensus_config().entropy_packing_iterations;
     let chain_id = node_config.consensus_config().chain_id;
@@ -188,6 +189,8 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             poa_is_valid(
                 &entropy_poa,
                 block_index_guard,
+                block_tree_guard,
+                new_block.block_hash,
                 new_block.height,
                 &epoch_snapshot,
                 &node_config.consensus_config(),
@@ -210,6 +213,8 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
             poa_is_valid(
                 &data_poa,
                 block_index_guard,
+                block_tree_guard,
+                new_block.block_hash,
                 new_block.height,
                 &epoch_snapshot,
                 &node_config.consensus_config(),
@@ -225,25 +230,31 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 }
 
 //==============================================================================
-// Liveness bug reproduction: data-PoA at the tip
+// Regression: data-PoA at the tip validates via block_tree fallback
 //==============================================================================
-/// This test demonstrates a known liveness bug (P0 in REVIEW.md, item #2):
-/// data-PoA blocks validated at the tip can never become valid because the
-/// parent is not in the `block_index` until migration runs. With the mainnet
-/// default `block_migration_depth = 6`, a block at height `H` only migrates
-/// once the canonical tip reaches `H + 6`, so when a child of `H` arrives for
-/// pre-validation the lookup `block_index.get_item(H)` returns `None` and
-/// `poa_is_valid` returns `PreValidationError::ParentNotIndexedYet`.
+/// Regression test for the `block_tree` fallback that fixes the P0 #2 stall
+/// in REVIEW.md — locks in that data-PoA blocks at the tip validate even
+/// before the parent is migrated to the `block_index`.
 ///
-/// Once the bug is fixed, this test will need to be inverted to assert that
-/// `poa_is_valid` returns `Ok(())` for a data-PoA whose parent is in the
-/// block tree but not yet in the block index.
+/// Prior to the fix, `poa_is_valid`'s data-path required the parent's item
+/// to be in the persistent `block_index`, which only contains blocks
+/// migrated `block_migration_depth` deep below the canonical tip. With the
+/// mainnet default `block_migration_depth = 6`, a block at height `H` only
+/// migrates once the canonical tip reaches `H + 6`, so when a child of `H`
+/// arrived for pre-validation the lookup `block_index.get_item(H)` returned
+/// `None` and `poa_is_valid` returned `PreValidationError::ParentNotIndexedYet`,
+/// stalling the child indefinitely.
+///
+/// The fix walks the parent chain in `block_tree` when the parent is not
+/// yet indexed (the un-migrated window). The config invariant
+/// `block_tree_depth > block_migration_depth` guarantees `block_tree`
+/// always covers that window.
 ///
 /// Distinct from `multi_slot_poa_test` (above), which forces migration by
 /// overriding `block_migration_depth = 1` and explicitly awaiting
 /// `wait_until_block_index_height` — masking the at-tip code path.
 #[tokio::test]
-async fn data_poa_at_tip_returns_parent_not_indexed_yet() -> eyre::Result<()> {
+async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "info") };
     initialize_tracing();
@@ -387,33 +398,28 @@ async fn data_poa_at_tip_returns_parent_not_indexed_yet() -> eyre::Result<()> {
 
     // Call `poa_is_valid` with `parent_height = data_block.height` — i.e. as
     // if we were pre-validating a hypothetical child block built on top of
-    // `data_block`. With the bug present this returns `ParentNotIndexedYet`
-    // because `block_index.get_item(data_block.height)` is None.
+    // `data_block`. With the fix in place, `poa_is_valid` falls back to
+    // `block_tree` (because `block_index.get_item(data_block.height)` is
+    // None — asserted twice above) and resolves the bounds from there.
     let result = poa_is_valid(
         &data_poa,
         &block_index_guard,
+        &block_tree,
+        data_block.block_hash,
         data_block.height,
         &epoch_snapshot,
         &node_config.consensus_config(),
         &genesis_signer.address(),
     );
 
-    match result {
-        Err(PreValidationError::ParentNotIndexedYet { parent_height }) => {
-            assert_eq!(
-                parent_height, data_block.height,
-                "ParentNotIndexedYet should carry the parent height we asked about"
-            );
-            info!(
-                "reproduced data-PoA liveness bug: ParentNotIndexedYet at parent_height={}",
-                parent_height
-            );
-        }
-        other => panic!(
-            "expected Err(PreValidationError::ParentNotIndexedYet {{ parent_height: {} }}), got {:?}",
-            data_block.height, other
-        ),
-    }
+    result.expect(
+        "data-PoA at the tip should validate via block_tree fallback \
+         (parent un-migrated; bounds resolved from block_tree)",
+    );
+    info!(
+        "validated data-PoA at tip via block_tree fallback at parent_height={}",
+        data_block.height
+    );
 
     // Orderly shutdown
     genesis_node.stop().await;

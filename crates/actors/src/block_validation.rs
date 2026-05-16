@@ -10,7 +10,7 @@ use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
@@ -363,6 +363,13 @@ pub enum PreValidationError {
     /// (validity unknown, retry plausible once migration catches up) and NOT
     /// a node fault — the peer is innocent and the local state will advance
     /// on its own.
+    ///
+    /// NOTE: the data-PoA path no longer surfaces this variant — it falls
+    /// back to `block_tree` for the un-migrated window
+    /// (`block_tree_depth > block_migration_depth`, config-enforced). The
+    /// variant is retained as a useful classification for any future
+    /// fallback failure mode that genuinely needs to surface
+    /// "parent missing from both index and tree but consensus-innocent".
     #[error("parent block at height {parent_height} not yet in block index (still in block tree)")]
     ParentNotIndexedYet { parent_height: u64 },
 }
@@ -2066,6 +2073,185 @@ pub fn get_recall_range(
     )
 }
 
+/// Resolve PoA chunk bounds for a data-PoA at `parent_height`, falling back
+/// to `block_tree` when `block_index` doesn't yet have the parent (the
+/// un-migrated window between canonical tip and `tip - block_migration_depth`).
+///
+/// Returns `BlockBounds` for the block that introduced the chunk at
+/// `ledger_chunk_offset`: `start_chunk_offset` is the predecessor's total
+/// chunks at this ledger, `end_chunk_offset` is the introducing block's total,
+/// and `tx_root` is the introducing block's tx_root for the ledger.
+///
+/// ## Lock ordering
+/// Acquires `block_tree.read()` before `block_index.read()` when both are
+/// needed mid-fallback. Mirrors the writer order in
+/// `block_tree_service::on_block_validation_finished` and the reader order in
+/// `block_pool::fcu_markers`, so this helper cannot deadlock against either.
+///
+/// ## Invariants the fallback relies on
+/// - `block_tree_depth > block_migration_depth` (config-enforced in
+///   `Config::validate`). Walking backwards from `parent_block_hash`, we
+///   are guaranteed to reach the migrated portion before running out of
+///   block_tree entries.
+fn get_data_poa_bounds_with_block_tree_fallback(
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    parent_block_hash: BlockHash,
+    parent_height: u64,
+    ledger: DataLedger,
+    ledger_chunk_offset: u64,
+) -> Result<BlockBounds, PreValidationError> {
+    // Fast path: parent is migrated. Identical disambiguation to the prior
+    // implementation — offsets past chain-max and ledger-not-active are
+    // consensus-invalid, lookup failures past those checks are local.
+    {
+        let index = block_index_guard.read();
+        if let Some(parent_item) = index.get_item(parent_height) {
+            match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
+                Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
+                    return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+                }
+                None => {
+                    return Err(PreValidationError::PoALedgerInactive {
+                        ledger_id: ledger as u32,
+                    });
+                }
+                Some(_) => {}
+            }
+            return index
+                .get_block_bounds_at_height(
+                    ledger,
+                    LedgerChunkOffset::from(ledger_chunk_offset),
+                    parent_height,
+                )
+                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+        }
+        // index doesn't have parent yet — drop the lock before acquiring tree
+        // to keep the tree-then-index ordering when we re-enter for older history.
+    }
+
+    // Fallback path: walk the parent chain in block_tree until we find the
+    // block whose [prev_total, curr_total) range contains ledger_chunk_offset.
+    // If the walk falls off the bottom of block_tree before finding the
+    // chunk, delegate the remainder to block_index's binary search (older
+    // history is always indexed).
+    let tree = block_tree_guard.read();
+
+    // Anchor: parent's data_ledgers[ledger].total_chunks defines the upper
+    // bound on which offsets are in-range for the chain ending at this parent.
+    let parent_header =
+        tree.get_block(&parent_block_hash)
+            .ok_or(PreValidationError::ParentNotInCache {
+                parent_hash: parent_block_hash,
+                expected_height: parent_height,
+            })?;
+    let parent_ledger_entry = parent_header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == ledger as u32)
+        .ok_or(PreValidationError::PoALedgerInactive {
+            ledger_id: ledger as u32,
+        })?;
+    if ledger_chunk_offset >= parent_ledger_entry.total_chunks {
+        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+    }
+
+    // Walk backwards: at each step `curr` is the candidate introducing block.
+    // We accept it when `prev_total <= offset < curr_total`.
+    let mut curr: &IrysBlockHeader = parent_header;
+    let mut curr_total: u64 = parent_ledger_entry.total_chunks;
+    let mut curr_tx_root: H256 = parent_ledger_entry.tx_root;
+
+    loop {
+        let prev_hash = curr.previous_block_hash;
+        let curr_height = curr.height;
+
+        // prev_total for the predecessor of `curr`:
+        //  - genesis (curr_height == 0): no predecessor, prev_total = 0
+        //  - predecessor in block_tree: read its data_ledgers entry
+        //  - predecessor not in block_tree: read from block_index
+        //    (block_tree_depth > block_migration_depth guarantees this is
+        //    always indexed; missing entry for this ledger ⇒ ledger not yet
+        //    introduced at that height, prev_total = 0)
+        let prev_total: u64 = if curr_height == 0 {
+            0
+        } else if let Some(prev_header) = tree.get_block(&prev_hash) {
+            prev_header
+                .data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == ledger as u32)
+                .map(|l| l.total_chunks)
+                .unwrap_or(0)
+        } else {
+            let index = block_index_guard.read();
+            index
+                .get_item(curr_height - 1)
+                .and_then(|item| {
+                    item.ledgers
+                        .iter()
+                        .find(|l| l.ledger == ledger)
+                        .map(|l| l.total_chunks)
+                })
+                .unwrap_or(0)
+        };
+
+        if ledger_chunk_offset >= prev_total {
+            // Found: chunk falls in [prev_total, curr_total) for `curr`.
+            // `curr_tx_root` was set when we descended into `curr` (or
+            // initially from the parent header) — it always reflects the
+            // tx_root of the block we're returning.
+            return Ok(BlockBounds {
+                height: curr_height,
+                ledger,
+                start_chunk_offset: prev_total,
+                end_chunk_offset: curr_total,
+                tx_root: curr_tx_root,
+            });
+        }
+
+        // Descend to predecessor. We already proved `ledger_chunk_offset <
+        // parent_ledger_entry.total_chunks` above, so genesis is unreachable
+        // here in well-formed data — but guard against logic errors anyway.
+        if curr_height == 0 {
+            return Err(PreValidationError::BlockBoundsLookupError(format!(
+                "chunk offset {} not located in chain ending at parent {} (height {})",
+                ledger_chunk_offset, parent_block_hash, parent_height
+            )));
+        }
+
+        match tree.get_block(&prev_hash) {
+            Some(prev_header) => {
+                let prev_entry = prev_header
+                    .data_ledgers
+                    .iter()
+                    .find(|l| l.ledger_id == ledger as u32);
+                // For a block that doesn't yet have this ledger, treat as
+                // (0, default tx_root): the walk's next iteration will fall
+                // through to the prev_total==0 case and we'd return — but
+                // only if offset==0 is the target. Otherwise we continue.
+                curr_total = prev_entry.map(|e| e.total_chunks).unwrap_or(0);
+                curr_tx_root = prev_entry.map(|e| e.tx_root).unwrap_or_default();
+                curr = prev_header;
+            }
+            None => {
+                // Predecessor is below block_tree's window — delegate the
+                // remainder of the search to block_index's binary search,
+                // anchored at (curr_height - 1) so the bounds are
+                // fork-deterministic with the rest of this lookup.
+                drop(tree);
+                let index = block_index_guard.read();
+                return index
+                    .get_block_bounds_at_height(
+                        ledger,
+                        LedgerChunkOffset::from(ledger_chunk_offset),
+                        curr_height - 1,
+                    )
+                    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+            }
+        }
+    }
+}
+
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
@@ -2078,6 +2264,8 @@ pub fn get_recall_range(
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    parent_block_hash: BlockHash,
     parent_height: u64,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
@@ -2125,40 +2313,30 @@ pub fn poa_is_valid(
         //    (the chain has no committed data for it yet, or the peer is on
         //    a different fork)
         //
-        // Anchored on the parent's indexed item (`get_item(parent_height)`)
-        // rather than the local tip (`get_latest_item()`) so that two honest
-        // peers on the same fork produce identical pre-validation outcomes
-        // regardless of how far their local indices have advanced past
-        // `parent_height`. The bounds lookup is likewise anchored on
-        // `parent_height` (via `get_block_bounds_at_height`) so the binary
-        // search never consults blocks beyond the parent — if we instead fell
-        // through to the latest-tip `get_block_bounds`, the local-tip
-        // dependency would re-enter through the back door. When the parent
-        // is too recent to be in the index yet (in the block tree but not
-        // migrated), we surface `ParentNotIndexedYet` so the block stays in
-        // cache for retry rather than being mis-validated against the tip.
-        let bb = {
-            let index = block_index_guard.read();
-            let parent_item = index
-                .get_item(parent_height)
-                .ok_or(PreValidationError::ParentNotIndexedYet { parent_height })?;
-            match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
-                Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
-                    return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
-                }
-                None => {
-                    return Err(PreValidationError::PoALedgerInactive { ledger_id });
-                }
-                Some(_) => {}
-            }
-            index
-                .get_block_bounds_at_height(
-                    ledger,
-                    LedgerChunkOffset::from(ledger_chunk_offset),
-                    parent_height,
-                )
-                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?
-        };
+        // Anchored on the parent (`parent_height` / `parent_block_hash`)
+        // rather than the local tip so that two honest peers on the same
+        // fork produce identical pre-validation outcomes regardless of how
+        // far their local indices have advanced past `parent_height`. The
+        // bounds lookup is likewise anchored on the parent so the search
+        // never consults blocks beyond the parent — if we instead fell
+        // through to a latest-tip lookup, the local-tip dependency would
+        // re-enter through the back door.
+        //
+        // When the parent is too recent to be in the block_index yet (the
+        // un-migrated window between canonical tip and
+        // tip - block_migration_depth), we fall back to walking the parent
+        // chain in `block_tree`. The config invariant
+        // `block_tree_depth > block_migration_depth` guarantees that the
+        // un-migrated window always lives in `block_tree`; older history
+        // is always in `block_index`.
+        let bb = get_data_poa_bounds_with_block_tree_fallback(
+            block_index_guard,
+            block_tree_guard,
+            parent_block_hash,
+            parent_height,
+            ledger,
+            ledger_chunk_offset,
+        )?;
         if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
@@ -4423,7 +4601,10 @@ mod tests {
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_database::db::IrysDatabaseExt as _;
-    use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
+    use irys_domain::{
+        BlockIndex, BlockTree, EpochSnapshot, block_index_guard::BlockIndexReadGuard,
+    };
+    use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::tempfile::TempDir;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -4431,8 +4612,22 @@ mod tests {
         DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
     use tracing::{debug, info};
+
+    /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
+    /// `block_index` fast path of `poa_is_valid` — the helper's fallback is
+    /// unreachable when `parent_height` is present in the index, so the
+    /// tree's contents don't matter, only that the guard is constructible.
+    /// (`BlockTree::new` validates the genesis signature, so we need a signed
+    /// mock header rather than the unsigned `new_mock_header`.)
+    fn dummy_block_tree_guard(consensus_config: &ConsensusConfig) -> BlockTreeReadGuard {
+        let genesis = new_mock_signed_header();
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+            &genesis,
+            consensus_config.clone(),
+        ))))
+    }
 
     fn ledger_with_tx(ledger_id: DataLedger, tx_id: H256) -> DataTransactionLedger {
         DataTransactionLedger {
@@ -4902,10 +5097,15 @@ mod tests {
         // (just pushed above), so anchoring on its height lets the
         // pre-check use the same view of total_chunks the rest of the
         // test exercises (the chunks the PoA references were committed
-        // by this block).
+        // by this block). The block_tree fallback in `poa_is_valid` is
+        // unreachable here because `height` is in `block_index`; the dummy
+        // guard exists only to satisfy the signature.
+        let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            &block_tree_guard,
+            H256::zero(),
             height,
             &context.epoch_snapshot,
             &context.consensus_config,
@@ -5149,10 +5349,15 @@ mod tests {
 
         // See parent-anchor comment in `poa_test`: use the just-pushed
         // block's height so the pre-check sees the same `total_chunks`
-        // the rest of the assertions exercise.
+        // the rest of the assertions exercise. The block_tree fallback in
+        // `poa_is_valid` is unreachable here because `height` is in
+        // `block_index`; the dummy guard exists only to satisfy the signature.
+        let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            &block_tree_guard,
+            H256::zero(),
             height,
             &context.epoch_snapshot,
             &context.consensus_config,

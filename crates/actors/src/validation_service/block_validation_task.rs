@@ -566,8 +566,10 @@ impl BlockValidationTask {
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
+            let block_tree_guard = self.block_tree_guard.clone();
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
+            let parent_block_hash = self.sealed_block.header().previous_block_hash;
             // Clone the Arc for the blocking task; the non-PoA tasks below
             // get their own clones from the same single fetch.
             let poa_epoch_snapshot = Arc::clone(&parent_epoch_snapshot);
@@ -586,6 +588,8 @@ impl BlockValidationTask {
                     poa_is_valid(
                         &poa,
                         &block_index_guard,
+                        &block_tree_guard,
+                        parent_block_hash,
                         block_height.saturating_sub(1),
                         &poa_epoch_snapshot,
                         &consensus_config,
