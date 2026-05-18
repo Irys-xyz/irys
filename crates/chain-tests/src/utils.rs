@@ -3810,11 +3810,23 @@ pub async fn read_block_from_state(
         // Check for block state events (non-blocking)
         while let Ok(event) = event_receiver.try_recv() {
             if event.block_hash == *block_hash && event.discarded {
-                // Block was discarded, extract validation error from result
-                if let irys_actors::block_tree_service::ValidationResult::Invalid(rejection) =
-                    event.validation_result
-                {
-                    return BlockValidationOutcome::Discarded(rejection.err().clone());
+                // Block was discarded; extract the underlying ValidationError
+                // from either dispatch arm. `Invalid` carries consensus
+                // rejections (peer's block is bad); `InternalFailure` carries
+                // local/runtime issues including cancel reasons like
+                // ParentMissing that route as internal. Both surface to tests
+                // via `BlockValidationOutcome::Discarded(error)` so
+                // `assert_validation_error` works on either.
+                match event.validation_result {
+                    irys_actors::block_tree_service::ValidationResult::Invalid(rejection) => {
+                        return BlockValidationOutcome::Discarded(rejection.err().clone());
+                    }
+                    irys_actors::block_tree_service::ValidationResult::InternalFailure(
+                        internal,
+                    ) => {
+                        return BlockValidationOutcome::Discarded(internal.err().clone());
+                    }
+                    irys_actors::block_tree_service::ValidationResult::Valid => {}
                 }
             }
         }

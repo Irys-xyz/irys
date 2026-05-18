@@ -134,9 +134,18 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    // After the `761fb22f6` map_err removal in `shadow_tx_task`, typed
+    // PreValidation errors propagate cleanly instead of being stringified
+    // as the catch-all `ShadowTransactionInvalid`. The fee mismatch surfaces
+    // here as the typed `PreValidation(InsufficientPermFee)`.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+            )
+        },
         "block with insufficient perm_fee should be rejected",
     );
 
