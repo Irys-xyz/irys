@@ -401,13 +401,18 @@ impl InnerCacheTask {
             }
             // Pruning horizon priority: canonical tx inclusion > expiry height > skip
             // Rationale: Migrated tx metadata provides a stable canonical
-            // inclusion height even after reorgs.  Unconfirmed mempool entries
-            // use expiry_height as a conservative fallback.  Entries without
-            // either are likely still active and are skipped.
+            // inclusion height even after reorgs.  Pre-confirmation mempool
+            // entries use expiry_height as a fallback.  Entries with neither
+            // are skipped (conservative).
             //
-            // No block_tree fallback is needed here: pre-migration entries are
-            // already covered by expiry_height (set at cache_data_root time)
-            // and by the local-proof exemption further below.
+            // Note: cache_data_root *clears* expiry_height when a block_header
+            // is provided (database.rs).  So a confirmed-but-not-yet-migrated
+            // entry temporarily has expiry_height=None and included_height=None
+            // and lands in the skip arm below.  Once migration writes
+            // included_height (within ~block_migration_depth blocks) the entry
+            // becomes eligible for pruning.  No block_tree fallback is added
+            // here: the local-proof exemption further below covers the case
+            // we care most about, and the window is bounded.
             let mut inclusion_max_height: Option<u64> = None;
             for tx_id in cached.txid_set.iter() {
                 if let Some(metadata) = irys_database::get_data_tx_metadata(&write_tx, tx_id)?
