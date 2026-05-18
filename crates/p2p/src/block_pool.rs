@@ -1027,7 +1027,7 @@ where
                         self.sync_state
                             .record_block_processing_error(pre_err.to_string());
                         return Err(
-                            CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into(),
+                            CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into()
                         );
                     }
                     // Consensus rejection: peer's block is genuinely invalid.
