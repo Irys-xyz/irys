@@ -504,7 +504,8 @@ impl ChunkIngressServiceInner {
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
     /// - data_size is confirmed (rightmost chunk merkle validation)
-    /// - data_root is included in a confirmed block (block_set non-empty)
+    /// - some tx referencing this data_root is canonically confirmed in a
+    ///   Submit ledger at or before the current canonical tip
     /// - no local proof already exists
     /// - all expected chunks are present
     pub(crate) fn try_generate_ingress_proof_for_root(
@@ -526,10 +527,39 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Only generate ingress proofs for txs confirmed in a block's submit ledger.
-        // block_set is populated by cache_data_root() when called with a block header
-        // during block confirmation (lifecycle.rs). Empty means mempool-only.
+        // Cheap hint: `block_set` is best-effort and not fork-tolerant, but
+        // an empty `block_set` means no `BlockConfirmed` event has ever
+        // touched this data_root.  In that case there's nothing to verify
+        // canonically yet; skip the more expensive helper lookup.  The
+        // next `BlockConfirmed` event will retrigger this code path with a
+        // non-empty `block_set`.
         if cdr.block_set.is_empty() {
+            return Ok(());
+        }
+
+        // Trustworthy verification: a non-empty `block_set` can still hold
+        // only orphan hashes (append-only across reorgs).  Confirm at least
+        // one tx in `txid_set` is canonically confirmed in a Submit ledger
+        // at or before the current tip via `tx_inclusion` — this is the
+        // trust root.  Without it, validation could proceed for data_roots
+        // that only ever made it into reorg'd-out forks.
+        let current_height = self
+            .block_tree_read_guard
+            .latest_canonical_block_height()
+            .unwrap_or(0);
+        let any_confirmed = cdr.txid_set.iter().any(|tx_id| {
+            matches!(
+                crate::tx_inclusion::find_canonical_ledger_range(
+                    tx_id,
+                    current_height,
+                    self.config.consensus.block_migration_depth,
+                    &self.block_tree_read_guard,
+                    &self.irys_db,
+                ),
+                Ok(Some(_))
+            )
+        });
+        if !any_confirmed {
             return Ok(());
         }
 

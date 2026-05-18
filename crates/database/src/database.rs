@@ -316,7 +316,11 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         cached_data_root.data_size = tx_header.data_size;
     }
 
-    // If the entry exists and a block header reference was provided, add the block hash reference if necessary
+    // If a block header is provided, record it in block_set as a *hint*
+    // (best-effort, not fork-tolerant — orphan hashes are retained across
+    // reorgs).  Consumers that need canonical truth must verify via
+    // `irys_actors::tx_inclusion`.  Also clear any pre-confirmation expiry
+    // since the data_root is now associated with at least one block.
     if let Some(block_header) = block_header {
         if !cached_data_root
             .block_set
@@ -324,7 +328,6 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         {
             cached_data_root.block_set.push(block_header.block_hash);
         }
-        // Clear any pre-confirmation expiry once the data_root is included in a block
         cached_data_root.expiry_height = None;
     }
 

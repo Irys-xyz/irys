@@ -76,9 +76,10 @@ impl Inner {
             return Ok(());
         }
 
-        // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
-        // Track which roots were successfully cached so we only trigger proof generation
-        // for roots whose block_set was actually updated.
+        // Update `CachedDataRoots` so this block_hash is recorded in each
+        // data_root's block_set hint, and any pre-confirmation expiry is
+        // cleared.  Track which roots were successfully cached so we only
+        // trigger proof generation for those.
         let mut confirmed_data_roots = Vec::new();
         for submit_tx in sealed_block
             .transactions()
@@ -105,9 +106,10 @@ impl Inner {
             };
         }
 
-        // After block_set is populated for each confirmed data_root, notify the
-        // chunk ingress service to try generating ingress proofs. These will now
-        // pass the block_set gate since the block hash was just recorded above.
+        // After block_set is populated for each confirmed data_root, notify
+        // the chunk ingress service to try generating ingress proofs.  The
+        // block_set hint will now be non-empty and the canonical-tx
+        // verification will succeed since the tx was just included above.
         if !confirmed_data_roots.is_empty()
             && let Err(e) = self.service_senders.chunk_ingress.send_traced(
                 ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
