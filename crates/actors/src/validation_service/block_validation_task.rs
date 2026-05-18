@@ -479,8 +479,8 @@ impl BlockValidationTask {
                         block.parent_hash = %block.previous_block_hash,
                         "Parent EMA snapshot not found"
                     );
-                    return crate::block_validation::PreValidationError::LocalEmaSnapshotMissing {
-                        parent_hash: block.previous_block_hash,
+                    return ValidationError::ParentEmaSnapshotMissing {
+                        block_hash: block.previous_block_hash,
                     }
                     .into();
                 }

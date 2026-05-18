@@ -242,8 +242,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 /// mainnet default `block_migration_depth = 6`, a block at height `H` only
 /// migrates once the canonical tip reaches `H + 6`, so when a child of `H`
 /// arrived for pre-validation the lookup `block_index.get_item(H)` returned
-/// `None` and `poa_is_valid` returned `PreValidationError::ParentNotIndexedYet`,
-/// stalling the child indefinitely.
+/// `None` and the child stalled indefinitely.
 ///
 /// The fix walks the parent chain in `block_tree` when the parent is not
 /// yet indexed (the un-migrated window). The config invariant
@@ -264,8 +263,8 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
 
     // Use the mainnet default `block_migration_depth = 6`. This is the whole
     // point of the test — with depth=1 (as in `multi_slot_poa_test`) migration
-    // catches up after a couple of blocks, and the at-tip lookup never fires
-    // `ParentNotIndexedYet`.
+    // catches up after a couple of blocks, and the at-tip code path that
+    // exercises the `block_tree` fallback never fires.
     let node_config = NodeConfig::testing().with_consensus(|consensus| {
         consensus.chunk_size = chunk_size as u64;
         consensus.num_partitions_per_slot = 3;

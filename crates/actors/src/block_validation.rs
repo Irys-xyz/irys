@@ -53,6 +53,38 @@ use std::{
 use thiserror::Error;
 use tracing::{Instrument as _, debug, error, info, warn};
 
+/// Classification of an error variant's failure mode. Drives whether the
+/// block is removed from cache as a consensus rejection (`Consensus`),
+/// parked as soft-internal pending passive prune+re-gossip recovery
+/// (`SoftInternal`), or whether the node must abort + restart
+/// (`NodeFault`).
+///
+/// SAFETY-CRITICAL: see the enum-level safety doc on `PreValidationError`
+/// / `ValidationError`. Misclassification can attribute a local failure to
+/// the peer (or vice versa) and corrupt consensus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Strict subset of internal: local fault, retry will hit the same
+    /// fault. Must abort + supervisor restart.
+    NodeFault,
+    /// Local condition (eviction race, missing snapshot), recoverable
+    /// via passive depth-prune + fresh gossip re-entering the prevalidate
+    /// path. Block stays in cache.
+    SoftInternal,
+    /// Peer's block is genuinely invalid. Discard the block and (where
+    /// applicable) the peer.
+    Consensus,
+}
+
+impl ErrorClass {
+    pub fn is_node_fault(self) -> bool {
+        matches!(self, Self::NodeFault)
+    }
+    pub fn is_internal_failure(self) -> bool {
+        !matches!(self, Self::Consensus)
+    }
+}
+
 /// SAFETY-CRITICAL: variants in this enum are returned from `prevalidate_block`
 /// and used by callers to decide whether a block is consensus-invalid. Local
 /// or runtime failures (I/O, task join errors, lock contention, transient
@@ -246,17 +278,6 @@ pub enum PreValidationError {
         "Publish transaction and ingress proof length mismatch, cannot validate publish ledger transaction proofs"
     )]
     PublishTxProofLengthMismatch,
-    /// Local block-tree cache no longer holds the parent's EMA snapshot. This
-    /// is a race against block-tree eviction or reorg pruning — the parent
-    /// existed at prevalidation time but has since fallen out of the in-memory
-    /// window. NOT a consensus failure: the block's validity is unknown and
-    /// must not be peer-attributed.
-    #[error("Local EMA snapshot missing for parent {parent_hash}")]
-    LocalEmaSnapshotMissing { parent_hash: BlockHash },
-    /// Local block-tree cache no longer holds the parent's epoch snapshot.
-    /// Same race semantics as `LocalEmaSnapshotMissing`.
-    #[error("Local epoch snapshot missing for parent {parent_hash}")]
-    LocalEpochSnapshotMissing { parent_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
     #[error("Failed to get previous transaction inclusions: {0}")]
@@ -380,25 +401,6 @@ pub enum PreValidationError {
         parent_hash: H256,
         expected_height: u64,
     },
-
-    /// Parent block exists in the in-memory block tree but has not yet been
-    /// migrated into the persistent block index. PoA pre-validation needs the
-    /// parent's indexed item to compute fork-deterministic block bounds; if
-    /// it isn't there yet, we must NOT fall back to a latest-tip lookup
-    /// (which would re-introduce the local-tip dependency the parent-anchored
-    /// pre-check was meant to eliminate). Classified as `is_internal_failure`
-    /// (validity unknown, retry plausible once migration catches up) and NOT
-    /// a node fault — the peer is innocent and the local state will advance
-    /// on its own.
-    ///
-    /// NOTE: the data-PoA path no longer surfaces this variant — it falls
-    /// back to `block_tree` for the un-migrated window
-    /// (`block_tree_depth > block_migration_depth`, config-enforced). The
-    /// variant is retained as a useful classification for any future
-    /// fallback failure mode that genuinely needs to surface
-    /// "parent missing from both index and tree but consensus-innocent".
-    #[error("parent block at height {parent_height} not yet in block index (still in block tree)")]
-    ParentNotIndexedYet { parent_height: u64 },
 }
 
 impl PreValidationError {
@@ -410,47 +412,27 @@ impl PreValidationError {
         matches!(self, Self::CachePoisoned { .. })
     }
 
-    /// Returns true for the strict subset of `is_internal_failure()` variants
-    /// that indicate a genuine node-level fault (verifier panic, MDBX I/O
-    /// error, local arithmetic bug, poisoned lock, internal channel dead,
-    /// local cache mutation failure, OS clock failure). These are NOT
-    /// retry-plausible: the underlying issue is in this node, not in the
-    /// peer's block, and re-running the same path will hit the same fault.
-    /// The consensus-safe response is to abort the node so the supervisor
-    /// can restart it clean — running on with an undefined-state local
-    /// failure risks forking off the network with silent data-level errors.
+    /// Single source of truth for failure-mode classification. Drives both
+    /// `is_node_fault()` and `is_internal_failure()`.
     ///
-    /// Pruning/eviction races (`LocalEmaSnapshotMissing`,
-    /// `LocalEpochSnapshotMissing`, `ParentNotInCache`,
-    /// `AssignedProofBlockMissing`) remain `is_internal_failure()` but are
-    /// NOT node faults — they're recoverable via passive depth-prune + fresh
+    /// Node faults (`NodeFault`) are local failures whose retry will hit the
+    /// same fault (verifier panic, MDBX I/O, local arithmetic bug, poisoned
+    /// lock, internal channel dead, local cache mutation, OS clock).
+    /// Consensus-safe response: abort + supervisor restart — running on with
+    /// an undefined-state local failure risks forking off the network with
+    /// silent data-level errors.
+    ///
+    /// Soft-internal failures (`SoftInternal`) are local but peer-innocent
+    /// (pruning/eviction races); recovery is passive via depth-prune + fresh
     /// gossip re-entering the prevalidate path.
-    pub fn is_node_fault(&self) -> bool {
-        matches!(
-            self,
-            Self::InternalTaskJoin(_)
-                | Self::DatabaseError { .. }
-                | Self::PreviousTxInclusionsFailed(_)
-                | Self::AddBlockFailed { .. }
-                | Self::UpdateCacheForScheduledValidationError(_)
-                | Self::ValidationServiceUnreachable
-                | Self::SystemTimeError(_)
-                | Self::RewardCurveError(_)
-                | Self::FeeCalculationFailed(_)
-                | Self::EmaSnapshotError(_)
-                | Self::BlockBoundsLookupError(_)
-                | Self::CachePoisoned { .. }
-        )
-    }
-
-    /// Returns true for variants representing local/runtime failures (verifier
-    /// panics, transient task-join errors, etc.) that must NEVER be attributed
-    /// to the peer or used to mark a block as consensus-invalid. See the enum
-    /// safety-critical doc for the full invariant. Grow this method as new
-    /// non-consensus variants are added.
-    pub fn is_internal_failure(&self) -> bool {
-        matches!(
-            self,
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without classifying it here is a
+    /// compile error by design: silently defaulting to `Consensus` would
+    /// peer-attribute a local fault (or vice versa) and corrupt consensus.
+    pub fn classify(&self) -> ErrorClass {
+        match self {
+            // === Node faults (must abort + restart) ===
             // Verifier-thread panic captured by spawn_blocking.
             Self::InternalTaskJoin(_)
             // Local MDBX I/O failure during prevalidation lookups.
@@ -473,40 +455,103 @@ impl PreValidationError {
             // Local snapshot computation; has no real failure path today, but
             // if it ever fires it's a local bug, not a consensus failure.
             | Self::EmaSnapshotError(_)
-            // Parent's snapshot missing from the in-memory block-tree window
-            // (eviction race); construction site only fires under this race,
-            // not under any consensus-induced condition.
-            | Self::LocalEmaSnapshotMissing { .. }
-            | Self::LocalEpochSnapshotMissing { .. }
             // PoA-anchored block-bounds lookup failure: caller pre-checks
             // peer-supplied offsets against the chain max
             // (`PoAChunkOffsetOutOfBlockBounds`) and peer-supplied ledger ids
             // against the parent's indexed item (`PoALedgerInactive`), so by
             // the time this variant is constructed the failure is a local
             // index inconsistency (empty index, DB I/O, missing predecessor).
-            // Internal + node-fault (see `is_node_fault`).
             | Self::BlockBoundsLookupError(_)
+            // Block-tree RwLock poisoned by a prior panic. Local corruption —
+            // caller should escalate (see `is_fatal_corruption`).
+            | Self::CachePoisoned { .. } => ErrorClass::NodeFault,
+
+            // === Soft internal (peer innocent, retry via passive prune+re-gossip) ===
             // Assigned-proof walk over `CachedDataRoots.block_set` hit a hash
-            // that is no longer resolvable — `block_set` is fork-spanning, so
-            // a hash for a now-pruned side-fork block is the expected cause.
-            // Internal but NOT a node fault: peer is innocent and the local
-            // condition is structural (fork-determinism gap in `block_set`).
-            | Self::AssignedProofBlockMissing { .. }
-            // Block-tree RwLock poisoned by a prior panic. Local corruption
-            // — caller should escalate (see `is_fatal_corruption`). Listed
-            // here so any caller that routes this through `.into()` doesn't
-            // mistakenly peer-attribute the block.
-            | Self::CachePoisoned { .. }
+            // no longer resolvable — `block_set` is fork-spanning, so a hash
+            // for a now-pruned side-fork block is the expected cause.
+            Self::AssignedProofBlockMissing { .. }
             // Parent missing from the in-memory block-tree cache due to a
             // local prune/reorg race. Peer is innocent.
-            | Self::ParentNotInCache { .. }
-            // Parent is in the block tree but not yet migrated into the
-            // block index. Retry plausible once migration catches up; peer
-            // is innocent. Surfacing this typed variant (instead of falling
-            // through to a latest-tip lookup) preserves fork-determinism of
-            // the PoA pre-check.
-            | Self::ParentNotIndexedYet { .. }
-        )
+            | Self::ParentNotInCache { .. } => ErrorClass::SoftInternal,
+
+            // === Consensus rejections (peer's block is bad) ===
+            Self::AssignedProofCountMismatch { .. }
+            | Self::BlockSignatureInvalid
+            | Self::CascadeNotConfigured { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CumulativeDifficultyMismatch { .. }
+            | Self::DataLedgerExtractionFailed(_)
+            | Self::DifficultyMismatch { .. }
+            | Self::DuplicateIngressProofSigner { .. }
+            | Self::EmaMismatch
+            | Self::HeightInvalid { .. }
+            | Self::IngressProofCountMismatch { .. }
+            | Self::IngressProofMismatch { .. }
+            | Self::IngressProofSignatureInvalid(_)
+            | Self::IngressProofsMissing
+            | Self::InsufficientPermFee { .. }
+            | Self::InsufficientTermFee { .. }
+            | Self::InvalidDataLedgersLength { .. }
+            | Self::InvalidEpochSnapshot { .. }
+            | Self::InvalidIngressProof { .. }
+            | Self::InvalidLedgerId { .. }
+            | Self::InvalidLedgerIdForTx { .. }
+            | Self::InvalidPermFeeStructure { .. }
+            | Self::InvalidPromotionDataSizeMismatch { .. }
+            | Self::InvalidPromotionPath { .. }
+            | Self::InvalidTermFeeStructure { .. }
+            | Self::InvalidTransactionSignature(_)
+            | Self::LastDiffTimestampMismatch { .. }
+            | Self::LastEpochHashMismatch { .. }
+            | Self::LedgerIdInvalid { .. }
+            | Self::MerkleProofInvalid(_)
+            | Self::MissingTransactions(_)
+            | Self::OraclePriceInvalid
+            | Self::PartitionAssignmentMissing { .. }
+            | Self::PartitionAssignmentSlotIndexMissing { .. }
+            | Self::PartitionAssignmentSlotIndexTooLarge { .. }
+            | Self::PoACapacityChunkMismatch { .. }
+            | Self::PoAChunkHashMismatch { .. }
+            | Self::PoAChunkMissing
+            | Self::PoAChunkOffsetOutOfBlockBounds
+            | Self::PoAChunkOffsetOutOfDataChunksBounds
+            | Self::PoAChunkOffsetOutOfTxBounds
+            | Self::PoADataPartitionExpired { .. }
+            | Self::PoALedgerInactive { .. }
+            | Self::PreviousCumulativeDifficultyMismatch { .. }
+            | Self::PreviousSolutionHashMismatch { .. }
+            | Self::PublishLedgerProofCountMismatch { .. }
+            | Self::PublishTxAlreadyIncluded { .. }
+            | Self::PublishTxMissingPriorSubmit { .. }
+            | Self::PublishTxProofLengthMismatch
+            | Self::RewardMismatch { .. }
+            | Self::SolutionHashBelowDifficulty { .. }
+            | Self::SolutionHashLinkInvalid { .. }
+            | Self::SubmitTxAlreadyIncluded { .. }
+            | Self::SubmitTxHasPromotedHeight { .. }
+            | Self::TermLedgerExpiryMismatch { .. }
+            | Self::TermLedgerTxHasPermFee { .. }
+            | Self::TimestampOlderThanParent { .. }
+            | Self::TimestampTooFarInFuture { .. }
+            | Self::TooManyCommitmentTxs { .. }
+            | Self::TooManyDataTxs { .. }
+            | Self::TransactionIdMismatch { .. }
+            | Self::TxFoundInMultipleBlocks { .. }
+            | Self::TxInMultipleLedgers { .. }
+            | Self::UnexpectedCommitmentTransactions
+            | Self::UnstakedIngressProofSigner { .. }
+            | Self::VDFCheckpointsInvalid(_)
+            | Self::VDFPreviousOutputMismatch { .. } => ErrorClass::Consensus,
+        }
+    }
+
+    pub fn is_node_fault(&self) -> bool {
+        self.classify().is_node_fault()
+    }
+
+    pub fn is_internal_failure(&self) -> bool {
+        self.classify().is_internal_failure()
     }
 }
 
@@ -736,6 +781,13 @@ pub enum ValidationError {
     #[error("Parent epoch snapshot missing for block {block_hash}")]
     ParentEpochSnapshotMissing { block_hash: H256 },
 
+    /// Parent EMA snapshot not found at validation entry.
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`].
+    #[error("Parent EMA snapshot missing for block {block_hash}")]
+    ParentEmaSnapshotMissing { block_hash: H256 },
+
     /// Parent block not found in block tree at validation entry (looked up
     /// during seed-data validation, before the parent-wait stage).
     ///
@@ -774,103 +826,84 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// Returns true for the strict subset of `is_internal_failure()` variants
-    /// that indicate a genuine node-level fault (see
-    /// [`PreValidationError::is_node_fault`] for the rationale). The handler
-    /// must abort the node on `is_node_fault()` rather than leaving the block
-    /// in the cache, because the failure is in this node — retrying will hit
-    /// the same fault.
+    /// Single source of truth for failure-mode classification. Drives both
+    /// `is_node_fault()` and `is_internal_failure()`. See
+    /// [`PreValidationError::classify`] for the rationale.
     ///
-    /// Eviction-race variants (`ParentCommitmentSnapshotMissing`,
-    /// `ParentEpochSnapshotMissing`, `ParentBlockMissing`) remain
-    /// `is_internal_failure()` but are NOT node faults — recovery is passive
-    /// via depth-prune + re-gossip.
-    pub fn is_node_fault(&self) -> bool {
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without classifying it here is a
+    /// compile error by design: silently defaulting would peer-attribute a
+    /// local fault (or vice versa) and corrupt consensus.
+    pub fn classify(&self) -> ErrorClass {
         match self {
-            Self::PreValidation(e) => e.is_node_fault(),
+            // Delegate to PreValidationError's classifier.
+            Self::PreValidation(e) => e.classify(),
             // Task panic is always a node fault: a verifier thread crashed.
-            Self::TaskPanicked { .. } => true,
+            Self::TaskPanicked { .. } => ErrorClass::NodeFault,
             // Local reth engine RPC transport failure — the EL is broken
-            // on this node, not the peer's block. Abort + supervisor
-            // restart.
-            Self::ExecutionLayerTransportFailed(_) => true,
+            // on this node, not the peer's block. Abort + supervisor restart.
+            Self::ExecutionLayerTransportFailed(_) => ErrorClass::NodeFault,
+            // Hard local I/O failure inside shadow-tx generation (block-header
+            // DB read, MDBX corruption, etc.) — retry cannot help, the DB is
+            // broken on this node.
+            Self::ShadowTxNodeFault(_) => ErrorClass::NodeFault,
+
+            // Cancellation classification is sub-variant-dependent; delegate
+            // so a future retry-plausible reason doesn't silently become a
+            // node fault — that decision should be explicit at the reason
+            // site. (Today: `ParentMissing` → SoftInternal; `HeightDifference`
+            // / `ChannelClosed` → Consensus.)
+            Self::ValidationCancelled { reason } => {
+                if reason.is_internal() {
+                    ErrorClass::SoftInternal
+                } else {
+                    ErrorClass::Consensus
+                }
+            }
+            // Prevalidation-time parent/snapshot lookups: eviction races, not
+            // node faults. Recovery is passive via depth-prune + re-gossip.
+            // The cancellation-time `ValidationCancelReason::ParentMissing`
+            // routes via `ValidationCancelled` above — see the doc on
+            // `Self::ParentBlockMissing` for the distinction.
+            Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentEmaSnapshotMissing { .. }
+            | Self::ParentBlockMissing { .. } => ErrorClass::SoftInternal,
+            // Soft local failure inside shadow-tx generation.
+            Self::ShadowTxGenerationFailed(_) => ErrorClass::SoftInternal,
             // Local `ExecutionPayloadCache` tore down the wait receiver
             // (LRU eviction under sync load, or explicit cache removal).
             // The node is healthy and the EL is fine — cache is just
-            // saturated. Must NOT panic; the block parks in cache for
-            // retry. See the variant doc for the full rationale.
-            Self::ExecutionPayloadCacheEvicted { .. } => false,
-            // Hard local I/O failure inside shadow-tx generation
-            // (block-header DB read, MDBX corruption, etc.) — retry
-            // cannot help, the DB is broken on this node. Abort +
-            // supervisor restart instead of letting known-bad-state
-            // blocks pile up in cache.
-            Self::ShadowTxNodeFault(_) => true,
-            // Every current cancellation reason maps to "chain has moved on,
-            // discard" (see ValidationCancelReason::is_internal). Delegate so
-            // a future retry-plausible reason doesn't silently become a node
-            // fault — that decision should be explicit at the reason site.
-            Self::ValidationCancelled { .. } => false,
-            // Prevalidation-time parent/snapshot lookups: eviction races, not
-            // node faults. Recovery is passive via depth-prune + re-gossip.
-            Self::ParentCommitmentSnapshotMissing { .. }
-            | Self::ParentEpochSnapshotMissing { .. }
-            | Self::ParentBlockMissing { .. } => false,
-            _ => false,
+            // saturated. Block parks in cache for retry. See the variant
+            // doc for the full rationale.
+            Self::ExecutionPayloadCacheEvicted { .. } => ErrorClass::SoftInternal,
+
+            // Consensus rejections — peer's block is genuinely bad.
+            Self::VdfValidationFailed(_)
+            | Self::SeedDataInvalid(_)
+            | Self::ExecutionLayerFailed(_)
+            | Self::RecallRangeInvalid(_)
+            | Self::ShadowTransactionInvalid(_)
+            | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CommitmentTypeNotAllowed { .. }
+            | Self::CommitmentOrderingFailed(_)
+            | Self::CommitmentSnapshotRejected { .. }
+            | Self::UnpledgePartitionNotOwned { .. }
+            | Self::EpochCommitmentMismatch { .. }
+            | Self::EpochExtraCommitment { .. }
+            | Self::EpochMissingCommitment { .. }
+            | Self::CommitmentWrongOrder { .. }
+            | Self::Other(_) => ErrorClass::Consensus,
         }
     }
 
-    /// Returns true for variants representing local/runtime failures that must
-    /// NEVER be treated as a consensus rejection of the block. Delegates to
-    /// `PreValidationError::is_internal_failure` for the `PreValidation` arm
-    /// and classifies the ValidationError-level variants directly, so a single
-    /// `From<ValidationError> for ValidationResult` impl can dispatch the
-    /// correct outcome (`InternalFailure` vs `Invalid`) for every call site.
-    /// Grow this method as new ValidationError-level local failures are added.
+    pub fn is_node_fault(&self) -> bool {
+        self.classify().is_node_fault()
+    }
+
     pub fn is_internal_failure(&self) -> bool {
-        match self {
-            // Delegate to PreValidationError's classifier.
-            Self::PreValidation(e) => e.is_internal_failure(),
-            // Task panic is always local; the block's validity is unknown,
-            // not bad.
-            Self::TaskPanicked { .. } => true,
-            // Cancellation classification is sub-variant-dependent — every
-            // reason on `ValidationCancelReason` today maps to "chain has
-            // moved on, discard" (see the type-level doc), but the hook is
-            // in place for future retry-plausible reasons.
-            Self::ValidationCancelled { reason } => reason.is_internal(),
-            // Prevalidation-time parent/snapshot lookups: classified internal
-            // because they fire *before* the parent-wait stage, i.e. the
-            // parent could legitimately have been there moments earlier and
-            // got evicted in a race. Retry on re-gossip can succeed.
-            //
-            // The cancellation-time `ValidationCancelReason::ParentMissing`
-            // is intentionally NOT classified the same way — see the doc on
-            // `ValidationError::ParentBlockMissing` for the distinction.
-            Self::ParentCommitmentSnapshotMissing { .. }
-            | Self::ParentEpochSnapshotMissing { .. }
-            | Self::ParentBlockMissing { .. } => true,
-            // Local reth engine RPC transport failure — internal (and a
-            // node fault, see `is_node_fault`). Must never be
-            // peer-attributed.
-            Self::ExecutionLayerTransportFailed(_) => true,
-            // Local cache evicted the payload-wait receiver — soft
-            // internal failure. See `is_node_fault` for the rationale on
-            // why this is NOT a node fault.
-            Self::ExecutionPayloadCacheEvicted { .. } => true,
-            // Local computation/lookup failures inside shadow-tx
-            // generation. Internal so the block stays in cache for
-            // retry rather than being misclassified as a consensus
-            // rejection. See `Self::ShadowTxGenerationFailed`.
-            Self::ShadowTxGenerationFailed(_) => true,
-            // Hard local I/O failure inside shadow-tx generation —
-            // internal (and a node fault, see `is_node_fault`). Must
-            // never be peer-attributed.
-            Self::ShadowTxNodeFault(_) => true,
-            // Everything else is treated as a consensus-level rejection until
-            // its construction sites are individually audited.
-            _ => false,
-        }
+        self.classify().is_internal_failure()
     }
 }
 
@@ -1735,18 +1768,6 @@ mod prevalidation_error_classification_tests {
         assert!(PreValidationError::FeeCalculationFailed("ovf".to_string()).is_internal_failure());
         assert!(PreValidationError::EmaSnapshotError("ema".to_string()).is_internal_failure());
         assert!(
-            PreValidationError::LocalEmaSnapshotMissing {
-                parent_hash: H256::zero(),
-            }
-            .is_internal_failure()
-        );
-        assert!(
-            PreValidationError::LocalEpochSnapshotMissing {
-                parent_hash: H256::zero(),
-            }
-            .is_internal_failure()
-        );
-        assert!(
             PreValidationError::BlockBoundsLookupError("db gone".to_string()).is_internal_failure()
         );
         assert!(
@@ -1760,10 +1781,6 @@ mod prevalidation_error_classification_tests {
             }
             .is_internal_failure(),
             "ParentNotInCache is a local prune/reorg race, must not be peer-attributed"
-        );
-        assert!(
-            PreValidationError::ParentNotIndexedYet { parent_height: 0 }.is_internal_failure(),
-            "ParentNotIndexedYet is a migration-lag race, must not be peer-attributed"
         );
     }
 
@@ -1817,17 +1834,10 @@ mod prevalidation_error_classification_tests {
     #[test]
     fn eviction_race_variants_are_not_node_faults() {
         let cases: &[PreValidationError] = &[
-            PreValidationError::LocalEmaSnapshotMissing {
-                parent_hash: H256::zero(),
-            },
-            PreValidationError::LocalEpochSnapshotMissing {
-                parent_hash: H256::zero(),
-            },
             PreValidationError::ParentNotInCache {
                 parent_hash: H256::zero(),
                 expected_height: 0,
             },
-            PreValidationError::ParentNotIndexedYet { parent_height: 0 },
             // `block_set` is fork-spanning — a hash that resolved at observe
             // time can be pruned with its side fork by validation time.
             // Innocent peer; not a node fault.
@@ -1971,6 +1981,12 @@ mod prevalidation_error_classification_tests {
         );
         assert!(
             !ValidationError::ParentEpochSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentEmaSnapshotMissing {
                 block_hash: H256::zero(),
             }
             .is_node_fault()
