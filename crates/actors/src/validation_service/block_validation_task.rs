@@ -246,7 +246,11 @@ impl BlockValidationTask {
         // InternalFailure arm.
         let result_label = match &final_result {
             ValidationResult::Valid => "valid",
-            ValidationResult::Invalid(ValidationError::ValidationCancelled { .. }) => "cancelled",
+            ValidationResult::Invalid(rejection)
+                if matches!(rejection.err(), ValidationError::ValidationCancelled { .. }) =>
+            {
+                "cancelled"
+            }
             ValidationResult::Invalid(_) => "invalid",
             ValidationResult::InternalFailure(inner) => match inner.err() {
                 ValidationError::TaskPanicked { .. } => "panicked",
@@ -942,7 +946,7 @@ fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult 
 
     // Tier 2: consensus rejection.
     if let Some(invalid) = stage_results.iter().find_map(|r| match r {
-        ValidationResult::Invalid(e) => Some(e.clone()),
+        ValidationResult::Invalid(rejection) => Some(rejection.clone()),
         _ => None,
     }) {
         return ValidationResult::Invalid(invalid);
@@ -1018,9 +1022,7 @@ mod merge_stage_results_tests {
 
     /// Consensus rejection — used for `Invalid` cases.
     fn invalid() -> ValidationResult {
-        ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
-            "consensus mismatch".to_string(),
-        ))
+        ValidationError::ShadowTransactionInvalid("consensus mismatch".to_string()).into()
     }
 
     /// Node-fault `InternalFailure` — must trigger supervisor restart.
@@ -1174,7 +1176,8 @@ mod merge_stage_results_tests {
         ];
         let refs: Vec<&ValidationResult> = results.iter().collect();
         match merge_stage_results(&refs) {
-            ValidationResult::Invalid(ValidationError::Other(_)) => {}
+            ValidationResult::Invalid(rejection)
+                if matches!(rejection.err(), ValidationError::Other(_)) => {}
             other => panic!("expected Invalid(Other(..)), got {:?}", other),
         }
     }

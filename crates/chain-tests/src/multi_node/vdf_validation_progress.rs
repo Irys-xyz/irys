@@ -278,14 +278,14 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
                      scenario)"
                 );
             }
-            if let ValidationResult::Invalid(err) = &event.validation_result {
+            if let ValidationResult::Invalid(rejection) = &event.validation_result {
                 // Defensive: if the wait stage ever gets converted into
                 // an Invalid result via a different code path (rather
                 // than the current "panic on Stalled" behaviour), still
                 // accept it — but require the reason to mention VDF.
-                let reason = err.to_string();
+                let reason = rejection.to_string();
                 assert!(
-                    matches!(err, ValidationError::VdfValidationFailed(_))
+                    matches!(rejection.err(), ValidationError::VdfValidationFailed(_))
                         || reason.contains("VDF")
                         || reason.contains("Stalled")
                         || reason.contains("did not advance"),

@@ -1217,6 +1217,35 @@ impl std::fmt::Display for InternalFailureError {
     }
 }
 
+/// Wrapper that guarantees the inner `ValidationError` is classified as a
+/// consensus rejection (per `!ValidationError::is_internal_failure`).
+///
+/// SAFETY-CRITICAL: this type is the structural seal that prevents callers
+/// outside `block_tree_service` from constructing
+/// `ValidationResult::Invalid(...)` carrying a node-fault variant (e.g.
+/// `TaskPanicked`, `ParentBlockMissing`). Misclassification in that direction
+/// would peer-attribute a local fault. The only construction path is
+/// `From<ValidationError> for ValidationResult`, which checks the classifier
+/// before wrapping; the inner field is private so direct construction outside
+/// this module is impossible. Consumers read the underlying error via `err()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusRejectionError(crate::block_validation::ValidationError);
+
+impl ConsensusRejectionError {
+    /// Borrow the wrapped `ValidationError` for inspection / logging /
+    /// pattern-matching. Use this in `if let ValidationResult::Invalid(e) = ...`
+    /// to look at sub-variants for finer-grained handling.
+    pub fn err(&self) -> &crate::block_validation::ValidationError {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ConsensusRejectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Result of block validation.
 ///
 /// SAFETY-CRITICAL: only `Invalid` should mark a block as consensus-rejected.
@@ -1225,13 +1254,14 @@ impl std::fmt::Display for InternalFailureError {
 /// unknown and must not be peer-attributed or discarded. The `From` impls
 /// below dispatch to the correct variant based on the underlying error's
 /// `is_internal_failure()` classifier — prefer `.into()` over constructing
-/// these variants directly at call sites. The `InternalFailure` payload is a
-/// sealed wrapper (`InternalFailureError`) so that constructing it with a
-/// consensus-rejection variant is structurally impossible.
+/// these variants directly at call sites. Both payloads are sealed wrappers
+/// (`InternalFailureError`, `ConsensusRejectionError`) so that constructing
+/// either with a misclassified variant is structurally impossible outside
+/// this module.
 #[derive(Debug, Clone)]
 pub enum ValidationResult {
     Valid,
-    Invalid(crate::block_validation::ValidationError),
+    Invalid(ConsensusRejectionError),
     InternalFailure(InternalFailureError),
 }
 
@@ -1253,7 +1283,7 @@ impl From<crate::block_validation::ValidationError> for ValidationResult {
         if e.is_internal_failure() {
             Self::InternalFailure(InternalFailureError(e))
         } else {
-            Self::Invalid(e)
+            Self::Invalid(ConsensusRejectionError(e))
         }
     }
 }

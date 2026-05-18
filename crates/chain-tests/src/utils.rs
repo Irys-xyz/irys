@@ -3811,10 +3811,10 @@ pub async fn read_block_from_state(
         while let Ok(event) = event_receiver.try_recv() {
             if event.block_hash == *block_hash && event.discarded {
                 // Block was discarded, extract validation error from result
-                if let irys_actors::block_tree_service::ValidationResult::Invalid(error) =
+                if let irys_actors::block_tree_service::ValidationResult::Invalid(rejection) =
                     event.validation_result
                 {
-                    return BlockValidationOutcome::Discarded(error);
+                    return BlockValidationOutcome::Discarded(rejection.err().clone());
                 }
             }
         }

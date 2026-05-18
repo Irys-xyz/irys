@@ -5065,8 +5065,9 @@ mod tests {
         let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
         assert!(
             matches!(
-                is_valid,
-                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+                &is_valid,
+                ValidationResult::Invalid(rejection)
+                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
             ),
             "Seed data should be invalid due to wrong reset frequency"
         );
@@ -5078,8 +5079,9 @@ mod tests {
 
         assert!(
             matches!(
-                is_valid,
-                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+                &is_valid,
+                ValidationResult::Invalid(rejection)
+                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
             ),
             "Seed data should be invalid with random seeds"
         );
