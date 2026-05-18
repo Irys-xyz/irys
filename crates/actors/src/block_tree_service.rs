@@ -428,10 +428,12 @@ impl BlockTreeServiceInner {
         //    supervisor restarts the node clean. Same precedent as the VDF
         //    stall watchdog in `validation_service`.
         // 2. Soft internal (eviction race — parent snapshot pruned mid-
-        //    validation): the cache entry stays in `ValidationScheduled`
-        //    until normal depth-pruning evicts it, at which point fresh
-        //    gossip can re-enter the prevalidate path. No re-enqueue here;
-        //    that would loop if the race keeps re-occurring.
+        //    validation, payload-cache eviction, etc.): remove the block
+        //    (and recursively its children) from the tree so the canonical
+        //    chain cannot wedge waiting on a stale entry. Recovery is via
+        //    fresh gossip re-entering `process_block` once peers re-deliver.
+        //    No automatic re-enqueue — that would tight-loop if the local
+        //    race keeps re-occurring; gossip provides the natural rate-limit.
         if let ValidationResult::InternalFailure(validation_error) = &validation_result {
             if validation_error.is_node_fault() {
                 let height = self
@@ -449,36 +451,60 @@ impl BlockTreeServiceInner {
             error!(
                 block.hash = %block_hash,
                 error = %validation_error,
-                "block validation hit an internal failure (soft race); leaving block in cache, not marking invalid"
+                "block validation hit an internal failure (soft race); removing block from cache, fresh gossip can retry"
             );
             self.chain_sync_state.record_block_validation_error(format!(
                 "block={} internal_error={}",
                 block_hash, validation_error
             ));
-            let (height, state) = {
-                let cache = self.cache.read().map_err(|_| {
-                    eyre::eyre!(
-                        "block tree cache read lock poisoned in on_block_validation_finished (internal-failure path)"
-                    )
-                })?;
-                let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
-                let state = cache
-                    .get_block_and_status(&block_hash)
-                    .map(|(_, state)| *state)
-                    .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
-                (maybe_height.unwrap_or(0), state)
-            };
-            // Update the recent-results store BEFORE the broadcast send so
-            // any subscriber that wakes from `recv()` can read the result
-            // synchronously. See `ServiceSenders::recent_validation_result`
-            // for the full ordering invariant.
+
+            let mut cache = self.cache.write().map_err(|_| {
+                eyre::eyre!(
+                    "block tree cache write lock poisoned in on_block_validation_finished (internal-failure path)"
+                )
+            })?;
+
+            let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
+            let height = maybe_height.unwrap_or(0);
+            let state = cache
+                .get_block_and_status(&block_hash)
+                .map(|(_, state)| *state)
+                .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+            // `remove_block` is recursive (see `BlockTree::remove_block`):
+            // any children currently parked waiting on this parent (in
+            // tree, but not yet validated) are swept along with it. Their
+            // in-flight validation tasks will complete and gracefully
+            // no-op against an absent cache entry. Late-arriving children
+            // (gossip in after this sweep) hit `ParentMissing` in the
+            // wait stage, which is now `is_internal() = true` → they too
+            // remove and wait for re-gossip.
+            if maybe_height.is_some() {
+                if let Err(err) = cache.remove_block(&block_hash) {
+                    tracing::error!(
+                        block.hash = %block_hash,
+                        ?err,
+                        "Failed to remove block from cache on soft internal failure"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    block.hash = %block_hash,
+                    "Soft internal failure for block already removed from cache"
+                );
+            }
+            drop(cache);
+
+            // Record-before-broadcast (see `ServiceSenders::recent_validation_result`):
+            // late subscribers reading the store synchronously must see this
+            // result before observing any subsequent event.
             self.service_senders
                 .record_validation_result(block_hash, validation_result.clone());
             let event = BlockStateUpdated {
                 block_hash,
                 height,
                 state,
-                discarded: false,
+                discarded: true,
                 validation_result,
             };
             if let Err(e) = self.service_senders.block_state_events.send(event) {
@@ -1342,16 +1368,15 @@ mod tests {
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
 
-    /// Every current `ValidationCancelled` sub-reason means "the chain has
-    /// moved on, discard" and must dispatch to `Invalid`. The sub-classifier
-    /// is in place so a future retry-plausible reason can opt in without
-    /// reclassifying these existing sites.
+    /// `ValidationCancelled` dispatches by sub-reason: node-state reasons
+    /// (`HeightDifference`, `ChannelClosed`) → `Invalid`; parent-state reasons
+    /// (`ParentMissing`, `ParentInternalFailure`) → `InternalFailure` since
+    /// neither is peer-attributable.
     #[test]
     fn validation_cancelled_converts_per_reason() {
         use crate::block_validation::ValidationCancelReason;
         for reason in [
             ValidationCancelReason::HeightDifference,
-            ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
         ] {
             let result: ValidationResult =
@@ -1362,6 +1387,19 @@ mod tests {
                 reason
             );
             assert_eq!(result.metric_label(), "invalid");
+        }
+        for reason in [
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ParentInternalFailure,
+        ] {
+            let result: ValidationResult =
+                crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
+            assert!(
+                matches!(result, ValidationResult::InternalFailure(_)),
+                "reason {:?} should dispatch to InternalFailure",
+                reason
+            );
+            assert_eq!(result.metric_label(), "internal_error");
         }
     }
 

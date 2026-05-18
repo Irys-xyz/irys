@@ -515,30 +515,27 @@ impl PreValidationError {
 /// retry plausible) or `ValidationResult::Invalid` (we've given up,
 /// discard the block).
 ///
-/// NOTE: cancellation-time "parent missing" is distinct from prevalidation-time
-/// `ValidationError::ParentBlockMissing`. Prevalidation parent-missing is a
-/// true eviction race against an active block (validity unknown, retry on
-/// re-gossip → internal). Cancellation parent-missing only fires from inside
-/// the parent-wait stage, i.e. after prevalidation already saw the parent —
-/// the parent disappearing now means the tip has advanced past
-/// `block_tree_depth` and the block can no longer become canonical (discard).
-///
-/// `ParentInternalFailure` is the one cancellation reason that classifies as
-/// internal: it fires when the parent itself stalled in `ValidationScheduled`
-/// because of a local/runtime issue on this node (e.g. soft eviction race in
-/// the parent's own validation). Discarding the child as consensus-bad in
-/// that situation would be misattribution — the child has no peer-attributable
-/// defect, the cascade was entirely a local cascade.
+/// Both `ParentMissing` and `ParentInternalFailure` classify as internal:
+/// neither is peer-attributable. `ParentMissing` covers any parent absence
+/// during the wait stage (block_pool didn't gate, depth-prune, or the soft
+/// handler removed it); `ParentInternalFailure` covers parents that stalled
+/// in `ValidationScheduled` due to a local/runtime issue. The non-internal
+/// reasons (`HeightDifference`, `ChannelClosed`) reflect node-state
+/// observations that don't say anything about the child block's validity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationCancelReason {
     /// Canonical tip moved past this block by more than `block_tree_depth`.
     /// The block can never become canonical; discard rather than retry.
     HeightDifference,
-    /// Parent block disappeared from the in-memory block tree during the
-    /// parent-wait stage. Parent was observed at prevalidation, so its
-    /// removal now implies the cache has pruned it — i.e. the chain has
-    /// advanced past `block_tree_depth`. The block can no longer become
-    /// canonical; discard rather than retry.
+    /// Parent block absent from the in-memory block tree during the
+    /// parent-wait stage. The parent's absence is never peer-attributable:
+    /// either the block_pool failed to gate the child on its parent, the
+    /// parent was depth-pruned past `block_tree_depth`, or the parent was
+    /// proactively removed by the soft-`InternalFailure` handler. In every
+    /// case the cause is local, so this routes through `is_internal() = true`
+    /// → `ValidationResult::InternalFailure` (child removed on the soft path
+    /// alongside its parent; fresh gossip can re-enter if/when the parent
+    /// returns).
     ParentMissing,
     /// Block-state broadcast channel closed (typically during node shutdown).
     /// Treated as a "give up, discard" outcome — on shutdown there is no
@@ -556,24 +553,18 @@ pub enum ValidationCancelReason {
 }
 
 impl ValidationCancelReason {
-    /// Returns true when the cancellation indicates a local/runtime issue
-    /// where the block's validity is genuinely unknown and a future retry
-    /// could resolve it.
+    /// Returns true when the cancellation reflects a local node-side
+    /// condition rather than a peer-attributable defect in the child block.
     ///
-    /// Today only `ParentInternalFailure` qualifies: the parent's local
-    /// stall is a node-side cascade, not a child-block defect. The other
-    /// reasons all indicate "the chain has moved on, discard" (height
-    /// difference past `block_tree_depth`, parent pruned from the cache,
-    /// node shutting down). The sub-classifier is in place so future
-    /// retry-plausible reasons (e.g. transient I/O race during a stage
-    /// handoff) can opt in without reclassifying every existing site.
-    ///
-    /// Do NOT broaden the matcher casually: misclassifying a "chain moved
-    /// on" cancel as internal would let stale blocks accumulate in cache.
+    /// `ParentInternalFailure` and `ParentMissing` both qualify: the parent's
+    /// local stall or absence is not the child's fault. `HeightDifference`
+    /// and `ChannelClosed` do NOT qualify — they reflect "this node has
+    /// moved on" (tip advanced beyond `block_tree_depth`, or shutdown),
+    /// where retry has nothing to gain.
     pub fn is_internal(&self) -> bool {
         match self {
-            Self::ParentInternalFailure => true,
-            Self::HeightDifference | Self::ParentMissing | Self::ChannelClosed => false,
+            Self::ParentInternalFailure | Self::ParentMissing => true,
+            Self::HeightDifference | Self::ChannelClosed => false,
         }
     }
 }
@@ -765,12 +756,10 @@ pub enum ValidationError {
     /// depth-pruning evicts it, then fresh gossip re-enters the prevalidate
     /// path); no automatic re-scheduler today.
     ///
-    /// DISTINCT from [`ValidationCancelReason::ParentMissing`], which fires
-    /// from inside the parent-wait stage *after* prevalidation already
-    /// observed the parent. That cancellation-time variant is classified as
-    /// not-internal because the parent disappearing mid-wait implies the
-    /// cache has pruned past it (i.e. the tip advanced beyond
-    /// `block_tree_depth`), and the block can no longer become canonical.
+    /// Construction site is prevalidation-time. The cancellation-time analog
+    /// is [`ValidationCancelReason::ParentMissing`], which fires from inside
+    /// the parent-wait stage; both classify as internal because neither
+    /// "parent absent from cache" condition is peer-attributable.
     #[error("Parent block {block_hash} not found in block tree")]
     ParentBlockMissing { block_hash: H256 },
 
@@ -1651,21 +1640,21 @@ mod prevalidation_error_classification_tests {
     }
 
     /// "Chain moved on" cancellation reasons must route to `Invalid` (discard
-    /// the block); `ParentInternalFailure` must route to `InternalFailure`
-    /// (block parks in cache for retry).
+    /// the block); parent-state cancels (`ParentInternalFailure`,
+    /// `ParentMissing`) must route to `InternalFailure` since neither is
+    /// peer-attributable.
     #[test]
     fn validation_cancel_reason_classifier_dispatch() {
-        // Non-internal: chain has moved on, discard.
+        // Non-internal: this node has moved on, discard.
         assert!(!ValidationCancelReason::HeightDifference.is_internal());
-        assert!(!ValidationCancelReason::ParentMissing.is_internal());
         assert!(!ValidationCancelReason::ChannelClosed.is_internal());
-        // Internal: parent's own stall is a local cascade, not a child defect.
+        // Internal: parent-state cancels are local, not child-block defects.
         assert!(ValidationCancelReason::ParentInternalFailure.is_internal());
+        assert!(ValidationCancelReason::ParentMissing.is_internal());
 
         // ValidationError::is_internal_failure must delegate to the reason.
         for reason in [
             ValidationCancelReason::HeightDifference,
-            ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
         ] {
             assert!(
@@ -1674,26 +1663,28 @@ mod prevalidation_error_classification_tests {
                 reason
             );
         }
-        assert!(
-            ValidationError::ValidationCancelled {
-                reason: ValidationCancelReason::ParentInternalFailure,
-            }
-            .is_internal_failure(),
-            "ParentInternalFailure must classify as internal so the child parks in cache for retry"
-        );
+        for reason in [
+            ValidationCancelReason::ParentInternalFailure,
+            ValidationCancelReason::ParentMissing,
+        ] {
+            assert!(
+                ValidationError::ValidationCancelled { reason }.is_internal_failure(),
+                "reason {:?} must classify as internal — parent-state cancels are not peer-attributable",
+                reason
+            );
+        }
     }
 
-    /// Round-trip: `ValidationCancelled { reason: ParentInternalFailure }`
-    /// must land on `ValidationResult::InternalFailure(_)` via the
-    /// `From<ValidationError> for ValidationResult` dispatcher. The other
-    /// reasons must land on `Invalid`.
+    /// Round-trip: parent-state cancellation reasons must land on
+    /// `ValidationResult::InternalFailure(_)` via the
+    /// `From<ValidationError> for ValidationResult` dispatcher. The
+    /// node-state reasons must land on `Invalid`.
     #[test]
     fn validation_cancel_reason_roundtrip_through_dispatcher() {
         use crate::block_tree_service::ValidationResult;
 
         for reason in [
             ValidationCancelReason::HeightDifference,
-            ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
         ] {
             let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
@@ -1705,27 +1696,28 @@ mod prevalidation_error_classification_tests {
             );
         }
 
-        let result: ValidationResult = ValidationError::ValidationCancelled {
-            reason: ValidationCancelReason::ParentInternalFailure,
-        }
-        .into();
-        match result {
-            ValidationResult::InternalFailure(inner) => {
-                assert!(
-                    !inner.is_node_fault(),
-                    "ParentInternalFailure is a soft cascade — not a node fault",
-                );
-                assert!(matches!(
-                    inner.err(),
-                    ValidationError::ValidationCancelled {
-                        reason: ValidationCancelReason::ParentInternalFailure,
-                    }
-                ));
+        for reason in [
+            ValidationCancelReason::ParentInternalFailure,
+            ValidationCancelReason::ParentMissing,
+        ] {
+            let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
+            match result {
+                ValidationResult::InternalFailure(inner) => {
+                    assert!(
+                        !inner.is_node_fault(),
+                        "{:?} is a soft cancel — not a node fault",
+                        reason,
+                    );
+                    assert!(matches!(
+                        inner.err(),
+                        ValidationError::ValidationCancelled { reason: r } if *r == reason,
+                    ));
+                }
+                other => panic!(
+                    "{:?} must round-trip to InternalFailure, got {:?}",
+                    reason, other,
+                ),
             }
-            other => panic!(
-                "ParentInternalFailure must round-trip to InternalFailure, got {:?}",
-                other
-            ),
         }
     }
 

@@ -293,32 +293,18 @@ impl BlockValidationTask {
         let parent_chain_state_check =
             |parent_hash: BlockHash| match self.get_parent_chain_state(&parent_hash) {
                 None => {
-                    // Parent doesn't exist in tree — this only happens from
-                    // inside the parent-wait stage *after* prevalidation
-                    // already observed the parent, so the parent disappearing
-                    // now implies cache pruning past it (chain has advanced
-                    // beyond `block_tree_depth`). Treat as "block too old,
-                    // discard" via the non-internal `ParentMissing` reason,
-                    // distinct from the retry-plausible prevalidation-time
-                    // `ValidationError::ParentBlockMissing`.
-                    //
-                    // NOTE: this site deliberately does NOT consult
-                    // `parent_last_validation_result` (no
-                    // `cancel_reason_for_parent_state` upgrade applied).
-                    // Even if a prior `InternalFailure` update was observed,
-                    // the parent being absent from the tree right now means
-                    // pruning has already advanced past it — at which point
-                    // the chain has moved on and retry can no longer help.
-                    // The closure also doesn't have access to the wait loop's
-                    // local history, so plumbing the upgrade here would
-                    // require widening the closure signature for a case that
-                    // wouldn't benefit from it. Keep `ParentMissing` as the
-                    // discard outcome.
+                    // Parent absent from tree during the wait stage. Possible
+                    // causes are all local: block_pool failed to gate on the
+                    // parent, depth-prune evicted it, or the soft-internal
+                    // handler removed it. None are peer-attributable, so
+                    // `ParentMissing` already routes through `is_internal() =
+                    // true` → `InternalFailure`. No `cancel_reason_for_parent_state`
+                    // upgrade needed.
                     error!(
                         block.parent_hash = %parent_hash,
                         block.hash = %self.sealed_block.header().block_hash,
                         block.height = %self.sealed_block.header().height,
-                        "CRITICAL: Parent block not found"
+                        "Parent block not found in tree during wait stage"
                     );
                     ControlFlow::Break(ParentValidationResult::Cancelled(
                         ValidationCancelReason::ParentMissing,
