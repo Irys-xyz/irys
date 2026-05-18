@@ -93,11 +93,18 @@ pub struct CachedDataRoot {
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
 
-    /// Block hashes for blocks containing transactions with this `data_root`
+    /// Block hashes for blocks that have included a tx referencing this
+    /// `data_root`.  **Hint only — NOT fork-tolerant.**  Append-only across
+    /// reorgs (orphan hashes are retained), so this field must not be
+    /// trusted as a canonical-inclusion oracle.  Consumers that need
+    /// canonical truth must verify via `irys_actors::tx_inclusion`.
+    /// Useful as a cheap "has this ever been in a block" pre-check before
+    /// the more expensive canonical lookup.
     pub block_set: Vec<H256>,
 
-    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used for pruning while unconfirmed.
-    /// If None, pruning falls back to block inclusion history.
+    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used
+    /// for pruning while unconfirmed.  If `None`, pruning falls back to the
+    /// canonical inclusion heights of the txs in `txid_set`.
     #[serde(default)]
     pub expiry_height: Option<u64>,
 
