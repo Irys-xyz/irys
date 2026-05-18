@@ -495,11 +495,6 @@ impl BlockTreeServiceInner {
             }
             drop(cache);
 
-            // Record-before-broadcast (see `ServiceSenders::recent_validation_result`):
-            // late subscribers reading the store synchronously must see this
-            // result before observing any subsequent event.
-            self.service_senders
-                .record_validation_result(block_hash, validation_result.clone());
             let event = BlockStateUpdated {
                 block_hash,
                 height,
@@ -559,10 +554,6 @@ impl BlockTreeServiceInner {
                 );
             }
 
-            // Update the recent-results store BEFORE broadcasting — see
-            // `ServiceSenders::recent_validation_result`.
-            self.service_senders
-                .record_validation_result(block_hash, validation_result.clone());
             let event = BlockStateUpdated {
                 block_hash,
                 // todo: restructure the event so that `height` and `state` is not part of it
@@ -672,10 +663,6 @@ impl BlockTreeServiceInner {
 
                 drop(cache);
 
-                // Update the recent-results store BEFORE broadcasting — see
-                // `ServiceSenders::recent_validation_result`.
-                self.service_senders
-                    .record_validation_result(block_hash, ValidationResult::Valid);
                 let event = BlockStateUpdated {
                     block_hash,
                     height,
@@ -1055,10 +1042,6 @@ impl BlockTreeServiceInner {
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
         }
 
-        // Update the recent-results store BEFORE broadcasting — see
-        // `ServiceSenders::recent_validation_result`.
-        self.service_senders
-            .record_validation_result(block_hash, ValidationResult::Valid);
         let event = BlockStateUpdated {
             block_hash,
             height,
@@ -1369,9 +1352,8 @@ mod tests {
     }
 
     /// `ValidationCancelled` dispatches by sub-reason: node-state reasons
-    /// (`HeightDifference`, `ChannelClosed`) → `Invalid`; parent-state reasons
-    /// (`ParentMissing`, `ParentInternalFailure`) → `InternalFailure` since
-    /// neither is peer-attributable.
+    /// (`HeightDifference`, `ChannelClosed`) → `Invalid`; `ParentMissing` →
+    /// `InternalFailure` since parent absence is not peer-attributable.
     #[test]
     fn validation_cancelled_converts_per_reason() {
         use crate::block_validation::ValidationCancelReason;
@@ -1388,19 +1370,14 @@ mod tests {
             );
             assert_eq!(result.metric_label(), "invalid");
         }
-        for reason in [
-            ValidationCancelReason::ParentMissing,
-            ValidationCancelReason::ParentInternalFailure,
-        ] {
-            let result: ValidationResult =
-                crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
-            assert!(
-                matches!(result, ValidationResult::InternalFailure(_)),
-                "reason {:?} should dispatch to InternalFailure",
-                reason
-            );
-            assert_eq!(result.metric_label(), "internal_error");
-        }
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ValidationCancelled {
+                reason: ValidationCancelReason::ParentMissing,
+            }
+            .into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+        assert_eq!(result.metric_label(), "internal_error");
     }
 
     /// `InternalFailureError::err()` exposes the underlying ValidationError
