@@ -91,9 +91,29 @@ pub struct ReorgEvent {
 pub struct BlockStateUpdated {
     pub block_hash: BlockHash,
     pub height: u64,
+    /// Snapshot of the block's `ChainState` at broadcast time. Stale on the
+    /// `discarded: true` paths — captured before the block is removed from
+    /// the cache, so it reflects the *pre-removal* state. Read by a
+    /// diagnostic `tracing::info!` in `chain-tests/.../vdf_validation_progress.rs`
+    /// (which logs it alongside `discarded` so the staleness is recoverable
+    /// by the reader). No control-flow consumer keys off this field today.
+    /// See the `todo: restructure` at the soft-fail broadcast site.
     pub state: ChainState,
     pub discarded: bool,
     pub validation_result: ValidationResult,
+}
+
+/// Which failure flavour drove a discard. Keeps the per-arm log wording and
+/// diagnostic-record templates distinct without bleaching them into one bland
+/// message — see `BlockTreeService::discard_and_broadcast`.
+#[derive(Clone, Copy)]
+enum DiscardKind {
+    /// Soft `InternalFailure` (non-node-fault): eviction race, payload-cache
+    /// miss, etc. Block removed so canonical chain can't wedge; fresh gossip
+    /// will re-deliver.
+    SoftInternal,
+    /// Consensus `Invalid`: block rejected on its merits.
+    Invalid,
 }
 
 impl BlockTreeService {
@@ -413,8 +433,8 @@ impl BlockTreeServiceInner {
             .record_validation_finished(&block_hash);
 
         // Handle internal/runtime validation failures first. Block validity
-        // is unknown locally — DO NOT remove the block from cache or mark it
-        // discarded. Two sub-cases:
+        // is unknown locally — never mark it `Invalid` (which would
+        // peer-attribute a local fault). Two sub-cases:
         //
         // 1. Node fault (`is_node_fault()` — panic, DB I/O, poisoned lock,
         //    local arithmetic bug, internal channel dead, OS clock failure):
@@ -447,130 +467,16 @@ impl BlockTreeServiceInner {
                     block_hash, height, validation_error
                 );
             }
-
-            error!(
-                block.hash = %block_hash,
-                error = %validation_error,
-                "block validation hit an internal failure (soft race); removing block from cache, fresh gossip can retry"
-            );
-            self.chain_sync_state.record_block_validation_error(format!(
-                "block={} internal_error={}",
-                block_hash, validation_error
-            ));
-
-            let mut cache = self.cache.write().map_err(|_| {
-                eyre::eyre!(
-                    "block tree cache write lock poisoned in on_block_validation_finished (internal-failure path)"
-                )
-            })?;
-
-            let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
-            let height = maybe_height.unwrap_or(0);
-            let state = cache
-                .get_block_and_status(&block_hash)
-                .map(|(_, state)| *state)
-                .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
-
-            // `remove_block` is recursive (see `BlockTree::remove_block`):
-            // any children currently parked waiting on this parent (in
-            // tree, but not yet validated) are swept along with it. Their
-            // in-flight validation tasks will complete and gracefully
-            // no-op against an absent cache entry. Late-arriving children
-            // (gossip in after this sweep) hit `ParentMissing` in the
-            // wait stage, which is now `is_internal() = true` → they too
-            // remove and wait for re-gossip.
-            if maybe_height.is_some() {
-                if let Err(err) = cache.remove_block(&block_hash) {
-                    tracing::error!(
-                        block.hash = %block_hash,
-                        ?err,
-                        "Failed to remove block from cache on soft internal failure"
-                    );
-                }
-            } else {
-                tracing::debug!(
-                    block.hash = %block_hash,
-                    "Soft internal failure for block already removed from cache"
-                );
-            }
-            drop(cache);
-
-            let event = BlockStateUpdated {
+            return self.discard_and_broadcast(
                 block_hash,
-                height,
-                state,
-                discarded: true,
                 validation_result,
-            };
-            if let Err(e) = self.service_senders.block_state_events.send(event) {
-                tracing::trace!(
-                    block.hash = ?block_hash,
-                    block.height = height,
-                    "Failed to broadcast block state update event: {}", e
-                );
-            }
-            return Ok(());
+                DiscardKind::SoftInternal,
+            );
         }
 
         // Handle a failed validation first
-        if let ValidationResult::Invalid(validation_error) = &validation_result {
-            error!(
-                block.hash = %block_hash,
-                error = %validation_error,
-                "block validation failed"
-            );
-
-            // Record validation error for diagnostics
-            let error_message = format!("block={} error={}", block_hash, validation_error);
-            self.chain_sync_state
-                .record_block_validation_error(error_message);
-
-            let mut cache = self.cache.write().map_err(|_| {
-                eyre::eyre!(
-                    "block tree cache write lock poisoned in on_block_validation_finished (invalid path)"
-                )
-            })?;
-
-            let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
-            let height = maybe_height.unwrap_or(0);
-            let state = cache
-                .get_block_and_status(&block_hash)
-                .map(|(_, state)| *state)
-                .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
-
-            // The block may already be gone if an invalid ancestor was removed recursively.
-            if maybe_height.is_some() {
-                if let Err(err) = cache.remove_block(&block_hash) {
-                    tracing::error!(
-                        block.hash = %block_hash,
-                        ?err,
-                        "Failed to remove block from cache"
-                    );
-                }
-            } else {
-                tracing::debug!(
-                    block.hash = %block_hash,
-                    "Ignoring invalid validation result for block already removed from cache"
-                );
-            }
-
-            let event = BlockStateUpdated {
-                block_hash,
-                // todo: restructure the event so that `height` and `state` is not part of it
-                height,
-                state,
-                discarded: true,
-                validation_result,
-            };
-            if let Err(e) = self.service_senders.block_state_events.send(event) {
-                tracing::trace!(
-                    block.hash = ?block_hash,
-                    block.height = height,
-                    "Failed to broadcast block state update event: {}", e
-                );
-            }
-
-            return Ok(());
+        if let ValidationResult::Invalid(_) = &validation_result {
+            return self.discard_and_broadcast(block_hash, validation_result, DiscardKind::Invalid);
         }
 
         // From here, we are processing a fully validated block
@@ -1048,6 +954,87 @@ impl BlockTreeServiceInner {
             state,
             discarded: false,
             validation_result: ValidationResult::Valid,
+        };
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
+            tracing::trace!(
+                block.hash = ?block_hash,
+                block.height = height,
+                "Failed to broadcast block state update event: {}", e
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Shared discard path for soft `InternalFailure` and `Invalid` results.
+    /// Node-fault internal failures must `panic!` BEFORE calling this helper
+    /// — see `on_block_validation_finished`.
+    ///
+    /// `remove_block` is recursive (see `BlockTree::remove_block`): any
+    /// children currently parked waiting on this parent (in tree, but not
+    /// yet validated) are swept along with it. Their in-flight validation
+    /// tasks will complete and gracefully no-op against an absent cache
+    /// entry. Late-arriving children (gossip in after this sweep) hit
+    /// `ParentMissing` in the wait stage, which is now `is_internal() =
+    /// true` → they too remove and wait for re-gossip.
+    fn discard_and_broadcast(
+        &self,
+        block_hash: H256,
+        validation_result: ValidationResult,
+        kind: DiscardKind,
+    ) -> eyre::Result<()> {
+        // Render the inner error for the structured `error` field + diagnostic
+        // record; the two arms previously logged via `error = %validation_error`.
+        let error_display: String = match &validation_result {
+            ValidationResult::Invalid(e) => e.to_string(),
+            ValidationResult::InternalFailure(e) => e.to_string(),
+            ValidationResult::Valid => String::new(),
+        };
+        // Per-arm wording for the user-facing error log and the diagnostic
+        // record string; the rest of the discard mechanics (lock, remove,
+        // broadcast) is identical between the two arms.
+        let (error_log_msg, diagnostic_record) = match kind {
+            DiscardKind::SoftInternal => (
+                "block validation hit an internal failure (soft race); removing block from cache, fresh gossip can retry",
+                format!("block={} internal_error={}", block_hash, error_display),
+            ),
+            DiscardKind::Invalid => (
+                "block validation failed",
+                format!("block={} error={}", block_hash, error_display),
+            ),
+        };
+
+        error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+        self.chain_sync_state
+            .record_block_validation_error(diagnostic_record);
+
+        let mut cache = self.cache.write().map_err(|_| {
+            eyre::eyre!("block tree cache write lock poisoned in discard_and_broadcast")
+        })?;
+
+        let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
+        let height = maybe_height.unwrap_or(0);
+        let state = cache
+            .get_block_and_status(&block_hash)
+            .map(|(_, state)| *state)
+            .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
+
+        if maybe_height.is_some() {
+            if let Err(err) = cache.remove_block(&block_hash) {
+                tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache");
+            }
+        } else {
+            tracing::debug!(block.hash = %block_hash, "Block already removed from cache");
+        }
+        drop(cache);
+
+        // todo: restructure the event so that `height` and `state` is not part of it
+        let event = BlockStateUpdated {
+            block_hash,
+            height,
+            state,
+            discarded: true,
+            validation_result,
         };
         if let Err(e) = self.service_senders.block_state_events.send(event) {
             tracing::trace!(

@@ -3,7 +3,7 @@ use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
-use irys_actors::block_validation::PreValidationError;
+use irys_actors::block_validation::{ErrorClass, PreValidationError};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -924,7 +924,23 @@ where
             // simply couldn't verify it locally. All remaining variants are
             // genuine consensus rejections and route to `BlockError`.
             if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
-                if pre_err.is_fatal_corruption() {
+                // Single dispatch table for prevalidation-error handling. Two
+                // variants short-circuit ahead of the class-based match because
+                // their action differs from the rest of their class
+                // (`CachePoisoned` is a NodeFault but takes the graceful
+                // shutdown path; `ParentNotInCache` is SoftInternal but evicts
+                // from cache so a re-pull can fix it). All other dispatch
+                // happens via `classify()` to avoid duplicating the
+                // variant-classification table from `block_validation.rs` —
+                // adding a new `PreValidationError` variant only needs
+                // updating `classify()`, and the `ErrorClass` match here stays
+                // exhaustive automatically (3 fixed variants, no `_`).
+                if let PreValidationError::CachePoisoned { .. } = pre_err {
+                    // Cache poisoning is unrecoverable (RwLock poisoned by a
+                    // prior panic); retry will hit the same poison. Surface
+                    // as critical so the service can escalate via the
+                    // well-tested `FatalCacheCorruption` graceful-shutdown
+                    // path rather than the generic node-fault panic.
                     error!(
                         block.hash = ?block_hash,
                         error = ?pre_err,
@@ -945,28 +961,14 @@ where
                     );
                 }
 
-                // Node fault (verifier panic, DB I/O, local arithmetic bug,
-                // internal channel dead, OS clock failure, local cache
-                // mutation failure): the fault is in this node, not the
-                // peer's block. Retrying will hit the same fault. Panic so
-                // `setup_panic_hook` converts to a graceful SIGINT and the
-                // supervisor restarts the node clean. Same never-mislabel
-                // rationale as the VDF stall watchdog: a node fault tells
-                // us nothing about block validity, and either
-                // misclassification forks us off the network.
-                //
-                // `is_fatal_corruption()` is a strict subset of
-                // `is_node_fault()`; it's checked above so the well-tested
-                // `FatalCacheCorruption` graceful-shutdown path remains
-                // for that one specific variant.
-                if pre_err.is_node_fault() {
-                    panic!(
-                        "block pool: prevalidation hit a node fault (block={:?}, error={}); aborting node — see PreValidationError::is_node_fault for rationale",
-                        block_hash, pre_err
-                    );
-                }
-
-                if matches!(pre_err, PreValidationError::ParentNotInCache { .. }) {
+                if let PreValidationError::ParentNotInCache { .. } = pre_err {
+                    // Parent missing from the in-memory block-tree cache due
+                    // to a local prune/reorg race. Peer is innocent. Evict
+                    // this block from cache so a re-pull (driven by a child
+                    // arriving and orphan-resolving) can re-stitch the chain;
+                    // unlike the generic SoftInternal path we do NOT park it
+                    // in cache, because nothing local will re-invoke
+                    // process_block on it.
                     warn!(
                         block.hash = ?block_hash,
                         error = ?pre_err,
@@ -987,23 +989,54 @@ where
                     );
                 }
 
-                if pre_err.is_internal_failure() {
-                    error!(
-                        block.hash = ?block_hash,
-                        error = ?pre_err,
-                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
-                    );
-                    // Keep the block in cache and clear `is_processing` so the next
-                    // gossip arrival (or orphan-resolve when a child arrives) re-runs
-                    // prevalidation. Removing would force a refetch round-trip even
-                    // though our local state is intact — the verifier crashed in an
-                    // isolated spawn_blocking thread, not in shared state.
-                    self.blocks_cache
-                        .change_block_processing_status(block_hash, false)
-                        .await;
-                    self.sync_state
-                        .record_block_processing_error(pre_err.to_string());
-                    return Err(CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into());
+                // Exhaustive match — no `_` wildcard. If `ErrorClass` gains a
+                // new variant the compiler forces us to decide the dispatch
+                // here rather than silently peer-attributing a local fault
+                // (or vice versa).
+                match pre_err.classify() {
+                    ErrorClass::NodeFault => {
+                        // Node fault (verifier panic, DB I/O, local arithmetic
+                        // bug, internal channel dead, OS clock failure, local
+                        // cache mutation failure): the fault is in this node,
+                        // not the peer's block. Retrying will hit the same
+                        // fault. Panic so `setup_panic_hook` converts to a
+                        // graceful SIGINT and the supervisor restarts the node
+                        // clean. Same never-mislabel rationale as the VDF
+                        // stall watchdog: a node fault tells us nothing about
+                        // block validity, and either misclassification forks
+                        // us off the network.
+                        panic!(
+                            "block pool: prevalidation hit a node fault (block={:?}, error={}); aborting node — see PreValidationError::is_node_fault for rationale",
+                            block_hash, pre_err
+                        );
+                    }
+                    ErrorClass::SoftInternal => {
+                        error!(
+                            block.hash = ?block_hash,
+                            error = ?pre_err,
+                            "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
+                        );
+                        // Keep the block in cache and clear `is_processing` so the next
+                        // gossip arrival (or orphan-resolve when a child arrives) re-runs
+                        // prevalidation. Removing would force a refetch round-trip even
+                        // though our local state is intact — the verifier crashed in an
+                        // isolated spawn_blocking thread, not in shared state.
+                        self.blocks_cache
+                            .change_block_processing_status(block_hash, false)
+                            .await;
+                        self.sync_state
+                            .record_block_processing_error(pre_err.to_string());
+                        return Err(
+                            CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into(),
+                        );
+                    }
+                    // Consensus rejection: peer's block is genuinely invalid.
+                    // Fall through to the outer error/remove/return path so
+                    // the existing `BlockError` reporting (which logs the
+                    // full `block_discovery_error`, not just `pre_err`)
+                    // remains the single point that handles peer-attributed
+                    // failures across all `BlockDiscoveryError` variants.
+                    ErrorClass::Consensus => {}
                 }
             }
 

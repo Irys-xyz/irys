@@ -1048,88 +1048,96 @@ async fn process_block_rejects_block_already_in_tree_pending_validation() {
     );
 }
 
-/// `is_block_processing_or_processed` must return true for a block that is
-/// already in the tree pending validation, so gossip handlers skip it instead
-/// of re-driving `process_block`.
+/// `is_block_processing_or_processed` classifies every `BlockStatus` variant.
+/// Each case sets up the provider mock to land on a target variant, then
+/// asserts the predicate's expected truth value (gossip handlers skip "known"
+/// blocks; only `NotProcessed` re-enters `process_block`).
+///
+/// Variant rationale (mirrors `block_status_provider::BlockStatus` doc):
+/// - `InTreePendingValidation` (true): parent already locally known —
+///   gossip handlers must skip rather than re-drive `process_block`.
+/// - `ProcessedButCanBeReorganized` (true): in tree, validated, not yet
+///   migrated — already-known.
+/// - `Finalized` (true): migrated into the index, pruned from the tree —
+///   already-known.
+/// - `PartOfAPrunedFork` (true): regression case — master used
+///   `is_processed()` which covered this; an `is_in_tree()`-only narrowing
+///   briefly dropped it, causing stale-fork tips peers kept advertising to
+///   re-enter `process_block` every gossip cycle. The fix is
+///   `is_in_tree() || is_a_part_of_pruned_fork()`.
+/// - `NotProcessed` (false): unknown to both tree and index — gossip
+///   handlers must proceed into `process_block`.
+#[rstest::rstest]
+#[case::in_tree_pending_validation(
+    setup_in_tree_pending_validation,
+    crate::block_status_provider::BlockStatus::InTreePendingValidation,
+    true
+)]
+#[case::processed_but_can_be_reorganized(
+    setup_processed_but_can_be_reorganized,
+    crate::block_status_provider::BlockStatus::ProcessedButCanBeReorganized,
+    true
+)]
+#[case::finalized(
+    setup_finalized,
+    crate::block_status_provider::BlockStatus::Finalized,
+    true
+)]
+#[case::part_of_a_pruned_fork(
+    setup_part_of_a_pruned_fork,
+    crate::block_status_provider::BlockStatus::PartOfAPrunedFork,
+    true
+)]
+#[case::not_processed(
+    setup_not_processed,
+    crate::block_status_provider::BlockStatus::NotProcessed,
+    false
+)]
 #[tokio::test]
-async fn is_block_processing_or_processed_true_for_in_tree_pending_validation() {
+async fn is_block_processing_or_processed_classifies_block_status(
+    #[case] setup: fn(&MockedServices, &Config) -> (irys_types::BlockHash, u64),
+    #[case] expected_status: crate::block_status_provider::BlockStatus,
+    #[case] expected_predicate: bool,
+) {
     let (_tmp_dir, config) = create_test_config();
     let (pool, services, _sync_receiver) = build_test_pool(&config);
 
-    let genesis = services.block_status_provider_mock.genesis_header();
-    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
-    let block = &chain[0];
+    let (hash, height) = setup(&services, &config);
 
-    // Sanity: before adding to the tree the predicate is false.
-    assert!(
-        !pool
-            .is_block_processing_or_processed(&block.block_hash, block.height)
-            .await
-    );
-
-    services
-        .block_status_provider_mock
-        .add_block_mock_to_the_tree(block);
-
-    assert!(
-        pool.is_block_processing_or_processed(&block.block_hash, block.height)
-            .await,
-        "InTreePendingValidation parent must be treated as processed by gossip handlers"
-    );
-}
-
-/// Regression test for the `is_in_tree()`-only narrowing that dropped
-/// `PartOfAPrunedFork` from the predicate. Master used `is_processed()`
-/// (Finalized | ProcessedButCanBeReorganized | PartOfAPrunedFork). The branch
-/// briefly used `is_in_tree()` (InTreePendingValidation +
-/// ProcessedButCanBeReorganized + Finalized), losing PartOfAPrunedFork — so
-/// stale-fork tips peers kept advertising re-entered `process_block` on every
-/// gossip cycle. The fix is `is_in_tree() || is_a_part_of_pruned_fork()`.
-#[tokio::test]
-async fn is_block_processing_or_processed_true_for_part_of_a_pruned_fork() {
-    let (_tmp_dir, config) = create_test_config();
-    let (pool, services, _sync_receiver) = build_test_pool(&config);
-
-    let genesis = services.block_status_provider_mock.genesis_header();
-    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
-    let canonical = &chain[0];
-
-    // Push a canonical block at height 1 into both index and tree.
-    services
-        .block_status_provider_mock
-        .add_block_to_index_and_tree_for_testing(canonical);
-
-    // A *different* hash at the same height represents a side-fork tip whose
-    // canonical-position block has been migrated. `block_status` returns
-    // `PartOfAPrunedFork` for this hash.
-    let pruned_fork_tip = irys_types::BlockHash::repeat_byte(0xAA);
-    assert_ne!(pruned_fork_tip, canonical.block_hash);
     assert_eq!(
         services
             .block_status_provider_mock
-            .block_status(canonical.height, &pruned_fork_tip),
-        crate::block_status_provider::BlockStatus::PartOfAPrunedFork,
+            .block_status(height, &hash),
+        expected_status,
+        "setup did not produce the expected BlockStatus variant",
     );
 
-    assert!(
-        pool.is_block_processing_or_processed(&pruned_fork_tip, canonical.height)
-            .await,
-        "PartOfAPrunedFork must short-circuit gossip re-entry — otherwise peers re-pull stale-fork tips on every cycle",
+    assert_eq!(
+        pool.is_block_processing_or_processed(&hash, height).await,
+        expected_predicate,
     );
 }
 
-/// `ProcessedButCanBeReorganized` (block in tree, validated, not yet
-/// migrated into the index) must remain in the "already-known" set so gossip
-/// handlers skip it.
-#[tokio::test]
-async fn is_block_processing_or_processed_true_for_processed_but_can_be_reorganized() {
-    let (_tmp_dir, config) = create_test_config();
-    let (pool, services, _sync_receiver) = build_test_pool(&config);
+fn setup_in_tree_pending_validation(
+    services: &MockedServices,
+    config: &Config,
+) -> (irys_types::BlockHash, u64) {
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    services
+        .block_status_provider_mock
+        .add_block_mock_to_the_tree(block);
+    (block.block_hash, block.height)
+}
 
+fn setup_processed_but_can_be_reorganized(
+    services: &MockedServices,
+    config: &Config,
+) -> (irys_types::BlockHash, u64) {
     let genesis = services.block_status_provider_mock.genesis_header();
     let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
     let validated = &chain[0];
-
     services
         .block_status_provider_mock
         .add_block_mock_to_the_tree(validated);
@@ -1146,31 +1154,13 @@ async fn is_block_processing_or_processed_true_for_processed_but_can_be_reorgani
         .write()
         .mark_block_as_valid(&validated.block_hash)
         .expect("mark valid");
-    assert_eq!(
-        services
-            .block_status_provider_mock
-            .block_status(validated.height, &validated.block_hash),
-        crate::block_status_provider::BlockStatus::ProcessedButCanBeReorganized,
-    );
-
-    assert!(
-        pool.is_block_processing_or_processed(&validated.block_hash, validated.height)
-            .await,
-        "ProcessedButCanBeReorganized must be treated as already-known",
-    );
+    (validated.block_hash, validated.height)
 }
 
-/// `Finalized` (block migrated into the index, dropped from the tree) must
-/// remain in the "already-known" set so gossip handlers skip it.
-#[tokio::test]
-async fn is_block_processing_or_processed_true_for_finalized() {
-    let (_tmp_dir, config) = create_test_config();
-    let (pool, services, _sync_receiver) = build_test_pool(&config);
-
+fn setup_finalized(services: &MockedServices, config: &Config) -> (irys_types::BlockHash, u64) {
     let genesis = services.block_status_provider_mock.genesis_header();
     let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
     let finalized = &chain[0];
-
     services
         .block_status_provider_mock
         .add_block_to_index_and_tree_for_testing(finalized);
@@ -1179,41 +1169,31 @@ async fn is_block_processing_or_processed_true_for_finalized() {
     services
         .block_status_provider_mock
         .delete_mocked_blocks_older_than(finalized.height + 1);
-    assert_eq!(
-        services
-            .block_status_provider_mock
-            .block_status(finalized.height, &finalized.block_hash),
-        crate::block_status_provider::BlockStatus::Finalized,
-    );
-
-    assert!(
-        pool.is_block_processing_or_processed(&finalized.block_hash, finalized.height)
-            .await,
-        "Finalized must be treated as already-known",
-    );
+    (finalized.block_hash, finalized.height)
 }
 
-/// `NotProcessed` (block unknown to both tree and index, not currently
-/// processing in the pool) must return false so gossip handlers proceed
-/// into `process_block`.
-#[tokio::test]
-async fn is_block_processing_or_processed_false_for_not_processed() {
-    let (_tmp_dir, config) = create_test_config();
-    let (pool, services, _sync_receiver) = build_test_pool(&config);
+fn setup_part_of_a_pruned_fork(
+    services: &MockedServices,
+    config: &Config,
+) -> (irys_types::BlockHash, u64) {
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let canonical = &chain[0];
+    // Push a canonical block at height 1 into both index and tree.
+    services
+        .block_status_provider_mock
+        .add_block_to_index_and_tree_for_testing(canonical);
+    // A *different* hash at the same height represents a side-fork tip whose
+    // canonical-position block has been migrated. `block_status` returns
+    // `PartOfAPrunedFork` for this hash.
+    let pruned_fork_tip = irys_types::BlockHash::repeat_byte(0xAA);
+    assert_ne!(pruned_fork_tip, canonical.block_hash);
+    (pruned_fork_tip, canonical.height)
+}
 
-    let unknown_hash = irys_types::BlockHash::repeat_byte(0x42);
-    let unknown_height = 7;
-    assert_eq!(
-        services
-            .block_status_provider_mock
-            .block_status(unknown_height, &unknown_hash),
-        crate::block_status_provider::BlockStatus::NotProcessed,
-    );
-
-    assert!(
-        !pool
-            .is_block_processing_or_processed(&unknown_hash, unknown_height)
-            .await,
-        "NotProcessed must allow gossip handlers to enter process_block",
-    );
+fn setup_not_processed(
+    _services: &MockedServices,
+    _config: &Config,
+) -> (irys_types::BlockHash, u64) {
+    (irys_types::BlockHash::repeat_byte(0x42), 7)
 }

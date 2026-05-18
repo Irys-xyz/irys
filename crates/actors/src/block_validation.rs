@@ -404,14 +404,6 @@ pub enum PreValidationError {
 }
 
 impl PreValidationError {
-    /// Returns true for unrecoverable cache corruption (the block tree
-    /// `RwLock` was poisoned by a prior caller's panic). The cache is
-    /// corrupt; retry will hit the same poison. Caller should escalate
-    /// rather than silently dropping.
-    pub fn is_fatal_corruption(&self) -> bool {
-        matches!(self, Self::CachePoisoned { .. })
-    }
-
     /// Single source of truth for failure-mode classification. Drives both
     /// `is_node_fault()` and `is_internal_failure()`.
     ///
@@ -463,7 +455,9 @@ impl PreValidationError {
             // index inconsistency (empty index, DB I/O, missing predecessor).
             | Self::BlockBoundsLookupError(_)
             // Block-tree RwLock poisoned by a prior panic. Local corruption —
-            // caller should escalate (see `is_fatal_corruption`).
+            // callers short-circuit this variant ahead of the generic
+            // node-fault panic so it routes to the graceful shutdown path
+            // (see `block_pool::process_block`'s dispatch table).
             | Self::CachePoisoned { .. } => ErrorClass::NodeFault,
 
             // === Soft internal (peer innocent, retry via passive prune+re-gossip) ===
@@ -1616,32 +1610,6 @@ pub fn height_is_valid(
 mod prevalidation_error_classification_tests {
     use super::*;
 
-    /// `CachePoisoned` is unrecoverable — retry will hit the same poisoned
-    /// lock. Caller must escalate, not silently drop.
-    #[test]
-    fn cache_poisoned_is_fatal_corruption() {
-        let err = PreValidationError::CachePoisoned { at: "test_site" };
-        assert!(
-            err.is_fatal_corruption(),
-            "CachePoisoned must surface as fatal corruption"
-        );
-    }
-
-    /// Genuine validation failures and `ParentNotInCache` are terminal —
-    /// retrying gives the same answer (or, for `ParentNotInCache`, no retry
-    /// mechanism re-invokes process_block once is_processing is flipped back).
-    #[test]
-    fn non_corruption_errors_are_not_fatal_corruption() {
-        assert!(!PreValidationError::BlockSignatureInvalid.is_fatal_corruption());
-        assert!(
-            !PreValidationError::ParentNotInCache {
-                parent_hash: H256::zero(),
-                expected_height: 0,
-            }
-            .is_fatal_corruption()
-        );
-    }
-
     /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
     /// must classify as internal so callers route it away from peer-attributed
     /// "block invalid" paths.
@@ -1649,7 +1617,6 @@ mod prevalidation_error_classification_tests {
     fn internal_task_join_is_internal_failure() {
         let err = PreValidationError::InternalTaskJoin("panic".to_string());
         assert!(err.is_internal_failure());
-        assert!(!err.is_fatal_corruption());
     }
 
     /// Consensus-validation variants must NOT classify as internal.
@@ -1903,10 +1870,6 @@ mod prevalidation_error_classification_tests {
             !err.is_node_fault(),
             "AssignedProofBlockMissing is a fork-determinism gap in block_set, NOT a node fault — \
              aborting the node here would self-DoS on every pruned side-fork data_root",
-        );
-        assert!(
-            !err.is_fatal_corruption(),
-            "AssignedProofBlockMissing is recoverable, not fatal corruption",
         );
     }
 

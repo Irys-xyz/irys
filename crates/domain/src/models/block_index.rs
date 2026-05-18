@@ -221,100 +221,20 @@ impl BlockIndex {
 
     /// For a given chunk offset in a ledger, what block was responsible for adding
     /// that chunk to the data ledger?
+    ///
+    /// Thin wrapper over [`Self::get_block_bounds_at_height`] anchored on the
+    /// latest indexed height. The anchored variant assumes a non-empty index;
+    /// the empty-index precheck lives here, the public entry point.
     pub fn get_block_bounds(
         &self,
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<BlockBounds> {
-        self.db.view_eyre(|tx| {
-            let latest_height = block_index_latest_height(tx)?
-                .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
-
-            let last_item = block_index_item_by_height(tx, &latest_height)?;
-            let last_max = last_item
-                .ledgers
-                .iter()
-                .find(|l| l.ledger == ledger)
-                .map(|l| l.total_chunks)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        latest_height
-                    )
-                })?;
-
-            let chunk_offset_val: u64 = chunk_offset.into();
-            eyre::ensure!(
-                chunk_offset_val < last_max,
-                "chunk_offset {} beyond last block's max_chunk_offset {}, last block height {}",
-                chunk_offset_val,
-                last_max,
-                latest_height + 1
-            );
-
-            // Binary search for the block containing this chunk offset.
-            // A probed block lacking this ledger entirely (introduced at a
-            // later height) is equivalent to total_chunks = 0; the search
-            // just moves right.
-            let (block_height, found_item) = {
-                let mut lo: u64 = 0;
-                let mut hi: u64 = latest_height;
-
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
-                    let item = block_index_item_by_height(tx, &mid)?;
-                    let total = item
-                        .ledgers
-                        .iter()
-                        .find(|l| l.ledger == ledger)
-                        .map(|l| l.total_chunks)
-                        .unwrap_or(0);
-                    if chunk_offset_val < total {
-                        hi = mid;
-                    } else {
-                        lo = mid + 1;
-                    }
-                }
-
-                let item = block_index_item_by_height(tx, &lo)?;
-                (lo, item)
-            };
-
-            // prev_total is 0 for genesis (no predecessor) and for blocks
-            // that first introduce this ledger (predecessor has no entry).
-            let prev_total = if block_height == 0 {
-                0
-            } else {
-                let previous_item = block_index_item_by_height(tx, &(block_height - 1))?;
-                previous_item
-                    .ledgers
-                    .iter()
-                    .find(|l| l.ledger == ledger)
-                    .map(|l| l.total_chunks)
-                    .unwrap_or(0)
-            };
-
-            let found_ledger = found_item
-                .ledgers
-                .iter()
-                .find(|l| l.ledger == ledger)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        block_height
-                    )
-                })?;
-
-            Ok(BlockBounds {
-                height: block_height,
-                ledger,
-                start_chunk_offset: prev_total,
-                end_chunk_offset: found_ledger.total_chunks,
-                tx_root: found_ledger.tx_root,
-            })
-        })
+        let latest_height = self
+            .db
+            .view_eyre(block_index_latest_height)?
+            .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
+        self.get_block_bounds_at_height(ledger, chunk_offset, latest_height)
     }
 
     /// Like [`Self::get_block_bounds`], but anchored on `anchor_height`
