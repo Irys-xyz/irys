@@ -1,0 +1,351 @@
+//! Canonical-only lookup: given a tx_id and a height bound, find the ledger
+//! chunk range the tx contributed to its Submit ledger.
+//!
+//! Used by validation, chunk ingress, and cache pruning to determine the
+//! canonical confirming block for a tx without consulting `CachedDataRoots`.
+//!
+//! Two-stage lookup:
+//!   1. Migrated path: [`IrysDataTxMetadata`].`included_height` +
+//!      `MigratedBlockHashes` — O(1) DB read.
+//!   2. Pre-migration fallback: walk `block_tree` ≤ `block_migration_depth`
+//!      blocks back from `max_height`, filtered to `ChainState::Onchain`.
+
+use irys_database::{
+    block_header_by_hash, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
+};
+use irys_domain::{BlockTreeReadGuard, ChainState};
+use irys_types::{
+    DataLedger, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
+    app_state::DatabaseProvider,
+};
+use nodit::interval::ii;
+use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
+
+/// Returns the Submit-ledger chunk range that this tx contributed to its
+/// confirming canonical block, or `None` if the tx is not yet confirmed on
+/// canonical at or before `max_height`.
+pub fn find_canonical_ledger_range(
+    tx_id: &IrysTransactionId,
+    max_height: u64,
+    block_migration_depth: u32,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    if let Some(range) = lookup_via_migrated_metadata(tx_id, max_height, db)? {
+        return Ok(Some(range));
+    }
+    lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db)
+}
+
+fn lookup_via_migrated_metadata(
+    tx_id: &IrysTransactionId,
+    max_height: u64,
+    db: &DatabaseProvider,
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    // `tx_header_by_txid_canonical` already enforces:
+    //   - tx exists
+    //   - included_height is set
+    //   - included_height ≤ max_height
+    //   - MigratedBlockHashes[included_height] is canonical
+    db.view(|tx| -> eyre::Result<Option<LedgerChunkRange>> {
+        let Some(header) = tx_header_by_txid_canonical(tx, tx_id, max_height)? else {
+            return Ok(None);
+        };
+        let Some(included_height) = header.metadata().included_height else {
+            return Ok(None);
+        };
+        let Some(block_hash) = tx.get::<MigratedBlockHashes>(included_height)? else {
+            return Ok(None);
+        };
+        let Some(block) = block_header_by_hash(tx, &block_hash, false)? else {
+            return Ok(None);
+        };
+        let prev = if block.height == 0 {
+            None
+        } else {
+            block_header_by_hash(tx, &block.previous_block_hash, false)?
+        };
+        compute_submit_range(&block, prev.as_ref())
+    })?
+}
+
+fn lookup_via_block_tree(
+    tx_id: &IrysTransactionId,
+    max_height: u64,
+    block_migration_depth: u32,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    let tree = block_tree.read();
+    let (canonical, _tip_idx) = tree.get_canonical_chain();
+
+    // Only the most recent `block_migration_depth` canonical entries can be
+    // pre-migration; older heights are already in the migrated-path table.
+    let depth = block_migration_depth as usize;
+    let start_idx = canonical.len().saturating_sub(depth);
+    for entry in canonical[start_idx..].iter().rev() {
+        let block = entry.header();
+        if block.height > max_height {
+            continue;
+        }
+        let submit_txs = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+        if !submit_txs.iter().any(|t| t == tx_id) {
+            continue;
+        }
+        // Canonical-chain entries should be Onchain, but check defensively.
+        let Some((_, state)) = tree.get_block_and_status(&block.block_hash) else {
+            continue;
+        };
+        if !matches!(state, ChainState::Onchain) {
+            continue;
+        }
+
+        let prev_in_tree = tree.get_block(&block.previous_block_hash).cloned();
+        let prev = if let Some(p) = prev_in_tree {
+            Some(p)
+        } else if block.height == 0 {
+            None
+        } else {
+            db.view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??
+        };
+        return compute_submit_range(block.as_ref(), prev.as_ref());
+    }
+    Ok(None)
+}
+
+/// Compute `[prev.submit.total_chunks, block.submit.total_chunks - 1]` as a
+/// `LedgerChunkRange` (inclusive-inclusive), matching the historical
+/// `get_ledger_range` semantics.  Returns `None` if the block added no
+/// Submit-ledger chunks.  Returns `Err` if `block.total < prev.total` (data
+/// corruption).
+fn compute_submit_range(
+    block: &IrysBlockHeader,
+    prev: Option<&IrysBlockHeader>,
+) -> eyre::Result<Option<LedgerChunkRange>> {
+    let total = block.data_ledgers[DataLedger::Submit].total_chunks;
+    if total == 0 {
+        return Ok(None);
+    }
+    let prev_total = prev
+        .map(|p| p.data_ledgers[DataLedger::Submit].total_chunks)
+        .unwrap_or(0);
+    if total < prev_total {
+        return Err(eyre::eyre!(
+            "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
+            block.block_hash,
+            total,
+            prev_total
+        ));
+    }
+    if total == prev_total {
+        return Ok(None);
+    }
+    Ok(Some(LedgerChunkRange(ii(
+        LedgerChunkOffset::from(prev_total),
+        LedgerChunkOffset::from(total - 1),
+    ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_database::{
+        IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, set_data_tx_included_height,
+        tables::{IrysBlockHeaders, IrysTables},
+    };
+    use irys_domain::{
+        BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,
+        dummy_ema_snapshot,
+    };
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_testing_utils::utils::{TempDirBuilder, tempfile};
+    use irys_types::{
+        BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+        IrysBlockHeader, SealedBlock, U256, app_state::DatabaseProvider,
+    };
+    use reth_db::mdbx::DatabaseArguments;
+    use reth_db::transaction::DbTxMut as _;
+    use std::sync::{Arc, RwLock};
+
+    fn open_db() -> eyre::Result<(DatabaseProvider, tempfile::TempDir)> {
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        Ok((DatabaseProvider(Arc::new(env)), tmp))
+    }
+
+    /// Build a signed block header with custom Submit-ledger totals and tx_ids.
+    fn make_signed_header(
+        height: u64,
+        previous_block_hash: H256,
+        cumulative_diff: u64,
+        submit_total_chunks: u64,
+        submit_tx_ids: Vec<H256>,
+    ) -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.previous_block_hash = previous_block_hash;
+        header.cumulative_diff = U256::from(cumulative_diff);
+        let submit = &mut header.data_ledgers[DataLedger::Submit as usize];
+        submit.total_chunks = submit_total_chunks;
+        submit.tx_ids = H256List(submit_tx_ids);
+        header.test_sign();
+        header
+    }
+
+    fn put_block_header(db: &DatabaseProvider, header: &IrysBlockHeader) -> eyre::Result<()> {
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(header.block_hash, header.clone().into())?;
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    fn mark_migrated(db: &DatabaseProvider, height: u64, hash: H256) -> eyre::Result<()> {
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<MigratedBlockHashes>(height, hash)?;
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    fn write_tx_with_included_height(
+        db: &DatabaseProvider,
+        tx_id: H256,
+        data_root: H256,
+        included_height: u64,
+    ) -> eyre::Result<()> {
+        let mut metadata = DataTransactionMetadata::new();
+        metadata.included_height = Some(included_height);
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata,
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, included_height)?;
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    /// Build a BlockTree with `genesis` seeded as Onchain, then add `extra` blocks
+    /// via `add_common` using `SealedBlock::new_unchecked` (so we don't have to
+    /// populate matching tx bodies).
+    fn build_tree(genesis: IrysBlockHeader, extras: Vec<IrysBlockHeader>) -> BlockTreeReadGuard {
+        // Genesis must seal successfully — it has no tx_ids in either ledger.
+        let mut tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        for header in extras {
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+                ChainState::Onchain,
+            )
+            .expect("add_common succeeds");
+        }
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+    }
+
+    fn empty_block_tree_guard() -> BlockTreeReadGuard {
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn migrated_tx_returns_canonical_range() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 25, vec![tx_id]);
+
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let guard = empty_block_tree_guard();
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("expected Some(range)"))?;
+
+        // [10, 24] inclusive — the 15 chunks added in h1.
+        assert_eq!(range.start(), LedgerChunkOffset::from(10_u64));
+        assert_eq!(range.end(), LedgerChunkOffset::from(24_u64));
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn missing_metadata_and_no_block_tree_returns_none() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+        let guard = empty_block_tree_guard();
+
+        let tx_id = H256::random();
+        let result = find_canonical_ledger_range(
+            &tx_id,
+            10,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn pre_migration_tx_returns_range_via_block_tree() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // h0: 5 Submit chunks (no tx) - serves as genesis with empty tx_ids.
+        let h0 = make_signed_header(0, H256::zero(), 0, 5, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 12, vec![tx_id]);
+
+        let guard = build_tree(h0, vec![h1]);
+        // Deliberately do NOT write IrysDataTxMetadata or MigratedBlockHashes —
+        // the helper must fall back to the block_tree walk.
+
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 1,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("expected Some(range) via block_tree fallback"))?;
+
+        // [5, 11] inclusive.
+        assert_eq!(range.start(), LedgerChunkOffset::from(5_u64));
+        assert_eq!(range.end(), LedgerChunkOffset::from(11_u64));
+        Ok(())
+    }
+}
