@@ -83,10 +83,13 @@ pub enum PreValidationError {
     /// across all observed forks — that referenced a given `data_root`. If a
     /// side-fork block referenced in the set is later pruned from both
     /// `block_tree` and the database, `get_ledger_range` returns `Ok(None)`
-    /// or a lookup error. The peer's block is innocent — this is a
-    /// fork-determinism gap in `block_set`, not a node fault. Classified as
-    /// `is_internal_failure` (block parks in cache, retry plausible) and
+    /// and this variant is surfaced. The peer's block is innocent — this is
+    /// a fork-determinism gap in `block_set`, not a node fault. Classified
+    /// as `is_internal_failure` (block parks in cache, retry plausible) and
     /// explicitly NOT a node fault.
+    ///
+    /// `Err(_)` from `get_ledger_range` is a local DB fault, NOT this
+    /// variant — it routes through `BlockBoundsLookupError` (node fault).
     #[error(
         "Assigned-proof block {block_hash} for tx {tx_id} no longer resolvable in block_tree or DB (likely pruned side fork)"
     )]
@@ -4588,13 +4591,16 @@ pub fn get_assigned_ingress_proofs(
     //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
     //
     //  `block_hashes` comes from `CachedDataRoots.block_set` — explicitly
-    //  fork-spanning (see this function's doc). A hash here may belong to a
-    //  side fork that has since been pruned from both `block_tree` and the
-    //  database, so `Ok(None)` and `Err(_)` from `get_ledger_range` both
-    //  describe the same root cause: a no-longer-resolvable side-fork hash.
-    //  Both surface as the soft `AssignedProofBlockMissing` variant so the
-    //  caller parks the block in cache for retry rather than treating this
-    //  as a node-fault local-index inconsistency.
+    //  fork-spanning (see this function's doc). The two failure modes from
+    //  `get_ledger_range` are NOT the same root cause:
+    //   - `Ok(None)` → the hash is no longer resolvable (predecessor missing,
+    //     pruned side-fork block). Soft `AssignedProofBlockMissing` so the
+    //     caller parks the block for retry.
+    //   - `Err(_)` → local DB I/O failure or an explicit data-corruption
+    //     assertion inside `get_ledger_range`. A real local fault, not a
+    //     fork-determinism artifact. Routes through the node-fault
+    //     `BlockBoundsLookupError` variant so the handler aborts and the
+    //     supervisor restarts the node clean.
     let mut block_ranges = Vec::new();
     for block_hash in block_hashes.iter() {
         match get_ledger_range(block_hash, block_tree, db) {
@@ -4606,16 +4612,10 @@ pub fn get_assigned_ingress_proofs(
                 });
             }
             Err(e) => {
-                debug!(
-                    %block_hash,
-                    tx_id = %tx_header.id,
-                    error = %e,
-                    "get_ledger_range error for fork-spanning block_set hash; treating as pruned side fork"
-                );
-                return Err(PreValidationError::AssignedProofBlockMissing {
-                    block_hash: *block_hash,
-                    tx_id: tx_header.id,
-                });
+                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                    "get_ledger_range failed for block {} (tx_id {}): {}",
+                    block_hash, tx_header.id, e
+                )));
             }
         }
     }
