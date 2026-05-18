@@ -434,39 +434,57 @@ impl ValidationService {
                         }
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
-                            let message = if e.is_cancelled() {
-                                "Concurrent validation task was cancelled"
-                            } else {
-                                "Concurrent validation task panicked"
-                            };
-                            error!(
-                                block.hash = ?removed.as_ref().map(|(h, _)| h),
-                                custom.error = %e,
-                                message
-                            );
-                            if let Some((hash, enqueued_at)) = removed {
-                                metrics::record_validation_full_duration_ms(
-                                    enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                            if e.is_cancelled() {
+                                // JoinError::Cancelled here is a tokio runtime
+                                // hiccup (sibling-task worker panic, runtime
+                                // shutdown racing the loop) — NOT a node fault.
+                                // Dispatching TaskPanicked would classify as
+                                // NodeFault and trigger a supervisor restart
+                                // (see block_validation.rs classify()). Instead
+                                // log, release the validation slot, and leave
+                                // the block in the cache; depth-prune sweeps
+                                // it or a parallel path resubmits.
+                                error!(
+                                    block.hash = ?removed.as_ref().map(|(h, _)| h),
+                                    custom.error = %e,
+                                    "Concurrent validation task was cancelled"
                                 );
-                                // Route through `.into()` so the From dispatcher
-                                // classifies TaskPanicked as InternalFailure
-                                // (validity unknown, do not peer-attribute).
-                                // Constructing `Invalid(TaskPanicked)` directly
-                                // here would defeat the seal.
-                                if !self.send_validation_result(
-                                    hash,
-                                    ValidationError::TaskPanicked {
-                                        task: "concurrent_validation".to_string(),
-                                        details: e.to_string(),
-                                    }
-                                    .into(),
-                                ) {
-                                    // Block tree won't handle diagnostics since send failed,
-                                    // so record directly as a fallback.
-                                    self.inner.chain_sync_state.record_validation_finished(&hash);
-                                    self.inner.chain_sync_state.record_block_validation_error(
-                                        format!("block={} error=concurrent task panicked: {}", hash, e),
+                                if let Some((hash, enqueued_at)) = removed {
+                                    metrics::record_validation_full_duration_ms(
+                                        enqueued_at.elapsed().as_secs_f64() * 1000.0,
                                     );
+                                    self.inner.chain_sync_state.record_validation_finished(&hash);
+                                }
+                            } else {
+                                error!(
+                                    block.hash = ?removed.as_ref().map(|(h, _)| h),
+                                    custom.error = %e,
+                                    "Concurrent validation task panicked"
+                                );
+                                if let Some((hash, enqueued_at)) = removed {
+                                    metrics::record_validation_full_duration_ms(
+                                        enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                    );
+                                    // Route through `.into()` so the From dispatcher
+                                    // classifies TaskPanicked as InternalFailure
+                                    // (validity unknown, do not peer-attribute).
+                                    // Constructing `Invalid(TaskPanicked)` directly
+                                    // here would defeat the seal.
+                                    if !self.send_validation_result(
+                                        hash,
+                                        ValidationError::TaskPanicked {
+                                            task: "concurrent_validation".to_string(),
+                                            details: e.to_string(),
+                                        }
+                                        .into(),
+                                    ) {
+                                        // Block tree won't handle diagnostics since send failed,
+                                        // so record directly as a fallback.
+                                        self.inner.chain_sync_state.record_validation_finished(&hash);
+                                        self.inner.chain_sync_state.record_block_validation_error(
+                                            format!("block={} error=concurrent task panicked: {}", hash, e),
+                                        );
+                                    }
                                 }
                             }
                         }

@@ -2218,6 +2218,11 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     {
         let index = block_index_guard.read();
         if let Some(parent_item) = index.get_item(parent_height) {
+            debug_assert_eq!(
+                parent_item.block_hash, parent_block_hash,
+                "fast-path: indexed parent must match supplied parent_block_hash \
+                 (invariant: reorgs past migration_depth abort the node)"
+            );
             match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
                 Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
                     return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
@@ -2289,16 +2294,36 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 .map(|(total, _)| total)
                 .unwrap_or(0)
         } else {
-            let index = block_index_guard.read();
-            index
-                .get_item(curr_height - 1)
-                .and_then(|item| {
-                    item.ledgers
+            // Inline `Result` block so `None` from `get_item` propagates as
+            // `BlockBoundsLookupError` (node fault) rather than silently
+            // collapsing to `prev_total = 0` like a missing ledger entry.
+            let lookup: Result<u64, PreValidationError> = {
+                let index = block_index_guard.read();
+                match index.get_item(curr_height - 1) {
+                    // `None` here violates the invariant documented above:
+                    // `block_tree_depth > block_migration_depth` guarantees
+                    // predecessors below `block_tree`'s window are always
+                    // indexed. Surface as a node fault instead of producing
+                    // a consensus-valid `BlockBounds` rooted at offset 0 on
+                    // a corrupted node.
+                    None => Err(PreValidationError::BlockBoundsLookupError(format!(
+                        "block_index missing item at height {} (invariant violated: \
+                         block_tree_depth > block_migration_depth guarantees this is \
+                         always indexed; predecessor of block at height {} unreachable)",
+                        curr_height - 1,
+                        curr_height
+                    ))),
+                    // `Some(item)` but no matching ledger entry is legitimate:
+                    // the ledger had not yet been introduced at that height.
+                    Some(item) => Ok(item
+                        .ledgers
                         .iter()
                         .find(|l| l.ledger == ledger)
                         .map(|l| l.total_chunks)
-                })
-                .unwrap_or(0)
+                        .unwrap_or(0)),
+                }
+            };
+            lookup?
         };
 
         if ledger_chunk_offset >= prev_total {
@@ -2941,9 +2966,15 @@ async fn generate_expected_shadow_transactions(
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
 
-    // Calculate expired ledger fees for epoch blocks. The walk reads
-    // locally-cached blocks and mempool state; any failure is local in
-    // nature → `ShadowTxGenerationFailed`.
+    // Calculate expired ledger fees for epoch blocks. The walk transitively
+    // performs MDBX reads (block-header lookups via `db.view_eyre` inside
+    // `process_boundary_block` / `process_middle_blocks`, plus
+    // `get_data_tx_in_parallel`), so a failure is dominantly DB-I/O —
+    // `eyre::Result` doesn't let us cleanly distinguish DB faults from
+    // pure-logic faults here, and retry can't heal a broken MDBX. Route
+    // through `node_fault` (`ShadowTxNodeFault`) rather than `internal`.
+    // TODO(P2 follow-up): differentiate DB I/O from logic errors here by
+    // converting the helpers' return types to a typed error.
     let expired_ledger_fees = if is_epoch_block {
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -2958,7 +2989,7 @@ async fn generate_expected_shadow_transactions(
         )
         .in_current_span()
         .await
-        .map_err(internal)?;
+        .map_err(node_fault)?;
 
         // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
         let cascade_active = config
@@ -2980,7 +3011,7 @@ async fn generate_expected_shadow_transactions(
                 )
                 .in_current_span()
                 .await
-                .map_err(internal)?;
+                .map_err(node_fault)?;
                 result.merge(delta);
             }
         }
@@ -3011,6 +3042,26 @@ async fn generate_expected_shadow_transactions(
     } else {
         Vec::new()
     };
+
+    // Deterministic block-invariant: peer-attributable. See
+    // `ShadowTransactionInvalid` doc — a tx in the publish ledger that also
+    // has a perm_fee refund scheduled is a structural inconsistency in the
+    // peer's block (promoted txs must not receive refunds). Routed here
+    // (rather than only inside `ShadowTxGenerator::new`) so violations
+    // surface as consensus rejection rather than soft-internal
+    // `ShadowTxGenerationFailed`. The constructor keeps an identical guard
+    // as defence-in-depth for non-validation callers.
+    for tx in &publish_ledger_with_txs.txs {
+        for (refund_tx_id, _, _) in &expired_ledger_fees.user_perm_fee_refunds {
+            if tx.id == *refund_tx_id {
+                return Err(consensus(format!(
+                    "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
+                     Promoted transactions should not receive refunds.",
+                    tx.id
+                )));
+            }
+        }
+    }
 
     // ShadowTxGenerator::new and its iteration operate on already-loaded
     // local data (parent block, snapshots, mempool-resolved txs). Any

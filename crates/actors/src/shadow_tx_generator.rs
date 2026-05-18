@@ -169,8 +169,17 @@ impl<'a> ShadowTxGenerator<'a> {
         unstake_refund_events: &[UnstakeRefundEvent],
         epoch_snapshot: &EpochSnapshot,
     ) -> Result<Self> {
-        // Validate that no transaction in publish ledger has a refund
-        // (promoted transactions should not get perm_fee refunds)
+        // Defence-in-depth: no publish-ledger tx may also have a perm_fee
+        // refund scheduled (promoted transactions must not receive refunds).
+        // The canonical check lives at the validation call site
+        // (`generate_expected_shadow_transactions` in `block_validation.rs`)
+        // so violations surface as `ValidationError::ShadowTransactionInvalid`
+        // (peer-attributable consensus rejection) rather than soft
+        // `ShadowTxGenerationFailed`. This in-constructor guard covers any
+        // other construction path (tests, future callers) so the invariant
+        // can't be silently bypassed. If this arm ever fires from production
+        // validation, the call-site check failed to run — fix the call site,
+        // don't relax this guard.
         for tx in &publish_ledger.txs {
             for (refund_tx_id, _, _) in &ledger_expiry_balance_delta.user_perm_fee_refunds {
                 if tx.id == *refund_tx_id {

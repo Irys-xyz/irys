@@ -207,7 +207,23 @@ impl BlockTreeService {
             match msg {
                 // Skip: talks to downstream services (reth FCU, migration) that
                 // may already be stopped during shutdown.
-                BlockTreeServiceMessage::BlockValidationFinished { .. } => {
+                BlockTreeServiceMessage::BlockValidationFinished {
+                    block_hash,
+                    validation_result,
+                } => {
+                    // Exception: a node-fault `InternalFailure` must still
+                    // panic during the drain so the supervisor restarts the
+                    // node clean. Silently dropping it would lose the
+                    // diagnostic and let a corrupted process exit normally.
+                    // See `on_block_validation_finished` for the same rationale.
+                    if let ValidationResult::InternalFailure(validation_error) = &validation_result
+                        && validation_error.is_node_fault()
+                    {
+                        panic!(
+                            "block validation hit a node fault during shutdown drain (block={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
+                            block_hash, validation_error
+                        );
+                    }
                     debug!("Skipping BlockValidationFinished during shutdown drain");
                 }
                 msg => self.inner.handle_message(msg, parent_span).await?,
