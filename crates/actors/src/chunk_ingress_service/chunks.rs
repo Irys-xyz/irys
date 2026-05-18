@@ -527,22 +527,18 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Cheap hint: `block_set` is best-effort and not fork-tolerant, but
-        // an empty `block_set` means no `BlockConfirmed` event has ever
-        // touched this data_root.  In that case there's nothing to verify
-        // canonically yet; skip the more expensive helper lookup.  The
-        // next `BlockConfirmed` event will retrigger this code path with a
-        // non-empty `block_set`.
-        if cdr.block_set.is_empty() {
-            return Ok(());
-        }
-
-        // Trustworthy verification: a non-empty `block_set` can still hold
-        // only orphan hashes (append-only across reorgs).  Confirm at least
-        // one tx in `txid_set` is canonically confirmed in a Submit ledger
-        // at or before the current tip via `tx_inclusion` — this is the
-        // trust root.  Without it, validation could proceed for data_roots
-        // that only ever made it into reorg'd-out forks.
+        // Trustworthy verification: `block_set` is append-only across reorgs
+        // (orphan hashes are retained) AND it is only populated by the
+        // `BlockConfirmed` handler — so it can be either non-empty with only
+        // orphan hashes, or empty even when a tx IS canonical (e.g. after a
+        // restart where `BlockConfirmed` was missed, or before the
+        // `TryGenerateProofsForConfirmedRoots` notification fires).  Skip the
+        // `block_set` hint entirely and consult the canonical trust root:
+        // confirm at least one tx in `txid_set` is canonically confirmed in
+        // a Submit ledger at or before the current tip via `tx_inclusion`.
+        // Without this, validation could proceed for data_roots that only
+        // ever made it into reorg'd-out forks, or be silently skipped for
+        // canonical data_roots whose `block_set` happens to be empty.
         let current_height = self
             .block_tree_read_guard
             .latest_canonical_block_height()
