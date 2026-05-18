@@ -399,19 +399,21 @@ impl InnerCacheTask {
                 );
                 break;
             }
-            // Pruning horizon priority: block inclusion > expiry height > skip
-            // Rationale: Confirmed blocks provide the most reliable pruning point.
-            // Unconfirmed mempool entries use expiry_height as a conservative fallback.
-            // Entries without either metadata are likely still active and should not be pruned.
+            // Pruning horizon priority: canonical tx inclusion > expiry height > skip
+            // Rationale: Migrated tx metadata provides a stable canonical
+            // inclusion height even after reorgs.  Unconfirmed mempool entries
+            // use expiry_height as a conservative fallback.  Entries without
+            // either are likely still active and are skipped.
+            //
+            // No block_tree fallback is needed here: pre-migration entries are
+            // already covered by expiry_height (set at cache_data_root time)
+            // and by the local-proof exemption further below.
             let mut inclusion_max_height: Option<u64> = None;
-            for block_hash in cached.block_set.iter() {
-                if let Some(block_header) =
-                    irys_database::block_header_by_hash(&write_tx, block_hash, false)?
+            for tx_id in cached.txid_set.iter() {
+                if let Some(metadata) = irys_database::get_data_tx_metadata(&write_tx, tx_id)?
+                    && let Some(h) = metadata.included_height
                 {
-                    inclusion_max_height = Some(
-                        inclusion_max_height
-                            .map_or(block_header.height, |h| h.max(block_header.height)),
-                    );
+                    inclusion_max_height = Some(inclusion_max_height.map_or(h, |x| x.max(h)));
                 }
             }
             let horizon = match (inclusion_max_height, cached.expiry_height) {
