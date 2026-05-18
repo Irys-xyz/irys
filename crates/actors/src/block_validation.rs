@@ -8,7 +8,7 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
+use irys_database::tx_header_by_txid_canonical;
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -2705,6 +2705,7 @@ pub async fn data_txs_are_valid(
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
                 tx_header,
+                block.height.saturating_sub(1),
                 block_tree_guard,
                 db,
                 config,
@@ -3296,6 +3297,7 @@ fn merge_same_block_historical_ledgers(
 pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
+    parent_height: u64,
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
@@ -3305,57 +3307,31 @@ pub fn get_assigned_ingress_proofs(
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
 
-    //  a) Get the block hashes from the cached data_root (invariant across all proofs)
-    let block_hashes = db
-        .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
-        .map_err(|e| PreValidationError::DatabaseError {
-            error: format!(
-                "Failed to open DB read tx for data_root {} (tx_id {}): {}",
-                tx_header.data_root, tx_header.id, e
-            ),
-        })?
-        .map_err(|e| PreValidationError::DatabaseError {
-            error: format!(
-                "DB query failed for data_root {} (tx_id {}): {}",
-                tx_header.data_root, tx_header.id, e
-            ),
-        })?
-        .ok_or_else(|| PreValidationError::DatabaseError {
-            error: format!(
-                "CachedDataRoot not found for data_root {} (tx_id {})",
-                tx_header.data_root, tx_header.id
-            ),
-        })?
-        .block_set;
+    //  a) Get the canonical Submit-ledger range this tx contributed to at or
+    //     before `parent_height`.  This replaces the historical
+    //     CachedDataRoots.block_set lookup, which retained reorg'd-out hashes
+    //     and could produce stale BlockBoundsLookupError.
+    let block_range = crate::tx_inclusion::find_canonical_ledger_range(
+        &tx_header.id,
+        parent_height,
+        config.consensus.block_migration_depth,
+        block_tree,
+        db,
+    )
+    .map_err(|e| {
+        PreValidationError::BlockBoundsLookupError(format!(
+            "find_canonical_ledger_range failed for tx {} (data_root {}): {}",
+            tx_header.id, tx_header.data_root, e
+        ))
+    })?;
 
-    // Empty block_set is valid for single-block promotion: the data_root hasn't
-    // been included in any confirmed block yet.  With no block_ranges, no proofs
-    // will be classified as "assigned" and assigned_miners stays 0.  The caller
-    // clamps expected_assigned_proofs to 0, so all proofs count as unassigned and
-    // only the total-proof-count gate applies.
-    if block_hashes.is_empty() {
+    // No canonical confirmation at or before parent_height (single-block
+    // promotion or unconfirmed).  Preserve historical semantics: no proofs are
+    // classified as "assigned" and assigned_miners stays 0, so the caller's
+    // clamp leaves only the total-proof-count gate applicable.
+    let Some(block_range) = block_range else {
         return Ok((vec![], 0));
-    }
-
-    //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
-    let mut block_ranges = Vec::new();
-    for block_hash in block_hashes.iter() {
-        match get_ledger_range(block_hash, block_tree, db) {
-            Ok(Some(block_range)) => block_ranges.push(block_range),
-            Ok(None) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "get_ledger_range returned None for block {}, assigned_miners would remain unset (tx_id {})",
-                    block_hash, tx_header.id
-                )));
-            }
-            Err(e) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "Failed to get ledger range for block {}: {}",
-                    block_hash, e
-                )));
-            }
-        }
-    }
+    };
 
     // Loop through all the ingress proofs for the published transaction and pre-validate them
     for ingress_proof in tx_proofs.iter() {
@@ -3391,16 +3367,9 @@ pub fn get_assigned_ingress_proofs(
         let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
 
         //  f) are there any intersections of block and slot ranges?
-        let mut is_intersected = false;
-        for block_range in &block_ranges {
-            for (slot_index, slot_range) in &slot_ranges {
-                if block_range.intersection(slot_range).is_some() {
-                    is_intersected = true;
-                    assigned_miners = *slot_address_counts.get(slot_index).unwrap();
-                    break;
-                }
-            }
-            if is_intersected {
+        for (slot_index, slot_range) in &slot_ranges {
+            if block_range.intersection(slot_range).is_some() {
+                assigned_miners = *slot_address_counts.get(slot_index).unwrap();
                 assigned_proofs.push(ingress_proof.clone());
                 break;
             }
@@ -3408,59 +3377,6 @@ pub fn get_assigned_ingress_proofs(
     }
 
     Ok((assigned_proofs, assigned_miners))
-}
-
-fn get_ledger_range(
-    hash: &H256,
-    block_tree: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-) -> eyre::Result<Option<LedgerChunkRange>> {
-    let block = match get_block_by_hash(hash, block_tree, db)? {
-        Some(b) => b,
-        None => return Ok(None),
-    };
-    let prev_block_hash = block.previous_block_hash;
-
-    let block_total_chunks = block.data_ledgers[DataLedger::Submit].total_chunks;
-
-    if block.height == 0 {
-        if block_total_chunks == 0 {
-            return Ok(None);
-        }
-        Ok(Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(0),
-            LedgerChunkOffset::from(block_total_chunks - 1),
-        ))))
-    } else {
-        let prev_block = match get_block_by_hash(&prev_block_hash, block_tree, db)? {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
-        if block_total_chunks < prev_total_chunks {
-            return Err(eyre::eyre!(
-                "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
-                hash,
-                block_total_chunks,
-                prev_total_chunks
-            ));
-        }
-        if block_total_chunks == 0 || block_total_chunks == prev_total_chunks {
-            return Ok(None);
-        }
-        Ok(Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(prev_total_chunks),
-            LedgerChunkOffset::from(block_total_chunks - 1),
-        ))))
-    }
-}
-
-fn get_block_by_hash(
-    hash: &H256,
-    block_tree: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-) -> eyre::Result<Option<IrysBlockHeader>> {
-    crate::block_tree_service::get_block_header(block_tree, db, *hash, false)
 }
 
 fn get_submit_ledger_slot_assignments(
@@ -4440,6 +4356,133 @@ mod tests {
         } else {
             panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
         }
+    }
+
+    /// Integration check for `get_assigned_ingress_proofs`: with a tx
+    /// canonically confirmed via `IrysDataTxMetadata`+`MigratedBlockHashes`,
+    /// the function looks up the Submit-ledger range via
+    /// `tx_inclusion::find_canonical_ledger_range` and returns successfully.
+    ///
+    /// Regression coverage for the 2026-05-15 self-fork: the previous
+    /// implementation walked `CachedDataRoots.block_set`, which retained
+    /// orphaned hashes after reorgs and caused `BlockBoundsLookupError`
+    /// once those blocks were purged.  `block_set` has since been removed
+    /// from `CachedDataRoot` entirely.
+    #[test_log::test(tokio::test)]
+    async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
+        use crate::tx_inclusion;
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height,
+            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Build a two-block canonical chain.  h1 includes tx_id in Submit.
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        // Persist block headers + mark both heights migrated to canonical.
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        // Write the canonical tx metadata so the migrated-path lookup succeeds.
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        // Empty BlockTree + default EpochSnapshot are sufficient since
+        // the tx is found via the migrated-metadata path and no proofs
+        // are passed (so partition assignments are unused).
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let epoch_snapshot = EpochSnapshot::default();
+
+        // Sanity: helper resolves the canonical range directly.
+        let direct = tx_inclusion::find_canonical_ledger_range(
+            &tx_id,
+            5,
+            config.consensus.block_migration_depth,
+            &block_tree_guard,
+            &db,
+        )?;
+        assert!(
+            direct.is_some(),
+            "test setup error: helper should resolve migrated tx"
+        );
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert!(assigned.is_empty());
+        assert_eq!(miners, 0);
+
+        Ok(())
     }
 }
 

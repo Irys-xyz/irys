@@ -977,6 +977,7 @@ async fn get_publish_txs_and_proofs(
             let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                 &proofs_only,
                 tx_header,
+                current_height,
                 ctx.block_tree,
                 ctx.db,
                 ctx.config,
