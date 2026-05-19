@@ -1,4 +1,4 @@
-use crate::block_pool::{BlockRemovalReason, FailureReason};
+use crate::block_pool::{BlockRemovalReason, CriticalBlockPoolError, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
 use irys_actors::MempoolFacade;
@@ -426,9 +426,24 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .pull_and_process_block(block_hash, self.sync_state.is_trusted_sync())
             .await
         {
+            let rejection_reason = match &err {
+                GossipError::BlockPool(CriticalBlockPoolError::ForkedBlock(_)) => {
+                    Some("forked_block")
+                }
+                GossipError::BlockPool(CriticalBlockPoolError::PreviousBlockNotFound(_)) => {
+                    Some("prev_block_not_found")
+                }
+                GossipError::BlockPool(_) => Some("block_pool_other"),
+                _ => None,
+            };
+            if let Some(reason) = rejection_reason {
+                irys_actors::record_chain_sync_block_rejected(reason);
+            }
             error!(
-                "Failed to pull and process block {:?}: {:?}",
-                block_hash, err
+                %block_hash,
+                rejection_reason = ?rejection_reason,
+                error = ?err,
+                "chain_sync.pull_and_process_block_failed"
             );
 
             if !err.is_advisory() {

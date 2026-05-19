@@ -414,11 +414,16 @@ impl BlockTreeServiceInner {
 
         // Handle a failed validation first
         if let ValidationResult::Invalid(validation_error) = &validation_result {
+            let reason = validation_error.metric_reason();
             error!(
                 block.hash = %block_hash,
+                %reason,
                 error = %validation_error,
                 "block validation failed"
             );
+            if validation_error.is_pre_validation() {
+                crate::metrics::record_block_pre_validation_failed(reason);
+            }
 
             // Record validation error for diagnostics
             let error_message = format!("block={} error={}", block_hash, validation_error);
@@ -440,9 +445,19 @@ impl BlockTreeServiceInner {
 
             // The block may already be gone if an invalid ancestor was removed recursively.
             if maybe_height.is_some() {
+                debug!(
+                    block.hash = %block_hash,
+                    block.height = height,
+                    prev_state = ?state,
+                    %reason,
+                    "block_tree.transition: remove_block (validation invalid)"
+                );
                 if let Err(err) = cache.remove_block(&block_hash) {
                     tracing::error!(
                         block.hash = %block_hash,
+                        block.height = height,
+                        prev_state = ?state,
+                        %reason,
                         ?err,
                         "Failed to remove block from cache"
                     );
@@ -605,6 +620,8 @@ impl BlockTreeServiceInner {
                 let old_tip_block = cache
                     .get_block(&cache.tip)
                     .ok_or_eyre("tip block must always be present")?;
+                let old_tip_hash = old_tip_block.block_hash;
+                let old_tip_height = old_tip_block.height;
 
                 // only mark the tip if the new tip has higher cumulative difficulty than the old one
                 if old_tip_block.cumulative_diff >= arc_block.cumulative_diff {
@@ -612,9 +629,25 @@ impl BlockTreeServiceInner {
                     // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
                     // That is valid because the blocks below self.max_cumulative_difficulty
                     // could still be undergoing validation, which is not guaranteed to succeed
+                    debug!(
+                        block.hash = %block_hash,
+                        block.height = arc_block.height,
+                        old_tip.hash = %old_tip_hash,
+                        old_tip.height = old_tip_height,
+                        "block_tree.transition: validated as Fork (kept current tip)"
+                    );
                     false
                 } else {
-                    cache.mark_tip(&block_hash)?
+                    let changed = cache.mark_tip(&block_hash)?;
+                    debug!(
+                        block.hash = %block_hash,
+                        block.height = arc_block.height,
+                        old_tip.hash = %old_tip_hash,
+                        old_tip.height = old_tip_height,
+                        tip_changed = changed,
+                        "block_tree.transition: mark_tip"
+                    );
+                    changed
                 }
             };
 
