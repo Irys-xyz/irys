@@ -465,17 +465,22 @@ impl InnerCacheTask {
                     continue;
                 }
 
-                debug!(
-                    data_root.data_root = ?data_root,
-                    data_root.max_height = ?max_height,
-                    data_root.prune_height = ?prune_height,
-                    "expiring cached data for data root",
+                info!(
+                    %data_root,
+                    block_set_at_eviction = ?cached.block_set,
+                    txid_set_size = cached.txid_set.len(),
+                    last_inclusion_height = ?inclusion_max_height,
+                    expiry_height = ?cached.expiry_height,
+                    %prune_height,
+                    has_local_proof,
+                    "cached_data_root.evict"
                 );
                 write_tx.delete::<IngressProofs>(data_root, None)?;
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
                 eviction_count += 1;
+                metrics::record_cached_data_root_evicted();
             }
         }
         debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
