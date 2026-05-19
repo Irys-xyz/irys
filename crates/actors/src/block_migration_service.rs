@@ -360,3 +360,318 @@ impl BlockMigrationService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Focused unit tests for `BlockMigrationService::persist_metadata` —
+    //! the authoritative-writer entry point for
+    //! `CachedDataRoot.block_set` and `IrysDataTxMetadata.included_height`.
+    //!
+    //! The function only touches `self.db`; the other service fields
+    //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
+    //! satisfied with cheap placeholders.
+    use super::*;
+    use irys_database::{
+        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
+        tables::{CachedDataRoots, IrysTables},
+    };
+    use irys_domain::BlockTree;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::{
+        BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+        IrysBlockHeader, U256,
+    };
+    use reth_db::Database as _;
+    use reth_db::mdbx::DatabaseArguments;
+    use reth_db::transaction::{DbTx as _, DbTxMut as _};
+
+    /// Build a `BlockMigrationService` whose only meaningful field is `db`.
+    /// All other dependencies are placeholders sufficient to construct but
+    /// not exercised by `persist_metadata`.
+    fn make_service(
+        db: DatabaseProvider,
+    ) -> (
+        BlockMigrationService,
+        irys_testing_utils::utils::tempfile::TempDir,
+    ) {
+        // BlockIndex needs a writable DB; reuse the test DB.
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+
+        // BlockTree needs a genesis to seal; consensus testing config.
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let cache = Arc::new(RwLock::new(tree));
+
+        let (chunk_migration_sender, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Return a dummy tempdir alongside so callers can keep it alive if
+        // they want; in practice the test owns its own tempdir for the DB.
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let svc = BlockMigrationService::new(
+            db,
+            block_index_guard,
+            None, // supply_state — unused by persist_metadata
+            ConsensusConfig::testing().chunk_size,
+            cache,
+            chunk_migration_sender,
+        );
+        (svc, tmp)
+    }
+
+    fn open_db() -> eyre::Result<(
+        DatabaseProvider,
+        irys_testing_utils::utils::tempfile::TempDir,
+    )> {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        Ok((DatabaseProvider(Arc::new(env)), tmp))
+    }
+
+    /// Build a signed block header with the given Submit-ledger `tx_ids`
+    /// and `total_chunks`.
+    fn make_block_header(
+        height: u64,
+        previous_block_hash: H256,
+        submit_total_chunks: u64,
+        submit_tx_ids: Vec<H256>,
+    ) -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.previous_block_hash = previous_block_hash;
+        header.cumulative_diff = U256::from(height);
+        let submit = &mut header.data_ledgers[DataLedger::Submit as usize];
+        submit.total_chunks = submit_total_chunks;
+        submit.tx_ids = H256List(submit_tx_ids);
+        header.test_sign();
+        header
+    }
+
+    /// Wrap a header in a `SealedBlock` whose body carries matching
+    /// `DataTransactionHeader` entries for each Submit tx_id (so
+    /// `block.transactions().get_ledger_txs(Submit)` returns non-empty).
+    fn make_sealed_with_submit_txs(
+        header: IrysBlockHeader,
+        submit_data_roots: &[(H256, H256)], // (tx_id, data_root)
+    ) -> Arc<SealedBlock> {
+        let data_txs: Vec<DataTransactionHeader> = submit_data_roots
+            .iter()
+            .map(|(tx_id, data_root)| {
+                DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                    tx: DataTransactionHeaderV1 {
+                        id: *tx_id,
+                        data_root: *data_root,
+                        ledger_id: DataLedger::Submit as u32,
+                        ..Default::default()
+                    },
+                    metadata: DataTransactionMetadata::new(),
+                })
+            })
+            .collect();
+        let mut data_txs_map = HashMap::new();
+        data_txs_map.insert(DataLedger::Submit, data_txs);
+        let body = BlockTransactions {
+            data_txs: data_txs_map,
+            ..Default::default()
+        };
+        Arc::new(SealedBlock::new_unchecked(Arc::new(header), body))
+    }
+
+    /// Seed a CachedDataRoot via the normal `cache_data_root` path, then
+    /// stamp specific `block_set` / `expiry_height` values.
+    fn seed_cdr(
+        db: &DatabaseProvider,
+        data_root: H256,
+        tx_id: H256,
+        block_set: Vec<H256>,
+        expiry: Option<u64>,
+    ) {
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            cache_data_root(tx, &tx_header, None)?;
+            let mut cdr = tx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("seed_cdr: cache_data_root must produce an entry");
+            cdr.block_set = block_set;
+            cdr.expiry_height = expiry;
+            tx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    }
+
+    fn read_cdr(
+        db: &DatabaseProvider,
+        data_root: H256,
+    ) -> Option<irys_database::db_cache::CachedDataRoot> {
+        db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Phase 3 normal advance: an existing CDR for a Submit tx in
+    /// `blocks_to_confirm` gets the new tip's `block_hash` appended and
+    /// `expiry_height` cleared.
+    #[tokio::test]
+    async fn phase3_appends_tip_hash_and_clears_expiry_on_existing_cdr() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        // Pre-confirmation state: expiry set, block_set empty.
+        seed_cdr(&db, data_root, tx_id, vec![], Some(99));
+
+        let tip = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let tip_hash = tip.block_hash;
+        let tip_sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
+
+        svc.persist_metadata(&[], std::slice::from_ref(&tip_sealed))?;
+
+        let cdr = read_cdr(&db, data_root).expect("CDR present");
+        assert_eq!(
+            cdr.block_set,
+            vec![tip_hash],
+            "tip hash appended to block_set"
+        );
+        assert!(
+            cdr.expiry_height.is_none(),
+            "expiry cleared by Phase 3 update_data_root_block_set"
+        );
+        Ok(())
+    }
+
+    /// Phase 3 update-only contract: a Submit tx in `blocks_to_confirm`
+    /// with no corresponding CDR row produces no CDR write.  Mirrors
+    /// `update_data_root_block_set`'s "must not fabricate" doc.
+    #[tokio::test]
+    async fn phase3_does_not_fabricate_cdr_when_missing() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        // No seed_cdr call — no CDR for this data_root.
+
+        let tip = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let tip_sealed = make_sealed_with_submit_txs(tip, &[(tx_id, data_root)]);
+
+        svc.persist_metadata(&[], std::slice::from_ref(&tip_sealed))?;
+
+        assert!(
+            read_cdr(&db, data_root).is_none(),
+            "Phase 3 must not create a CDR for a data_root the node never tracked"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 scrub on reorg: an existing CDR carrying the orphaned
+    /// block's hash has that hash removed.  `expiry_height` is left
+    /// untouched per the helper's docblock — mempool re-anchor restores it.
+    #[tokio::test]
+    async fn phase1_scrubs_orphan_block_hash_from_cdr() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let other_canonical_hash = H256::random();
+        let orphan_tip = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let orphan_hash = orphan_tip.block_hash;
+
+        // CDR currently records the orphaned tip alongside another canonical
+        // hash; expiry already cleared (post-confirmation).
+        seed_cdr(
+            &db,
+            data_root,
+            tx_id,
+            vec![orphan_hash, other_canonical_hash],
+            None,
+        );
+
+        let orphan_sealed = make_sealed_with_submit_txs(orphan_tip, &[(tx_id, data_root)]);
+
+        svc.persist_metadata(std::slice::from_ref(&orphan_sealed), &[])?;
+
+        let cdr = read_cdr(&db, data_root).expect("CDR present");
+        assert_eq!(
+            cdr.block_set,
+            vec![other_canonical_hash],
+            "orphan hash scrubbed; non-orphan hash retained"
+        );
+        assert!(
+            cdr.expiry_height.is_none(),
+            "expiry_height intentionally left untouched per helper docblock"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 + Phase 3 ordering: a Submit tx appears in both the orphaned
+    /// block (`blocks_to_clear`) and the new canonical block
+    /// (`blocks_to_confirm`).  Phase 1 must run before Phase 3 so the
+    /// orphan hash is scrubbed first and the new canonical hash appended
+    /// second — final state has only the new canonical hash.
+    ///
+    /// Guards the ordering invariant: if the phases were swapped, the
+    /// new canonical hash would be appended, then the orphan hash
+    /// scrubbed (no effect), leaving both hashes present.  Worse, if
+    /// they referenced the same hash by accident the final state could
+    /// be empty.
+    #[tokio::test]
+    async fn phase1_before_phase3_for_overlapping_tx() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let orphan = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let orphan_hash = orphan.block_hash;
+        let new_canonical = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let new_canonical_hash = new_canonical.block_hash;
+        // Distinct hashes — they're constructed with different parents so
+        // even with otherwise identical contents the headers diverge.
+        assert_ne!(orphan_hash, new_canonical_hash);
+
+        // CDR currently records only the orphaned hash.
+        seed_cdr(&db, data_root, tx_id, vec![orphan_hash], None);
+
+        let orphan_sealed = make_sealed_with_submit_txs(orphan, &[(tx_id, data_root)]);
+        let new_canonical_sealed =
+            make_sealed_with_submit_txs(new_canonical, &[(tx_id, data_root)]);
+
+        svc.persist_metadata(
+            std::slice::from_ref(&orphan_sealed),
+            std::slice::from_ref(&new_canonical_sealed),
+        )?;
+
+        let cdr = read_cdr(&db, data_root).expect("CDR present");
+        assert_eq!(
+            cdr.block_set,
+            vec![new_canonical_hash],
+            "orphan scrubbed then new canonical appended; final state has only the new hash"
+        );
+        assert!(
+            cdr.expiry_height.is_none(),
+            "expiry remains cleared post-Phase 3"
+        );
+        Ok(())
+    }
+}
