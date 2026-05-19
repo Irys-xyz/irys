@@ -1,4 +1,3 @@
-use eyre::{Result, eyre};
 use irys_domain::EpochSnapshot;
 use irys_reth::shadow_tx::{
     BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
@@ -14,6 +13,57 @@ use std::collections::BTreeMap;
 
 use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
+
+/// Typed error for shadow-transaction generation.
+///
+/// Distinguishes between failure modes so the validator can route each
+/// to the correct `ValidationResult`:
+///
+/// - `SnapshotInvariant` → local snapshot/state inconsistency. Retry won't
+///   heal. Validator-side: node fault (panic + supervisor restart).
+///   Producer-side: code bug or corrupt local state.
+/// - `TreasuryArithmetic` → treasury under/overflow during fee accumulation.
+///   On the validator side these reflect a peer's block with structurally
+///   bad fee values (the fees come from the peer's tx set), so they route
+///   to consensus rejection. On the producer side they indicate a code bug
+///   in our own fee calc.
+/// - `Structural` → per-tx structural error (e.g. publish-ledger tx missing
+///   `perm_fee`, or fee-distribution constructors rejecting peer-supplied
+///   values). Always peer-attributable → consensus rejection.
+/// - `Soft` → unclassified soft local failure (retry plausible).
+#[derive(Debug, thiserror::Error)]
+pub enum ShadowTxGenError {
+    /// Local snapshot/state invariant violation. Retry won't heal.
+    /// Validator-side: node fault → panic + supervisor restart.
+    /// Producer-side: code bug or corrupt state.
+    #[error("snapshot invariant violation: {0}")]
+    SnapshotInvariant(String),
+
+    /// Treasury arithmetic under/overflow during peer-derived fee calc.
+    /// Validator-side: peer's block has structurally bad fees → consensus rejection.
+    /// Producer-side: indicates a code bug in our fee calc.
+    #[error("treasury arithmetic: {0}")]
+    TreasuryArithmetic(String),
+
+    /// Per-tx structural error (e.g. publish-ledger tx missing perm_fee).
+    /// Validator-side: consensus rejection. Producer-side: bad input.
+    #[error("structural: {0}")]
+    Structural(String),
+
+    /// Unclassified soft local failure (retry plausible).
+    #[error("{0}")]
+    Soft(String),
+}
+
+// Producer-side call sites return `eyre::Result` / `BlockProductionError`
+// (which has `From<eyre::Report>`); `eyre::Report` already provides a
+// blanket `From<E: std::error::Error + Send + Sync + 'static>` impl, so
+// `?` lifts `ShadowTxGenError` into `eyre::Report` automatically — no
+// explicit `From` needed (and adding one would conflict with the blanket
+// impl).
+
+/// Local `Result` alias for this module.
+type Result<T> = std::result::Result<T, ShadowTxGenError>;
 
 /// Structure holding publish ledger transactions with their proofs
 #[derive(Debug, Clone, Default)]
@@ -183,11 +233,11 @@ impl<'a> ShadowTxGenerator<'a> {
         for tx in &publish_ledger.txs {
             for (refund_tx_id, _, _) in &ledger_expiry_balance_delta.user_perm_fee_refunds {
                 if tx.id == *refund_tx_id {
-                    return Err(eyre!(
+                    return Err(ShadowTxGenError::SnapshotInvariant(format!(
                         "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
                         Promoted transactions should not receive refunds.",
                         tx.id
-                    ));
+                    )));
                 }
             }
         }
@@ -361,17 +411,23 @@ impl<'a> ShadowTxGenerator<'a> {
         // Process all transactions (MUST BE SORTED)
         for (index, tx) in publish_ledger.txs.iter().enumerate() {
             // CRITICAL: All publish ledger txs MUST have perm_fee
-            let perm_fee = tx
-                .perm_fee
-                .ok_or_else(|| eyre::eyre!("publish ledger tx missing perm_fee {}", tx.id))?;
+            let perm_fee = tx.perm_fee.ok_or_else(|| {
+                ShadowTxGenError::Structural(format!(
+                    "publish ledger tx missing perm_fee {}",
+                    tx.id
+                ))
+            })?;
 
-            // Calculate fee distribution using PublishFeeCharges
+            // Calculate fee distribution using PublishFeeCharges. Errors here
+            // reflect peer-supplied fee values outside the valid range →
+            // structural / consensus rejection.
             let publish_charges = PublishFeeCharges::new(
                 perm_fee,
                 tx.term_fee,
                 config,
                 number_of_ingress_proofs_total,
-            )?;
+            )
+            .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
             // Get all the ingress proofs for the transaction
             let start_index = index * number_of_ingress_proofs_total as usize;
@@ -379,7 +435,9 @@ impl<'a> ShadowTxGenerator<'a> {
             let ingress_proofs = &proofs[start_index..end_index];
 
             // Get fee charges for all ingress proofs
-            let fee_charges = publish_charges.ingress_proof_rewards(ingress_proofs)?;
+            let fee_charges = publish_charges
+                .ingress_proof_rewards(ingress_proofs)
+                .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
             // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
@@ -403,14 +461,25 @@ impl<'a> ShadowTxGenerator<'a> {
         self.treasury_balance
     }
 
-    /// Update treasury balance for expired ledger fee payments
+    /// Update treasury balance for expired ledger fee payments.
+    ///
+    /// TODO(classification): underflow here is currently classified as
+    /// `TreasuryArithmetic` (→ consensus rejection on the validator side).
+    /// That's the right call for peer-driven fee paths (submit/term/perm
+    /// fee accumulation in `try_process_submit_at_index` /
+    /// `try_process_term_only`), but this helper is also called from the
+    /// expired-ledger and commitment-refund phases, whose amounts derive
+    /// from LOCAL snapshots — there, an underflow is more node-fault-shaped
+    /// (our snapshot disagrees with the inherited treasury). Conservatively
+    /// keeping the consensus classification to avoid restart loops on
+    /// local-state corruption; revisit by threading caller context through
+    /// to distinguish peer-driven vs snapshot-driven underflows.
     fn deduct_from_treasury_for_payout(&mut self, amount: U256) -> Result<()> {
         self.treasury_balance = self.treasury_balance.checked_sub(amount).ok_or_else(|| {
-            eyre!(
+            ShadowTxGenError::TreasuryArithmetic(format!(
                 "Treasury balance underflow: cannot pay {} from balance {}",
-                amount,
-                self.treasury_balance
-            )
+                amount, self.treasury_balance
+            ))
         })?;
         Ok(())
     }
@@ -540,10 +609,11 @@ impl<'a> ShadowTxGenerator<'a> {
             ),
             // Block producer gets their reward (5% of term_fee) via transaction_fee
             // This becomes a priority fee in the EVM layer
-            transaction_fee: term_charges
-                .block_producer_reward
-                .try_into()
-                .map_err(|_| eyre!("Block producer reward exceeds u128 max"))?,
+            transaction_fee: term_charges.block_producer_reward.try_into().map_err(|_| {
+                ShadowTxGenError::TreasuryArithmetic(
+                    "Block producer reward exceeds u128 max".to_string(),
+                )
+            })?,
         })
     }
 
@@ -552,8 +622,10 @@ impl<'a> ShadowTxGenerator<'a> {
     fn try_process_submit_at_index(&mut self, index: usize) -> Result<ShadowMetadata> {
         let tx = &self.submit_txs[index];
 
-        // Construct term fee charges
-        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
+        // Construct term fee charges. Constructor errors reflect peer-supplied
+        // fee values out of valid range → structural / consensus rejection.
+        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)
+            .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
         // Construct perm fee charges if applicable
         // Use parent block's timestamp for hardfork params (convert millis to seconds)
@@ -571,6 +643,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     self.config,
                     number_of_ingress_proofs_total,
                 )
+                .map_err(|e| ShadowTxGenError::Structural(e.to_string()))
             })
             .transpose()?;
 
@@ -581,13 +654,21 @@ impl<'a> ShadowTxGenerator<'a> {
         self.treasury_balance = self
             .treasury_balance
             .checked_add(term_charges.term_fee_treasury)
-            .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
+            .ok_or_else(|| {
+                ShadowTxGenError::TreasuryArithmetic(
+                    "Treasury balance overflow when adding term fee treasury".to_string(),
+                )
+            })?;
 
         if let Some(ref charges) = perm_charges {
             self.treasury_balance = self
                 .treasury_balance
                 .checked_add(charges.perm_fee_treasury)
-                .ok_or_else(|| eyre!("Treasury balance overflow when adding perm fee treasury"))?;
+                .ok_or_else(|| {
+                    ShadowTxGenError::TreasuryArithmetic(
+                        "Treasury balance overflow when adding perm fee treasury".to_string(),
+                    )
+                })?;
         }
 
         Ok(shadow_metadata)
@@ -597,7 +678,10 @@ impl<'a> ShadowTxGenerator<'a> {
     /// These have term_fee only (no perm_fee), so no PublishFeeCharges needed.
     #[tracing::instrument(skip_all, err)]
     fn try_process_term_only(&mut self, tx: &DataTransactionHeader) -> Result<ShadowMetadata> {
-        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
+        // Constructor errors reflect peer-supplied fee values out of valid
+        // range → structural / consensus rejection.
+        let term_charges = TermFeeCharges::new(tx.term_fee, self.config)
+            .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
         // Reuse the same shadow tx creation — perm_fee is None for term-only txs
         let shadow_metadata = self.create_submit_shadow_tx(tx, &term_charges)?;
@@ -606,7 +690,11 @@ impl<'a> ShadowTxGenerator<'a> {
         self.treasury_balance = self
             .treasury_balance
             .checked_add(term_charges.term_fee_treasury)
-            .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
+            .ok_or_else(|| {
+                ShadowTxGenError::TreasuryArithmetic(
+                    "Treasury balance overflow when adding term fee treasury".to_string(),
+                )
+            })?;
 
         Ok(shadow_metadata)
     }
@@ -623,10 +711,11 @@ impl<'a> ShadowTxGenerator<'a> {
         // this commitment type adds to the treasury (non-zero only for Stake/Pledge).
         let delta = tx.treasury_delta();
         if !delta.is_zero() {
-            self.treasury_balance = self
-                .treasury_balance
-                .checked_add(delta)
-                .ok_or_else(|| eyre!("Treasury balance overflow when adding commitment value"))?;
+            self.treasury_balance = self.treasury_balance.checked_add(delta).ok_or_else(|| {
+                ShadowTxGenError::TreasuryArithmetic(
+                    "Treasury balance overflow when adding commitment value".to_string(),
+                )
+            })?;
         }
 
         Ok(shadow_metadata)
@@ -658,10 +747,10 @@ impl<'a> ShadowTxGenerator<'a> {
                         self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                     }
                     _ => {
-                        return Err(eyre!(
+                        return Err(ShadowTxGenError::SnapshotInvariant(format!(
                             "Unexpected shadow transaction type in expired ledger phase: {:?}",
                             metadata.shadow_tx
-                        ));
+                        )));
                     }
                 }
 
@@ -690,14 +779,17 @@ impl<'a> ShadowTxGenerator<'a> {
                             .treasury_balance
                             .checked_sub(U256::from(increment.amount))
                             .ok_or_else(|| {
-                                eyre!("Treasury balance underflow when paying ingress proof reward")
+                                ShadowTxGenError::TreasuryArithmetic(
+                                    "Treasury balance underflow when paying ingress proof reward"
+                                        .to_string(),
+                                )
                             })?;
                     }
                     _ => {
-                        return Err(eyre!(
+                        return Err(ShadowTxGenError::SnapshotInvariant(format!(
                             "Unexpected shadow transaction type in publish ledger phase: {:?}",
                             metadata.shadow_tx
-                        ));
+                        )));
                     }
                 }
 
@@ -1695,5 +1787,36 @@ mod tests {
 
         // Treasury should remain unchanged (no expired fees to pay)
         assert_eq!(generator.treasury_balance(), initial_treasury);
+    }
+
+    /// `ShadowTxGenError::Display` carries the message verbatim with the
+    /// variant-specific prefix. Round-trip through `eyre::Report` preserves
+    /// the message so producer-side `?` lift keeps the failure debuggable.
+    #[test]
+    fn shadow_tx_gen_error_display_and_eyre_roundtrip() {
+        let cases: Vec<(ShadowTxGenError, &str)> = vec![
+            (
+                ShadowTxGenError::SnapshotInvariant("bad snapshot".into()),
+                "snapshot invariant violation: bad snapshot",
+            ),
+            (
+                ShadowTxGenError::TreasuryArithmetic("overflow".into()),
+                "treasury arithmetic: overflow",
+            ),
+            (
+                ShadowTxGenError::Structural("missing perm_fee".into()),
+                "structural: missing perm_fee",
+            ),
+            (ShadowTxGenError::Soft("retry me".into()), "retry me"),
+        ];
+        for (err, expected_msg) in cases {
+            let s = err.to_string();
+            assert_eq!(s, expected_msg, "Display mismatch for {err:?}");
+            // `eyre::Report` has a blanket `From<E: std::error::Error + Send + Sync + 'static>`,
+            // so `?` lift works for producer-side call sites that return
+            // `eyre::Result` or `BlockProductionError`.
+            let report: eyre::Report = err.into();
+            assert_eq!(report.to_string(), expected_msg);
+        }
     }
 }

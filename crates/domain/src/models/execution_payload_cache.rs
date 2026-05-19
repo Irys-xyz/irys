@@ -261,6 +261,39 @@ impl ExecutionPayloadCache {
         }
 
         let receiver = self.block_receiver(*evm_block_hash).await;
+
+        // Close the lost-notify window: a payload may have arrived between
+        // the initial cache check above and `block_receiver` registering our
+        // oneshot. If that happened, the notify fired with zero listeners
+        // and the payload now sits in the cache while our just-registered
+        // receiver would otherwise block until LRU eviction of `payload_senders`
+        // (up to `PAYLOAD_RECEIVERS_CAPACITY` distinct hashes later under sync
+        // load) — recoverable, but adds large unnecessary tail latency. The
+        // second cache check is cheap, idempotent, and turns a worst-case
+        // multi-second stall into an immediate hit.
+        if let Some(sealed_block) = self.get_sealed_block_from_cache(evm_block_hash).await {
+            // We just registered a sender into `payload_senders` above; on
+            // this fast-return path nothing will ever fire it (the payload
+            // is already in cache, and `add_payload_to_cache` for this hash
+            // already happened — that's why the second check hit). Without
+            // cleanup, repeated race wins across distinct hashes leak sender
+            // entries into the 1000-slot LRU until eviction, displacing
+            // legitimate waiters and reintroducing `ReceiverDisrupted` via
+            // the side door. Pop the entry now.
+            //
+            // Pop is on the entire per-hash `Vec<Sender>`, not just ours,
+            // but that's safe: any concurrent waiter on the same hash
+            // either (a) already returned via cache hit, or (b) will hit
+            // cache on their own second-check pass since the payload is
+            // there. Either way, no one needs to be notified through this
+            // sender entry.
+            self.payload_senders.write().await.pop(evm_block_hash);
+            // Drop our receiver explicitly to make the lifetime of the
+            // cleanup unambiguous (the matching sender is already gone).
+            drop(receiver);
+            return Ok(sealed_block);
+        }
+
         self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
             .await;
         // `receiver.await` errors only when the matching oneshot sender is

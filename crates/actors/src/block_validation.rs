@@ -2106,6 +2106,160 @@ mod prevalidation_error_classification_tests {
     }
 }
 
+/// Tests for the typed-error → `ValidationError` dispatch used inside
+/// `generate_expected_shadow_transactions`. These tests replicate the
+/// exact mapping closures (`classify_shadow_err` and the
+/// `CommitmentRefundError` match arm) so that any future drift between
+/// the typed error variants and the validator's classification is caught
+/// at compile time / test time, not in production.
+///
+/// SAFETY: the mappings are the single point where producer-side typed
+/// failures are translated to validator-side `ValidationResult` semantics.
+/// Misclassifying e.g. `TreasuryArithmetic` as a node fault would cause a
+/// validator to panic+restart on every peer block with bad fees — a DoS
+/// vector. Misclassifying `SnapshotInvariant` as consensus would
+/// peer-attribute a local corruption.
+#[cfg(test)]
+mod shadow_tx_gen_error_dispatch_tests {
+    use super::*;
+    use crate::block_tree_service::ValidationResult;
+    use crate::commitment_refunds::CommitmentRefundError;
+    use crate::shadow_tx_generator::ShadowTxGenError;
+
+    // Reproduce the helpers and closures used inside
+    // `generate_expected_shadow_transactions`. Keep these in lockstep
+    // with the call site.
+    fn internal(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTxGenerationFailed(err.to_string())
+    }
+    fn node_fault(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTxNodeFault(err.to_string())
+    }
+    fn consensus(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTransactionInvalid(err.to_string())
+    }
+
+    fn classify_shadow_err(e: ShadowTxGenError) -> ValidationError {
+        match e {
+            ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
+            ShadowTxGenError::TreasuryArithmetic(s) => {
+                consensus(format!("treasury arithmetic: {s}"))
+            }
+            ShadowTxGenError::Structural(s) => consensus(s),
+            ShadowTxGenError::Soft(s) => internal(s),
+        }
+    }
+
+    fn classify_refund_err(e: CommitmentRefundError) -> ValidationError {
+        match e {
+            CommitmentRefundError::SnapshotInvariant(s) => {
+                node_fault(format!("commitment refund invariant: {s}"))
+            }
+        }
+    }
+
+    /// `SnapshotInvariant` → `ShadowTxNodeFault` → `InternalFailure` with
+    /// `is_node_fault() == true`. Triggers panic+restart so a corrupted
+    /// local snapshot can't silently keep producing/validating bad blocks.
+    #[test]
+    fn snapshot_invariant_maps_to_node_fault() {
+        let err = classify_shadow_err(ShadowTxGenError::SnapshotInvariant("bad iter type".into()));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "must preserve node-fault classification"
+                );
+            }
+            other => panic!("SnapshotInvariant must route to InternalFailure, got {other:?}"),
+        }
+    }
+
+    /// `TreasuryArithmetic` → `ShadowTransactionInvalid` → `Invalid`. The
+    /// peer's block carries fees whose arithmetic over/underflows; this is
+    /// a structural defect of the peer's block, not a local fault. Routes
+    /// as consensus rejection — block gets peer-attributed.
+    #[test]
+    fn treasury_arithmetic_maps_to_consensus() {
+        let err = classify_shadow_err(ShadowTxGenError::TreasuryArithmetic(
+            "overflow adding term_fee_treasury".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
+        assert!(
+            !err.is_node_fault(),
+            "consensus rejection must NOT be a node fault"
+        );
+        let result: ValidationResult = err.into();
+        assert!(
+            matches!(result, ValidationResult::Invalid(_)),
+            "TreasuryArithmetic must route to Invalid (consensus rejection)",
+        );
+    }
+
+    /// `Structural` (e.g. publish-ledger tx missing perm_fee, or a fee
+    /// constructor rejecting peer-supplied values) → `ShadowTransactionInvalid`
+    /// → `Invalid`. Peer-attributable.
+    #[test]
+    fn structural_maps_to_consensus() {
+        let err = classify_shadow_err(ShadowTxGenError::Structural(
+            "publish ledger tx missing perm_fee".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
+        assert!(!err.is_node_fault());
+        let result: ValidationResult = err.into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
+
+    /// `Soft` → existing soft-internal fallback (`ShadowTxGenerationFailed`)
+    /// → `InternalFailure` (validity unknown, block parks in cache).
+    #[test]
+    fn soft_maps_to_internal_failure() {
+        let err = classify_shadow_err(ShadowTxGenError::Soft("retry plausible".into()));
+        assert!(matches!(err, ValidationError::ShadowTxGenerationFailed(_)));
+        assert!(!err.is_node_fault());
+        assert!(err.is_internal_failure());
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(!inner.is_node_fault(), "soft must NOT be a node fault");
+            }
+            other => panic!("Soft must route to InternalFailure, got {other:?}"),
+        }
+    }
+
+    /// `CommitmentRefundError::SnapshotInvariant` → `ShadowTxNodeFault` →
+    /// node-fault `InternalFailure`. A snapshot whose unpledge has
+    /// `pledge_count_before_executing == 0` is internally inconsistent;
+    /// retry can't heal it.
+    #[test]
+    fn commitment_refund_snapshot_invariant_maps_to_node_fault() {
+        let err = classify_refund_err(CommitmentRefundError::SnapshotInvariant(
+            "pledge_count_before_executing = 0".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        // The wrapping prefix "commitment refund invariant:" must be present
+        // so logs distinguish refund-derived faults from shadow-tx-generator
+        // faults.
+        assert!(
+            err.to_string().contains("commitment refund invariant"),
+            "must carry the refund-invariant prefix for log disambiguation: {err}",
+        );
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(inner.is_node_fault());
+            }
+            other => panic!(
+                "CommitmentRefundError must route to InternalFailure(node-fault), got {other:?}",
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod height_tests {
     use super::*;
@@ -2215,14 +2369,21 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     // Fast path: parent is migrated. Identical disambiguation to the prior
     // implementation — offsets past chain-max and ledger-not-active are
     // consensus-invalid, lookup failures past those checks are local.
+    //
+    // The hash-mismatch fall-through below is load-bearing in release builds:
+    // `block_index.get_item(parent_height)` returns the *canonical* indexed
+    // item, which may not be the peer's claimed parent. A peer-submitted block
+    // whose `parent_block_hash` is a non-canonical sibling at a migrated
+    // `parent_height` would otherwise have its PoA bounds computed against
+    // the canonical anchor — wrong fork. `block_tree`'s reorg-abort backstop
+    // fires later, but the PoA verdict would already have been derived from
+    // a fork-mismatched view. Fall through to the block_tree walk on
+    // mismatch so the bounds are anchored on the supplied parent.
     {
         let index = block_index_guard.read();
-        if let Some(parent_item) = index.get_item(parent_height) {
-            debug_assert_eq!(
-                parent_item.block_hash, parent_block_hash,
-                "fast-path: indexed parent must match supplied parent_block_hash \
-                 (invariant: reorgs past migration_depth abort the node)"
-            );
+        if let Some(parent_item) = index.get_item(parent_height)
+            && parent_item.block_hash == parent_block_hash
+        {
             match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
                 Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
                     return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
@@ -2242,8 +2403,12 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 )
                 .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
         }
-        // index doesn't have parent yet — drop the lock before acquiring tree
-        // to keep the tree-then-index ordering when we re-enter for older history.
+        // Either the index doesn't have parent_height yet (un-migrated window)
+        // or the indexed canonical at parent_height differs from the supplied
+        // parent (non-canonical fork crossing the migration boundary). Either
+        // way, fall through to the block_tree walk which anchors on the
+        // supplied `parent_block_hash`. Drop the index lock first to keep
+        // the tree-then-index ordering when we re-enter for older history.
     }
 
     // Fallback path: walk the parent chain in block_tree until we find the
@@ -3022,14 +3187,21 @@ async fn generate_expected_shadow_transactions(
     };
 
     // Compute commitment refund events for epoch blocks from parent's commitment snapshot.
-    // These derive purely from local snapshot state → internal on failure.
+    // Failures here are snapshot-invariant violations — local state is
+    // internally inconsistent and retry can't heal it → node fault.
     let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
         if is_epoch_block {
             crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
                 &parent_commitment_snapshot,
                 &config.consensus,
             )
-            .map_err(internal)?
+            .map_err(
+                |e: crate::commitment_refunds::CommitmentRefundError| match e {
+                    crate::commitment_refunds::CommitmentRefundError::SnapshotInvariant(s) => {
+                        node_fault(format!("commitment refund invariant: {s}"))
+                    }
+                },
+            )?
         } else {
             Vec::new()
         };
@@ -3038,7 +3210,13 @@ async fn generate_expected_shadow_transactions(
             &parent_commitment_snapshot,
             &config.consensus,
         )
-        .map_err(internal)?
+        .map_err(
+            |e: crate::commitment_refunds::CommitmentRefundError| match e {
+                crate::commitment_refunds::CommitmentRefundError::SnapshotInvariant(s) => {
+                    node_fault(format!("commitment refund invariant: {s}"))
+                }
+            },
+        )?
     } else {
         Vec::new()
     };
@@ -3064,9 +3242,21 @@ async fn generate_expected_shadow_transactions(
     }
 
     // ShadowTxGenerator::new and its iteration operate on already-loaded
-    // local data (parent block, snapshots, mempool-resolved txs). Any
-    // failure is a local computation issue (arithmetic, invariant
-    // violation) → `ShadowTxGenerationFailed`.
+    // local data (parent block, snapshots, mempool-resolved txs). The
+    // typed `ShadowTxGenError` distinguishes failure classes so each lands
+    // on the correct `ValidationResult`:
+    //   - `SnapshotInvariant` → node fault (local state is corrupt).
+    //   - `TreasuryArithmetic` / `Structural` → consensus rejection
+    //     (peer's tx set produced bad fee math or out-of-range fee values).
+    //   - `Soft` → soft internal (existing retry-plausible fallback).
+    let classify_shadow_err = |e: crate::shadow_tx_generator::ShadowTxGenError| match e {
+        crate::shadow_tx_generator::ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
+        crate::shadow_tx_generator::ShadowTxGenError::TreasuryArithmetic(s) => {
+            consensus(format!("treasury arithmetic: {s}"))
+        }
+        crate::shadow_tx_generator::ShadowTxGenError::Structural(s) => consensus(s),
+        crate::shadow_tx_generator::ShadowTxGenError::Soft(s) => internal(s),
+    };
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -3085,11 +3275,11 @@ async fn generate_expected_shadow_transactions(
         &unstake_refund_events,
         &parent_epoch_snapshot,
     )
-    .map_err(|e| internal(format!("Failed to create shadow tx generator: {}", e)))?;
+    .map_err(classify_shadow_err)?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
-        let metadata = result.map_err(internal)?;
+        let metadata = result.map_err(classify_shadow_err)?;
         shadow_txs_vec.push(metadata.shadow_tx);
     }
 

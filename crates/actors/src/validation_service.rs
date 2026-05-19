@@ -435,33 +435,68 @@ impl ValidationService {
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
                             if e.is_cancelled() {
-                                // JoinError::Cancelled here is a tokio runtime
-                                // hiccup (sibling-task worker panic, runtime
-                                // shutdown racing the loop) — NOT a node fault.
-                                // Dispatching TaskPanicked would classify as
-                                // NodeFault and trigger a supervisor restart
-                                // (see block_validation.rs classify()). Instead
-                                // log, release the validation slot, and leave
-                                // the block in the cache; depth-prune sweeps
-                                // it or a parallel path resubmits.
-                                error!(
-                                    block.hash = ?removed.as_ref().map(|(h, _)| h),
+                                // JoinError::Cancelled here is unexpected: the
+                                // only intentional cancel path is
+                                // `ValidationCoordinator::shutdown()` via
+                                // `concurrent_tasks.abort_all()`, which runs
+                                // after the main loop has already broken on
+                                // the shutdown signal — i.e. it cannot reach
+                                // this arm. So a cancel landing here is a
+                                // runtime hiccup (sibling worker panic,
+                                // runtime tear-down race, etc.). Requeue the
+                                // block via the priority queue so the
+                                // validation pass restarts; do NOT dispatch
+                                // a result, since we never produced one. The
+                                // requeue mirrors the VDF cancel arm's
+                                // "defensive resubmit" pattern.
+                                warn!(
+                                    block.hash = ?removed.as_ref().map(|(h, _, _, _)| h),
                                     custom.error = %e,
-                                    "Concurrent validation task was cancelled"
+                                    "Concurrent validation task unexpectedly cancelled, requeuing"
                                 );
-                                if let Some((hash, enqueued_at)) = removed {
-                                    metrics::record_validation_full_duration_ms(
-                                        enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                if let Some((_hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
+                                    // Do NOT fire `record_validation_full_duration_ms`
+                                    // here — this validation is still in
+                                    // flight. Firing now would double-count
+                                    // when the requeued task finally
+                                    // completes. Preserve `enqueued_at` so
+                                    // the eventual completion records the
+                                    // true gossip-to-completion latency
+                                    // including the cancelled attempt.
+                                    //
+                                    // Resubmit through `submit_task` (which
+                                    // enters the VDF queue first). Re-running
+                                    // VDF for an already-VDF-validated block
+                                    // is wasted work but cheap, and the cancel
+                                    // could have fired at any stage — VDF
+                                    // re-entry is the only path that covers
+                                    // every possibility safely.
+                                    //
+                                    // Original `parent_span` (gossip trace
+                                    // context) was consumed when the task was
+                                    // first constructed; on requeue, attach
+                                    // to the current span so the trace tree
+                                    // continues from this handler rather than
+                                    // dangling.
+                                    let task = block_validation_task::BlockValidationTask::new_with_enqueued_at(
+                                        sealed_block,
+                                        Arc::clone(&self.inner),
+                                        self.inner.block_tree_guard.clone(),
+                                        skip_vdf_validation,
+                                        tracing::Span::current(),
+                                        enqueued_at,
                                     );
-                                    self.inner.chain_sync_state.record_validation_finished(&hash);
+                                    coordinator.submit_task(task);
+                                    // No `record_validation_finished` here:
+                                    // we're keeping the validation in flight.
                                 }
                             } else {
                                 error!(
-                                    block.hash = ?removed.as_ref().map(|(h, _)| h),
+                                    block.hash = ?removed.as_ref().map(|(h, _, _, _)| h),
                                     custom.error = %e,
                                     "Concurrent validation task panicked"
                                 );
-                                if let Some((hash, enqueued_at)) = removed {
+                                if let Some((hash, enqueued_at, _sealed_block, _skip_vdf)) = removed {
                                     metrics::record_validation_full_duration_ms(
                                         enqueued_at.elapsed().as_secs_f64() * 1000.0,
                                     );

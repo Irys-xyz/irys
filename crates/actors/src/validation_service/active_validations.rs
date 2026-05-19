@@ -514,9 +514,16 @@ pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
-    /// Maps task IDs to (block hash, enqueue time) for panic diagnostics and
-    /// E2E duration accounting when a concurrent task fails to return a result.
-    pub concurrent_task_blocks: HashMap<tokio::task::Id, (BlockHash, Instant)>,
+    /// Maps task IDs to the bookkeeping needed when a concurrent task fails
+    /// to return a result. `sealed_block` + `skip_vdf_validation` allow the
+    /// `JoinError::Cancelled` arm in `validation_service` to reconstruct
+    /// the task and re-`submit_task` it — `concurrent_tasks.abort_all()`
+    /// only runs from `shutdown()`, so a cancel reaching the result handler
+    /// is an unexpected runtime hiccup rather than an intentional drop,
+    /// and re-queuing is safer than soft-discarding a block whose validity
+    /// we never actually decided on.
+    pub concurrent_task_blocks:
+        HashMap<tokio::task::Id, (BlockHash, Instant, Arc<SealedBlock>, bool)>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -602,6 +609,12 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
         let block_hash = task.sealed_block.header().block_hash;
         let enqueued_at = task.enqueued_at;
+        // Capture before the task is moved into the spawn closure so the
+        // cancel-arm requeue path can reconstruct a fresh `BlockValidationTask`
+        // for the same block. Cloning the `Arc<SealedBlock>` is a refcount
+        // bump; the bool is Copy.
+        let sealed_block = Arc::clone(&task.sealed_block);
+        let skip_vdf_validation = task.skip_vdf_validation;
 
         let abort_handle = self.concurrent_tasks.spawn(
             async move {
@@ -619,8 +632,10 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             ))
             .in_current_span(),
         );
-        self.concurrent_task_blocks
-            .insert(abort_handle.id(), (block_hash, enqueued_at));
+        self.concurrent_task_blocks.insert(
+            abort_handle.id(),
+            (block_hash, enqueued_at, sealed_block, skip_vdf_validation),
+        );
     }
 
     /// Abort all running validation tasks for clean shutdown.

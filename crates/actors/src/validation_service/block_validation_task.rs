@@ -114,13 +114,35 @@ impl BlockValidationTask {
         skip_vdf_validation: bool,
         parent_span: tracing::Span,
     ) -> Self {
+        Self::new_with_enqueued_at(
+            sealed_block,
+            service_inner,
+            block_tree_guard,
+            skip_vdf_validation,
+            parent_span,
+            Instant::now(),
+        )
+    }
+
+    /// Construct a task while preserving an existing `enqueued_at`. Used by
+    /// the cancel-requeue path in `validation_service` so end-to-end
+    /// validation latency metrics reflect the original gossip-to-completion
+    /// span, not just the post-requeue retry.
+    pub(super) fn new_with_enqueued_at(
+        sealed_block: Arc<SealedBlock>,
+        service_inner: Arc<ValidationServiceInner>,
+        block_tree_guard: BlockTreeReadGuard,
+        skip_vdf_validation: bool,
+        parent_span: tracing::Span,
+        enqueued_at: Instant,
+    ) -> Self {
         Self {
             sealed_block,
             service_inner,
             block_tree_guard,
             skip_vdf_validation,
             parent_span,
-            enqueued_at: Instant::now(),
+            enqueued_at,
         }
     }
 
@@ -238,24 +260,56 @@ impl BlockValidationTask {
             "concurrent_overall",
             concurrent_started.elapsed().as_secs_f64() * 1000.0,
         );
-        // Split "cancelled" out of the generic "invalid" bucket for
-        // observability: every `ValidationCancelled` reason today dispatches
-        // to `Invalid` (see `ValidationCancelReason::is_internal`) and we
-        // want the cancellation rate visible separately from real consensus
-        // rejections. `TaskPanicked` retains its own label on the
-        // InternalFailure arm.
+        // Split "cancelled" / "panicked" out of the generic "invalid" /
+        // "internal_error" buckets for observability. `ValidationCancelled`
+        // can land in either `Invalid` (HeightDifference / ChannelClosed)
+        // or `InternalFailure` (ParentMissing / RuntimeCancelled-style soft
+        // reasons) depending on its sub-reason — both should label as
+        // "cancelled". `TaskPanicked` only routes through `InternalFailure`
+        // and labels as "panicked".
+        //
+        // Exhaustive over every `ValidationError` variant — no `_` wildcard.
+        // The sealed `Invalid` / `InternalFailure` wrappers guarantee that
+        // most variant-vs-bucket pairings are structurally unreachable
+        // (e.g. `TaskPanicked` cannot appear inside `Invalid`), but the
+        // labelling still spells them so any new variant added to
+        // `ValidationError` produces a compile error here until its label
+        // is decided.
+        let label_for = |err: &ValidationError, default: &'static str| -> &'static str {
+            match err {
+                ValidationError::ValidationCancelled { .. } => "cancelled",
+                ValidationError::TaskPanicked { .. } => "panicked",
+                ValidationError::PreValidation(_)
+                | ValidationError::VdfValidationFailed(_)
+                | ValidationError::SeedDataInvalid(_)
+                | ValidationError::ExecutionLayerFailed(_)
+                | ValidationError::ExecutionLayerTransportFailed(_)
+                | ValidationError::RecallRangeInvalid(_)
+                | ValidationError::ShadowTransactionInvalid(_)
+                | ValidationError::ShadowTxGenerationFailed(_)
+                | ValidationError::ShadowTxNodeFault(_)
+                | ValidationError::ExecutionPayloadCacheEvicted { .. }
+                | ValidationError::CommitmentValueInvalid { .. }
+                | ValidationError::CommitmentVersionInvalid { .. }
+                | ValidationError::CommitmentTypeNotAllowed { .. }
+                | ValidationError::CommitmentOrderingFailed(_)
+                | ValidationError::CommitmentSnapshotRejected { .. }
+                | ValidationError::UnpledgePartitionNotOwned { .. }
+                | ValidationError::ParentCommitmentSnapshotMissing { .. }
+                | ValidationError::ParentEpochSnapshotMissing { .. }
+                | ValidationError::ParentEmaSnapshotMissing { .. }
+                | ValidationError::ParentBlockMissing { .. }
+                | ValidationError::EpochCommitmentMismatch { .. }
+                | ValidationError::EpochExtraCommitment { .. }
+                | ValidationError::EpochMissingCommitment { .. }
+                | ValidationError::CommitmentWrongOrder { .. }
+                | ValidationError::Other(_) => default,
+            }
+        };
         let result_label = match &final_result {
             ValidationResult::Valid => "valid",
-            ValidationResult::Invalid(rejection)
-                if matches!(rejection.err(), ValidationError::ValidationCancelled { .. }) =>
-            {
-                "cancelled"
-            }
-            ValidationResult::Invalid(_) => "invalid",
-            ValidationResult::InternalFailure(inner) => match inner.err() {
-                ValidationError::TaskPanicked { .. } => "panicked",
-                _ => "internal_error",
-            },
+            ValidationResult::Invalid(rejection) => label_for(rejection.err(), "invalid"),
+            ValidationResult::InternalFailure(inner) => label_for(inner.err(), "internal_error"),
         };
         metrics::record_validation_result("concurrent_overall", result_label);
         if let Ok(now) = UnixTimestampMs::now() {
