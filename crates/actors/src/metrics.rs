@@ -27,6 +27,7 @@ irys_utils::define_metrics! {
     counter DATA_TX_UNFUNDED("irys.mempool.data_tx_unfunded_total", "Data transactions rejected due to insufficient funds");
     counter CACHED_DATA_ROOT_EVICTED("irys.cache.cached_data_root_evicted_total", "CachedDataRoots entries evicted by prune_data_root_cache");
     counter BLOCK_PRE_VALIDATION_FAILED("irys.block.pre_validation_failed_total", "Block pre-validation failures by reason (labelled)");
+    counter BLOCK_VALIDATION_FAILED("irys.block.validation_failed_total", "Block full-validation failures (post pre-validation) by reason (labelled)");
     counter CHAIN_SYNC_BLOCK_REJECTED("irys.chain_sync.block_rejected_total", "Chain-sync block rejections by reason (labelled)");
 
     histogram PREVALIDATION_DURATION_MS(
@@ -245,6 +246,10 @@ pub(crate) fn record_cached_data_root_evicted() {
 
 pub(crate) fn record_block_pre_validation_failed(reason: &'static str) {
     BLOCK_PRE_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_block_validation_failed(reason: &'static str) {
+    BLOCK_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub fn record_chain_sync_block_rejected(reason: &'static str) {
