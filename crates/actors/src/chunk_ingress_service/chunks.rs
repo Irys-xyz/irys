@@ -504,8 +504,8 @@ impl ChunkIngressServiceInner {
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
     /// - data_size is confirmed (rightmost chunk merkle validation)
-    /// - some tx referencing this data_root is canonically confirmed in a
-    ///   Submit ledger at or before the current canonical tip
+    /// - `block_set` is non-empty (cheap "has this data_root been confirmed
+    ///   in some block?" hint maintained by `cache_data_root`)
     /// - no local proof already exists
     /// - all expected chunks are present
     pub(crate) fn try_generate_ingress_proof_for_root(
@@ -527,35 +527,14 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Trustworthy verification: `block_set` is append-only across reorgs
-        // (orphan hashes are retained) AND it is only populated by the
-        // `BlockConfirmed` handler — so it can be either non-empty with only
-        // orphan hashes, or empty even when a tx IS canonical (e.g. after a
-        // restart where `BlockConfirmed` was missed, or before the
-        // `TryGenerateProofsForConfirmedRoots` notification fires).  Skip the
-        // `block_set` hint entirely and consult the canonical trust root:
-        // confirm at least one tx in `txid_set` is canonically confirmed in
-        // a Submit ledger at or before the current tip via `tx_inclusion`.
-        // Without this, validation could proceed for data_roots that only
-        // ever made it into reorg'd-out forks, or be silently skipped for
-        // canonical data_roots whose `block_set` happens to be empty.
-        let current_height = self
-            .block_tree_read_guard
-            .latest_canonical_block_height()
-            .unwrap_or(0);
-        let any_confirmed = cdr.txid_set.iter().any(|tx_id| {
-            matches!(
-                crate::tx_inclusion::find_canonical_ledger_range(
-                    tx_id,
-                    current_height,
-                    self.config.consensus.block_migration_depth,
-                    &self.block_tree_read_guard,
-                    &self.irys_db,
-                ),
-                Ok(Some(_))
-            )
-        });
-        if !any_confirmed {
+        // Cheap "has this data_root been confirmed in any canonical block?"
+        // gate.  `block_set` is maintained atomically with tip changes by
+        // `BlockMigrationService::persist_metadata` (scrub + add in one DB
+        // tx), so a non-empty set means at least one canonical block has
+        // included a referencing tx.  Range / slot lookups still go through
+        // `tx_inclusion::find_canonical_ledger_range` at validation /
+        // promotion time.
+        if cdr.block_set.is_empty() {
             return Ok(());
         }
 

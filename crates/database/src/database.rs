@@ -316,11 +316,15 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         cached_data_root.data_size = tx_header.data_size;
     }
 
-    // If a block header is provided, record it in block_set as a *hint*
-    // (best-effort, not fork-tolerant — orphan hashes are retained across
-    // reorgs).  Consumers that need canonical truth must verify via
-    // `irys_actors::tx_inclusion`.  Also clear any pre-confirmation expiry
-    // since the data_root is now associated with at least one block.
+    // If a block header is provided, record it in block_set and clear any
+    // pre-confirmation expiry.  Authoritative block_set maintenance happens
+    // atomically with the tip change in
+    // `BlockMigrationService::persist_metadata` (see
+    // `update_data_root_block_set` / `remove_data_root_block_set_entry`) —
+    // by the time this is called from mempool's `on_block_confirmed`, the
+    // hash is already present.  The append is kept as a defensive idempotent
+    // write so direct callers of `cache_data_root` (tests, etc.) get
+    // consistent state.
     if let Some(block_header) = block_header {
         if !cached_data_root
             .block_set
@@ -343,6 +347,60 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
     data_root: DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_root)?)
+}
+
+/// Ensures `block_hash` is present in the `block_set` of an existing
+/// [`CachedDataRoot`] and clears `expiry_height` (matching `cache_data_root`'s
+/// confirmation semantics).  No-op if no entry exists for `data_root` — this
+/// helper is intended for migration-time consistency and must not fabricate
+/// cache entries for data_roots whose chunks the node never tracked.
+///
+/// Returns `true` if the row was modified.
+pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let already_present = cdr.block_set.contains(&block_hash);
+    let needs_expiry_clear = cdr.expiry_height.is_some();
+    if !already_present {
+        cdr.block_set.push(block_hash);
+    }
+    if needs_expiry_clear {
+        cdr.expiry_height = None;
+    }
+    if already_present && !needs_expiry_clear {
+        return Ok(false);
+    }
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    Ok(true)
+}
+
+/// Removes `block_hash` from the `block_set` of an existing [`CachedDataRoot`].
+/// Used when migration clears an orphaned block during reorg so `block_set`
+/// stops accumulating dead references.  No-op if the entry is absent or the
+/// hash is not present.  `expiry_height` is intentionally left untouched: any
+/// re-anchoring of an orphaned tx is handled by the mempool reorg path.
+///
+/// Returns `true` if the row was modified.
+pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let before = cdr.block_set.len();
+    cdr.block_set.retain(|h| h != &block_hash);
+    if cdr.block_set.len() == before {
+        return Ok(false);
+    }
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    Ok(true)
 }
 
 type IsDuplicate = bool;
