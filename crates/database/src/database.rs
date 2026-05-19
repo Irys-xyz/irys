@@ -338,6 +338,25 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // Update the database with the modified or new entry
     tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;
 
+    // Surface anomalous writes: a CDR with `block_set.is_empty()` and
+    // `expiry_height.is_none()` has no lifetime bound and will land in the
+    // `(None, None)` arm of `prune_data_root_cache` (evicted unless a local
+    // ingress proof is present).  Under the authoritative-writer model this
+    // should not be produced by the normal flow: confirmed entries get
+    // their block_set populated by `BlockMigrationService::persist_metadata`
+    // Phase 3, and unconfirmed entries get `expiry_height` set by
+    // `cache_data_root_with_expiry`.  Direct callers of `cache_data_root`
+    // that bypass both paths (test fixtures, pre-fix code) can produce
+    // this state — warn so operators see them.
+    if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
+        warn!(
+            data_root = %key,
+            tx.id = %tx_header.id,
+            had_block_header = block_header.is_some(),
+            "cached_data_root.anomalous_write: block_set empty and expiry_height None — entry has no lifetime bound"
+        );
+    }
+
     Ok(Some(cached_data_root))
 }
 
@@ -399,7 +418,22 @@ pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
     if cdr.block_set.len() == before {
         return Ok(false);
     }
+    let now_anomalous = cdr.block_set.is_empty() && cdr.expiry_height.is_none();
     tx.put::<CachedDataRoots>(data_root, cdr)?;
+    if now_anomalous {
+        // Reorg scrub left the CDR with no canonical block hashes and no
+        // pre-confirmation expiry.  Mempool's orphan re-anchor path
+        // (`handle_confirmed_data_tx_reorg`) is expected to re-ingest the
+        // orphaned tx and restore `expiry_height` via
+        // `cache_data_root_with_expiry`.  If that doesn't happen, the entry
+        // sits in the `(None, None)` arm and is only evicted by
+        // `prune_data_root_cache` after the local-proof exemption check.
+        warn!(
+            %data_root,
+            removed_block_hash = %block_hash,
+            "cached_data_root.anomalous_state_after_scrub: block_set now empty and expiry_height None — awaiting mempool orphan re-anchor or prune"
+        );
+    }
     Ok(true)
 }
 
