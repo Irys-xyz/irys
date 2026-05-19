@@ -58,13 +58,31 @@ fn lookup_via_migrated_metadata(
         let Some(block_hash) = tx.get::<MigratedBlockHashes>(included_height)? else {
             return Ok(None);
         };
-        let Some(block) = block_header_by_hash(tx, &block_hash, false)? else {
-            return Ok(None);
-        };
+        // MigratedBlockHashes attested this hash is canonical at this height;
+        // a missing IrysBlockHeaders entry means the two tables disagree.
+        let block = block_header_by_hash(tx, &block_hash, false)?.ok_or_else(|| {
+            eyre::eyre!(
+                "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders has no entry for that hash",
+                included_height,
+                block_hash
+            )
+        })?;
         let prev = if block.height == 0 {
             None
         } else {
-            block_header_by_hash(tx, &block.previous_block_hash, false)?
+            // Non-genesis: parent must be stored (parents migrate before
+            // children).  A None here would silently turn into prev_total = 0
+            // and produce a wrong range, so treat it as corruption.
+            Some(
+                block_header_by_hash(tx, &block.previous_block_hash, false)?.ok_or_else(|| {
+                    eyre::eyre!(
+                        "block header storage inconsistent: block {} at height {} references prev {} which is missing from IrysBlockHeaders",
+                        block.block_hash,
+                        block.height,
+                        block.previous_block_hash
+                    )
+                })?,
+            )
         };
         compute_submit_range(&block, prev.as_ref())
     })?
@@ -80,15 +98,24 @@ fn lookup_via_block_tree(
     let tree = block_tree.read();
     let (canonical, _tip_idx) = tree.get_canonical_chain();
 
-    // Only the most recent `block_migration_depth` canonical entries can be
-    // pre-migration; older heights are already in the migrated-path table.
+    // Anchor the migration window to `max_height`, not the chain tip.  For
+    // callers asking about a historical height (e.g. validation of a block
+    // at height H using parent_height = H-1, during reorg replay), the
+    // unmigrated entries we care about are the `block_migration_depth` blocks
+    // ending at max_height — not the blocks at the current tip.  The old
+    // tip-anchored window silently dropped canonical confirmations whenever
+    // max_height was far enough below the tip that the tip-anchored slice
+    // contained only blocks with `height > max_height`.
     let depth = block_migration_depth as usize;
-    let start_idx = canonical.len().saturating_sub(depth);
-    for entry in canonical[start_idx..].iter().rev() {
+    let Some(max_idx) = canonical
+        .iter()
+        .rposition(|entry| entry.header().height <= max_height)
+    else {
+        return Ok(None);
+    };
+    let start_idx = max_idx.saturating_sub(depth.saturating_sub(1));
+    for entry in canonical[start_idx..=max_idx].iter().rev() {
         let block = entry.header();
-        if block.height > max_height {
-            continue;
-        }
         let submit_txs = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
         if !submit_txs.iter().any(|t| t == tx_id) {
             continue;
@@ -107,7 +134,19 @@ fn lookup_via_block_tree(
         } else if block.height == 0 {
             None
         } else {
-            db.view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??
+            // Same invariant as the migrated path: a non-genesis canonical
+            // block's parent must be reachable.  None from both tree and DB
+            // would silently degrade the range; treat it as corruption.
+            let from_db = db
+                .view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??;
+            Some(from_db.ok_or_else(|| {
+                eyre::eyre!(
+                    "block header storage inconsistent: block {} at height {} references prev {} which is missing from both block_tree and IrysBlockHeaders",
+                    block.block_hash,
+                    block.height,
+                    block.previous_block_hash
+                )
+            })?)
         };
         return compute_submit_range(block.as_ref(), prev.as_ref());
     }
@@ -321,6 +360,75 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: migrated lookup must error when MigratedBlockHashes points
+    /// at a hash that IrysBlockHeaders has no entry for.  Earlier code returned
+    /// `Ok(None)` silently and let the caller treat a tx as unconfirmed even
+    /// though the canonical-height table disagreed.
+    #[test_log::test(tokio::test)]
+    async fn migrated_lookup_errors_when_canonical_header_missing() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // Mark a hash as canonical at height 1 in MigratedBlockHashes but
+        // *omit* the matching IrysBlockHeaders entry, simulating cross-table
+        // inconsistency.
+        let phantom_hash = H256::random();
+        mark_migrated(&db, 1, phantom_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let guard = empty_block_tree_guard();
+        let err = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )
+        .expect_err("missing canonical header must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("canonical metadata inconsistent"),
+            "unexpected error message: {msg}"
+        );
+        Ok(())
+    }
+
+    /// Regression: migrated lookup must error when a non-genesis block's
+    /// `previous_block_hash` is missing from IrysBlockHeaders.  Otherwise
+    /// `compute_submit_range` would run with `prev_total = 0` and emit a
+    /// silently-wrong range starting at offset 0.
+    #[test_log::test(tokio::test)]
+    async fn migrated_lookup_errors_when_prev_header_missing() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // Write h1 (the confirming block) but *not* h0 (its parent) to
+        // IrysBlockHeaders.  Mark both heights migrated.
+        let h0_phantom = H256::random();
+        let h1 = make_signed_header(1, h0_phantom, 1, 25, vec![tx_id]);
+
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0_phantom)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let guard = empty_block_tree_guard();
+        let err = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )
+        .expect_err("missing prev header must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("block header storage inconsistent"),
+            "unexpected error message: {msg}"
+        );
+        Ok(())
+    }
+
     /// Regression: `compute_submit_range` must flag `total < prev_total` as
     /// corruption even when `total == 0`.  An earlier shape of this function
     /// short-circuited on `total == 0` before the regression check and would
@@ -378,4 +486,57 @@ mod tests {
         assert_eq!(range.end(), LedgerChunkOffset::from(11_u64));
         Ok(())
     }
+
+    /// Regression test: the block-tree fallback must anchor its scan window
+    /// to `max_height`, not the canonical-chain tip.  Build a canonical chain
+    /// long enough that a tip-anchored window of `block_migration_depth`
+    /// blocks contains *only* entries with `height > max_height`, then put
+    /// the only `tx_id` reference at a height that is within the migration
+    /// window relative to `max_height`.  A tip-anchored implementation
+    /// returns `None`; the correct max-height-anchored implementation
+    /// returns the canonical range.
+    #[test_log::test(tokio::test)]
+    async fn pre_migration_lookup_anchored_to_max_height_not_tip() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // 10-block canonical chain.  Tx sits at height 2 in the Submit ledger
+        // (chunks [5, 11]).  Heights 3..=9 carry no Submit txs but advance
+        // the chain past block_migration_depth = 6 from height 2.
+        let h0 = make_signed_header(0, H256::zero(), 0, 5, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 5, vec![]);
+        let h2 = make_signed_header(2, h1.block_hash, 2, 12, vec![tx_id]);
+        let h3 = make_signed_header(3, h2.block_hash, 3, 12, vec![]);
+        let h4 = make_signed_header(4, h3.block_hash, 4, 12, vec![]);
+        let h5 = make_signed_header(5, h4.block_hash, 5, 12, vec![]);
+        let h6 = make_signed_header(6, h5.block_hash, 6, 12, vec![]);
+        let h7 = make_signed_header(7, h6.block_hash, 7, 12, vec![]);
+        let h8 = make_signed_header(8, h7.block_hash, 8, 12, vec![]);
+        let h9 = make_signed_header(9, h8.block_hash, 9, 12, vec![]);
+        let guard = build_tree(h0, vec![h1, h2, h3, h4, h5, h6, h7, h8, h9]);
+
+        // Query a historical height (3) far below the tip (9).  Migration
+        // window relative to max_height=3 with depth=6 covers heights -2..=3
+        // → 0..=3, which includes h2 where the tx lives.  A tip-anchored
+        // window (heights 4..=9) would not.
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 3,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "expected Some(range) at max_height=3 — scan must be anchored \
+                 to max_height, not the canonical tip"
+            )
+        })?;
+
+        // h2 added chunks 5..=11 (h1.total=5, h2.total=12).
+        assert_eq!(range.start(), LedgerChunkOffset::from(5_u64));
+        assert_eq!(range.end(), LedgerChunkOffset::from(11_u64));
+        Ok(())
+    }
+
 }
