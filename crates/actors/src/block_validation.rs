@@ -4750,6 +4750,172 @@ mod tests {
 
         Ok(())
     }
+
+    /// Proof-bearing complement to `assigned_ingress_proofs_uses_canonical_tx_metadata`.
+    /// The earlier test exits before the per-proof loop because it passes
+    /// `&[]`, so the intersection / classification path at the bottom of
+    /// `get_assigned_ingress_proofs` is unexercised.  Here we:
+    ///   - run the same canonical-metadata setup so the helper resolves
+    ///     `block_range = [10, 24]` (h1's Submit added chunks 10..=24),
+    ///   - register one signer to Submit slot 1 (chunks `[10, 20)` under
+    ///     `ConsensusConfig::testing().num_chunks_in_partition = 10`, so the
+    ///     slot range intersects the block range),
+    ///   - feed one ingress proof signed by that signer for the same
+    ///     `data_root`,
+    /// and assert the proof is classified as assigned with `assigned_miners == 1`.
+    /// This covers the loop-body and slot-intersection code paths that the
+    /// empty-proof tests skip.
+    #[test_log::test(tokio::test)]
+    async fn assigned_ingress_proofs_classifies_intersecting_proof() -> eyre::Result<()> {
+        use crate::tx_inclusion;
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height,
+            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::ingress::generate_ingress_proof;
+        use irys_types::partition::PartitionAssignment;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+            irys::IrysSigner,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let consensus = ConsensusConfig::testing();
+
+        // Canonical setup: same as the sibling tests.  h1 adds chunks 10..=24
+        // to the Submit ledger, so the helper resolves the range [10, 24].
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        // Sanity: helper resolves [10, 24] as expected.
+        let resolved = tx_inclusion::find_canonical_ledger_range(
+            &tx_id,
+            5,
+            config.consensus.block_migration_depth,
+            &block_tree_guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("test setup error: range should resolve"))?;
+        assert_eq!(u64::from(resolved.start()), 10);
+        assert_eq!(u64::from(resolved.end()), 24);
+
+        // Register one signer to Submit slot 1 = chunks [10, 20).  That
+        // overlaps the block range [10, 24], so the proof must classify.
+        let signer = IrysSigner::random_signer(&consensus);
+        let mut epoch_snapshot = EpochSnapshot::default();
+        let assignment = PartitionAssignment {
+            partition_hash: H256::random(),
+            miner_address: signer.address(),
+            ledger_id: Some(DataLedger::Submit as u32),
+            slot_index: Some(1),
+        };
+        epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .insert(assignment.partition_hash, assignment);
+
+        // One ingress proof for the canonical data_root, signed by the
+        // miner registered to the intersecting slot above.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            assigned.len(),
+            1,
+            "the proof should be classified as assigned"
+        );
+        assert_eq!(
+            assigned[0], proof,
+            "the returned proof should be the one we passed in"
+        );
+        assert_eq!(
+            miners, 1,
+            "exactly one miner registered to the intersecting slot"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
