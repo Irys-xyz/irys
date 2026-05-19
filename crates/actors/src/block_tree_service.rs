@@ -421,8 +421,16 @@ impl BlockTreeServiceInner {
                 error = %validation_error,
                 "block validation failed"
             );
+            // Symmetric counters: every ValidationError increments exactly
+            // one — pre-validation failures go to
+            // `irys.block.pre_validation_failed_total`, full-validation
+            // failures (VDF / EL / shadow tx / commitment) go to
+            // `irys.block.validation_failed_total`.  Reason tags share the
+            // same enum-driven `metric_reason()` taxonomy.
             if validation_error.is_pre_validation() {
                 crate::metrics::record_block_pre_validation_failed(reason);
+            } else {
+                crate::metrics::record_block_validation_failed(reason);
             }
 
             // Record validation error for diagnostics
