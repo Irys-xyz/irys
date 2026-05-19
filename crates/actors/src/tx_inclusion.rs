@@ -106,7 +106,8 @@ fn lookup_via_block_tree(
     // tip-anchored window silently dropped canonical confirmations whenever
     // max_height was far enough below the tip that the tip-anchored slice
     // contained only blocks with `height > max_height`.
-    let depth = block_migration_depth as usize;
+    let depth = usize::try_from(block_migration_depth)
+        .expect("convert block_migration_depth to usize failed: value out of range");
     let Some(max_idx) = canonical
         .iter()
         .rposition(|entry| entry.header().height <= max_height)
