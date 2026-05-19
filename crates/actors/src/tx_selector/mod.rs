@@ -986,8 +986,11 @@ async fn get_publish_txs_and_proofs(
                 Ok(result) => result,
                 Err(e) => {
                     warn!(
-                        "Failed to get assigned proofs for tx {}: {}",
-                        &tx_header.id, e
+                        tx.id = %tx_header.id,
+                        data_root = %tx_header.data_root,
+                        current_height,
+                        error = %e,
+                        "tx_selector.assigned_proofs_lookup_failed"
                     );
                     continue;
                 }

@@ -42,7 +42,6 @@ impl BlockMigrationService {
             chunk_migration_sender,
         }
     }
-
     /// Atomically persists tx metadata (included_height, promoted_height) and
     /// keeps the `CachedDataRoots.block_set` hint consistent with the canonical
     /// chain.

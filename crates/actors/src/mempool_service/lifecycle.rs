@@ -94,15 +94,23 @@ impl Inner {
             }) {
                 Ok(()) => {
                     info!(
-                        "Successfully cached data_root {:?} for tx {:?}",
-                        data_root, submit_tx.id
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        incoming_block.height = block.height,
+                        "cached_data_root.write"
                     );
                     confirmed_data_roots.push(data_root);
                 }
                 Err(db_error) => {
                     error!(
-                        "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                        data_root, submit_tx.id, db_error
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        error = ?db_error,
+                        "cached_data_root.write_failed"
                     );
                 }
             };

@@ -361,6 +361,97 @@ impl PreValidationError {
     pub fn is_internal_failure(&self) -> bool {
         matches!(self, Self::InternalTaskJoin(_))
     }
+
+    /// Stable, bounded-cardinality label for the
+    /// `irys.block.pre_validation_failed_total{reason}` counter.  Each variant
+    /// maps to a short snake_case tag so prometheus cardinality is capped at
+    /// the enum size.
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::BlockBoundsLookupError(_) => "block_bounds_lookup",
+            Self::BlockSignatureInvalid => "block_signature_invalid",
+            Self::CascadeNotConfigured { .. } => "cascade_not_configured",
+            Self::CumulativeDifficultyMismatch { .. } => "cumulative_difficulty_mismatch",
+            Self::DifficultyMismatch { .. } => "difficulty_mismatch",
+            Self::EmaMismatch => "ema_mismatch",
+            Self::EmaSnapshotError(_) => "ema_snapshot_error",
+            Self::IngressProofsMissing => "ingress_proofs_missing",
+            Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
+            Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
+            Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
+            Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
+            Self::MerkleProofInvalid(_) => "merkle_proof_invalid",
+            Self::OraclePriceInvalid => "oracle_price_invalid",
+            Self::UpdateCacheForScheduledValidationError(_) => "update_cache_scheduled_validation",
+            Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
+            Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
+            Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
+            Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
+            Self::PoAChunkOffsetOutOfTxBounds => "poa_chunk_offset_out_of_tx_bounds",
+            Self::PartitionAssignmentMissing { .. } => "partition_assignment_missing",
+            Self::PartitionAssignmentSlotIndexMissing { .. } => "partition_slot_index_missing",
+            Self::PartitionAssignmentSlotIndexTooLarge { .. } => "partition_slot_index_too_large",
+            Self::PoADataPartitionExpired { .. } => "poa_data_partition_expired",
+            Self::PreviousCumulativeDifficultyMismatch { .. } => "prev_cumulative_diff_mismatch",
+            Self::PreviousSolutionHashMismatch { .. } => "prev_solution_hash_mismatch",
+            Self::RewardCurveError(_) => "reward_curve_error",
+            Self::RewardMismatch { .. } => "reward_mismatch",
+            Self::SolutionHashBelowDifficulty { .. } => "solution_hash_below_difficulty",
+            Self::SolutionHashLinkInvalid { .. } => "solution_hash_link_invalid",
+            Self::SystemTimeError(_) => "system_time_error",
+            Self::TermLedgerExpiryMismatch { .. } => "term_ledger_expiry_mismatch",
+            Self::TimestampOlderThanParent { .. } => "timestamp_older_than_parent",
+            Self::TimestampTooFarInFuture { .. } => "timestamp_too_far_in_future",
+            Self::ValidationServiceUnreachable => "validation_service_unreachable",
+            Self::InternalTaskJoin(_) => "internal_task_join",
+            Self::VDFCheckpointsInvalid(_) => "vdf_checkpoints_invalid",
+            Self::VDFPreviousOutputMismatch { .. } => "vdf_prev_output_mismatch",
+            Self::HeightInvalid { .. } => "height_invalid",
+            Self::LastEpochHashMismatch { .. } => "last_epoch_hash_mismatch",
+            Self::PublishTxMissingPriorSubmit { .. } => "publish_tx_missing_prior_submit",
+            Self::PublishTxAlreadyIncluded { .. } => "publish_tx_already_included",
+            Self::InvalidPromotionPath { .. } => "invalid_promotion_path",
+            Self::SubmitTxAlreadyIncluded { .. } => "submit_tx_already_included",
+            Self::TxFoundInMultipleBlocks { .. } => "tx_in_multiple_blocks",
+            Self::TxInMultipleLedgers { .. } => "tx_in_multiple_ledgers",
+            Self::PublishTxProofLengthMismatch => "publish_tx_proof_length_mismatch",
+            Self::BlockEmaSnapshotNotFound { .. } => "block_ema_snapshot_not_found",
+            Self::ParentEpochSnapshotNotFound { .. } => "parent_epoch_snapshot_not_found",
+            Self::DataLedgerExtractionFailed(_) => "data_ledger_extraction_failed",
+            Self::TransactionFetchFailed(_) => "tx_fetch_failed",
+            Self::PreviousTxInclusionsFailed(_) => "prev_tx_inclusions_failed",
+            Self::InvalidLedgerIdForTx { .. } => "invalid_ledger_id_for_tx",
+            Self::InvalidLedgerId { .. } => "invalid_ledger_id",
+            Self::FeeCalculationFailed(_) => "fee_calculation_failed",
+            Self::InsufficientPermFee { .. } => "insufficient_perm_fee",
+            Self::InsufficientTermFee { .. } => "insufficient_term_fee",
+            Self::InvalidTermFeeStructure { .. } => "invalid_term_fee_structure",
+            Self::InvalidPermFeeStructure { .. } => "invalid_perm_fee_structure",
+            Self::SubmitTxHasPromotedHeight { .. } => "submit_tx_has_promoted_height",
+            Self::TermLedgerTxHasPermFee { .. } => "term_ledger_tx_has_perm_fee",
+            Self::PublishLedgerProofCountMismatch { .. } => "publish_ledger_proof_count_mismatch",
+            Self::IngressProofCountMismatch { .. } => "ingress_proof_count_mismatch",
+            Self::AssignedProofCountMismatch { .. } => "assigned_proof_count_mismatch",
+            Self::InvalidIngressProof { .. } => "invalid_ingress_proof",
+            Self::IngressProofMismatch { .. } => "ingress_proof_mismatch",
+            Self::DuplicateIngressProofSigner { .. } => "duplicate_ingress_proof_signer",
+            Self::UnstakedIngressProofSigner { .. } => "unstaked_ingress_proof_signer",
+            Self::DatabaseError { .. } => "database_error",
+            Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
+            Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
+            Self::MissingTransactions(_) => "missing_transactions",
+            Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
+            Self::InvalidTransactionSignature(_) => "invalid_tx_signature",
+            Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
+            Self::UnexpectedCommitmentTransactions => "unexpected_commitment_txs",
+            Self::InvalidDataLedgersLength { .. } => "invalid_data_ledgers_length",
+            Self::AddBlockFailed { .. } => "add_block_failed",
+            Self::CachePoisoned { .. } => "cache_poisoned",
+            Self::ParentNotInCache { .. } => "parent_not_in_cache",
+        }
+    }
 }
 
 /// Validation error type that covers all block validation failures.
@@ -483,6 +574,47 @@ pub enum ValidationError {
     /// Generic validation error for edge cases
     #[error("Validation failed: {0}")]
     Other(String),
+}
+
+impl ValidationError {
+    /// Stable, bounded-cardinality label for the
+    /// `irys.block.pre_validation_failed_total{reason}` counter.  Delegates to
+    /// [`PreValidationError::metric_reason`] for the pre-validation variant
+    /// (the case the counter is named for); other variants get a coarse tag
+    /// matching the variant name.
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::PreValidation(inner) => inner.metric_reason(),
+            Self::ValidationCancelled { .. } => "validation_cancelled",
+            Self::TaskPanicked { .. } => "task_panicked",
+            Self::VdfValidationFailed(_) => "vdf_validation_failed",
+            Self::SeedDataInvalid(_) => "seed_data_invalid",
+            Self::ExecutionLayerFailed(_) => "execution_layer_failed",
+            Self::RecallRangeInvalid(_) => "recall_range_invalid",
+            Self::ShadowTransactionInvalid(_) => "shadow_tx_invalid",
+            Self::CommitmentTransactionFetchFailed(_) => "commitment_tx_fetch_failed",
+            Self::CommitmentValueInvalid { .. } => "commitment_value_invalid",
+            Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
+            Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
+            Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
+            Self::CommitmentSnapshotRejected { .. } => "commitment_snapshot_rejected",
+            Self::UnpledgePartitionNotOwned { .. } => "unpledge_partition_not_owned",
+            Self::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
+            Self::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
+            Self::ParentBlockMissing { .. } => "parent_block_missing",
+            Self::EpochCommitmentMismatch { .. } => "epoch_commitment_mismatch",
+            Self::EpochExtraCommitment { .. } => "epoch_extra_commitment",
+            Self::EpochMissingCommitment { .. } => "epoch_missing_commitment",
+            Self::CommitmentWrongOrder { .. } => "commitment_wrong_order",
+            Self::Other(_) => "other",
+        }
+    }
+
+    /// Returns true for the pre-validation variant so callers can route to
+    /// the pre-validation-specific counter without re-matching.
+    pub fn is_pre_validation(&self) -> bool {
+        matches!(self, Self::PreValidation(_))
+    }
 }
 
 /// Full pre-validation steps for a block
@@ -4482,6 +4614,137 @@ mod tests {
             &config,
             &epoch_snapshot,
         )?;
+        assert!(assigned.is_empty());
+        assert_eq!(miners, 0);
+
+        Ok(())
+    }
+
+    /// Same setup as `assigned_ingress_proofs_uses_canonical_tx_metadata`,
+    /// but with a deliberately-corrupt [`CachedDataRoot`] row alongside the
+    /// canonical metadata: `block_set` filled with random hashes that point
+    /// nowhere, `txid_set` augmented with stale txids that do not match the
+    /// canonical tx, and a bogus `data_size`.  Asserts the validation lookup
+    /// is unaffected — `get_assigned_ingress_proofs` returns the same
+    /// `(vec![], 0)` as the no-CDR case because
+    /// `tx_inclusion::find_canonical_ledger_range` derives canonical truth
+    /// from `IrysDataTxMetadata` + `MigratedBlockHashes` and never reads
+    /// `CachedDataRoots`.  Regression guard against a future refactor
+    /// accidentally re-introducing a CDR read into the validation path.
+    #[test_log::test(tokio::test)]
+    async fn corrupt_cdr_does_not_affect_assigned_ingress_proofs() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _,
+            db_cache::CachedDataRoot,
+            insert_tx_header, open_or_create_db, set_data_tx_included_height,
+            tables::{CachedDataRoots, IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+            UnixTimestamp,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        // Inject a deliberately-corrupt CachedDataRoot:
+        //   - block_set points at random hashes that resolve to nothing
+        //   - txid_set contains stale txids alongside the canonical tx
+        //   - data_size is bogus and marked "confirmed"
+        // Any of these, if the validation path were silly enough to consult
+        // them, would change the returned range / corrupt the assignment.
+        let corrupt_cdr = CachedDataRoot {
+            data_size: u64::MAX,
+            data_size_confirmed: true,
+            txid_set: vec![H256::random(), tx_id, H256::random()],
+            block_set: vec![H256::random(), H256::random(), H256::random()],
+            expiry_height: Some(0),
+            cached_at: UnixTimestamp::from_secs(0),
+        };
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<CachedDataRoots>(data_root, corrupt_cdr)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+        let epoch_snapshot = EpochSnapshot::default();
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        // Identical result to the no-CDR case in
+        // `assigned_ingress_proofs_uses_canonical_tx_metadata` — proof that
+        // the corrupt CDR was not consulted.
         assert!(assigned.is_empty());
         assert_eq!(miners, 0);
 
