@@ -4366,8 +4366,11 @@ mod tests {
     /// Regression coverage for the 2026-05-15 self-fork: the previous
     /// implementation walked `CachedDataRoots.block_set`, which retained
     /// orphaned hashes after reorgs and caused `BlockBoundsLookupError`
-    /// once those blocks were purged.  `block_set` has since been removed
-    /// from `CachedDataRoot` entirely.
+    /// once those blocks were purged.  Validation now consults
+    /// `tx_inclusion::find_canonical_ledger_range` directly; `block_set`
+    /// remains on `CachedDataRoot` as a cheap "ever-confirmed?" hint kept
+    /// in sync atomically with tip changes by
+    /// `BlockMigrationService::persist_metadata`.
     #[test_log::test(tokio::test)]
     async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
         use crate::tx_inclusion;

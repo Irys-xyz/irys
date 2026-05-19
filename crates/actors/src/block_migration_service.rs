@@ -43,21 +43,33 @@ impl BlockMigrationService {
         }
     }
 
-    /// Atomically persists tx metadata (included_height, promoted_height) to the DB.
+    /// Atomically persists tx metadata (included_height, promoted_height) and
+    /// keeps the `CachedDataRoots.block_set` hint consistent with the canonical
+    /// chain.
     ///
     /// For normal blocks: `blocks_to_clear` is empty, `blocks_to_confirm` contains just the tip.
     /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
     /// the new canonical fork blocks. Both operations happen in a single DB transaction to
     /// prevent inconsistent metadata state.
+    ///
+    /// Invariant established at every commit boundary: if a Submit-ledger tx
+    /// in `blocks_to_confirm` has a [`CachedDataRoot`] entry, its `block_set`
+    /// contains the confirming block hash and `expiry_height` is `None`.
+    /// Orphan block hashes from `blocks_to_clear` are scrubbed from any
+    /// `block_set` that retained them so the hint stays meaningful across
+    /// reorgs.  This is the migration-time backstop for cases where the
+    /// `BlockConfirmed`-driven fast path in mempool did not run or failed.
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
         self.db.update_eyre(|tx| {
-            // Phase 1: Clear orphaned metadata
+            // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
+            // block_hash from any CachedDataRoot.block_set that retained it.
             for block in blocks_to_clear {
                 let header = block.header();
+                let orphan_block_hash = header.block_hash;
                 let all_data_tx_ids: Vec<_> = header
                     .data_ledgers
                     .iter()
@@ -72,6 +84,15 @@ impl BlockMigrationService {
                 if !commitment_ids.is_empty() {
                     irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+
+                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                    irys_database::remove_data_root_block_set_entry(
+                        tx,
+                        submit_tx.data_root,
+                        orphan_block_hash,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
             }
             // Phase 2: Write confirmed metadata
@@ -101,6 +122,17 @@ impl BlockMigrationService {
                         height,
                     )
                     .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+            }
+            // Phase 3: Backstop the CachedDataRoot.block_set invariant for the
+            // canonical Submit-ledger txs we just confirmed.  Update-only —
+            // does not create cache entries for data_roots the node never
+            // tracked chunks for.
+            for block in blocks_to_confirm {
+                let block_hash = block.header().block_hash;
+                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                    irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
             }
             Ok(())
