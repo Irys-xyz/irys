@@ -399,20 +399,24 @@ impl InnerCacheTask {
                 );
                 break;
             }
-            // Pruning horizon priority: canonical tx inclusion > expiry height > skip
-            // Rationale: Migrated tx metadata provides a stable canonical
-            // inclusion height even after reorgs.  Pre-confirmation mempool
-            // entries use expiry_height as a fallback.  Entries with neither
-            // are skipped (conservative).
+            // Pruning horizon priority: canonical tx inclusion > expiry height > evict-anomalous.
             //
-            // Note: cache_data_root *clears* expiry_height when a block_header
-            // is provided (database.rs).  So a confirmed-but-not-yet-migrated
-            // entry temporarily has expiry_height=None and included_height=None
-            // and lands in the skip arm below.  Once migration writes
-            // included_height (within ~block_migration_depth blocks) the entry
-            // becomes eligible for pruning.  No block_tree fallback is added
-            // here: the local-proof exemption further below covers the case
-            // we care most about, and the window is bounded.
+            // CDR lifetime is bounded by either (a) `expiry_height` set at tx
+            // ingress (`cache_data_root_with_expiry`), or (b) `included_height`
+            // set atomically with the confirming tip change in
+            // `BlockMigrationService::persist_metadata` (Phase 2 sets
+            // `included_height`, Phase 3 clears `expiry_height` — same write
+            // tx).  The local-proof exemption below extends (b) indefinitely
+            // while a local ingress proof is present.
+            //
+            // The `(None, None)` arm is reachable only when a CDR has lost
+            // both bounds: a reorg cleared `included_height` for every tx in
+            // `txid_set` after the confirmation already cleared
+            // `expiry_height`, and the mempool re-anchor path did not restore
+            // expiry (e.g. orphan resubmission failed).  Under the lifetime
+            // model such an entry should not exist, so treat it as a
+            // candidate for eviction — but keep the local-proof exemption so
+            // an entry that still carries a useful commitment survives.
             let mut inclusion_max_height: Option<u64> = None;
             for tx_id in cached.txid_set.iter() {
                 if let Some(metadata) = irys_database::get_data_tx_metadata(&write_tx, tx_id)?
@@ -426,23 +430,25 @@ impl InnerCacheTask {
                 (None, Some(e)) => Some(e),
                 (None, None) => None,
             };
-            let max_height: u64 = match horizon {
-                Some(h) => h,
-                None => {
-                    trace!(
-                        data_root.data_root = ?data_root,
-                        "Skipping prune for data root without inclusion or expiry"
-                    );
-                    continue;
-                }
+
+            // Decide whether this entry is a candidate for eviction.
+            //  * horizon present: the historical "past the bound" check.
+            //  * horizon absent: anomalous (None, None) state — evict unless
+            //    the local-proof exemption below applies.
+            let is_eviction_candidate = match horizon {
+                Some(max_height) => max_height < prune_height,
+                None => true,
             };
 
             trace!(
-                "Processing data root {} max height: {}, prune height: {}",
-                &data_root, &max_height, &prune_height
+                data_root.data_root = ?data_root,
+                horizon = ?horizon,
+                prune_height,
+                is_eviction_candidate,
+                "Processing data root for prune evaluation"
             );
 
-            if max_height < prune_height {
+            if is_eviction_candidate {
                 // Check for locally generated ingress proof
                 let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
                 let mut has_local_proof = false;
@@ -460,6 +466,7 @@ impl InnerCacheTask {
                 if has_local_proof {
                     trace!(
                         data_root.data_root = ?data_root,
+                        horizon = ?horizon,
                         "Skipping prune for data root with locally generated ingress proof"
                     );
                     continue;
@@ -471,6 +478,7 @@ impl InnerCacheTask {
                     txid_set_size = cached.txid_set.len(),
                     last_inclusion_height = ?inclusion_max_height,
                     expiry_height = ?cached.expiry_height,
+                    horizon = ?horizon,
                     %prune_height,
                     has_local_proof,
                     "cached_data_root.evict"
@@ -1011,6 +1019,14 @@ mod tests {
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
     // are pruned once prune_height > 0 and they should not be pruned!
+    //
+    // Real prod ingress goes through `cache_data_root_with_expiry`, which sets
+    // `expiry_height` to `anchor + tx_anchor_expiry_depth`.  Direct callers of
+    // `cache_data_root(_, _, None)` (this fixture, pre-fix code paths) leave
+    // `expiry_height = None`.  We set it manually here to mirror what the
+    // mempool ingress path produces, so the test exercises the realistic
+    // "unconfirmed entry with expiry in the future" state rather than the
+    // anomalous (None, None) state.
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
@@ -1033,6 +1049,17 @@ mod tests {
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Mirror `cache_data_root_with_expiry`: set expiry_height to a future
+        // height so the entry has a valid lifetime bound (pre-confirmation arm).
+        db.update(|wtx| {
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
+            cdr.expiry_height = Some(100);
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
             eyre::Ok(())
         })??;
 
@@ -1771,6 +1798,162 @@ mod tests {
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots should NOT have been pruned due to local proof"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Anomalous `(None, None)` state — no `expiry_height`, no
+    /// `included_height` for any txid in `txid_set`, no local ingress proof.
+    /// Under the lifetime model this entry has lost both bounds and should be
+    /// evicted on the next prune cycle.  Reachable in practice when a reorg
+    /// cleared `included_height` for an orphaned tx, `expiry_height` had
+    /// already been cleared at the now-orphaned confirmation, and the mempool
+    /// orphan re-anchor path did not restore expiry.
+    #[tokio::test]
+    async fn prunes_anomalous_none_none_state() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        // cache_data_root(_, _, None) leaves expiry_height=None, and we never
+        // populate IrysDataTxMetadata for the tx — so the txid_set walk in
+        // prune_data_root_cache produces inclusion_max_height=None.  The
+        // resulting CDR is in the (None, None) state.
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Sanity: entry exists and is in the (None, None) state.
+        db.view(|rtx| -> eyre::Result<()> {
+            let cdr = rtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("CachedDataRoots missing before prune"))?;
+            eyre::ensure!(
+                cdr.expiry_height.is_none(),
+                "fixture expected expiry_height=None, got {:?}",
+                cdr.expiry_height
+            );
+            Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Any prune_height — the (None, None) state has no bound, so the
+        // entry is an eviction candidate regardless.
+        service_task.prune_data_root_cache(1)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(
+                !has_root,
+                "anomalous (None, None) CachedDataRoots entry should have been pruned"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Companion to `prunes_anomalous_none_none_state`: the same anomalous
+    /// `(None, None)` state, but with a local ingress proof present.  The
+    /// local-proof exemption should override the eviction so any useful
+    /// commitment is preserved.
+    #[tokio::test]
+    async fn does_not_prune_anomalous_none_none_state_with_local_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Add a local ingress proof for this data_root.
+        let signer = config.irys_signer();
+        let local_addr = signer.address();
+        db.update(|wtx| {
+            let mut ingress_proof = IngressProof::default();
+            ingress_proof.data_root = tx_header.data_root;
+            irys_database::store_external_ingress_proof_checked(wtx, &ingress_proof, local_addr)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Without the local-proof exemption the (None, None) state would be
+        // evicted; with it the entry must survive.
+        service_task.prune_data_root_cache(1)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(
+                has_root,
+                "CachedDataRoots in (None, None) state with local proof should NOT have been pruned"
             );
             Ok(())
         })??;
