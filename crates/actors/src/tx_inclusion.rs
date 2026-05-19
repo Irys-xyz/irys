@@ -124,12 +124,11 @@ fn compute_submit_range(
     prev: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
     let total = block.data_ledgers[DataLedger::Submit].total_chunks;
-    if total == 0 {
-        return Ok(None);
-    }
     let prev_total = prev
         .map(|p| p.data_ledgers[DataLedger::Submit].total_chunks)
         .unwrap_or(0);
+    // Regression must be checked before any short-circuit: total < prev_total
+    // is corruption regardless of whether total is zero.
     if total < prev_total {
         return Err(eyre::eyre!(
             "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
@@ -141,6 +140,7 @@ fn compute_submit_range(
     if total == prev_total {
         return Ok(None);
     }
+    // total > prev_total ≥ 0, so total > 0 and `total - 1` cannot underflow.
     Ok(Some(LedgerChunkRange(ii(
         LedgerChunkOffset::from(prev_total),
         LedgerChunkOffset::from(total - 1),
@@ -319,6 +319,36 @@ mod tests {
         )?;
         assert!(result.is_none());
         Ok(())
+    }
+
+    /// Regression: `compute_submit_range` must flag `total < prev_total` as
+    /// corruption even when `total == 0`.  An earlier shape of this function
+    /// short-circuited on `total == 0` before the regression check and would
+    /// have silently returned `Ok(None)` for a `prev_total = 100, total = 0`
+    /// header pair.
+    #[test_log::test(tokio::test)]
+    async fn compute_submit_range_detects_zero_total_regression() {
+        let prev = make_signed_header(
+            /* height */ 0,
+            H256::zero(),
+            /* cumulative_diff */ 0,
+            /* submit_total_chunks */ 100,
+            vec![],
+        );
+        let block = make_signed_header(
+            /* height */ 1,
+            prev.block_hash,
+            /* cumulative_diff */ 1,
+            /* submit_total_chunks */ 0,
+            vec![],
+        );
+        let err = compute_submit_range(&block, Some(&prev))
+            .expect_err("total=0 with prev_total=100 must error as data corruption");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("data corruption"),
+            "unexpected error message: {msg}"
+        );
     }
 
     #[test_log::test(tokio::test)]
