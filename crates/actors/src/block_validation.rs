@@ -1609,6 +1609,7 @@ pub fn height_is_valid(
 #[cfg(test)]
 mod prevalidation_error_classification_tests {
     use super::*;
+    use rstest::rstest;
 
     /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
     /// must classify as internal so callers route it away from peer-attributed
@@ -1631,75 +1632,92 @@ mod prevalidation_error_classification_tests {
     /// "Chain moved on" cancellation reasons must route to `Invalid` (discard
     /// the block); `ParentMissing` must route to `InternalFailure` since
     /// parent absence is never peer-attributable.
-    #[test]
-    fn validation_cancel_reason_classifier_dispatch() {
-        // Non-internal: this node has moved on, discard.
-        assert!(!ValidationCancelReason::HeightDifference.is_internal());
-        assert!(!ValidationCancelReason::ChannelClosed.is_internal());
-        // Internal: parent absence is local, not a child-block defect.
-        assert!(ValidationCancelReason::ParentMissing.is_internal());
-
-        // ValidationError::is_internal_failure must delegate to the reason.
-        for reason in [
-            ValidationCancelReason::HeightDifference,
-            ValidationCancelReason::ChannelClosed,
-        ] {
-            assert!(
-                !ValidationError::ValidationCancelled { reason }.is_internal_failure(),
-                "reason {:?} should classify as not-internal",
-                reason
-            );
-        }
-        assert!(
-            ValidationError::ValidationCancelled {
-                reason: ValidationCancelReason::ParentMissing,
-            }
-            .is_internal_failure(),
-            "ParentMissing must classify as internal — parent absence is not peer-attributable",
+    ///
+    /// One case per `ValidationCancelReason` variant so per-variant failures
+    /// surface as distinct nextest reports (matches the repo convention used
+    /// by `is_parent_ready_chain_state_dispatch` / `block_status_returns_in_tree_pending_validation`).
+    #[rstest]
+    #[case::height_difference(ValidationCancelReason::HeightDifference, false)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed, false)]
+    #[case::parent_missing(ValidationCancelReason::ParentMissing, true)]
+    fn validation_cancel_reason_classifier_dispatch(
+        #[case] reason: ValidationCancelReason,
+        #[case] expected_internal: bool,
+    ) {
+        assert_eq!(
+            reason.is_internal(),
+            expected_internal,
+            "{:?}.is_internal()",
+            reason
         );
+        // `ValidationError::is_internal_failure` must delegate to the reason
+        // sub-classification.
+        assert_eq!(
+            ValidationError::ValidationCancelled { reason }.is_internal_failure(),
+            expected_internal,
+            "ValidationError::ValidationCancelled {{ reason: {:?} }}.is_internal_failure()",
+            reason,
+        );
+    }
+
+    /// Expected `ValidationResult` shape for a given `ValidationCancelReason`
+    /// after round-tripping through `From<ValidationError>`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExpectedRoundtripShape {
+        /// Node-state cancel ("chain moved on") → consensus discard.
+        Invalid,
+        /// Parent-absence cancel → soft internal failure (not a node fault).
+        InternalFailureSoft,
     }
 
     /// Round-trip: `ParentMissing` must land on
     /// `ValidationResult::InternalFailure(_)` via the
     /// `From<ValidationError> for ValidationResult` dispatcher. The
     /// node-state reasons must land on `Invalid`.
-    #[test]
-    fn validation_cancel_reason_roundtrip_through_dispatcher() {
+    ///
+    /// One case per `ValidationCancelReason` variant so per-variant failures
+    /// surface as distinct nextest reports.
+    #[rstest]
+    #[case::height_difference(
+        ValidationCancelReason::HeightDifference,
+        ExpectedRoundtripShape::Invalid,
+    )]
+    #[case::channel_closed(
+        ValidationCancelReason::ChannelClosed,
+        ExpectedRoundtripShape::Invalid,
+    )]
+    #[case::parent_missing(
+        ValidationCancelReason::ParentMissing,
+        ExpectedRoundtripShape::InternalFailureSoft,
+    )]
+    fn validation_cancel_reason_roundtrip_through_dispatcher(
+        #[case] reason: ValidationCancelReason,
+        #[case] expected: ExpectedRoundtripShape,
+    ) {
         use crate::block_tree_service::ValidationResult;
 
-        for reason in [
-            ValidationCancelReason::HeightDifference,
-            ValidationCancelReason::ChannelClosed,
-        ] {
-            let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
-            assert!(
-                matches!(result, ValidationResult::Invalid(_)),
-                "reason {:?} must round-trip to Invalid, got {:?}",
-                reason,
-                result
-            );
-        }
-
-        let result: ValidationResult = ValidationError::ValidationCancelled {
-            reason: ValidationCancelReason::ParentMissing,
-        }
-        .into();
-        match result {
-            ValidationResult::InternalFailure(inner) => {
+        let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
+        match (expected, &result) {
+            (ExpectedRoundtripShape::Invalid, ValidationResult::Invalid(_)) => {}
+            (ExpectedRoundtripShape::InternalFailureSoft, ValidationResult::InternalFailure(inner)) => {
                 assert!(
                     !inner.is_node_fault(),
-                    "ParentMissing is a soft cancel — not a node fault",
+                    "{:?} is a soft cancel — must NOT be a node fault",
+                    reason,
                 );
-                assert!(matches!(
+                assert!(
+                    matches!(
+                        inner.err(),
+                        ValidationError::ValidationCancelled { reason: cancel_reason }
+                            if *cancel_reason == reason
+                    ),
+                    "inner ValidationCancelled reason must round-trip identically; got {:?}",
                     inner.err(),
-                    ValidationError::ValidationCancelled {
-                        reason: ValidationCancelReason::ParentMissing,
-                    },
-                ));
+                );
             }
-            other => panic!(
-                "ParentMissing must round-trip to InternalFailure, got {:?}",
-                other,
+            (expected, actual) => panic!(
+                "reason {:?} round-tripped to {:?}, expected shape {:?}",
+                reason, actual, expected,
             ),
         }
     }
