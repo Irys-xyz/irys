@@ -93,13 +93,22 @@ pub struct CachedDataRoot {
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
 
-    /// Block hashes for blocks that have included a tx referencing this
-    /// `data_root`.  **Hint only — NOT fork-tolerant.**  Append-only across
-    /// reorgs (orphan hashes are retained), so this field must not be
-    /// trusted as a canonical-inclusion oracle.  Consumers that need
-    /// canonical truth must verify via `irys_actors::tx_inclusion`.
-    /// Useful as a cheap "has this ever been in a block" pre-check before
-    /// the more expensive canonical lookup.
+    /// Block hashes for canonical blocks that have included a tx referencing
+    /// this `data_root`.  Maintained authoritatively by
+    /// `BlockMigrationService::persist_metadata` inside the same DB
+    /// transaction as the tip change: it appends the new tip's block hash
+    /// for any existing entry and scrubs hashes for `blocks_to_clear`, so
+    /// orphan entries do not survive past the reorg that produced them.
+    /// `cache_data_root` (called later from mempool's `on_block_confirmed`)
+    /// idempotently re-adds the same hash; it does not introduce orphans
+    /// because the migration write that precedes it has already established
+    /// the canonical contents for the tip.
+    ///
+    /// Use as a cheap "has this data_root been confirmed in any block?"
+    /// gate.  Range / slot lookups still belong to
+    /// `irys_actors::tx_inclusion::find_canonical_ledger_range`, which
+    /// derives canonical truth from `IrysDataTxMetadata` +
+    /// `MigratedBlockHashes` rather than this set.
     pub block_set: Vec<H256>,
 
     /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used
