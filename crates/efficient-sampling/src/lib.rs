@@ -46,10 +46,6 @@ impl Ranges {
         Ok(range)
     }
 
-    pub fn get_last_recall_range(self) -> Option<usize> {
-        self.last_recall_ranges.get(&self.last_step_num).copied()
-    }
-
     /// Picks next random (using seed as entropy) range idx in [0..NUM_RECALL_RANGES_IN_PARTITION-1] interval
     pub fn next_recall_range(
         &mut self,
@@ -66,34 +62,40 @@ impl Ranges {
             ));
         }
 
-        let range = if self.last_range_pos == 0 {
-            let range = self.ranges[0];
-            self.reinitialize();
-            range
-        } else {
-            let mut hasher = sha::Sha256::new();
-            hasher.update(&seed.0);
-            hasher.update(&partition_hash.0);
-            let rng_seed: u32 = u32::from_be_bytes(
-                hasher.finish()[28..32]
-                    .try_into()
-                    .map_err(|_| eyre::eyre!("SHA256 slice [28..32] was not 4 bytes"))?,
-            );
-            let mut rng = SimpleRNG::new(rng_seed);
-
-            let last_range_pos_u32 = u32::try_from(self.last_range_pos).map_err(|_| {
-                eyre::eyre!("last_range_pos {} exceeds u32::MAX", self.last_range_pos)
-            })?;
-            let next_range_pos = usize::try_from(rng.next() % last_range_pos_u32)
-                .map_err(|_| eyre::eyre!("range position exceeds usize"))?;
-            let range = self.ranges[next_range_pos];
-            self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
-            self.last_range_pos -= 1;
-            range
-        };
-
+        let range = self.pick_next(seed, partition_hash)?;
         self.last_recall_ranges.insert(step, range);
         self.last_step_num = step;
+        Ok(range)
+    }
+
+    /// Pure picking step: derives the next recall range from `(seed, partition_hash)` using
+    /// SHA-256 → `SimpleRNG` → Fisher–Yates swap on `self.ranges`. Does NOT touch
+    /// `last_recall_ranges` or `last_step_num`, so callers that only need the final value
+    /// (e.g. block validation) can skip the per-step HashMap insert.
+    fn pick_next(&mut self, seed: &H256, partition_hash: &H256) -> Result<usize> {
+        if self.last_range_pos == 0 {
+            let range = self.ranges[0];
+            self.reinitialize();
+            return Ok(range);
+        }
+
+        let mut hasher = sha::Sha256::new();
+        hasher.update(&seed.0);
+        hasher.update(&partition_hash.0);
+        let rng_seed: u32 = u32::from_be_bytes(
+            hasher.finish()[28..32]
+                .try_into()
+                .map_err(|_| eyre::eyre!("SHA256 slice [28..32] was not 4 bytes"))?,
+        );
+        let mut rng = SimpleRNG::new(rng_seed);
+
+        let last_range_pos_u32 = u32::try_from(self.last_range_pos)
+            .map_err(|_| eyre::eyre!("last_range_pos {} exceeds u32::MAX", self.last_range_pos))?;
+        let next_range_pos = usize::try_from(rng.next() % last_range_pos_u32)
+            .map_err(|_| eyre::eyre!("range position exceeds usize"))?;
+        let range = self.ranges[next_range_pos];
+        self.ranges[next_range_pos] = self.ranges[self.last_range_pos]; // overwrite returned range with last one
+        self.last_range_pos -= 1;
         Ok(range)
     }
 
@@ -173,19 +175,22 @@ pub fn recall_range_is_valid(
     }
 }
 
-/// Construct recall range index from given step seeds and partition hash
+/// Construct recall range index from given step seeds and partition hash.
+///
+/// Only the final pick is needed (e.g. block validation), so this skips the per-step
+/// `last_recall_ranges` HashMap inserts and `last_step_num` bookkeeping that
+/// `Ranges::reconstruct` does for the mining path.
 pub fn get_recall_range(
     num_recall_ranges_in_partition: usize,
     steps: &H256List,
     partition_hash: &H256,
 ) -> eyre::Result<usize> {
     let mut ranges = Ranges::new(num_recall_ranges_in_partition)?;
-    ranges.reconstruct(steps, partition_hash)?;
-    if let Some(reconstructed_range) = ranges.get_last_recall_range() {
-        Ok(reconstructed_range)
-    } else {
-        Err(eyre::eyre!("No recall range index found"))
+    let mut last = None;
+    for seed in &steps.0 {
+        last = Some(ranges.pick_next(seed, partition_hash)?);
     }
+    last.ok_or_else(|| eyre::eyre!("No recall range index found"))
 }
 
 /// Get last step number where ranges were reinitialized

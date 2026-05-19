@@ -5232,6 +5232,8 @@ dependencies = [
  "irys-config",
  "irys-testing-utils",
  "irys-types",
+ "irys-utils",
+ "metrics",
  "modular-bitfield",
  "paste",
  "proptest",
@@ -5252,7 +5254,9 @@ dependencies = [
 name = "irys-debug-utils"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "eyre",
+ "hex",
  "irys-database",
  "irys-types",
  "reth-node-core",
@@ -5305,6 +5309,7 @@ dependencies = [
 name = "irys-efficient-sampling"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "eyre",
  "irys-types",
  "openssl",
@@ -5690,6 +5695,7 @@ dependencies = [
  "dashmap",
  "eyre",
  "irys-types",
+ "metrics",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -5697,6 +5703,7 @@ dependencies = [
  "opentelemetry_sdk",
  "proptest",
  "rand 0.8.5",
+ "reth-node-metrics",
  "serial_test",
  "socket2 0.5.10",
  "tokio",
@@ -5718,14 +5725,17 @@ dependencies = [
  "irys-domain",
  "irys-efficient-sampling",
  "irys-types",
+ "irys-utils",
  "nodit",
  "openssl",
+ "opentelemetry",
  "proptest",
  "rayon",
  "reth-db",
  "rstest",
  "sha2",
  "test-log",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",

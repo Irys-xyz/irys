@@ -12,7 +12,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
 };
-use reth_db::{Database as _, DatabaseError};
+use reth_db::DatabaseError;
 use tracing::{debug, error, warn};
 
 /// Errors that can occur when ingesting an external ingress proof.
@@ -94,7 +94,7 @@ impl ChunkIngressServiceInner {
         // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
             .irys_db
-            .update(|rw_tx| -> Result<(), DatabaseError> {
+            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
                 irys_database::store_external_ingress_proof_checked(rw_tx, &ingress_proof, address)
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 Ok(())
@@ -188,7 +188,7 @@ impl ChunkIngressServiceInner {
         data_root: DataRoot,
     ) -> Result<(), IngressProofError> {
         irys_db
-            .update(|rw_tx| -> Result<(), DatabaseError> {
+            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
                 delete_ingress_proof(rw_tx, data_root)
                     .map_err(|report| DatabaseError::Other(report.to_string()))?;
                 Ok(())

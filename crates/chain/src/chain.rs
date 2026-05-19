@@ -82,12 +82,12 @@ use tokio::{
     runtime::Handle,
     sync::{
         mpsc,
-        mpsc::{UnboundedReceiver, UnboundedSender},
+        mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
         oneshot::{self},
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, debug, error, info, instrument, warn};
+use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
 #[derive(Debug, Clone)]
 pub struct IrysNodeCtx {
@@ -711,7 +711,15 @@ impl IrysNode {
             // Continue even if saving to disk fails - not critical
         }
 
-        // Open a database transaction
+        // Open a database transaction. Span attributes any libmdbx writer-lock
+        // stall warning fired during begin_rw_txn to
+        // libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}
+        // (see crates/utils/utils/src/mdbx_metrics.rs).
+        let _span = info_span!(
+            irys_utils::MDBX_RW_TX_SPAN,
+            db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
+        )
+        .entered();
         let write_tx = irys_db.tx_mut()?;
 
         // Insert the genesis block header
@@ -977,6 +985,7 @@ impl IrysNode {
             let is_vdf_mining_enabled = ctx.is_vdf_mining_enabled.clone();
             let storage_modules_guard = ctx.storage_modules_guard.clone();
             let chunk_ingress_state = ctx.chunk_ingress_state.clone();
+            let irys_db_for_metrics = ctx.db.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn_task(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -1036,6 +1045,15 @@ impl IrysNode {
                     metrics::record_storage_modules_total(total);
                     metrics::record_partitions_assigned(assigned);
                     metrics::record_partitions_unassigned(total - assigned);
+
+                    // Counterpart to Reth's metrics_hooks() throttled
+                    // report_metrics() — that hook only covers Reth's DB.
+                    // Surfaces freelist, table sizes, and timed-out-reader
+                    // gauges so MDBX contention shows up alongside the per-tx
+                    // commit-latency histograms.
+                    irys_database::db_metrics::report_irys_consensus_db_gauges(
+                        irys_db_for_metrics.0.as_ref(),
+                    );
                 }
             });
         }
@@ -1757,7 +1775,7 @@ impl IrysNode {
         let (global_step_number, last_step_hash) =
             vdf_state_readonly.read().get_last_step_and_seed();
         let initial_hash = last_step_hash.0;
-        metrics::record_vdf_global_step(global_step_number);
+        irys_vdf::metrics::record_vdf_global_step(global_step_number);
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
@@ -2010,7 +2028,7 @@ impl IrysNode {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_fast_forward_receiver: UnboundedReceiver<Traced<VdfStep>>,
+        vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
@@ -2286,6 +2304,14 @@ impl IrysNode {
             mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
+            // TODO: share this rayon pool with the one in `ValidationService`
+            // (crates/actors/src/validation_service.rs). Each is sized to
+            // `vdf.parallel_verification_thread_limit`, so two long-lived pools
+            // double the effective thread budget vs. operator guidance in
+            // MAINNET_BETA.md. `rayon::ThreadPool` is Send+Sync and safe for
+            // concurrent `install` calls, so a single `Arc<ThreadPool>` plumbed
+            // through `ServiceSenders` (or built once here) would suffice.
+            pool: Arc::new(irys_vdf::build_verification_pool(&config.vdf)),
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,

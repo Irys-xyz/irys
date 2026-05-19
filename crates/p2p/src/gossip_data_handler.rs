@@ -38,6 +38,23 @@ use tracing::{Instrument as _, debug, error, warn};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
 
+/// Decide whether the outer body-pull retry should continue after an error.
+/// `NoPeersAvailable` means no candidate is reachable right now; the CB
+/// cooldown is 30s, so retrying within milliseconds is pure overhead.
+fn should_continue_outer_retry(err: &PeerNetworkError) -> bool {
+    !matches!(err, PeerNetworkError::NoPeersAvailable)
+}
+
+/// Variant of [`should_continue_outer_retry`] for header retries, where the
+/// inner returns `GossipError` (wrapping `PeerNetworkError`) rather than
+/// `PeerNetworkError` directly.
+fn should_continue_header_outer_retry(err: &GossipError) -> bool {
+    !matches!(
+        err,
+        GossipError::PeerNetwork(PeerNetworkError::NoPeersAvailable)
+    )
+}
+
 /// Builds a human-readable summary from a list of failed peer attempts.
 fn format_failure_summary(
     operation: &str,
@@ -1055,6 +1072,7 @@ where
                     break;
                 }
                 Err(e) => {
+                    let should_retry = should_continue_header_outer_retry(&e);
                     debug!(
                         "Node {}: Failed to pull block header for {} (attempt {}/{}): {}",
                         self.gossip_client.mining_address,
@@ -1064,6 +1082,13 @@ where
                         e
                     );
                     failed_attempts.push((None, e));
+                    if !should_retry {
+                        debug!(
+                            "Node {}: short-circuiting outer header retry for block {} (no peers available)",
+                            self.gossip_client.mining_address, block_hash
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -1195,6 +1220,7 @@ where
                     failed_attempts.push((Some(peer_id), error));
                 }
                 Err(e) => {
+                    let should_retry = should_continue_outer_retry(&e);
                     let error = GossipError::from(e);
                     debug!(
                         "Node {}: Failed to pull block body for {} height {} (attempt {}/{}): {}",
@@ -1206,6 +1232,13 @@ where
                         error
                     );
                     failed_attempts.push((None, error));
+                    if !should_retry {
+                        debug!(
+                            "Node {}: short-circuiting outer body-pull retry for block {} (no peers available)",
+                            self.gossip_client.mining_address, block_hash
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -1263,5 +1296,41 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
             block_hash
         );
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod fetch_body_retries_tests {
+    use super::*;
+    use irys_types::PeerNetworkError;
+
+    #[test]
+    fn no_peers_available_should_short_circuit_outer_retry() {
+        let err = PeerNetworkError::NoPeersAvailable;
+        assert!(
+            !should_continue_outer_retry(&err),
+            "NoPeersAvailable must short-circuit the outer body-pull retry"
+        );
+    }
+
+    #[test]
+    fn other_errors_should_continue_outer_retry() {
+        let err = PeerNetworkError::FailedToRequestData("transient".to_string());
+        assert!(
+            should_continue_outer_retry(&err),
+            "transient errors must allow outer body-pull retries"
+        );
+    }
+
+    #[test]
+    fn no_peers_available_should_short_circuit_outer_header_retry() {
+        let err = GossipError::PeerNetwork(PeerNetworkError::NoPeersAvailable);
+        assert!(!should_continue_header_outer_retry(&err));
+    }
+
+    #[test]
+    fn other_errors_should_continue_outer_header_retry() {
+        let err = GossipError::Network("transient".to_string());
+        assert!(should_continue_header_outer_retry(&err));
     }
 }

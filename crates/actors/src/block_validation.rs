@@ -40,6 +40,7 @@ use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
+use rayon::prelude::*;
 use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
@@ -53,6 +54,16 @@ use std::{
 use thiserror::Error;
 use tracing::{Instrument as _, debug, error, info, warn};
 
+/// SAFETY-CRITICAL: variants in this enum are returned from `prevalidate_block`
+/// and used by callers to decide whether a block is consensus-invalid. Local
+/// or runtime failures (I/O, task join errors, lock contention, transient
+/// service unavailability, etc.) MUST NEVER be mapped to a variant that
+/// describes a consensus-level rejection (`VDFCheckpointsInvalid`,
+/// `BlockSignatureInvalid`, `InvalidTransactionSignature`, etc.). Marking a
+/// valid block as invalid — or an invalid block as valid — by routing through
+/// the wrong variant is catastrophic. When in doubt, add a distinct
+/// internal/runtime variant (e.g. `InternalTaskJoin`) rather than reusing a
+/// validation variant.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
@@ -153,6 +164,8 @@ pub enum PreValidationError {
     TimestampTooFarInFuture { current: u128, now: u128 },
     #[error("Validation service unreachable")]
     ValidationServiceUnreachable,
+    #[error("Internal prevalidation task failed (likely panic): {0}")]
+    InternalTaskJoin(String),
     #[error("last_step_checkpoints validation failed: {0}")]
     VDFCheckpointsInvalid(String),
     #[error(
@@ -339,6 +352,15 @@ impl PreValidationError {
     pub fn is_fatal_corruption(&self) -> bool {
         matches!(self, Self::CachePoisoned { .. })
     }
+
+    /// Returns true for variants representing local/runtime failures (verifier
+    /// panics, transient task-join errors, etc.) that must NEVER be attributed
+    /// to the peer or used to mark a block as consensus-invalid. See the enum
+    /// safety-critical doc for the full invariant. Grow this method as new
+    /// non-consensus variants are added.
+    pub fn is_internal_failure(&self) -> bool {
+        matches!(self, Self::InternalTaskJoin(_))
+    }
 }
 
 /// Validation error type that covers all block validation failures.
@@ -470,6 +492,7 @@ pub async fn prevalidate_block(
     previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
+    pool: Arc<rayon::ThreadPool>,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
@@ -482,12 +505,12 @@ pub async fn prevalidate_block(
         "Prevalidating block",
     );
 
-    let poa_chunk: Vec<u8> = match &block.poa.chunk {
-        Some(chunk) => chunk.clone().into(),
+    let poa_chunk: &[u8] = match &block.poa.chunk {
+        Some(chunk) => chunk.as_ref(),
         None => return Err(PreValidationError::PoAChunkMissing),
     };
 
-    let block_poa_hash: H256 = sha::sha256(&poa_chunk).into();
+    let block_poa_hash: H256 = sha::sha256(poa_chunk).into();
     if block.chunk_hash != block_poa_hash {
         return Err(PreValidationError::PoAChunkHashMismatch {
             expected: block.chunk_hash,
@@ -568,7 +591,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(block, &poa_chunk)?;
+    solution_hash_link_is_valid(block, poa_chunk)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -606,10 +629,26 @@ pub async fn prevalidate_block(
         "last_epoch_hash_is_valid",
     );
 
-    // We only check last_step_checkpoints during pre-validation
-    last_step_checkpoints_is_valid(&block.vdf_limiter_info, &config.node_config.vdf())
-        .await
-        .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
+    // We only check last_step_checkpoints during pre-validation.
+    // A spawn_blocking JoinError is a local panic in the verifier thread, not
+    // a consensus failure — it must never be mapped to VDFCheckpointsInvalid.
+    let pool_clone = Arc::clone(&pool);
+    let vdf_info = block.vdf_limiter_info.clone();
+    let vdf_config = config.vdf.clone();
+    tokio::task::spawn_blocking(move || {
+        last_step_checkpoints_is_valid(&pool_clone, &vdf_info, &vdf_config)
+    })
+    .await
+    .map_err(|e| {
+        error!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            error = %e,
+            "spawn_blocking for last_step_checkpoints_is_valid failed",
+        );
+        PreValidationError::InternalTaskJoin(format!("last_step_checkpoints_is_valid: {e}"))
+    })?
+    .map_err(|e| PreValidationError::VDFCheckpointsInvalid(e.to_string()))?;
 
     // Check that the oracle price does not exceed the EMA pricing parameters
     let oracle_price_valid = EmaSnapshot::oracle_price_is_valid(
@@ -717,7 +756,7 @@ pub async fn prevalidate_block(
         })?;
 
         let ledger_txs = transactions.get_ledger_txs(ledger);
-        validate_transactions(ledger_txs, &dl.tx_ids.0)?;
+        validate_transactions(&pool, ledger_txs, &dl.tx_ids.0)?;
         debug!(
             block.hash = ?block.block_hash,
             block.height = ?block.height,
@@ -751,16 +790,27 @@ pub async fn prevalidate_block(
 
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
-    // Validate ingress proofs for published transactions
+    // Flatten (proof, data_root) pairs across publish txs so the parallel
+    // verify below fans out across every proof rather than per-tx batches.
+    let estimated_proofs = publish_ledger
+        .required_proof_count
+        .map_or(publish_txs.len(), |c| publish_txs.len() * c as usize);
+    let mut ingress_pairs: Vec<(IngressProof, H256)> = Vec::with_capacity(estimated_proofs);
     for tx_header in publish_txs.iter() {
         let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
             .map_err(|_| PreValidationError::IngressProofsMissing)?;
-        for proof in tx_proofs.iter() {
-            proof
-                .pre_validate(&tx_header.data_root)
-                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
+        for proof in tx_proofs.0 {
+            ingress_pairs.push((proof, tx_header.data_root));
         }
     }
+    pool.install(|| {
+        ingress_pairs.par_iter().try_for_each(|(proof, data_root)| {
+            proof
+                .pre_validate(data_root)
+                .map(|_| ())
+                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))
+        })
+    })?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -813,7 +863,7 @@ pub async fn prevalidate_block(
         }
 
         // Validate commitment transactions: count, IDs, and signatures
-        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        validate_transactions(&pool, commitment_txs, &commitment_ledger.tx_ids.0)?;
         debug!(
             block.hash = ?block.block_hash,
             block.height = ?block.height,
@@ -845,11 +895,11 @@ fn find_invalid_commitment_version(
 
 /// Validate transactions against expected IDs from the block header.
 /// Checks: count matches, IDs match in order, signatures are valid.
-fn validate_transactions<T: IrysTransactionCommon>(
+fn validate_transactions<T: IrysTransactionCommon + Sync>(
+    pool: &rayon::ThreadPool,
     txs: &[T],
     expected_ids: &[IrysTransactionId],
 ) -> Result<(), PreValidationError> {
-    // Check count matches
     if txs.len() != expected_ids.len() {
         let provided_ids: std::collections::HashSet<_> =
             txs.iter().map(IrysTransactionCommon::id).collect();
@@ -861,21 +911,23 @@ fn validate_transactions<T: IrysTransactionCommon>(
         return Err(PreValidationError::MissingTransactions(missing));
     }
 
-    // Check IDs match in order and signatures are valid
-    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
-        let actual_id = tx.id();
-        if actual_id != *expected_id {
-            return Err(PreValidationError::TransactionIdMismatch {
-                expected: *expected_id,
-                actual: actual_id,
-            });
-        }
-        if !tx.is_signature_valid() {
-            return Err(PreValidationError::InvalidTransactionSignature(actual_id));
-        }
-    }
-
-    Ok(())
+    pool.install(|| {
+        txs.par_iter()
+            .zip(expected_ids.par_iter())
+            .try_for_each(|(tx, expected_id)| {
+                let actual_id = tx.id();
+                if actual_id != *expected_id {
+                    return Err(PreValidationError::TransactionIdMismatch {
+                        expected: *expected_id,
+                        actual: actual_id,
+                    });
+                }
+                if !tx.is_signature_valid() {
+                    return Err(PreValidationError::InvalidTransactionSignature(actual_id));
+                }
+                Ok(())
+            })
+    })
 }
 
 pub fn prev_output_is_valid(
@@ -1167,6 +1219,25 @@ mod prevalidation_error_classification_tests {
             .is_fatal_corruption()
         );
     }
+
+    /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
+    /// must classify as internal so callers route it away from peer-attributed
+    /// "block invalid" paths.
+    #[test]
+    fn internal_task_join_is_internal_failure() {
+        let err = PreValidationError::InternalTaskJoin("panic".to_string());
+        assert!(err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
+    }
+
+    /// Consensus-validation variants must NOT classify as internal.
+    #[test]
+    fn validation_errors_are_not_internal_failures() {
+        assert!(!PreValidationError::BlockSignatureInvalid.is_internal_failure());
+        assert!(
+            !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1386,7 +1457,7 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
-#[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     block_tree_guard: &BlockTreeReadGuard,

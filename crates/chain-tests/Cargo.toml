@@ -24,7 +24,7 @@ irys-api-server.workspace = true
 irys-chain.workspace = true
 irys-config.workspace = true
 irys-database.workspace = true
-irys-domain.workspace = true
+irys-domain = { workspace = true, features = ["test-utils"] }
 irys-macros-diag-slow.workspace = true
 irys-p2p.workspace = true
 irys-packing.workspace = true

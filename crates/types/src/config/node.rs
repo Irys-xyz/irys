@@ -784,6 +784,44 @@ pub struct VdfNodeConfig {
     /// outrunning block production when sha_1s_difficulty is low.
     #[serde(default)]
     pub throttle: bool,
+
+    /// Bail out of a VDF wait if the local `global_step` has not advanced for
+    /// this many seconds. Detects a dead/stuck VDF thread without imposing a
+    /// wall-clock cap on legitimate long waits.
+    ///
+    /// Used in three places, all in the validation pipeline. All three treat a
+    /// trip as a local-infrastructure failure ("never mislabel a block as
+    /// Valid or Invalid"; see design/docs/vdf-validation-stall-detection.md)
+    /// and panic the process so the supervisor restarts it clean:
+    ///   1. `wait_for_step` — `ensure_vdf_is_valid` calls it once at the start
+    ///      (waiting for the previous VDF step) and once at the end (waiting
+    ///      for `global_step` to reach the block's `global_step_number` after
+    ///      all batches have been enqueued). A `WaitForStepError::Stalled`
+    ///      from either site panics the validation task.
+    ///   2. `fast_forward_validated_steps` — per-step send timeout (and the
+    ///      receiver-closed arm) into the bounded `vdf_fast_forward` channel.
+    ///      A consumer that stays stuck for this long, or has dropped the
+    ///      receiver, panics — see the call site for why.
+    ///   3. The pipeline watchdog — every 5s tick the validation loop force-
+    ///      aborts a VDF task whose stage signal has been idle for this long,
+    ///      panicking the service (and the process) on the assumption that
+    ///      something is genuinely broken, not slow.
+    #[serde(default = "default_vdf_progress_timeout_secs")]
+    pub progress_timeout_secs: u64,
+
+    /// Number of VDF steps to validate before fast-forwarding that validated
+    /// prefix and waiting for local progress. Smaller batches surface liveness
+    /// problems sooner; larger batches reduce coordination overhead.
+    #[serde(default = "default_vdf_validation_batch_size")]
+    pub validation_batch_size: usize,
+}
+
+fn default_vdf_progress_timeout_secs() -> u64 {
+    15
+}
+
+fn default_vdf_validation_batch_size() -> usize {
+    32
 }
 
 impl Default for VdfNodeConfig {
@@ -793,6 +831,8 @@ impl Default for VdfNodeConfig {
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
             throttle: false,
+            progress_timeout_secs: default_vdf_progress_timeout_secs(),
+            validation_batch_size: default_vdf_validation_batch_size(),
         }
     }
 }
@@ -1085,6 +1125,8 @@ impl NodeConfig {
                 parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
                 throttle: true,
+                progress_timeout_secs: default_vdf_progress_timeout_secs(),
+                validation_batch_size: default_vdf_validation_batch_size(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),
@@ -1257,6 +1299,8 @@ impl NodeConfig {
                 parallel_verification_thread_limit: 4,
                 core_pinning: CorePinning::Auto,
                 throttle: false,
+                progress_timeout_secs: default_vdf_progress_timeout_secs(),
+                validation_batch_size: default_vdf_validation_batch_size(),
             },
 
             p2p_handshake: P2PHandshakeConfig::default(),

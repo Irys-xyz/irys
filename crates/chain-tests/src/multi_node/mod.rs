@@ -12,3 +12,4 @@ pub(crate) mod peer_mining;
 pub(crate) mod reth_restart;
 pub(crate) mod sync_chain_state;
 pub(crate) mod validation;
+pub(crate) mod vdf_validation_progress;

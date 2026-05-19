@@ -1,7 +1,7 @@
 use dashmap::DashSet;
 use irys_database::cache_chunk_verified;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{ChunkPathHash, DatabaseProvider, UnpackedChunk};
-use reth_db::Database as _;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -159,7 +159,7 @@ impl BackgroundWriter {
 
         let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
-        let result = self.db.update(|tx| {
+        let result = self.db.update_scoped(|tx| {
             let mut written = 0_usize;
             for (chunk, hash) in batch.iter().zip(hashes.iter()) {
                 match cache_chunk_verified(tx, chunk) {

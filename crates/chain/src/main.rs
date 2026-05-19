@@ -1,7 +1,7 @@
 use irys_chain::{IrysNode, utils::load_config};
 use irys_testing_utils::setup_panic_hook;
 use irys_types::ShutdownReason;
-use irys_utils::shutdown::spawn_shutdown_watchdog;
+use irys_utils::{install_metrics_recorder, shutdown::spawn_shutdown_watchdog};
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -43,6 +43,9 @@ async fn main() -> eyre::Result<()> {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
     }
+
+    // Must run before any DB opens — see `install_metrics_recorder` docs.
+    install_metrics_recorder();
 
     #[cfg(feature = "telemetry")]
     {
@@ -123,6 +126,7 @@ fn init_tracing() -> eyre::Result<()> {
     Registry::default()
         .with(filter)
         .with(ErrorLayer::default())
+        .with(irys_utils::mdbx_lock_metrics_layer())
         .with(irys_utils::make_fmt_layer())
         .init();
 

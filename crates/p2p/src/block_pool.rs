@@ -713,7 +713,7 @@ where
             return Err(err.into());
         }
 
-        if !previous_block_status.is_processed() {
+        if !previous_block_status.is_in_tree() {
             // For orphan blocks, we already have ordered transactions from SealedBlock
             let block_transactions = block.transactions();
 
@@ -912,8 +912,11 @@ where
             // Cache poisoning is unrecoverable; surface as critical so the
             // service can escalate. `ParentNotInCache` is a local
             // prune/reorg race — the peer is innocent — so it gets its own
-            // non-penalising variant. All other pre-validation failures
-            // remain `BlockError` (peer-attributed bogus data).
+            // non-penalising variant. Internal verifier failures (e.g. a
+            // panic propagating through spawn_blocking) MUST NOT be peer-
+            // attributed either: the peer's block may have been valid; we
+            // simply couldn't verify it locally. All remaining variants are
+            // genuine consensus rejections and route to `BlockError`.
             if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
                 if pre_err.is_fatal_corruption() {
                     error!(
@@ -955,6 +958,25 @@ where
                     return Err(
                         CriticalBlockPoolError::ParentNotInCache(pre_err.to_string()).into(),
                     );
+                }
+
+                if pre_err.is_internal_failure() {
+                    error!(
+                        block.hash = ?block_hash,
+                        error = ?pre_err,
+                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
+                    );
+                    // Keep the block in cache and clear `is_processing` so the next
+                    // gossip arrival (or orphan-resolve when a child arrives) re-runs
+                    // prevalidation. Removing would force a refetch round-trip even
+                    // though our local state is intact — the verifier crashed in an
+                    // isolated spawn_blocking thread, not in shared state.
+                    self.blocks_cache
+                        .change_block_processing_status(block_hash, false)
+                        .await;
+                    self.sync_state
+                        .record_block_processing_error(pre_err.to_string());
+                    return Err(CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into());
                 }
             }
 
@@ -1153,11 +1175,16 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        self.blocks_cache.is_block_processing(block_hash).await
-            || self
-                .block_status_provider
-                .block_status(block_height, block_hash)
-                .is_processed()
+        if self.blocks_cache.is_block_processing(block_hash).await {
+            return true;
+        }
+        let status = self
+            .block_status_provider
+            .block_status(block_height, block_hash);
+        // A block that is in the tree pending validation has also been observed
+        // already; we do not want gossip handlers to re-enter `process_block`
+        // for it.
+        status.is_processed() || status.is_in_tree()
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
@@ -1286,6 +1313,15 @@ fn check_block_status(
 
     match block_status {
         BlockStatus::NotProcessed => Ok(()),
+        BlockStatus::InTreePendingValidation => {
+            debug!(
+                "Block pool: Block {:?} (height {}) is already in tree pending validation",
+                block_hash, block_height,
+            );
+            Err(BlockPoolError::Advisory(
+                AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
+            ))
+        }
         BlockStatus::ProcessedButCanBeReorganized => {
             debug!(
                 "Block pool: Block {:?} (height {}) is already processed",

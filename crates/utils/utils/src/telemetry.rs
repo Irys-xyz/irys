@@ -40,7 +40,6 @@ struct TelemetryConfig {
     service_name: String,
     traces_endpoint: String,
     logs_endpoint: String,
-    axiom_logs_endpoint: Option<String>,
     metrics_endpoint: String,
 }
 
@@ -64,7 +63,6 @@ impl TelemetryConfig {
                 .unwrap_or_else(|_| otlp_endpoint.clone()),
             logs_endpoint: std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
                 .unwrap_or(default_logs_endpoint),
-            axiom_logs_endpoint: std::env::var("AXIOM_LOGS_ENDPOINT").ok(),
             metrics_endpoint: std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
                 .unwrap_or(otlp_endpoint),
         }
@@ -241,6 +239,7 @@ fn setup_tracing_subscriber(
     let subscriber = subscriber
         .with(filter)
         .with(ErrorLayer::default())
+        .with(crate::mdbx_lock_metrics_layer())
         .with(crate::make_fmt_layer());
 
     let tracer = tracer_provider.tracer(service_name.to_string());
@@ -284,8 +283,6 @@ fn install_panic_hook() {
 /// - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Override endpoint for traces (optional)
 /// - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: Override endpoint for logs (optional)
 /// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
-/// - `AXIOM_LOGS_ENDPOINT`: Additional Axiom OTLP endpoint for logs (optional)
-///   When set, logs are sent to BOTH the primary logs endpoint AND Axiom
 ///
 /// # Errors
 ///
@@ -305,20 +302,7 @@ pub fn init_telemetry() -> Result<()> {
     let trace_exporter = build_trace_exporter(&config.traces_endpoint)?;
     let metrics_exporter = build_metrics_exporter(&config.metrics_endpoint)?;
 
-    let mut log_exporters = vec![build_log_exporter(&config.logs_endpoint)?];
-    let mut log_endpoints = vec![config.logs_endpoint.clone()];
-
-    if let Some(ref axiom_endpoint) = config.axiom_logs_endpoint {
-        match build_log_exporter(axiom_endpoint) {
-            Ok(exporter) => {
-                log_exporters.push(exporter);
-                log_endpoints.push(axiom_endpoint.clone());
-            }
-            Err(e) => {
-                eprintln!("Failed to build Axiom log exporter (continuing with primary): {e:?}");
-            }
-        }
-    }
+    let log_exporters = vec![build_log_exporter(&config.logs_endpoint)?];
 
     let tracer_provider = build_tracer_provider(trace_exporter, resource.clone());
     let logger_provider = build_logger_provider(log_exporters, resource.clone());
@@ -331,19 +315,13 @@ pub fn init_telemetry() -> Result<()> {
     opentelemetry::global::set_meter_provider(meter_provider);
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // NOTE: We do NOT install a metrics recorder here because Reth's internal
-    // EngineNodeLauncher calls install_prometheus_recorder() and will panic
-    // if a recorder is already set. Reth metrics will need to be exposed via
-    // a /metrics HTTP endpoint for Prometheus to scrape.
-
     setup_tracing_subscriber(&tracer_provider, &logger_provider, &config.service_name);
     install_panic_hook();
 
-    let endpoints_str = log_endpoints.join(", ");
     tracing::info!(
         telemetry.service_name = %config.service_name,
         telemetry.traces_endpoint = %config.traces_endpoint,
-        telemetry.logs_endpoints = %endpoints_str,
+        telemetry.logs_endpoints = %config.logs_endpoint,
         telemetry.metrics_endpoint = %config.metrics_endpoint,
         "OpenTelemetry telemetry initialized - logs, traces, metrics, and Reth metrics will be exported"
     );

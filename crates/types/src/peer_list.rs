@@ -460,7 +460,7 @@ impl Compact for PeerListItemInner {
                 Err(_) => {
                     tracing::warn!(
                         version_u32,
-                        peer = %address.gossip,
+                        peer.address = %address.gossip,
                         "Unknown protocol version in peer record, defaulting to V1"
                     );
                     ProtocolVersion::V1

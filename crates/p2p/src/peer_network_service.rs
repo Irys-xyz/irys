@@ -2,8 +2,9 @@ use crate::wire_types::{GossipResponse, RejectionReason};
 use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
 use eyre::{Report, Result as EyreResult};
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::insert_peer_list_item;
-use irys_database::reth_db::{Database as _, DatabaseError};
+use irys_database::reth_db::DatabaseError;
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
@@ -230,7 +231,7 @@ impl PeerNetworkServiceInner {
 
         let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
         let _ = db
-            .update(|tx| {
+            .update_scoped(|tx| {
                 for (peer_id, peer) in persistable_peers.iter() {
                     insert_peer_list_item(tx, peer_id, peer).map_err(PeerListServiceError::from)?;
                 }
@@ -1149,6 +1150,7 @@ pub(crate) fn spawn_peer_network_service_with_client(
 mod tests {
     use super::*;
     use futures::FutureExt as _;
+    use irys_database::reth_db::Database as _;
     use irys_database::{tables::PeerListItems, walk_all};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;

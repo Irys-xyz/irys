@@ -20,8 +20,10 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
 };
+
+const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct ServiceSenders(pub Arc<ServiceSendersInner>);
@@ -91,7 +93,7 @@ pub struct ServiceReceivers {
     pub chunk_ingress: UnboundedReceiver<Traced<ChunkIngressMessage>>,
     pub chunk_migration: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedReceiver<Traced<MempoolServiceMessage>>,
-    pub vdf_fast_forward: UnboundedReceiver<Traced<VdfStep>>,
+    pub vdf_fast_forward: Receiver<Traced<VdfStep>>,
     pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
@@ -113,7 +115,7 @@ pub struct ServiceSendersInner {
     pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
     pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
-    pub vdf_fast_forward: UnboundedSender<Traced<VdfStep>>,
+    pub vdf_fast_forward: Sender<Traced<VdfStep>>,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -141,7 +143,7 @@ impl ServiceSendersInner {
         let (mempool_sender, mempool_receiver) =
             unbounded_channel::<Traced<MempoolServiceMessage>>();
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
-            unbounded_channel::<Traced<VdfStep>>();
+            channel::<Traced<VdfStep>>(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
         let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
