@@ -449,10 +449,12 @@ impl ValidationService {
                                 // a result, since we never produced one. The
                                 // requeue mirrors the VDF cancel arm's
                                 // "defensive resubmit" pattern.
+                                metrics::record_validation_concurrent_cancel_requeued();
                                 warn!(
                                     block.hash = ?removed.as_ref().map(|(h, _, _, _)| h),
                                     custom.error = %e,
-                                    "Concurrent validation task unexpectedly cancelled, requeuing"
+                                    custom.metric = "validation_concurrent_cancel_requeued",
+                                    "Concurrent validation task unexpectedly cancelled; requeuing - sustained occurrence suggests Tokio runtime distress or external abort source"
                                 );
                                 if let Some((_hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
                                     // Do NOT fire `record_validation_full_duration_ms`

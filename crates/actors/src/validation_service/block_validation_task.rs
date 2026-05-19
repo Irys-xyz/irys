@@ -268,42 +268,24 @@ impl BlockValidationTask {
         // "cancelled". `TaskPanicked` only routes through `InternalFailure`
         // and labels as "panicked".
         //
-        // Exhaustive over every `ValidationError` variant — no `_` wildcard.
-        // The sealed `Invalid` / `InternalFailure` wrappers guarantee that
-        // most variant-vs-bucket pairings are structurally unreachable
-        // (e.g. `TaskPanicked` cannot appear inside `Invalid`), but the
-        // labelling still spells them so any new variant added to
-        // `ValidationError` produces a compile error here until its label
-        // is decided.
+        // Delegates to `ValidationError::metric_label()` (which is the
+        // exhaustive match — adding a new variant there produces a compile
+        // error until its label is decided). The closure collapses the
+        // granular per-stage labels (`node_fault`, `internal_error`,
+        // `invalid`) back to the caller-supplied `default` so the overall
+        // metric's label set in production dashboards is unchanged. The
+        // `cancelled` / `panicked` labels remain distinct because both
+        // have always been overall-metric labels for this closure.
         let label_for = |err: &ValidationError, default: &'static str| -> &'static str {
-            match err {
-                ValidationError::ValidationCancelled { .. } => "cancelled",
-                ValidationError::TaskPanicked { .. } => "panicked",
-                ValidationError::PreValidation(_)
-                | ValidationError::VdfValidationFailed(_)
-                | ValidationError::SeedDataInvalid(_)
-                | ValidationError::ExecutionLayerFailed(_)
-                | ValidationError::ExecutionLayerTransportFailed(_)
-                | ValidationError::RecallRangeInvalid(_)
-                | ValidationError::ShadowTransactionInvalid(_)
-                | ValidationError::ShadowTxGenerationFailed(_)
-                | ValidationError::ShadowTxNodeFault(_)
-                | ValidationError::ExecutionPayloadCacheEvicted { .. }
-                | ValidationError::CommitmentValueInvalid { .. }
-                | ValidationError::CommitmentVersionInvalid { .. }
-                | ValidationError::CommitmentTypeNotAllowed { .. }
-                | ValidationError::CommitmentOrderingFailed(_)
-                | ValidationError::CommitmentSnapshotRejected { .. }
-                | ValidationError::UnpledgePartitionNotOwned { .. }
-                | ValidationError::ParentCommitmentSnapshotMissing { .. }
-                | ValidationError::ParentEpochSnapshotMissing { .. }
-                | ValidationError::ParentEmaSnapshotMissing { .. }
-                | ValidationError::ParentBlockMissing { .. }
-                | ValidationError::EpochCommitmentMismatch { .. }
-                | ValidationError::EpochExtraCommitment { .. }
-                | ValidationError::EpochMissingCommitment { .. }
-                | ValidationError::CommitmentWrongOrder { .. }
-                | ValidationError::Other(_) => default,
+            match err.metric_label() {
+                "cancelled" => "cancelled",
+                "panicked" => "panicked",
+                // `node_fault`, `internal_error`, `invalid` all collapse to
+                // the caller-supplied default so the overall metric keeps its
+                // dashboard-compatible label set (`"invalid"` when wrapped in
+                // `Invalid`, `"internal_error"` when wrapped in
+                // `InternalFailure`).
+                _ => default,
             }
         };
         let result_label = match &final_result {
@@ -492,7 +474,7 @@ impl BlockValidationTask {
                     ValidationError::RecallRangeInvalid(err.to_string()).into()
                 }
             };
-            metrics::record_validation_result("recall_range", result.metric_label());
+            metrics::record_validation_result("recall_range", result.granular_metric_label());
             result
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
@@ -627,7 +609,7 @@ impl BlockValidationTask {
                     .into()
                 }
             };
-            metrics::record_validation_result("poa", result.metric_label());
+            metrics::record_validation_result("poa", result.granular_metric_label());
             result
         };
 
@@ -712,7 +694,14 @@ impl BlockValidationTask {
             match result.as_ref() {
                 Ok(_) => metrics::record_validation_result("shadow_tx", "valid"),
                 Err(err) => {
-                    metrics::record_validation_result("shadow_tx", "invalid");
+                    // Use the variant-specific label so `ShadowTxNodeFault`,
+                    // `ParentCommitmentSnapshotMissing`,
+                    // `ExecutionPayloadCacheEvicted`,
+                    // `ShadowTxGenerationFailed`, etc. don't inflate the
+                    // peer-attributable "invalid" counter. The overall
+                    // metric still maps these back to the dashboard label
+                    // set via `label_for`.
+                    metrics::record_validation_result("shadow_tx", err.metric_label());
                     tracing::error!(
                         custom.error = ?err,
                         "shadow transaction validation failed"
@@ -751,7 +740,7 @@ impl BlockValidationTask {
                             block_hash: self.sealed_block.header().previous_block_hash,
                         }
                         .into();
-                        metrics::record_validation_result("seeds", result.metric_label());
+                        metrics::record_validation_result("seeds", result.granular_metric_label());
                         tracing::error!(
                             block.parent_hash = %self.sealed_block.header().previous_block_hash,
                             "Previous block not found in block tree"
@@ -768,7 +757,7 @@ impl BlockValidationTask {
                 "seeds",
                 started.elapsed().as_secs_f64() * 1000.0,
             );
-            metrics::record_validation_result("seeds", outcome.metric_label());
+            metrics::record_validation_result("seeds", outcome.granular_metric_label());
             outcome
         }
         .instrument(tracing::info_span!(
@@ -805,7 +794,10 @@ impl BlockValidationTask {
                     err.into()
                 }
             };
-            metrics::record_validation_result("commitment_ordering", result.metric_label());
+            metrics::record_validation_result(
+                "commitment_ordering",
+                result.granular_metric_label(),
+            );
             result
         };
 
@@ -845,7 +837,7 @@ impl BlockValidationTask {
                     e.into()
                 }
             };
-            metrics::record_validation_result("data_txs", result.metric_label());
+            metrics::record_validation_result("data_txs", result.granular_metric_label());
             result
         };
 
@@ -949,7 +941,10 @@ impl BlockValidationTask {
                         }
                     }
                 };
-                metrics::record_validation_result("reth_submission", result.metric_label());
+                metrics::record_validation_result(
+                    "reth_submission",
+                    result.granular_metric_label(),
+                );
                 result
             }
             _ => {

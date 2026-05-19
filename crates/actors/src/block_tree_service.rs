@@ -1207,7 +1207,7 @@ pub fn validate_reorg_within_migration_depth(
 /// ValidationResult`, which checks the classifier before wrapping. Direct
 /// construction outside this module is impossible because the inner field is
 /// private. Consumers read the underlying error via `err()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalFailureError(crate::block_validation::ValidationError);
 
 impl InternalFailureError {
@@ -1282,14 +1282,35 @@ pub enum ValidationResult {
 }
 
 impl ValidationResult {
-    /// Label used for the validation-result metric. Distinguishes consensus
-    /// rejections ("invalid") from local/runtime failures ("internal_error")
-    /// so the rejection-rate counter isn't inflated by transient issues.
+    /// Coarse label used for the overall validation-result metric.
+    /// Distinguishes consensus rejections ("invalid") from local/runtime
+    /// failures ("internal_error") so the rejection-rate counter isn't
+    /// inflated by transient issues.
+    ///
+    /// Prefer [`Self::granular_metric_label`] for per-stage call sites so
+    /// `node_fault` / `cancelled` / `panicked` are surfaced separately
+    /// instead of being collapsed into `"invalid"` or `"internal_error"`.
     pub fn metric_label(&self) -> &'static str {
         match self {
             Self::Valid => "valid",
             Self::Invalid(_) => "invalid",
             Self::InternalFailure(_) => "internal_error",
+        }
+    }
+
+    /// Granular per-stage metric label. Surfaces `node_fault` (local-state
+    /// corruption / EL transport failure) and `cancelled` / `panicked`
+    /// separately so dashboards can isolate local-fault rates from
+    /// peer-attributable rejections on each concurrent validation stage.
+    ///
+    /// Delegates to [`crate::block_validation::ValidationError::metric_label`]
+    /// for the failing-variant cases; `Valid` returns `"valid"` to mirror
+    /// [`Self::metric_label`].
+    pub fn granular_metric_label(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid(c) => c.err().metric_label(),
+            Self::InternalFailure(i) => i.err().metric_label(),
         }
     }
 }

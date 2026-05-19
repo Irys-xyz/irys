@@ -27,6 +27,13 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 ///   bad fee values (the fees come from the peer's tx set), so they route
 ///   to consensus rejection. On the producer side they indicate a code bug
 ///   in our own fee calc.
+/// - `SnapshotTreasuryUnderflow` → treasury underflow in a payout helper
+///   whose deduction amount derives from a LOCAL snapshot (expired-ledger
+///   payout or commitment-refund). An underflow means our snapshot
+///   disagrees with the inherited treasury — a node fault, not
+///   peer-attributable. Two honest nodes cannot disagree on treasury
+///   balance, so silent canonical-fork is strictly worse than a loud
+///   restart.
 /// - `Structural` → per-tx structural error (e.g. publish-ledger tx missing
 ///   `perm_fee`, or fee-distribution constructors rejecting peer-supplied
 ///   values). Always peer-attributable → consensus rejection.
@@ -44,6 +51,14 @@ pub enum ShadowTxGenError {
     /// Producer-side: indicates a code bug in our fee calc.
     #[error("treasury arithmetic: {0}")]
     TreasuryArithmetic(String),
+
+    /// Treasury underflow in a payout helper whose amount is derived from a
+    /// local snapshot (expired-ledger payout or commitment-refund).
+    /// Validator-side: node fault — our local snapshot disagrees with the
+    /// inherited treasury balance, which two honest nodes cannot reach.
+    /// Producer-side: code bug or corrupt local state.
+    #[error("snapshot treasury underflow: {0}")]
+    SnapshotTreasuryUnderflow(String),
 
     /// Per-tx structural error (e.g. publish-ledger tx missing perm_fee).
     /// Validator-side: consensus rejection. Producer-side: bad input.
@@ -461,22 +476,18 @@ impl<'a> ShadowTxGenerator<'a> {
         self.treasury_balance
     }
 
-    /// Update treasury balance for expired ledger fee payments.
+    /// Update treasury balance for snapshot-derived payouts.
     ///
-    /// TODO(classification): underflow here is currently classified as
-    /// `TreasuryArithmetic` (→ consensus rejection on the validator side).
-    /// That's the right call for peer-driven fee paths (submit/term/perm
-    /// fee accumulation in `try_process_submit_at_index` /
-    /// `try_process_term_only`), but this helper is also called from the
-    /// expired-ledger and commitment-refund phases, whose amounts derive
-    /// from LOCAL snapshots — there, an underflow is more node-fault-shaped
-    /// (our snapshot disagrees with the inherited treasury). Conservatively
-    /// keeping the consensus classification to avoid restart loops on
-    /// local-state corruption; revisit by threading caller context through
-    /// to distinguish peer-driven vs snapshot-driven underflows.
+    /// All callers of this helper (`try_process_expired_ledger`,
+    /// `try_process_commitment_refunds`) derive `amount` from LOCAL
+    /// snapshots — not from peer-supplied data. Two honest nodes cannot
+    /// disagree on treasury balance, so an underflow here means our
+    /// snapshot disagrees with the inherited treasury: a node fault.
+    /// Classifying as `SnapshotTreasuryUnderflow` routes to a loud
+    /// supervisor restart instead of a silent canonical-fork.
     fn deduct_from_treasury_for_payout(&mut self, amount: U256) -> Result<()> {
         self.treasury_balance = self.treasury_balance.checked_sub(amount).ok_or_else(|| {
-            ShadowTxGenError::TreasuryArithmetic(format!(
+            ShadowTxGenError::SnapshotTreasuryUnderflow(format!(
                 "Treasury balance underflow: cannot pay {} from balance {}",
                 amount, self.treasury_balance
             ))
@@ -1802,6 +1813,10 @@ mod tests {
             (
                 ShadowTxGenError::TreasuryArithmetic("overflow".into()),
                 "treasury arithmetic: overflow",
+            ),
+            (
+                ShadowTxGenError::SnapshotTreasuryUnderflow("cannot pay 10 from balance 5".into()),
+                "snapshot treasury underflow: cannot pay 10 from balance 5",
             ),
             (
                 ShadowTxGenError::Structural("missing perm_fee".into()),

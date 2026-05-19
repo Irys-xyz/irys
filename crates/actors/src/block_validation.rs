@@ -899,6 +899,170 @@ impl ValidationError {
     pub fn is_internal_failure(&self) -> bool {
         self.classify().is_internal_failure()
     }
+
+    /// Most-specific label for per-stage metric recording. Distinguishes
+    /// `node_fault` (local-state corruption / EL transport failure → abort
+    /// + supervisor restart) from `internal_error` (soft-internal: block
+    /// parks in cache for retry) from `invalid` (peer-attributable
+    /// consensus rejection), so dashboards can isolate local-fault rates
+    /// from peer-fault rates.
+    ///
+    /// The overall-result `label_for` closure at the dispatch site in
+    /// `block_validation_task.rs` collapses `node_fault` and
+    /// `internal_error` back to its default (`"invalid"` for
+    /// `Invalid` / `"internal_error"` for `InternalFailure`) so the
+    /// production-dashboard labels for the overall metric do not change.
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below —
+    /// no `_` wildcard. Adding a new variant without labelling it here is
+    /// a compile error by design.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Self::ValidationCancelled { .. } => "cancelled",
+            Self::TaskPanicked { .. } => "panicked",
+            // node-fault variants — distinct from generic "invalid" so
+            // dashboards can isolate local-state corruption from
+            // peer-attributable rejections.
+            Self::ShadowTxNodeFault(_) | Self::ExecutionLayerTransportFailed(_) => "node_fault",
+            // soft-internal — block parks for retry, not a peer fault.
+            Self::ExecutionPayloadCacheEvicted { .. }
+            | Self::ShadowTxGenerationFailed(_)
+            | Self::ParentBlockMissing { .. }
+            | Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentEmaSnapshotMissing { .. } => "internal_error",
+            // consensus rejections — all remaining variants.
+            Self::PreValidation(_)
+            | Self::VdfValidationFailed(_)
+            | Self::SeedDataInvalid(_)
+            | Self::ExecutionLayerFailed(_)
+            | Self::RecallRangeInvalid(_)
+            | Self::ShadowTransactionInvalid(_)
+            | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CommitmentTypeNotAllowed { .. }
+            | Self::CommitmentOrderingFailed(_)
+            | Self::CommitmentSnapshotRejected { .. }
+            | Self::UnpledgePartitionNotOwned { .. }
+            | Self::EpochCommitmentMismatch { .. }
+            | Self::EpochExtraCommitment { .. }
+            | Self::EpochMissingCommitment { .. }
+            | Self::CommitmentWrongOrder { .. }
+            | Self::Other(_) => "invalid",
+        }
+    }
+}
+
+#[cfg(test)]
+mod metric_label_tests {
+    //! Regression tests for the granular per-stage
+    //! [`ValidationError::metric_label`] partitioning. The overall metric
+    //! collapses these back to `"invalid"` / `"internal_error"` via the
+    //! dispatch-site `label_for` closure, but per-stage call sites surface
+    //! the granular labels so dashboards can isolate local-fault rates from
+    //! peer-attributable rejections.
+
+    use super::*;
+    use crate::shadow_tx_generator::ShadowTxGenError;
+
+    /// Each category of `ValidationError` maps to a distinct per-stage
+    /// label. This is the load-bearing test that adding a new variant must
+    /// be classified (the match in `metric_label()` has no `_` wildcard).
+    #[test]
+    fn metric_label_distinguishes_node_fault_from_consensus() {
+        // cancelled — `ValidationCancelled` regardless of sub-reason.
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+        ] {
+            let err = ValidationError::ValidationCancelled { reason };
+            assert_eq!(
+                err.metric_label(),
+                "cancelled",
+                "ValidationCancelled (reason {:?}) must label as 'cancelled'",
+                reason,
+            );
+        }
+
+        // panicked — verifier thread crashed.
+        let err = ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "boom".into(),
+        };
+        assert_eq!(err.metric_label(), "panicked");
+
+        // node_fault — local-state corruption / EL transport failure.
+        let err = ValidationError::ShadowTxNodeFault("db corrupted".into());
+        assert_eq!(err.metric_label(), "node_fault");
+        let err = ValidationError::ExecutionLayerTransportFailed("rpc down".into());
+        assert_eq!(err.metric_label(), "node_fault");
+
+        // internal_error — soft-internal: block parks for retry.
+        let err = ValidationError::ShadowTxGenerationFailed("mempool absent".into());
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentCommitmentSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentEpochSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentEmaSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ExecutionPayloadCacheEvicted {
+            evm_block_hash: Default::default(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+
+        // invalid — consensus-rejection variants (peer-attributable).
+        let err = ValidationError::ShadowTransactionInvalid("bad treasury".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::ExecutionLayerFailed("state root mismatch".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::VdfValidationFailed("step mismatch".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::SeedDataInvalid("bad seed".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::RecallRangeInvalid("out of range".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::Other("misc".into());
+        assert_eq!(err.metric_label(), "invalid");
+    }
+
+    /// Regression coverage for the round-6 + R7 work: the
+    /// `SnapshotTreasuryUnderflow` sub-variant of `ShadowTxGenError` routes
+    /// through `ShadowTxNodeFault`, which must produce the `node_fault`
+    /// per-stage label so dashboards see local-snapshot corruption
+    /// separately from peer-attributable rejections.
+    #[test]
+    fn metric_label_for_snapshot_treasury_underflow_is_node_fault() {
+        // Mirror the routing used inside
+        // `shadow_tx_gen_error_dispatch_tests::classify_shadow_err` so the
+        // assertion stays in lockstep with the production classifier.
+        let err = match ShadowTxGenError::SnapshotTreasuryUnderflow(
+            "cannot pay 10 from balance 5".into(),
+        ) {
+            ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+                ValidationError::ShadowTxNodeFault(format!("snapshot treasury underflow: {s}"))
+            }
+            other => panic!("unexpected ShadowTxGenError variant: {other:?}"),
+        };
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        assert_eq!(
+            err.metric_label(),
+            "node_fault",
+            "SnapshotTreasuryUnderflow must surface as 'node_fault' per-stage label",
+        );
+    }
 }
 
 /// Full pre-validation steps for a block
@@ -1680,15 +1844,12 @@ mod prevalidation_error_classification_tests {
     #[rstest]
     #[case::height_difference(
         ValidationCancelReason::HeightDifference,
-        ExpectedRoundtripShape::Invalid,
+        ExpectedRoundtripShape::Invalid
     )]
-    #[case::channel_closed(
-        ValidationCancelReason::ChannelClosed,
-        ExpectedRoundtripShape::Invalid,
-    )]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed, ExpectedRoundtripShape::Invalid)]
     #[case::parent_missing(
         ValidationCancelReason::ParentMissing,
-        ExpectedRoundtripShape::InternalFailureSoft,
+        ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
         #[case] reason: ValidationCancelReason,
@@ -1699,7 +1860,10 @@ mod prevalidation_error_classification_tests {
         let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
         match (expected, &result) {
             (ExpectedRoundtripShape::Invalid, ValidationResult::Invalid(_)) => {}
-            (ExpectedRoundtripShape::InternalFailureSoft, ValidationResult::InternalFailure(inner)) => {
+            (
+                ExpectedRoundtripShape::InternalFailureSoft,
+                ValidationResult::InternalFailure(inner),
+            ) => {
                 assert!(
                     !inner.is_node_fault(),
                     "{:?} is a soft cancel — must NOT be a node fault",
@@ -2160,6 +2324,9 @@ mod shadow_tx_gen_error_dispatch_tests {
     fn classify_shadow_err(e: ShadowTxGenError) -> ValidationError {
         match e {
             ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
+            ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+                node_fault(format!("snapshot treasury underflow: {s}"))
+            }
             ShadowTxGenError::TreasuryArithmetic(s) => {
                 consensus(format!("treasury arithmetic: {s}"))
             }
@@ -2193,6 +2360,40 @@ mod shadow_tx_gen_error_dispatch_tests {
                 );
             }
             other => panic!("SnapshotInvariant must route to InternalFailure, got {other:?}"),
+        }
+    }
+
+    /// `SnapshotTreasuryUnderflow` → `ShadowTxNodeFault` → node-fault
+    /// `InternalFailure`. The deduction amount in the payout helper is
+    /// derived from a local snapshot (expired-ledger payout or
+    /// commitment-refund); an underflow means our snapshot disagrees with
+    /// the inherited treasury, which two honest nodes cannot reach. Must
+    /// route to node fault (loud restart) — never to consensus rejection
+    /// (silent canonical-fork).
+    #[test]
+    fn snapshot_treasury_underflow_maps_to_node_fault() {
+        let err = classify_shadow_err(ShadowTxGenError::SnapshotTreasuryUnderflow(
+            "cannot pay 10 from balance 5".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        // The wrapping prefix must be present so logs distinguish
+        // snapshot-treasury underflows from other snapshot invariants.
+        assert!(
+            err.to_string().contains("snapshot treasury underflow"),
+            "must carry the snapshot-treasury-underflow prefix for log disambiguation: {err}",
+        );
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "must preserve node-fault classification"
+                );
+            }
+            other => panic!(
+                "SnapshotTreasuryUnderflow must route to InternalFailure(node-fault), got {other:?}",
+            ),
         }
     }
 
@@ -3263,12 +3464,16 @@ async fn generate_expected_shadow_transactions(
     // local data (parent block, snapshots, mempool-resolved txs). The
     // typed `ShadowTxGenError` distinguishes failure classes so each lands
     // on the correct `ValidationResult`:
-    //   - `SnapshotInvariant` → node fault (local state is corrupt).
+    //   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault
+    //     (local state is corrupt; two honest nodes cannot reach this).
     //   - `TreasuryArithmetic` / `Structural` → consensus rejection
     //     (peer's tx set produced bad fee math or out-of-range fee values).
     //   - `Soft` → soft internal (existing retry-plausible fallback).
     let classify_shadow_err = |e: crate::shadow_tx_generator::ShadowTxGenError| match e {
         crate::shadow_tx_generator::ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
+        crate::shadow_tx_generator::ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+            node_fault(format!("snapshot treasury underflow: {s}"))
+        }
         crate::shadow_tx_generator::ShadowTxGenError::TreasuryArithmetic(s) => {
             consensus(format!("treasury arithmetic: {s}"))
         }
