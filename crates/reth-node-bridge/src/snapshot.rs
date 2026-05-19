@@ -51,6 +51,15 @@ const MDBX_NOTFOUND: i32 = -30798;
 /// Returns the highest fully-processed Reth block number read from the source
 /// `StageCheckpoints` table at copy time. `None` if the source has not yet
 /// completed any blocks (e.g., a freshly initialized node).
+///
+/// # Consistency caveat (running node)
+///
+/// `db/` is copied via `mdbx_env_copy(2)` (MVCC-consistent at its own instant)
+/// while `static_files/` is a plain recursive file copy taken slightly later.
+/// The two are NOT a single atomic snapshot: against a *running* node that
+/// advances between the two copies, the static-file segments can be ahead of
+/// the mdbx tip. Export against a stopped node for a guaranteed-consistent
+/// pair; the running-node path trades that guarantee for availability.
 pub fn snapshot_reth_state(
     src_reth_dir: &Path,
     dest_reth_dir: &Path,

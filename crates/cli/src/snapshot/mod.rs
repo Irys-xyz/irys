@@ -74,6 +74,14 @@ mod round_trip_tests {
             .update(|tx| insert_peer_list_item(tx, &peer, &item))
             .expect("insert peer outer")
             .expect("insert peer inner");
+        // Real nodes stamp this at startup; export now hard-errors on its
+        // absence, so this fixture must stamp it too.
+        irys_db
+            .update(|tx| {
+                irys_database::set_database_schema_version(tx, irys_types::DatabaseVersion::CURRENT)
+            })
+            .expect("stamp schema outer")
+            .expect("stamp schema inner");
         drop(irys_db);
 
         std::fs::write(data_dir.join(".irys_genesis.json"), b"{}").expect("write genesis");
@@ -127,7 +135,6 @@ mod round_trip_tests {
             output: archive_path.clone(),
             include_caches: false,
             chain_id: 7777,
-            irys_schema_version: 3,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
                 throttle_mvcc: true,
@@ -198,7 +205,6 @@ mod round_trip_tests {
             output: archive_path.clone(),
             include_caches: false,
             chain_id,
-            irys_schema_version: 3,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
                 throttle_mvcc: true,
@@ -406,7 +412,6 @@ mod round_trip_tests {
             output: archive_path.clone(),
             include_caches: false,
             chain_id: 11,
-            irys_schema_version: 3,
             copy_flags: irys_database::snapshot::CopyFlags {
                 compact: true,
                 throttle_mvcc: true,

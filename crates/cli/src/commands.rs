@@ -77,7 +77,7 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
     let node_config: NodeConfig = load_config()?;
     let config = Config::new_with_random_peer_id(node_config.clone());
     let chain_id = config.consensus.chain_id;
-    let irys_schema_version = irys_types::DatabaseVersion::CURRENT as u32;
+    let irys_schema_version = u32::from(irys_types::DatabaseVersion::CURRENT);
 
     match mode {
         SnapshotMode::Export {
@@ -94,7 +94,6 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
                 output,
                 include_caches,
                 chain_id,
-                irys_schema_version,
                 copy_flags: irys_database::snapshot::CopyFlags {
                     compact: !no_compact,
                     throttle_mvcc: !no_throttle_mvcc,

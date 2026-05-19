@@ -4,6 +4,7 @@ use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::tables::IrysBlockHeaders;
+use irys_reth_node_bridge::snapshot::RETH_DB_DIR;
 use reth_node_core::version::default_client_version;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -11,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::archive;
 use super::manifest::{MANIFEST_FILENAME, ManifestFile, SNAPSHOT_FORMAT_VERSION, SnapshotManifest};
-use super::{IRYS_CONSENSUS_SUBDIR, STORAGE_MODULES_SUBDIR, SUBMODULES_FILE};
+use super::{IRYS_CONSENSUS_SUBDIR, RETH_SUBDIR, STORAGE_MODULES_SUBDIR, SUBMODULES_FILE};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportOpts {
@@ -44,6 +45,11 @@ pub(crate) struct ImportOpts {
 pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     let manifest = archive::read_manifest_from_archive(&opts.input)?;
     verify_compatibility(&manifest, &opts)?;
+    // Validate before any extraction. `read_manifest_from_archive` rejects
+    // duplicate root manifests, so this preflight manifest is byte-identical
+    // to the one `unpack()` leaves on disk — validating its paths here
+    // protects every later `Path::join` on `extracted.files`.
+    validate_manifest_paths(&manifest.files)?;
     verify_data_dir_state(&opts)?;
 
     let staging =
@@ -54,9 +60,16 @@ pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     let allowed_roots = manifest_root_entries(&extracted.files);
     verify_no_extra_entries(staging.path(), &allowed_roots)?;
     sanity_check_consensus_db(staging.path())?;
+    sanity_check_reth_db(staging.path())?;
 
     std::fs::create_dir_all(&opts.data_dir)
         .with_context(|| format!("creating data dir {}", opts.data_dir.display()))?;
+    // NOTE: under `--force` the purge-then-place sequence is not atomic — a
+    // mid-import failure (ENOSPC, cross-device) leaves the target partly
+    // purged and partly populated. An atomic sibling-staging swap is a
+    // multi-day structural change tracked as out-of-scope finding #3 in
+    // claude/2026-05-14-002; operators are warned to keep a backup before
+    // `--force` import.
     if opts.force {
         purge_node_local_state(&opts.data_dir, &allowed_roots)?;
     }
@@ -106,6 +119,38 @@ fn sanity_check_consensus_db(root: &Path) -> eyre::Result<()> {
         );
     }
     drop(tx);
+    drop(env);
+    Ok(())
+}
+
+/// The staged Reth payload must contain an openable execution DB. Without this
+/// a repacked archive that drops `reth/` (or ships a corrupt-but-checksummed
+/// Reth DB) would import "successfully" and pair the snapshot's consensus
+/// state with the importing node's stale execution state. Run against staging
+/// BEFORE placement, mirroring `sanity_check_consensus_db`. A valid archive
+/// therefore always declares `reth/` in its manifest, so `--force` purges any
+/// stale `reth/` via `purge_node_local_state`.
+fn sanity_check_reth_db(root: &Path) -> eyre::Result<()> {
+    let reth_db_dir = root.join(RETH_SUBDIR).join(RETH_DB_DIR);
+    if !reth_db_dir.join("mdbx.dat").is_file() {
+        eyre::bail!(
+            "snapshot Reth DB is missing mdbx.dat at {}",
+            reth_db_dir.display()
+        );
+    }
+    let env = DatabaseEnv::open(
+        &reth_db_dir,
+        DatabaseEnvKind::RO,
+        DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )
+    .with_context(|| {
+        format!(
+            "sanity opening snapshot Reth DB at {}",
+            reth_db_dir.display()
+        )
+    })?;
     drop(env);
     Ok(())
 }
@@ -224,29 +269,14 @@ fn verify_data_dir_state(opts: &ImportOpts) -> eyre::Result<()> {
 }
 
 fn verify_checksums(staging: &std::path::Path, expected: &[ManifestFile]) -> eyre::Result<()> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-
-    let mut buf = vec![0_u8; 64 * 1024];
     for entry in expected {
         let path = staging.join(&entry.path);
-        let mut reader = std::io::BufReader::new(
+        let reader = std::io::BufReader::new(
             std::fs::File::open(&path)
                 .with_context(|| format!("opening extracted file {}", path.display()))?,
         );
-        let mut hasher = Sha256::new();
-        let mut total: u64 = 0;
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            total = total
-                .checked_add(u64::try_from(n).expect("read len fits in u64"))
-                .ok_or_else(|| eyre::eyre!("file size overflow on {}", path.display()))?;
-        }
-        let actual = hex::encode(hasher.finalize());
+        let (total, actual) =
+            archive::hash_reader(reader).with_context(|| format!("hashing {}", path.display()))?;
         if actual != entry.sha256_hex {
             eyre::bail!(
                 "checksum mismatch for {}: manifest={}, actual={}",
@@ -267,6 +297,57 @@ fn verify_checksums(staging: &std::path::Path, expected: &[ManifestFile]) -> eyr
     Ok(())
 }
 
+/// Reject any manifest entry whose `path` is unsafe to join under the staging
+/// or target directory. Runs before any extraction so a crafted manifest can
+/// never reach `Path::join` in `verify_checksums` or `place_manifest_files`.
+///
+/// A path is accepted only if it is non-empty, NUL-free, relative, built purely
+/// from `Normal` components, and already in canonical form (the exact string of
+/// those components joined by single `/`). This rejects absolute paths, Windows
+/// prefixes, `.`/`..` traversal, and separator aliasing (`foo//bar`, `foo/`,
+/// `./foo`) that could otherwise alias on disk or escape the target.
+fn validate_manifest_paths(files: &[ManifestFile]) -> eyre::Result<()> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for entry in files {
+        let raw = entry.path.as_str();
+        if raw.is_empty() {
+            eyre::bail!("manifest contains an empty file path");
+        }
+        if raw.contains('\0') {
+            eyre::bail!("manifest path {raw:?} contains a NUL byte");
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for comp in Path::new(raw).components() {
+            match comp {
+                Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
+                Component::RootDir
+                | Component::Prefix(_)
+                | Component::ParentDir
+                | Component::CurDir => {
+                    eyre::bail!(
+                        "manifest path {raw:?} is not a plain relative path \
+                         (absolute, prefix, or `.`/`..` components are rejected)"
+                    );
+                }
+            }
+        }
+        if parts.is_empty() {
+            eyre::bail!("manifest path {raw:?} has no usable path components");
+        }
+        let canonical = parts.join("/");
+        if canonical != raw {
+            eyre::bail!(
+                "manifest path {raw:?} is not in canonical form (expected {canonical:?}); \
+                 separator aliasing is rejected"
+            );
+        }
+        if !seen.insert(canonical) {
+            eyre::bail!("manifest declares duplicate path {raw:?}");
+        }
+    }
+    Ok(())
+}
+
 fn verify_compatibility(manifest: &SnapshotManifest, opts: &ImportOpts) -> eyre::Result<()> {
     if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
         eyre::bail!(
@@ -280,6 +361,17 @@ fn verify_compatibility(manifest: &SnapshotManifest, opts: &ImportOpts) -> eyre:
             "snapshot chain_id {} does not match local chain_id {}",
             manifest.chain_id,
             opts.expected_chain_id
+        );
+    }
+    // A schema newer than this binary understands is never importable, even
+    // with --force: the binary cannot run forward-incompatible state. --force
+    // only relaxes the older-than-CURRENT case (migrations run on first boot).
+    if manifest.irys_schema_version > opts.expected_irys_schema_version {
+        eyre::bail!(
+            "snapshot irys_schema_version {} is newer than this binary supports ({}); \
+             --force cannot override a forward-incompatible schema",
+            manifest.irys_schema_version,
+            opts.expected_irys_schema_version
         );
     }
     if manifest.irys_schema_version != opts.expected_irys_schema_version && !opts.force {
@@ -300,7 +392,16 @@ mod tests {
     use irys_database::tables::IrysTables;
     use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
+    use proptest::prelude::*;
     use rstest::rstest;
+
+    fn mf(path: &str) -> ManifestFile {
+        ManifestFile {
+            path: path.to_owned(),
+            size_bytes: 0,
+            sha256_hex: String::new(),
+        }
+    }
 
     #[derive(Debug, Clone, Copy)]
     enum BadConsensus {
@@ -346,6 +447,23 @@ mod tests {
             err.to_string().contains(expected_msg),
             "expected `{expected_msg}` in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn sanity_check_reth_db_rejects_missing_mdbx() {
+        let dir = TempDirBuilder::new().build();
+        let err = sanity_check_reth_db(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("missing mdbx.dat"), "got: {err}");
+    }
+
+    #[test]
+    fn sanity_check_reth_db_rejects_corrupt_mdbx() {
+        let dir = TempDirBuilder::new().build();
+        let reth_db = dir.path().join(RETH_SUBDIR).join(RETH_DB_DIR);
+        std::fs::create_dir_all(&reth_db).expect("mk reth db");
+        std::fs::write(reth_db.join("mdbx.dat"), b"not-a-real-mdbx").expect("write garbage");
+        let err = sanity_check_reth_db(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("sanity opening"), "got: {err}");
     }
 
     fn make_archive(manifest: &SnapshotManifest) -> (tempfile::TempDir, PathBuf) {
@@ -418,5 +536,84 @@ mod tests {
         };
         let err = run_import(opts).unwrap_err();
         assert!(err.to_string().contains("schema_version"), "got: {err}");
+    }
+
+    #[rstest]
+    #[case::empty("")]
+    #[case::nul("foo\u{0}bar")]
+    #[case::absolute("/etc/passwd")]
+    #[case::parent("../escape")]
+    #[case::nested_parent("reth/../../escape")]
+    #[case::curdir("./foo")]
+    #[case::trailing_slash("foo/")]
+    #[case::double_slash("foo//bar")]
+    fn validate_manifest_paths_rejects_unsafe(#[case] path: &str) {
+        assert!(
+            validate_manifest_paths(&[mf(path)]).is_err(),
+            "unsafe path {path:?} must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_manifest_paths_rejects_duplicates() {
+        let err =
+            validate_manifest_paths(&[mf("reth/db/mdbx.dat"), mf("reth/db/mdbx.dat")]).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_manifest_paths_accepts_canonical_relative() {
+        validate_manifest_paths(&[
+            mf("irys_consensus_data/mdbx.dat"),
+            mf("reth/db/mdbx.dat"),
+            mf("reth/static_files/headers.jf"),
+            mf(".irys_genesis.json"),
+        ])
+        .expect("canonical relative paths are accepted");
+    }
+
+    proptest! {
+        #[test]
+        fn validate_manifest_paths_accepts_only_canonical(
+            segs in proptest::collection::vec("[a-z0-9_]{1,8}", 1..5)
+        ) {
+            let path = segs.join("/");
+            prop_assert!(
+                validate_manifest_paths(&[mf(&path)]).is_ok(),
+                "canonical relative path {path:?} should pass"
+            );
+            for bad in [
+                format!("/{path}"),
+                format!("../{path}"),
+                format!("./{path}"),
+                format!("{path}/"),
+                format!("{path}//x"),
+            ] {
+                prop_assert!(
+                    validate_manifest_paths(&[mf(&bad)]).is_err(),
+                    "non-canonical/escaping path {bad:?} should be rejected"
+                );
+            }
+        }
+    }
+
+    /// Fix #3: a schema strictly newer than this binary supports is rejected
+    /// even with `--force` (forward-incompatible state can never be run).
+    #[test]
+    fn rejects_schema_newer_than_current_even_with_force() {
+        let manifest = manifest_with(1, 4, SNAPSHOT_FORMAT_VERSION);
+        let (_dir, archive_path) = make_archive(&manifest);
+        let opts = ImportOpts {
+            input: archive_path,
+            data_dir: PathBuf::from("/tmp/unused"),
+            force: true,
+            expected_chain_id: 1,
+            expected_irys_schema_version: 3,
+        };
+        let err = run_import(opts).unwrap_err();
+        assert!(
+            err.to_string().contains("newer than this binary supports"),
+            "got: {err}"
+        );
     }
 }

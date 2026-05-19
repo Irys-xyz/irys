@@ -24,9 +24,6 @@ pub(crate) struct ExportOpts {
     pub output: PathBuf,
     pub include_caches: bool,
     pub chain_id: u64,
-    /// Schema version of the binary running this export. Used as a fallback
-    /// when the source DB has no `Metadata::DBSchemaVersion` row.
-    pub irys_schema_version: u32,
     pub copy_flags: CopyFlags,
 }
 
@@ -64,7 +61,9 @@ pub(crate) fn run_export(opts: ExportOpts) -> eyre::Result<()> {
 
 /// Open the source consensus DB read-only, snapshot it into staging, then
 /// strip node-local tables from the copy. Returns the source's schema version
-/// (falling back to `opts.irys_schema_version` if missing) and the tip height.
+/// and the tip height. A source DB with no schema-version stamp is a hard
+/// error: stamping the archive with this binary's version would let the
+/// importer's schema gate pass for un-migrated state.
 fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u32, Option<u64>)> {
     let src_path = opts.data_dir.join(IRYS_CONSENSUS_SUBDIR);
     if !src_path.is_dir() {
@@ -79,7 +78,13 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
         let mut tx = src_db.tx().context("begin source consensus RO tx")?;
         let schema = database_schema_version(&mut tx)
             .context("reading source schema version")?
-            .unwrap_or(opts.irys_schema_version);
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "source consensus DB at {} has no schema-version stamp; start the \
+                     node once so startup migrations write it, then re-run the export",
+                    src_path.display()
+                )
+            })?;
         let tip = block_index_latest_height(&tx).context("reading source tip height")?;
 
         let dest = staging.join(IRYS_CONSENSUS_SUBDIR);
@@ -216,6 +221,14 @@ mod tests {
         .expect("insert peers")
         .expect("insert peers ok");
 
+        // Real nodes stamp this at startup via `ensure_db_version_compatible`;
+        // export now hard-errors on its absence, so fixtures must stamp it too.
+        env.update(|tx| {
+            irys_database::set_database_schema_version(tx, irys_types::DatabaseVersion::CURRENT)
+        })
+        .expect("stamp schema outer")
+        .expect("stamp schema inner");
+
         block.block_hash
     }
 
@@ -299,7 +312,6 @@ mod tests {
             output: archive_path.clone(),
             include_caches: false,
             chain_id: 12345,
-            irys_schema_version: 3,
             copy_flags: CopyFlags {
                 compact: true,
                 throttle_mvcc: true,
@@ -366,10 +378,40 @@ mod tests {
             output: out_dir.path().join("snap.tar.zst"),
             include_caches: false,
             chain_id: 1,
-            irys_schema_version: 3,
             copy_flags: CopyFlags::default(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("does not exist"), "got: {err}");
+    }
+
+    /// Fix #4: a source consensus DB with no `DBSchemaVersion` stamp must abort
+    /// the export rather than silently label the archive with this binary's
+    /// version (which would defeat the importer's schema gate).
+    #[test]
+    fn export_fails_when_source_db_has_no_schema_version() {
+        let dir = TempDirBuilder::new().build();
+        let data_dir = dir.path().to_path_buf();
+        let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
+        let db = open_or_create_db(
+            &irys_path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("testing args"),
+        )
+        .expect("open irys db");
+        drop(db);
+
+        let out_dir = TempDirBuilder::new().build();
+        let err = run_export(ExportOpts {
+            data_dir,
+            output: out_dir.path().join("snap.tar.zst"),
+            include_caches: false,
+            chain_id: 1,
+            copy_flags: CopyFlags::default(),
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no schema-version stamp"),
+            "got: {err}"
+        );
     }
 }

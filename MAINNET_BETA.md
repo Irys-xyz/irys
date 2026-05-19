@@ -189,10 +189,10 @@ A full node that tracks the current network state without participating in minin
 # Snapshots
 A snapshot is a portable, content-addressed archive of an Irys node's chain state. It bundles the Irys consensus DB, the Reth execution DB, the Reth `static_files/`, the block index, and the genesis files into a single `.tar.zst` archive. A lagging node can be brought up to the snapshot's height without going through P2P sync.
 
-Snapshots intentionally exclude node-identity material (mining key, peer list, JWT, discovery secret) and storage-module packing (chunks are XOR-packed with the source miner's address — non-portable). The importing node must supply its own `config.toml`, and partitions will be re-packed by the node on first boot.
+Snapshots intentionally exclude node-identity material (mining key, peer list, JWT, discovery secret) and storage-module packing (chunks are XOR-packed with the source miner's address — non-portable). The importing node must supply its own `config.toml` and `irys_submodules.toml`; because packed chunks are bound to the source miner's address, the importing node packs its own storage modules from its `irys_submodules.toml` on first boot rather than restoring the source node's modules.
 
 ## Exporting a snapshot
-The node should be stopped before exporting against its data directory. The tool can also run against a running node thanks to MDBX's MVCC, but a stopped node guarantees a clean tip.
+The node should be stopped before exporting against its data directory. The tool can also run against a running node thanks to MDBX's MVCC, but a stopped node guarantees a clean tip and a consistent Reth `db/`↔`static_files/` pair — against a running node those two are copied at slightly different instants and can skew.
 
 ```sh
 irys-cli snapshot export \
@@ -216,9 +216,9 @@ irys-cli snapshot import \
   --data-dir /var/lib/irys/.irys
 ```
 
-The import flow validates the archive's `format_version` and `chain_id` against the binary, verifies SHA-256 checksums on every file, places state into `data-dir/`, then performs a sanity open of the imported consensus DB. A mismatched `irys_schema_version` requires `--force` to override.
+The import flow validates the archive's `format_version`, `chain_id`, and `irys_schema_version`, refuses an archive containing more than one root manifest, verifies SHA-256 checksums on every declared file, sanity-opens both the staged consensus and Reth DBs before touching the target, then places state into `data-dir/`. An older `irys_schema_version` requires `--force` (migrations run on first boot); a schema newer than this binary is never importable, even with `--force`.
 
-After import, populate `config.toml` with a fresh mining key and start the node normally. Storage modules will be re-packed on first boot.
+After import, populate `config.toml` with a fresh mining key, ensure `irys_submodules.toml` lists your storage drives, and start the node normally. On first boot the node packs its own storage modules from that configuration (the source node's packed chunks are not portable).
 
 ## Snapshot contents
 | Layer | Included | Notes |

@@ -47,10 +47,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ManifestFile>) -> eyre::Result<()
     Ok(())
 }
 
-fn hash_file(path: &Path) -> eyre::Result<(u64, String)> {
-    let mut reader = BufReader::new(
-        File::open(path).with_context(|| format!("opening {} for hashing", path.display()))?,
-    );
+/// Stream `reader` through SHA-256, returning `(byte_count, lowercase_hex_digest)`.
+/// Shared by export-side manifest building and import-side checksum verification
+/// so both sides hash bytes identically.
+pub(crate) fn hash_reader<R: std::io::Read>(mut reader: R) -> eyre::Result<(u64, String)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0_u8; HASH_BUFFER_BYTES];
     let mut total: u64 = 0;
@@ -62,9 +62,16 @@ fn hash_file(path: &Path) -> eyre::Result<(u64, String)> {
         hasher.update(&buf[..n]);
         total = total
             .checked_add(u64::try_from(n).expect("read len fits in u64"))
-            .ok_or_else(|| eyre::eyre!("file size overflow while hashing {}", path.display()))?;
+            .ok_or_else(|| eyre::eyre!("file size overflow while hashing"))?;
     }
     Ok((total, hex::encode(hasher.finalize())))
+}
+
+fn hash_file(path: &Path) -> eyre::Result<(u64, String)> {
+    let reader = BufReader::new(
+        File::open(path).with_context(|| format!("opening {} for hashing", path.display()))?,
+    );
+    hash_reader(reader).with_context(|| format!("hashing {}", path.display()))
 }
 
 /// Pack `staging_dir` (which must already contain `manifest.json`) into a
@@ -115,27 +122,46 @@ pub(crate) fn read_manifest_from_dir(dir: &Path) -> eyre::Result<SnapshotManifes
 /// Stream just the manifest entry out of an archive without extracting other files.
 /// Useful for verifying compatibility before committing to a full extraction.
 ///
-/// Only matches the root-level manifest (`./manifest.json` or `manifest.json`).
-/// A crafted archive cannot smuggle a decoy manifest under a nested path —
-/// the import preflight and `unpack()` must agree on the same manifest entry.
+/// Walks every entry and accepts exactly one root-level manifest
+/// (`./manifest.json` or `manifest.json`):
+/// * Nested manifests (`foo/manifest.json`) are ignored — a crafted archive
+///   cannot smuggle a decoy under a nested path.
+/// * Two or more root manifests are rejected outright. `tar::Archive::unpack`
+///   overwrites by default (last entry wins on disk) while a first-match read
+///   would see the first entry, so a duplicate could present one manifest for
+///   the preflight compatibility gate and a different one for placement. The
+///   only way preflight and `unpack()` provably agree is to refuse archives
+///   that contain more than one root manifest.
 pub(crate) fn read_manifest_from_archive(archive: &Path) -> eyre::Result<SnapshotManifest> {
     let f =
         File::open(archive).with_context(|| format!("opening snapshot {}", archive.display()))?;
     let decoder = zstd::Decoder::new(BufReader::new(f)).context("initializing zstd decoder")?;
     let mut tar = tar::Archive::new(decoder);
+    let mut manifest_json: Option<String> = None;
     for entry in tar.entries()? {
         let mut entry = entry?;
         if !is_root_manifest_path(&entry.path()?) {
             continue;
         }
+        if manifest_json.is_some() {
+            eyre::bail!(
+                "archive {} contains more than one root {MANIFEST_FILENAME}; refusing to \
+                 import (a duplicate manifest can present one manifest for the preflight \
+                 compatibility check and another for file placement)",
+                archive.display()
+            );
+        }
         let mut buf = String::new();
         entry.read_to_string(&mut buf)?;
-        return serde_json::from_str(&buf).context("parsing manifest from archive");
+        manifest_json = Some(buf);
     }
-    eyre::bail!(
-        "{MANIFEST_FILENAME} not found at archive root in {}",
-        archive.display()
-    )
+    let buf = manifest_json.ok_or_else(|| {
+        eyre::eyre!(
+            "{MANIFEST_FILENAME} not found at archive root in {}",
+            archive.display()
+        )
+    })?;
+    serde_json::from_str(&buf).context("parsing manifest from archive")
 }
 
 /// Accept only the archive's root manifest: bare `manifest.json` or `./manifest.json`.
@@ -347,5 +373,48 @@ mod tests {
                 "nested path {nested:?} must not be accepted as root manifest"
             );
         }
+    }
+
+    /// A crafted archive with two root `manifest.json` entries lets the first
+    /// (read by the preflight compatibility gate) and the last (the one
+    /// `tar::unpack` leaves on disk) disagree. `read_manifest_from_archive`
+    /// must reject it outright rather than return either.
+    #[test]
+    fn read_manifest_archive_rejects_duplicate_root_manifests() {
+        fn manifest(chain_id: u64) -> SnapshotManifest {
+            SnapshotManifest {
+                format_version: SNAPSHOT_FORMAT_VERSION,
+                chain_id,
+                irys_schema_version: 3,
+                irys_tip_height: None,
+                reth_tip_height: None,
+                includes_caches: false,
+                created_at_unix_secs: 0,
+                created_by: "test".to_owned(),
+                files: vec![],
+            }
+        }
+
+        let archive_dir = TempDirBuilder::new().build();
+        let archive_path = archive_dir.path().join("snap.tar.zst");
+        let f = File::create(&archive_path).unwrap();
+        let encoder = zstd::Encoder::new(BufWriter::new(f), ZSTD_COMPRESSION_LEVEL).unwrap();
+        let mut builder = tar::Builder::new(encoder);
+        for chain_id in [1_u64, 9999_u64] {
+            let bytes = serde_json::to_vec(&manifest(chain_id)).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(u64::try_from(bytes.len()).expect("len fits in u64"));
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, MANIFEST_FILENAME, &bytes[..])
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let err = read_manifest_from_archive(&archive_path).unwrap_err();
+        assert!(
+            err.to_string().contains("more than one root"),
+            "expected duplicate-manifest rejection, got: {err}"
+        );
     }
 }
