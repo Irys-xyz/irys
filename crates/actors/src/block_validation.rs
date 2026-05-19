@@ -363,9 +363,10 @@ impl PreValidationError {
     }
 
     /// Stable, bounded-cardinality label for the
-    /// `irys.block.pre_validation_failed_total{reason}` counter.  Each variant
-    /// maps to a short snake_case tag so prometheus cardinality is capped at
-    /// the enum size.
+    /// `irys.block.pre_validation_failed_total{reason}` counter (and used by
+    /// [`ValidationError::metric_reason`] when delegating from the
+    /// pre-validation variant).  Each variant maps to a short snake_case tag
+    /// so prometheus cardinality is capped at the enum size.
     pub fn metric_reason(&self) -> &'static str {
         match self {
             Self::BlockBoundsLookupError(_) => "block_bounds_lookup",
@@ -578,10 +579,13 @@ pub enum ValidationError {
 
 impl ValidationError {
     /// Stable, bounded-cardinality label for the
-    /// `irys.block.pre_validation_failed_total{reason}` counter.  Delegates to
-    /// [`PreValidationError::metric_reason`] for the pre-validation variant
-    /// (the case the counter is named for); other variants get a coarse tag
-    /// matching the variant name.
+    /// `irys.block.pre_validation_failed_total{reason}` /
+    /// `irys.block.validation_failed_total{reason}` counters.  The caller
+    /// chooses which counter to increment based on
+    /// [`ValidationError::is_pre_validation`]; this method only returns the
+    /// tag.  Delegates to [`PreValidationError::metric_reason`] for the
+    /// pre-validation variant; other variants get a coarse tag matching the
+    /// variant name.
     pub fn metric_reason(&self) -> &'static str {
         match self {
             Self::PreValidation(inner) => inner.metric_reason(),
@@ -611,7 +615,8 @@ impl ValidationError {
     }
 
     /// Returns true for the pre-validation variant so callers can route to
-    /// the pre-validation-specific counter without re-matching.
+    /// `irys.block.pre_validation_failed_total` vs.
+    /// `irys.block.validation_failed_total` without re-matching the enum.
     pub fn is_pre_validation(&self) -> bool {
         matches!(self, Self::PreValidation(_))
     }
