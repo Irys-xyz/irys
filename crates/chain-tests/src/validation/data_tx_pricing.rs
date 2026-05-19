@@ -134,16 +134,23 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
-    // After the `761fb22f6` map_err removal in `shadow_tx_task`, typed
-    // PreValidation errors propagate cleanly instead of being stringified
-    // as the catch-all `ShadowTransactionInvalid`. The fee mismatch surfaces
-    // here as the typed `PreValidation(InsufficientPermFee)`.
+    // Two paths can surface the insufficient perm_fee, both valid consensus
+    // rejections of the same defect:
+    //   1. `data_txs_are_valid` → typed `PreValidation(InsufficientPermFee)`.
+    //   2. `shadow_tx_generator::ShadowTxGenerator::new` →
+    //      `PublishFeeCharges::new` rejects the underfunded perm_fee →
+    //      classified as `ShadowTxGenError::Structural` →
+    //      `ShadowTransactionInvalid`.
+    // Both stages run concurrently and either may win the merge race;
+    // accept either shape so the test pins the consensus rejection rather
+    // than an incidental stage-ordering tiebreak.
     assert_validation_error(
         outcome,
         |e| {
             matches!(
                 e,
                 ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+                    | ValidationError::ShadowTransactionInvalid(_)
             )
         },
         "block with insufficient perm_fee should be rejected",
@@ -629,8 +636,12 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .await?
         .unwrap();
 
-    // Validate by sending block directly to the block tree
-    // Expect the block to be rejected for insufficient perm_fee during prevalidation
+    // Validate by sending block directly to the block tree.
+    // Expect the block to be rejected for insufficient perm_fee — either via
+    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)`) or via
+    // `ShadowTxGenerator::new` (`ShadowTransactionInvalid` from the typed
+    // `Structural` classification of `PublishFeeCharges::new`'s rejection).
+    // Both are valid consensus rejections; accept either.
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, promote_block.clone(), false).await?;
     assert_validation_error(
@@ -639,6 +650,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
             matches!(
                 e,
                 ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+                    | ValidationError::ShadowTransactionInvalid(_)
             )
         },
         "block with insufficient perm_fee should be rejected",
