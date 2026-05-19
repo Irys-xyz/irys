@@ -464,6 +464,59 @@ mod tests {
         );
     }
 
+    /// Happy path: genesis-style block (`prev = None`, `prev_total = 0`)
+    /// with non-zero `total`.  Range is `[0, total - 1]`.
+    #[test_log::test(tokio::test)]
+    async fn compute_submit_range_genesis_returns_zero_anchored_range() -> eyre::Result<()> {
+        let block = make_signed_header(
+            /* height */ 0,
+            H256::zero(),
+            /* cumulative_diff */ 0,
+            /* submit_total_chunks */ 10,
+            vec![],
+        );
+        let range = compute_submit_range(&block, None)?
+            .ok_or_else(|| eyre::eyre!("expected Some(range) for non-empty genesis"))?;
+        assert_eq!(u64::from(range.start()), 0);
+        assert_eq!(u64::from(range.end()), 9);
+        Ok(())
+    }
+
+    /// Happy path: intermediate block with `total > prev_total`.  Range is
+    /// `[prev_total, total - 1]`.
+    #[test_log::test(tokio::test)]
+    async fn compute_submit_range_intermediate_returns_delta_range() -> eyre::Result<()> {
+        let prev = make_signed_header(0, H256::zero(), 0, 100, vec![]);
+        let block = make_signed_header(1, prev.block_hash, 1, 250, vec![]);
+        let range = compute_submit_range(&block, Some(&prev))?
+            .ok_or_else(|| eyre::eyre!("expected Some(range) for non-zero delta"))?;
+        assert_eq!(u64::from(range.start()), 100);
+        assert_eq!(u64::from(range.end()), 249);
+        Ok(())
+    }
+
+    /// Zero-delta: `total == prev_total` (no new Submit chunks in this
+    /// block).  Returns `Ok(None)` — caller treats this as "tx not
+    /// contributing here".
+    #[test_log::test(tokio::test)]
+    async fn compute_submit_range_zero_delta_returns_none() -> eyre::Result<()> {
+        let prev = make_signed_header(0, H256::zero(), 0, 42, vec![]);
+        let block = make_signed_header(1, prev.block_hash, 1, 42, vec![]);
+        assert!(compute_submit_range(&block, Some(&prev))?.is_none());
+        Ok(())
+    }
+
+    /// Zero-zero edge: both `total == 0` and `prev_total == 0` — the
+    /// regression check at the top of `compute_submit_range` must let this
+    /// through to the `total == prev_total` arm rather than erroring.
+    #[test_log::test(tokio::test)]
+    async fn compute_submit_range_zero_zero_returns_none() -> eyre::Result<()> {
+        let prev = make_signed_header(0, H256::zero(), 0, 0, vec![]);
+        let block = make_signed_header(1, prev.block_hash, 1, 0, vec![]);
+        assert!(compute_submit_range(&block, Some(&prev))?.is_none());
+        Ok(())
+    }
+
     #[test_log::test(tokio::test)]
     async fn pre_migration_tx_returns_range_via_block_tree() -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;
