@@ -137,8 +137,8 @@ fn lookup_via_block_tree(
             // Same invariant as the migrated path: a non-genesis canonical
             // block's parent must be reachable.  None from both tree and DB
             // would silently degrade the range; treat it as corruption.
-            let from_db = db
-                .view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??;
+            let from_db =
+                db.view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??;
             Some(from_db.ok_or_else(|| {
                 eyre::eyre!(
                     "block header storage inconsistent: block {} at height {} references prev {} which is missing from both block_tree and IrysBlockHeaders",
@@ -539,4 +539,32 @@ mod tests {
         Ok(())
     }
 
+    /// `max_height` below the first cached canonical height returns
+    /// `Ok(None)` — the `rposition` short-circuit handles the case where the
+    /// canonical chain cache has rolled past the requested height (e.g. tip
+    /// is thousands of blocks ahead, cache holds only the last
+    /// `block_tree_depth`).  Guards against a future refactor accidentally
+    /// indexing into an out-of-range slice.
+    #[test_log::test(tokio::test)]
+    async fn pre_migration_lookup_max_height_below_canonical_returns_none() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // Genesis sits at height 5 (no tx_ids, so the seal check passes).
+        // h6 contains the tx_id.  Canonical cache therefore covers heights
+        // 5..=6 — there is no entry at or below max_height=3.
+        let h5 = make_signed_header(5, H256::zero(), 0, 0, vec![]);
+        let h6 = make_signed_header(6, h5.block_hash, 1, 12, vec![tx_id]);
+        let guard = build_tree(h5, vec![h6]);
+
+        let result = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 3,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?;
+        assert!(result.is_none());
+        Ok(())
+    }
 }
