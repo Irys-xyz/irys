@@ -572,17 +572,34 @@ impl BlockValidationTask {
                     e.into()
                 }
                 Err(err) => {
-                    tracing::error!(
-                        block.hash = %block_hash_for_error_log,
-                        block.height = %block_height_for_error_log,
-                        custom.error = ?err,
-                        "poa task panicked"
-                    );
-                    ValidationError::TaskPanicked {
-                        task: "poa".to_string(),
-                        details: format!("{:?}", err),
+                    // H1 fix: split panic vs cancellation rather than unconditionally
+                    // classifying every `JoinError` as `TaskPanicked`. The cancel arm
+                    // in `execute_concurrent` calls `handle.abort()` on the PoA
+                    // blocking task; if a future refactor ever `.await`s the aborted
+                    // handle, the resulting `JoinError::is_cancelled()` must NOT
+                    // route through the NodeFault taxonomy and trigger a supervisor
+                    // restart. Mirrors the established pattern at
+                    // `validation_service.rs:438-479`. See `classify_poa_join_error`
+                    // for the panic/cancel split rationale.
+                    if err.is_panic() {
+                        tracing::error!(
+                            block.hash = %block_hash_for_error_log,
+                            block.height = %block_height_for_error_log,
+                            custom.error = ?err,
+                            "poa task panicked"
+                        );
+                    } else {
+                        // is_cancelled() — the cancel arm fired `handle.abort()`.
+                        // Log at debug; this is a deliberate, expected outcome of
+                        // the height-diff / channel-closed cancel race.
+                        debug!(
+                            block.hash = %block_hash_for_error_log,
+                            block.height = %block_height_for_error_log,
+                            custom.error = ?err,
+                            "poa task aborted (deliberate cancel)"
+                        );
                     }
-                    .into()
+                    classify_poa_join_error(&err).into()
                 }
             };
             metrics::record_validation_result("poa", result.granular_metric_label());
@@ -1061,6 +1078,46 @@ enum StageOutcome<J> {
     /// Cancellation fired and no stage had completed at the drain-poll
     /// moment. The cancel signal is the result.
     Cancelled(ParentValidationResult),
+}
+
+/// Convert a `tokio::task::JoinError` from the PoA blocking task into a
+/// `ValidationError`, distinguishing panic (genuine node fault) from
+/// cancellation (deliberate abort from the cancel arm).
+///
+/// `JoinError` has exactly two producers: `is_panic()` and `is_cancelled()`.
+/// The H1 audit (2026-05-20) closed a latent landmine where every `JoinError`
+/// — including aborts triggered by the cancel arm's `poa_abort_slot.abort()`
+/// — was unconditionally classified as `TaskPanicked`. That misclassification
+/// routes through the `NodeFault` taxonomy and triggers a supervisor panic at
+/// `block_tree_service.rs:540-544`. The bug is dormant today because the
+/// cancel arm drops the stages-join future after a synchronous `futures::poll!`
+/// rather than awaiting the aborted handle, but any future refactor that ever
+/// `.await`s a possibly-aborted handle activates it.
+///
+/// Mirrors the established pattern at `validation_service.rs:438-479`:
+/// `is_panic()` → `TaskPanicked` (NodeFault → abort + restart);
+/// otherwise → `ValidationCancelled` (SoftInternal → park-and-retry).
+///
+/// The `ChannelClosed` reason is reused for the "stage handle was aborted
+/// externally" semantics — it is already the local-side outcome for shutdown
+/// and aborts, and per commit `c3fd8963a` all `ValidationCancelReason` variants
+/// classify as `SoftInternal`, so routing is correct without introducing a new
+/// variant.
+fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
+    if err.is_panic() {
+        ValidationError::TaskPanicked {
+            task: "poa".to_string(),
+            details: format!("{:?}", err),
+        }
+    } else {
+        // `is_cancelled()` is the only other producer of `JoinError`. The
+        // cancel arm in `execute_concurrent` aborted the PoA blocking handle
+        // — a local, peer-innocent event. `ChannelClosed` carries the same
+        // "we deliberately tore down this stage" semantics.
+        ValidationError::ValidationCancelled {
+            reason: ValidationCancelReason::ChannelClosed,
+        }
+    }
 }
 
 /// Convert a `ParentValidationResult` from the inner cancel future into a
@@ -1575,5 +1632,103 @@ mod merge_stage_results_tests {
                 other
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod classify_poa_join_error_tests {
+    //! Tests for the H1 fix: PoA `JoinError` must split panic vs cancellation
+    //! rather than unconditionally classifying every `JoinError` as
+    //! `TaskPanicked`. The bug is dormant in the current call site (the cancel
+    //! arm drops the stages-join future after a synchronous `futures::poll!`),
+    //! but a future refactor that ever `.await`s the aborted PoA handle would
+    //! turn every legitimate height-diff cancel into a supervisor restart —
+    //! exactly the never-mislabel invariant this branch defends.
+    //!
+    //! See the helper's doc for the mirror to `validation_service.rs:438-479`
+    //! and the SoftInternal routing guarantee from commit `c3fd8963a`.
+    use super::*;
+    use crate::block_validation::{ErrorClass, ValidationCancelReason, ValidationError};
+
+    /// Panic path: a panicking blocking task produces `JoinError::is_panic()`.
+    /// Must classify as `TaskPanicked` and route through `NodeFault` so the
+    /// supervisor restart path still fires for genuine verifier-thread crashes.
+    #[tokio::test]
+    async fn panic_classifies_as_task_panicked_node_fault() {
+        let handle = tokio::task::spawn_blocking(|| {
+            panic!("simulated poa verifier panic");
+        });
+        let join_err = handle
+            .await
+            .expect_err("panicking task must produce JoinError");
+        assert!(
+            join_err.is_panic(),
+            "fixture must produce is_panic() = true"
+        );
+
+        let err = classify_poa_join_error(&join_err);
+        match &err {
+            ValidationError::TaskPanicked { task, .. } => {
+                assert_eq!(task, "poa", "TaskPanicked.task must be \"poa\"");
+            }
+            other => panic!("expected TaskPanicked, got {:?}", other),
+        }
+        assert_eq!(
+            err.classify(),
+            ErrorClass::NodeFault,
+            "panic must classify as NodeFault so supervisor restarts"
+        );
+        assert!(
+            err.is_node_fault(),
+            "TaskPanicked must trip the is_node_fault() supervisor-restart gate"
+        );
+    }
+
+    /// Cancellation path: aborting a handle then awaiting it produces
+    /// `JoinError::is_cancelled()`. Must classify as `ValidationCancelled`
+    /// and route through `SoftInternal` so the block parks for retry rather
+    /// than triggering supervisor restart. This is the H1 regression target.
+    #[tokio::test]
+    async fn cancellation_classifies_as_validation_cancelled_soft_internal() {
+        // Spawn a long-running task, abort it, then await — yields
+        // JoinError::is_cancelled() = true.
+        let handle = tokio::task::spawn(async {
+            // Park until aborted.
+            std::future::pending::<()>().await;
+        });
+        handle.abort();
+        let join_err = handle
+            .await
+            .expect_err("aborted task must produce JoinError");
+        assert!(
+            join_err.is_cancelled(),
+            "fixture must produce is_cancelled() = true"
+        );
+        assert!(
+            !join_err.is_panic(),
+            "fixture must not produce is_panic() = true"
+        );
+
+        let err = classify_poa_join_error(&join_err);
+        match &err {
+            ValidationError::ValidationCancelled { reason } => {
+                assert_eq!(
+                    *reason,
+                    ValidationCancelReason::ChannelClosed,
+                    "cancellation must reuse ChannelClosed per the H1 fix"
+                );
+            }
+            other => panic!("expected ValidationCancelled, got {:?}", other),
+        }
+        assert_eq!(
+            err.classify(),
+            ErrorClass::SoftInternal,
+            "cancellation must classify as SoftInternal (park-and-retry), \
+             NOT NodeFault (supervisor restart) — this is the H1 invariant"
+        );
+        assert!(
+            !err.is_node_fault(),
+            "cancellation must NOT trip the is_node_fault() supervisor-restart gate"
+        );
     }
 }
