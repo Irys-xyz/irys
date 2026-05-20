@@ -42,9 +42,13 @@ impl Inner {
             .unwrap_or(&[]);
         let commitment_txids = block.commitment_tx_ids();
 
-        let all_data_txids: Vec<H256> = submit_txids
+        // Only term-ledger txids (Submit / OneYear / ThirtyDay) receive
+        // `included_height`. Publish txids are excluded here because Publish
+        // confirmation sets `promoted_height` (passed separately below), not
+        // `included_height`; the `included_height` for a Publish tx was already
+        // recorded at the time the tx was first confirmed in Submit.
+        let term_ledger_txids: Vec<H256> = submit_txids
             .iter()
-            .chain(publish_txids.iter())
             .chain(one_year_txids.iter())
             .chain(thirty_day_txids.iter())
             .copied()
@@ -52,7 +56,7 @@ impl Inner {
         if let Err(e) = self
             .mempool_state
             .apply_block_confirmed_updates(
-                &all_data_txids,
+                &term_ledger_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
@@ -754,28 +758,16 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
-        // Clear included_height for orphaned publish transactions. Same
-        // contention semantics as the term-tx loop above.
-        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
-            match self
-                .mempool_state
-                .clear_data_tx_included_height(tx_id)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        ?e,
-                        tx.id = %tx_id,
-                        "Mempool contention during publish-tx reorg cleanup; aborting"
-                    );
-                    return Ok(());
-                }
-            }
-        }
+        // NOTE: do NOT clear `included_height` for orphaned Publish txs here.
+        // `included_height` is owned by term-ledger confirmations (Submit /
+        // OneYear / ThirtyDay).  If only the Publish-promotion is orphaned
+        // (the underlying Submit is on a shared ancestor and still
+        // canonical), clearing `included_height` would undo a still-valid
+        // confirmation.  The term-tx loop above is responsible for clearing
+        // `included_height` whenever the term confirmation itself is
+        // orphaned; the Publish-orphan path only needs to clear
+        // `promoted_height`, which the next loop (`mark_unpromoted_in_mempool`)
+        // does.
 
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
