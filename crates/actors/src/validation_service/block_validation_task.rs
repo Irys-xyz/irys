@@ -1122,17 +1122,38 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
 
 /// Convert a `ParentValidationResult` from the inner cancel future into a
 /// `ValidationResult`. The inner cancel future uses a Continue-only
-/// `extra_checks` closure, so only the `Cancelled(_)` arm is reachable.
+/// `extra_checks` closure at both known call sites (the `StageOutcome::Cancelled`
+/// arm and the `JoinedAfterCancel` merger path), so only the `Cancelled(_)`
+/// arm is reachable today.
+///
+/// CALLER INVARIANT: this function is only called with a cancellation
+/// outcome — the `Ready` arm is dormant today because the inner cancel
+/// future's `extra_checks` closure is Continue-only. A future caller that
+/// allows `Break(Ready)` (e.g. a "parent now valid, short-circuit"
+/// optimisation) would otherwise panic the validation task and kill the
+/// service via the `expect` in `validation_service.rs`. The fallback below
+/// mirrors the merger's all-Valid degradation precedent.
 fn cancel_outcome_to_result(outcome: ParentValidationResult) -> ValidationResult {
     match outcome {
         ParentValidationResult::Cancelled(reason) => {
             ValidationError::ValidationCancelled { reason }.into()
         }
-        // The Continue-only extra_checks closure used here never breaks
-        // with `Ready`; this arm is unreachable in production.
-        ParentValidationResult::Ready => unreachable!(
-            "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
-        ),
+        // Unreachable by caller invariant: the inner cancel future uses a
+        // Continue-only `extra_checks` closure at both known call sites,
+        // so `Ready` never breaks through. A future short-circuit-on-Ready
+        // caller (e.g. "parent now valid, abandon the wait") would reach
+        // here — fail loud in debug so tests catch the regression, fail
+        // clean in release. `Valid` is the only safe direction: a parent
+        // that is `Ready` IS validated, so returning `Valid` matches the
+        // spirit of the signal and avoids wrong-attributing a peer
+        // rejection.
+        ParentValidationResult::Ready => {
+            debug_assert!(
+                false,
+                "cancel_outcome_to_result reached Ready arm — Continue-only extra_checks invariant broken by a new caller"
+            );
+            ValidationResult::Valid
+        }
     }
 }
 
@@ -1730,5 +1751,47 @@ mod classify_poa_join_error_tests {
             !err.is_node_fault(),
             "cancellation must NOT trip the is_node_fault() supervisor-restart gate"
         );
+    }
+}
+
+#[cfg(test)]
+mod cancel_outcome_to_result_tests {
+    //! Tests for `cancel_outcome_to_result`.
+    //!
+    //! The `Ready` arm is dormant today (both call sites pass a Continue-only
+    //! `extra_checks` closure) but a future short-circuit-on-Ready caller in
+    //! the same module would reach it. The function guards the dormant arm
+    //! with a `debug_assert!` + `Valid` fallback so debug builds (including
+    //! tests) panic loudly on the regression while release builds degrade
+    //! safely. Mirrors the established merger pattern at
+    //! `merge_stage_results_with_cancel`.
+    use super::*;
+    use crate::block_validation::{ValidationCancelReason, ValidationError};
+
+    /// Sanity check: the `Cancelled(_)` arm routes through
+    /// `ValidationError::ValidationCancelled` so cancel-aware callers can
+    /// classify the outcome via `is_internal_failure`.
+    #[test]
+    fn cancelled_routes_to_validation_cancelled_error() {
+        let outcome = ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference);
+        match cancel_outcome_to_result(outcome) {
+            ValidationResult::InternalFailure(inner) => assert!(
+                matches!(inner.err(), ValidationError::ValidationCancelled { .. }),
+                "expected ValidationCancelled, got {:?}",
+                inner.err()
+            ),
+            other => panic!("expected InternalFailure(ValidationCancelled), got {:?}", other),
+        }
+    }
+
+    /// The `Ready` arm is unreachable by caller invariant today. Debug builds
+    /// (including `cargo test`) must panic loudly via `debug_assert!` so a
+    /// future refactor that allows `Break(Ready)` cannot silently slip past
+    /// review. Release builds degrade to `Valid` — see the analogous
+    /// `all_valid_with_no_cancel_panics_in_debug` test on the merger.
+    #[test]
+    #[should_panic(expected = "Continue-only extra_checks invariant broken")]
+    fn ready_arm_panics_in_debug() {
+        let _ = cancel_outcome_to_result(ParentValidationResult::Ready);
     }
 }
