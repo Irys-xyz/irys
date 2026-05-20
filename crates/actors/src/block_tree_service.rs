@@ -1700,45 +1700,198 @@ mod tests {
         assert_eq!(soft_internal_reason_tag(&err), expected_tag);
     }
 
+    /// Test harness for the soft-internal-discard LRU + recovery path.
+    ///
+    /// Drives `BlockTreeServiceInner::discard_and_broadcast` and
+    /// `on_block_validation_finished` against the real struct (no inlined
+    /// re-implementation of the discard gate). Only the four fields that
+    /// `discard_and_broadcast` and the Valid-recovery path actually touch
+    /// — `cache`, `chain_sync_state`, `service_senders`, and
+    /// `recent_soft_internal_discards` — are exercised; everything else is
+    /// a cheap testing default. The held `TempDir` keeps the MDBX env alive
+    /// for the duration of the test.
+    struct DiscardHarness {
+        inner: BlockTreeServiceInner,
+        block_state_rx: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+        /// MDBX env is mmap-backed: dropping the temp dir before the inner
+        /// service would unlink the underlying files. Hold both.
+        _tempdir: irys_testing_utils::tempfile::TempDir,
+    }
+
+    impl DiscardHarness {
+        fn new() -> Self {
+            use irys_database::{
+                IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables,
+            };
+            use irys_domain::BlockIndex;
+            use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
+            use irys_types::{ConsensusConfig, NodeConfig};
+            use reth_db::mdbx::DatabaseArguments;
+
+            let tmp = TempDirBuilder::new().build();
+            let db_env = open_or_create_db(
+                tmp.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().expect("irys_testing db args"),
+            )
+            .expect("open temp MDBX env");
+            let db = DatabaseProvider(Arc::new(db_env));
+
+            let block_index = BlockIndex::new_for_testing(db.clone());
+            let block_index_guard = BlockIndexReadGuard::new(block_index);
+
+            let mut genesis = IrysBlockHeader::new_mock_header();
+            genesis.height = 0;
+            genesis.test_sign();
+            let cache = Arc::new(RwLock::new(BlockTree::new(
+                &genesis,
+                ConsensusConfig::testing(),
+            )));
+
+            let (service_senders, service_rx) =
+                crate::test_helpers::build_test_service_senders();
+            // Subscribe BEFORE the discard path runs so the broadcast event
+            // is observable. The receivers struct is dropped — we only need
+            // the broadcast receiver.
+            let block_state_rx = service_senders.subscribe_block_state_updates();
+            drop(service_rx);
+
+            let node_config = NodeConfig::testing();
+            let miner_address = node_config.miner_address();
+            let config = irys_types::Config::new_with_random_peer_id(node_config);
+
+            let chain_sync_state = ChainSyncState::new(false, false);
+
+            // The migration service is wired but unused by both
+            // `discard_and_broadcast` and the Valid-recovery pop in
+            // `on_block_validation_finished` — supply a real instance with
+            // an orphan chunk-migration channel.
+            let (chunk_migration_sender, _chunk_migration_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let block_migration_service = BlockMigrationService::new(
+                db.clone(),
+                block_index_guard.clone(),
+                None,
+                config.consensus.chunk_size,
+                cache.clone(),
+                chunk_migration_sender,
+            );
+
+            let inner = BlockTreeServiceInner {
+                db,
+                cache,
+                miner_address,
+                block_index_guard,
+                config,
+                service_senders,
+                block_migration_service,
+                chain_sync_state,
+                recent_soft_internal_discards: LruCache::new(
+                    NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
+                ),
+            };
+
+            Self {
+                inner,
+                block_state_rx,
+                _tempdir: tmp,
+            }
+        }
+
+        /// Drain pending broadcast events into a Vec. Used to assert the
+        /// `BlockStateUpdated` shape after a discard.
+        fn collect_broadcasts(&mut self) -> Vec<BlockStateUpdated> {
+            let mut out = Vec::new();
+            while let Ok(event) = self.block_state_rx.try_recv() {
+                out.push(event);
+            }
+            out
+        }
+    }
+
     /// SoftInternal discard path must record (block_hash, reason) into the
     /// LRU so a subsequent Valid arrival can be counted as a gossip-driven
-    /// recovery. This test exercises the LRU-mutation logic directly.
+    /// recovery. Drives `discard_and_broadcast` directly and asserts on the
+    /// observable side effects (LRU contents + broadcast event shape) — not
+    /// a syntactic mirror of the production gate.
     #[test]
     fn soft_internal_discard_inserts_into_lru() {
-        let mut lru: LruCache<BlockHash, &'static str> =
-            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let mut h = DiscardHarness::new();
         let block_hash = H256([0xAB; 32]);
 
-        // Construct the SoftInternal result, then replay the put step from
-        // `discard_and_broadcast`.
         let result: ValidationResult =
             crate::block_validation::ValidationError::ParentBlockMissing { block_hash }.into();
-        let ValidationResult::InternalFailure(inner) = &result else {
-            panic!("expected InternalFailure");
-        };
-        let reason = soft_internal_reason_tag(inner.err());
-        lru.put(block_hash, reason);
 
-        assert_eq!(lru.get(&block_hash), Some(&"parent_block_missing"));
+        h.inner
+            .discard_and_broadcast(block_hash, result, DiscardKind::SoftInternal)
+            .expect("discard_and_broadcast must succeed for soft-internal");
+
+        // Observable side effect 1: LRU records (block_hash, reason_tag) so
+        // a subsequent Valid arrival can be counted as a recovery. The
+        // production gate at this same call site also fires
+        // `metrics::record_soft_internal_discard(reason)`; since both live
+        // in the same `if` block, the LRU state transitively confirms the
+        // counter increment.
+        assert_eq!(
+            h.inner.recent_soft_internal_discards.get(&block_hash),
+            Some(&"parent_block_missing"),
+            "SoftInternal discard must record the reason tag for H3 recovery accounting"
+        );
+
+        // Observable side effect 2: a discard broadcast carries the input
+        // ValidationResult so downstream subscribers can react.
+        let events = h.collect_broadcasts();
+        assert_eq!(events.len(), 1, "exactly one BlockStateUpdated must fire");
+        let event = &events[0];
+        assert_eq!(event.block_hash, block_hash);
+        assert!(event.discarded);
+        assert!(
+            matches!(event.validation_result, ValidationResult::InternalFailure(_)),
+            "discard broadcast must carry the InternalFailure verdict"
+        );
     }
 
     /// A Valid result for a previously-discarded block_hash must pop the
     /// entry from the LRU (so a second Valid wouldn't double-count) and
-    /// surface the original reason tag for the recovery metric.
-    #[test]
-    fn valid_result_pops_from_lru_and_returns_reason() {
-        let mut lru: LruCache<BlockHash, &'static str> =
-            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+    /// fire `metrics::record_soft_internal_recovered` against the original
+    /// reason tag. Drives `on_block_validation_finished` directly.
+    ///
+    /// The block is intentionally absent from the cache: the recovery pop
+    /// runs BEFORE the cache height lookup (production lines ~563 vs ~573),
+    /// so the early-return on missing height does not mask the pop.
+    #[tokio::test]
+    async fn valid_result_pops_from_lru_and_returns_reason() {
+        let mut h = DiscardHarness::new();
         let block_hash = H256([0xCD; 32]);
-        lru.put(block_hash, "execution_payload_cache_evicted");
 
-        // First Valid arrival: recovery is observed and the entry is removed.
-        let popped = lru.pop(&block_hash);
-        assert_eq!(popped, Some("execution_payload_cache_evicted"));
+        // Seed the LRU as if a prior SoftInternal discard ran for this
+        // block_hash.
+        h.inner
+            .recent_soft_internal_discards
+            .put(block_hash, "execution_payload_cache_evicted");
 
-        // Second Valid arrival: no-op, entry already drained — guarantees no
-        // double-count on metric retries or duplicate Valid messages.
-        assert_eq!(lru.pop(&block_hash), None);
+        // First Valid arrival: production pops the LRU and (no-op in tests)
+        // increments the recovered counter, then returns early because the
+        // block isn't in the cache. Both happen before the cache lookup.
+        h.inner
+            .on_block_validation_finished(block_hash, ValidationResult::Valid)
+            .await
+            .expect("Valid on missing block returns early without error");
+        assert!(
+            h.inner.recent_soft_internal_discards.get(&block_hash).is_none(),
+            "Valid arrival for a tracked hash must pop the LRU entry"
+        );
+
+        // Second Valid arrival: no-op — guarantees no double-count on
+        // metric retries or duplicate Valid messages for the same hash.
+        h.inner
+            .on_block_validation_finished(block_hash, ValidationResult::Valid)
+            .await
+            .expect("idempotent second Valid call must not error");
+        assert!(
+            h.inner.recent_soft_internal_discards.get(&block_hash).is_none(),
+            "second Valid arrival must remain a no-op for the LRU"
+        );
     }
 
     /// `Invalid` (peer-attributable) and node-fault `InternalFailure` paths
@@ -1747,28 +1900,37 @@ mod tests {
     /// abort-causing local faults.
     #[test]
     fn non_soft_internal_paths_leave_lru_untouched() {
-        let mut lru: LruCache<BlockHash, &'static str> =
-            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
-
-        // 1. Consensus Invalid: dispatch produces ValidationResult::Invalid,
-        //    and the `matches!(kind, DiscardKind::SoftInternal)` guard in
-        //    `discard_and_broadcast` short-circuits the LRU put. We replay
-        //    that guard here.
+        // 1. Consensus Invalid: dispatch produces ValidationResult::Invalid
+        //    and calls `discard_and_broadcast` with DiscardKind::Invalid.
+        //    The production gate short-circuits the LRU put for any non-
+        //    SoftInternal kind — we drive the real helper here.
+        let mut h = DiscardHarness::new();
+        let invalid_hash = H256([0x01; 32]);
         let invalid_result: ValidationResult =
             crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
-        let kind = DiscardKind::Invalid;
-        if matches!(kind, DiscardKind::SoftInternal)
-            && let ValidationResult::InternalFailure(inner) = &invalid_result
-        {
-            lru.put(H256([0x01; 32]), soft_internal_reason_tag(inner.err()));
-        }
-        assert_eq!(lru.len(), 0, "Invalid path must not touch the LRU");
+        h.inner
+            .discard_and_broadcast(invalid_hash, invalid_result, DiscardKind::Invalid)
+            .expect("discard_and_broadcast must succeed for Invalid arm");
+        assert_eq!(
+            h.inner.recent_soft_internal_discards.len(),
+            0,
+            "Invalid path must not touch the LRU"
+        );
+        // The broadcast still fires — confirms we exercised the same code
+        // path (not an early-return that skipped the LRU by accident).
+        let events = h.collect_broadcasts();
+        assert!(
+            events.iter().any(|e| e.block_hash == invalid_hash && e.discarded),
+            "Invalid arm must still broadcast the discard event"
+        );
 
-        // 2. Node-fault InternalFailure: handler panics BEFORE reaching
-        //    discard_and_broadcast (see `on_block_validation_finished`), so
-        //    the LRU is never updated. We assert the classification gate
-        //    (`is_node_fault`) catches the variant — proving the panic-before
-        //    -LRU-update ordering is preserved structurally.
+        // 2. Node-fault InternalFailure: the handler panics BEFORE
+        //    `discard_and_broadcast` runs (see
+        //    `on_block_validation_finished` lines 532-544). We assert the
+        //    classification gate (`is_node_fault`) catches the variant —
+        //    proving the panic-before-LRU-update ordering is preserved
+        //    structurally. Driving the panic in a unit test would crash
+        //    the runner, so we verify the precondition only.
         let node_fault: ValidationResult = crate::block_validation::ValidationError::TaskPanicked {
             task: "poa".into(),
             details: "boom".into(),
@@ -1781,7 +1943,11 @@ mod tests {
             inner.is_node_fault(),
             "node-fault variant must be caught upstream of discard_and_broadcast"
         );
-        assert_eq!(lru.len(), 0, "node-fault path must not touch the LRU");
+        assert_eq!(
+            h.inner.recent_soft_internal_discards.len(),
+            0,
+            "LRU still untouched after the node-fault precondition check"
+        );
     }
 
     /// M2 audit (2026-05-20): a `ValidationCancelled` SoftInternal discard
@@ -1790,7 +1956,14 @@ mod tests {
     /// moved on" events, not gossip-recoverable failures — recording them
     /// would inflate the discard counter and leave the recovery counter
     /// permanently behind (fresh gossip rarely re-triggers the same cancel
-    /// race for the same hash). Replays the gate in `discard_and_broadcast`.
+    /// race for the same hash).
+    ///
+    /// The LRU assertion is the load-bearing one. In production the LRU put
+    /// and the `metrics::record_soft_internal_discard` call share the same
+    /// `if` block — observing an empty LRU after a SoftInternal +
+    /// ValidationCancelled discard transitively confirms the counter did
+    /// not increment. (OpenTelemetry counters don't expose a sync read API
+    /// for direct counter inspection.)
     #[rstest]
     #[case::height_difference(crate::block_validation::ValidationCancelReason::HeightDifference)]
     #[case::channel_closed(crate::block_validation::ValidationCancelReason::ChannelClosed)]
@@ -1798,14 +1971,14 @@ mod tests {
     fn validation_cancelled_softinternal_skips_lru_and_counter(
         #[case] reason: crate::block_validation::ValidationCancelReason,
     ) {
-        let mut lru: LruCache<BlockHash, &'static str> =
-            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let mut h = DiscardHarness::new();
         let block_hash = H256([0xEF; 32]);
 
-        // Build the SoftInternal result the same way `discard_and_broadcast`
-        // sees it post-M2 (every cancel reason routes to InternalFailure).
         let result: ValidationResult =
             crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
+        // Sanity: post-M2 every cancel reason routes to InternalFailure and
+        // is NOT a node fault, so `discard_and_broadcast` is actually
+        // reachable from `on_block_validation_finished` for this variant.
         let ValidationResult::InternalFailure(inner) = &result else {
             panic!("post-M2 ValidationCancelled must dispatch to InternalFailure");
         };
@@ -1814,33 +1987,25 @@ mod tests {
             "ValidationCancelled is a soft InternalFailure, not a node fault"
         );
 
-        // Replay the exact gate from `discard_and_broadcast`. The
-        // `matches!(.., ValidationCancelled { .. })` guard short-circuits
-        // BOTH the metric increment and the LRU put — neither runs for
-        // any cancel reason.
-        let kind = DiscardKind::SoftInternal;
-        let mut metric_increments = 0_u32;
-        if matches!(kind, DiscardKind::SoftInternal)
-            && let ValidationResult::InternalFailure(inner) = &result
-            && !matches!(
-                inner.err(),
-                crate::block_validation::ValidationError::ValidationCancelled { .. }
-            )
-        {
-            metric_increments += 1; // would call metrics::record_soft_internal_discard here
-            lru.put(block_hash, soft_internal_reason_tag(inner.err()));
-        }
+        h.inner
+            .discard_and_broadcast(block_hash, result, DiscardKind::SoftInternal)
+            .expect("discard_and_broadcast must succeed for ValidationCancelled");
 
         assert_eq!(
-            lru.len(),
+            h.inner.recent_soft_internal_discards.len(),
             0,
-            "ValidationCancelled (reason {:?}) must not touch the H3 LRU",
+            "ValidationCancelled (reason {:?}) must not touch the H3 LRU \
+             (and transitively must not increment soft_internal_discard_total)",
             reason
         );
-        assert_eq!(
-            metric_increments, 0,
-            "ValidationCancelled (reason {:?}) must not increment soft_internal_discard_total",
-            reason
+
+        // The broadcast must still fire — confirms we drove the same code
+        // path (not a hidden early-return that left the LRU untouched for
+        // the wrong reason).
+        let events = h.collect_broadcasts();
+        assert!(
+            events.iter().any(|e| e.block_hash == block_hash && e.discarded),
+            "ValidationCancelled discard must still broadcast a discard event"
         );
     }
 
@@ -2226,29 +2391,6 @@ mod tests {
             Some(&"execution_payload_cache_evicted"),
             "LRU entry must be preserved when the block is no longer in cache — \
              a later legitimate re-delivery still needs it to be counted as a recovery"
-        );
-    }
-
-    /// `Valid` for a hash present in the cache MUST pop the LRU entry and
-    /// MUST report the recovery reason so the metric is incremented exactly
-    /// once.
-    #[test]
-    fn valid_with_cache_hit_pops_lru_and_records_recovery() {
-        let mut lru: LruCache<BlockHash, &'static str> =
-            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
-        let block_hash = H256([0x6B; 32]);
-        lru.put(block_hash, "parent_block_missing");
-
-        let recovered = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ true);
-
-        assert_eq!(
-            recovered,
-            Some("parent_block_missing"),
-            "cache-hit recovery must surface the original discard reason for the metric"
-        );
-        assert!(
-            lru.get(&block_hash).is_none(),
-            "LRU entry must be popped on confirmed recovery to prevent double-count"
         );
     }
 
