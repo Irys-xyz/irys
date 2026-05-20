@@ -424,8 +424,7 @@ impl InnerCacheTask {
                     .and_then(|m| m.included_height)
                 {
                     Some(h) => {
-                        inclusion_max_height =
-                            Some(inclusion_max_height.map_or(h, |x| x.max(h)));
+                        inclusion_max_height = Some(inclusion_max_height.map_or(h, |x| x.max(h)));
                     }
                     // No metadata row, or row exists with `included_height = None`:
                     // this tx (sharing `data_root` with the rest of `txid_set`) is
@@ -1036,7 +1035,9 @@ impl ChunkCacheService {
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, database, db_cache::CachedDataRoot, open_or_create_db,
+        IrysDatabaseArgs as _, database,
+        db_cache::CachedDataRoot,
+        open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};

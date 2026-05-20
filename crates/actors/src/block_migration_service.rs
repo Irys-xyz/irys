@@ -100,7 +100,10 @@ impl BlockMigrationService {
                 .iter()
                 .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
                 .map_or(0, |dl| dl.tx_ids.0.len());
-            let body_submit_count = block.transactions().get_ledger_txs(DataLedger::Submit).len();
+            let body_submit_count = block
+                .transactions()
+                .get_ledger_txs(DataLedger::Submit)
+                .len();
             debug_assert_eq!(
                 header_submit_count,
                 body_submit_count,
@@ -134,17 +137,14 @@ impl BlockMigrationService {
                         continue;
                     }
                     if dl.ledger_id == DataLedger::Publish as u32 {
-                        irys_database::batch_clear_data_tx_promoted_height(tx, tx_ids)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                        irys_database::batch_clear_data_tx_promoted_height(tx, tx_ids)?;
                     } else {
                         // Term ledger (Submit / OneYear / ThirtyDay)
-                        irys_database::batch_clear_data_tx_included_height(tx, tx_ids)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                        irys_database::batch_clear_data_tx_included_height(tx, tx_ids)?;
                     }
                 }
                 if !commitment_ids.is_empty() {
-                    irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
                 }
 
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
@@ -152,21 +152,28 @@ impl BlockMigrationService {
                         tx,
                         submit_tx.data_root,
                         orphan_block_hash,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    )?;
                 }
             }
-            // Phase 2: Write confirmed metadata
+            // Phase 2: Write confirmed metadata.
+            // Phase 3: Backstop the CachedDataRoot.block_set invariant for the
+            //          canonical Submit-ledger txs we just confirmed (update-only,
+            //          does not create cache entries for data_roots the node
+            //          never tracked chunks for).
             //
             // `included_height` ↔ term ledgers (Submit, OneYear, ThirtyDay) only.
             // `promoted_height` ↔ Publish ledger only.
             // Writing `included_height` for Publish txs would overwrite the
             // Submit-block height that was set when the tx first entered the
             // Submit ledger, violating the "first included in Submit" invariant.
+            // Phase 3 reads tx bodies (not the metadata written in Phase 2), so
+            // it has no ordering dependency on Phase 2 writes and is folded into
+            // the same outer loop.
             for block in blocks_to_confirm {
                 let header = block.header();
                 let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
+                let block_hash = header.block_hash;
 
                 // NOTE: same-block Submit→Publish promotions are valid. Keep
                 // the term-ledger pass first so `included_height` is written
@@ -183,8 +190,7 @@ impl BlockMigrationService {
                         continue;
                     }
                     // Term ledger (Submit / OneYear / ThirtyDay): set included_height.
-                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)?;
                 }
                 for dl in header
                     .data_ledgers
@@ -196,27 +202,19 @@ impl BlockMigrationService {
                         continue;
                     }
                     // Publish: only set promoted_height, never touch included_height.
-                    irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)?;
                 }
                 if !commitment_ids.is_empty() {
                     irys_database::batch_set_commitment_tx_included_height(
                         tx,
                         commitment_ids,
                         height,
-                    )
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    )?;
                 }
-            }
-            // Phase 3: Backstop the CachedDataRoot.block_set invariant for the
-            // canonical Submit-ledger txs we just confirmed.  Update-only —
-            // does not create cache entries for data_roots the node never
-            // tracked chunks for.
-            for block in blocks_to_confirm {
-                let block_hash = block.header().block_hash;
+
+                // Phase 3: append `block_hash` to each Submit-tx's CDR.block_set.
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                    irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)?;
                 }
             }
             Ok(())
@@ -406,8 +404,7 @@ impl BlockMigrationService {
                     continue;
                 }
                 // `included_height` ↔ term ledgers only; never overwrite for Publish.
-                irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)?;
             }
             for dl in header
                 .data_ledgers
@@ -419,8 +416,7 @@ impl BlockMigrationService {
                     continue;
                 }
                 // `promoted_height` ↔ Publish ledger only.
-                irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)?;
             }
 
             if !commitment_tx_ids.is_empty() {
@@ -428,8 +424,7 @@ impl BlockMigrationService {
                     tx,
                     commitment_tx_ids,
                     block_height,
-                )
-                .map_err(|e| eyre::eyre!("{:?}", e))?;
+                )?;
             }
 
             irys_database::insert_block_header(tx, &migrated_block)?;
