@@ -27,7 +27,7 @@ pub fn get_anchor_height(
         if canonical {
             guard
                 .get_canonical_chain()
-                .0
+                .entries
                 .iter()
                 .find(|b| b.block_hash() == anchor)
                 .map(BlockTreeEntry::height)

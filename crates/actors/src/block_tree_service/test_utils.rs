@@ -191,7 +191,7 @@ pub fn create_and_apply_fork(
     // Get the fork parent block
     let fork_parent = {
         let tree = block_tree_guard.read();
-        let (chain, _) = tree.get_canonical_chain();
+        let chain = tree.get_canonical_chain().entries;
         let fork_parent_hash = chain
             .iter()
             .find(|entry| entry.height() == common_ancestor_height)
@@ -208,7 +208,7 @@ pub fn create_and_apply_fork(
     let mut fork_prices = Vec::new();
     {
         let tree = block_tree_guard.read();
-        let (chain, _) = tree.get_canonical_chain();
+        let chain = tree.get_canonical_chain().entries;
 
         // Collect prices from genesis (height 0) up to and including the fork point
         for entry in chain.iter() {
@@ -282,7 +282,7 @@ pub fn create_and_apply_fork(
 
     let data = block_tree_guard.read();
     assert_eq!(
-        data.get_canonical_chain().0.len(),
+        data.get_canonical_chain().entries.len(),
         (fork_height + 1) as usize
     );
 

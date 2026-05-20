@@ -43,7 +43,7 @@ pub async fn get_block(
                 .block_tree
                 .read()
                 .get_canonical_chain()
-                .0
+                .entries
                 .iter()
                 .find_map(|e| {
                     if e.height() == height {

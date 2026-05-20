@@ -311,7 +311,7 @@ impl Inner {
         // All captured from the same read guard to avoid mixing data from different chain states.
         let (ema_snapshot, latest_block_timestamp_secs, latest_height) = {
             let tree = self.block_tree_read_guard.read();
-            let (canonical, _) = tree.get_canonical_chain();
+            let canonical = tree.get_canonical_chain().entries;
             let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
@@ -508,7 +508,7 @@ impl Inner {
         // Get latest block's timestamp for hardfork params
         let latest_block_timestamp_secs = {
             let tree = self.block_tree_read_guard.read();
-            let (canonical, _) = tree.get_canonical_chain();
+            let canonical = tree.get_canonical_chain().entries;
             let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;

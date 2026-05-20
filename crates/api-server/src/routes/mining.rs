@@ -39,7 +39,7 @@ pub async fn get_mining_info(app_state: Data<ApiState>) -> Result<Json<MiningInf
         .map_err(ApiError::canonical_chain_error)?;
 
     let latest_block_entry = canonical_chain
-        .0
+        .entries
         .last()
         .ok_or(ApiError::EmptyCanonicalChain)?;
 
