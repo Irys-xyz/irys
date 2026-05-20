@@ -22,18 +22,25 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 /// - `SnapshotInvariant` → local snapshot/state inconsistency. Retry won't
 ///   heal. Validator-side: node fault (panic + supervisor restart).
 ///   Producer-side: code bug or corrupt local state.
-/// - `TreasuryArithmetic` → treasury under/overflow during fee accumulation.
-///   On the validator side these reflect a peer's block with structurally
-///   bad fee values (the fees come from the peer's tx set), so they route
-///   to consensus rejection. On the producer side they indicate a code bug
-///   in our own fee calc.
-/// - `SnapshotTreasuryUnderflow` → treasury underflow in a payout helper
-///   whose deduction amount derives from a LOCAL snapshot (expired-ledger
-///   payout or commitment-refund). An underflow means our snapshot
-///   disagrees with the inherited treasury — a node fault, not
-///   peer-attributable. Two honest nodes cannot disagree on treasury
-///   balance, so silent canonical-fork is strictly worse than a loud
-///   restart.
+/// - `TreasuryArithmetic` → treasury under/overflow during peer-derived fee
+///   accumulation. INVARIANT: constructed only when the operation's operand
+///   is purely peer-supplied (e.g. `tx.term_fee`, `tx.perm_fee`,
+///   `block.reward_amount`) AND the running `treasury_balance` at the point
+///   of operation has NOT been mutated by snapshot-derived amounts earlier
+///   in the iterator. Under these conditions an over/underflow reflects a
+///   peer's block with structurally bad fee values and is safely
+///   peer-attributable. Validator-side: consensus rejection. Producer-side:
+///   indicates a code bug in our own fee calc.
+/// - `SnapshotTreasuryUnderflow` → treasury underflow attributable (in part
+///   or in whole) to local snapshot state. INVARIANT: constructed when
+///   either (a) the operand is itself derived from a local snapshot
+///   (expired-ledger payout, commitment-refund) OR (b) the running
+///   `treasury_balance` has already been mutated by snapshot-derived amounts
+///   earlier in the iterator, so an underflow could be caused by local
+///   snapshot disagreement even if the immediate operand is peer-supplied.
+///   Two honest nodes cannot disagree on treasury balance, so silent
+///   canonical-fork is strictly worse than a loud restart. Validator-side:
+///   node fault. Producer-side: code bug or corrupt local state.
 /// - `Structural` → per-tx structural error (e.g. publish-ledger tx missing
 ///   `perm_fee`, or fee-distribution constructors rejecting peer-supplied
 ///   values). Always peer-attributable → consensus rejection.
@@ -47,13 +54,22 @@ pub enum ShadowTxGenError {
     SnapshotInvariant(String),
 
     /// Treasury arithmetic under/overflow during peer-derived fee calc.
+    /// INVARIANT: constructed only when the operand is purely peer-supplied
+    /// AND the running treasury value has not been mutated by snapshot-
+    /// derived amounts at this point in the iterator. Under those
+    /// conditions a fault is safely peer-attributable.
     /// Validator-side: peer's block has structurally bad fees → consensus rejection.
     /// Producer-side: indicates a code bug in our fee calc.
     #[error("treasury arithmetic: {0}")]
     TreasuryArithmetic(String),
 
-    /// Treasury underflow in a payout helper whose amount is derived from a
-    /// local snapshot (expired-ledger payout or commitment-refund).
+    /// Treasury underflow in a payout helper or post-snapshot phase whose
+    /// result depends on local snapshot state.
+    /// INVARIANT: constructed when either (a) the deduction amount is
+    /// derived from a local snapshot (expired-ledger payout or
+    /// commitment-refund) OR (b) the running treasury value has already
+    /// been mutated by snapshot-derived amounts before this point in the
+    /// iterator (so the underflow cannot be cleanly peer-attributed).
     /// Validator-side: node fault — our local snapshot disagrees with the
     /// inherited treasury balance, which two honest nodes cannot reach.
     /// Producer-side: code bug or corrupt local state.
@@ -785,15 +801,34 @@ impl<'a> ShadowTxGenerator<'a> {
                         packet: TransactionPacket::IngressProofReward(increment),
                         ..
                     } => {
-                        // Deduct ingress proof reward from treasury
-                        self.treasury_balance = self
-                            .treasury_balance
-                            .checked_sub(U256::from(increment.amount))
-                            .ok_or_else(|| {
-                                ShadowTxGenError::TreasuryArithmetic(
-                                    "Treasury balance underflow when paying ingress proof reward"
-                                        .to_string(),
-                                )
+                        // Deduct ingress proof reward from treasury.
+                        //
+                        // The deduction `amount` itself is peer-derived
+                        // (aggregated from `tx.perm_fee` / `tx.term_fee` of
+                        // publish-ledger txs), BUT this phase runs AFTER
+                        // `try_process_expired_ledger` and may run after
+                        // `try_process_commitment_refunds`, both of which
+                        // mutate `treasury_balance` by snapshot-derived
+                        // amounts. An underflow here therefore has either
+                        // cause:
+                        //   - peer's `amount` is too large (peer fault), or
+                        //   - prior local snapshot-derived deductions
+                        //     drove `treasury_balance` below the level a
+                        //     peer with a correct snapshot computed (node
+                        //     fault).
+                        // Two honest nodes cannot disagree on treasury
+                        // balance, so silent canonical-fork is strictly
+                        // worse than a loud restart — classify as
+                        // `SnapshotTreasuryUnderflow` (node fault).
+                        let amount = U256::from(increment.amount);
+                        let prior_balance = self.treasury_balance;
+                        self.treasury_balance =
+                            self.treasury_balance.checked_sub(amount).ok_or_else(|| {
+                                ShadowTxGenError::SnapshotTreasuryUnderflow(format!(
+                                    "ingress proof reward underflow at block_height {}: \
+                                     cannot pay {} from balance {} (irys_ref {})",
+                                    self.block_height, amount, prior_balance, increment.irys_ref,
+                                ))
                             })?;
                     }
                     _ => {
@@ -1798,6 +1833,140 @@ mod tests {
 
         // Treasury should remain unchanged (no expired fees to pay)
         assert_eq!(generator.treasury_balance(), initial_treasury);
+    }
+
+    /// H6 regression: when a prior snapshot-derived expired-ledger payout
+    /// drains the treasury below the level required for the next
+    /// ingress-proof reward deduction, the underflow must surface as
+    /// `SnapshotTreasuryUnderflow` (node fault — local snapshot may
+    /// disagree with the inherited treasury), NOT `TreasuryArithmetic`
+    /// (which would peer-attribute the fault and silently canonical-fork
+    /// the network).
+    ///
+    /// The deduction `amount` at the ingress-proof site is peer-derived,
+    /// but the running `treasury_balance` at that point in the iterator
+    /// has already been mutated by snapshot-derived expired-ledger
+    /// payouts. Per the audited invariant on `ShadowTxGenError`, that
+    /// mutation makes the underflow non-cleanly-peer-attributable, so we
+    /// must classify it as a node fault.
+    #[test]
+    fn publish_ingress_underflow_after_expired_ledger_payout_is_snapshot_underflow() {
+        let mut config = ConsensusConfig::testing();
+        // Pin to 1 proof for arithmetic simplicity.
+        config.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        let parent_block = IrysBlockHeader::new_mock_header();
+
+        // Build a single publish tx whose ingress-proof reward we can
+        // bound. With 1 proof the total ingress reward equals
+        // per_proof_reward = term_fee * inclusion_reward_pct / 10000.
+        let term_fee = U256::from(100_000_u64);
+        let inclusion_pct = config.immediate_tx_inclusion_reward_percent.amount;
+        let ingress_proof_reward_total = (term_fee * inclusion_pct) / U256::from(10_000_u64);
+        assert!(
+            ingress_proof_reward_total > U256::zero(),
+            "test pre-condition: ingress reward must be non-zero",
+        );
+        // perm_fee must be at least ingress reward + 1 (base storage cost).
+        let perm_fee = ingress_proof_reward_total + U256::from(1_u64);
+
+        let tx_signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+
+        let proof_signer = IrysSigner::random_signer(&config);
+        let proof = create_test_ingress_proof(
+            &proof_signer,
+            H256::from([21_u8; 32]),
+            H256::from([22_u8; 32]),
+        );
+
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx],
+            proofs: Some(IngressProofsList(vec![proof])),
+        };
+
+        // Snapshot-derived expired-ledger miner reward that drains the
+        // treasury before the publish phase runs. Set `initial_treasury`
+        // so that AFTER the expired-ledger deduction, the balance is
+        // strictly less than the ingress-proof reward total — guaranteed
+        // underflow at the publish-ledger site.
+        //
+        // post_expired_balance = initial - miner_reward
+        // We want post_expired_balance < ingress_proof_reward_total.
+        // Pick miner_reward = initial - 1 to leave balance = 1 (well
+        // below ingress_proof_reward_total which is >= 5_000 for
+        // term_fee=100_000 at any reasonable inclusion %).
+        let initial_treasury = U256::from(1_000_u64);
+        let miner_reward = initial_treasury - U256::from(1_u64);
+        let miner = IrysAddress::from([42_u8; 20]);
+        let miner_hash = RollingHash(U256::from_be_bytes([7_u8; 32]));
+        let mut reward_balance_increment = BTreeMap::new();
+        reward_balance_increment.insert(miner, (miner_reward, miner_hash));
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment,
+            user_perm_fee_refunds: Vec::new(),
+        };
+
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000_u64);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+
+        let mut generator = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &expired_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        )
+        .expect("constructor must succeed; the underflow happens during iteration");
+
+        // Drive the iterator until either an error surfaces or we run
+        // out of items. The expected outcome is the publish-ledger
+        // ingress-reward subtraction surfacing as
+        // `SnapshotTreasuryUnderflow`.
+        let mut last_err: Option<ShadowTxGenError> = None;
+        for item in generator.by_ref() {
+            match item {
+                Ok(_) => continue,
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        let err = last_err.expect("publish-ledger phase must surface the underflow");
+        assert!(
+            matches!(err, ShadowTxGenError::SnapshotTreasuryUnderflow(_)),
+            "underflow at publish-ledger ingress-proof site must classify as \
+             SnapshotTreasuryUnderflow (node fault) because the running \
+             treasury at this point has been mutated by snapshot-derived \
+             expired-ledger payouts; got: {err:?}",
+        );
+        // The error message must carry diagnostic context — block height
+        // and the irys_ref (rolling hash) — so operator logs distinguish
+        // this site from other snapshot-underflow paths.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ingress proof reward underflow"),
+            "diagnostic prefix missing: {msg}",
+        );
+        assert!(
+            msg.contains(&block_height.to_string()),
+            "block height context missing: {msg}",
+        );
     }
 
     /// `ShadowTxGenError::Display` carries the message verbatim with the

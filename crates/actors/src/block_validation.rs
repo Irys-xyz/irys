@@ -3532,11 +3532,17 @@ async fn generate_expected_shadow_transactions(
     // ShadowTxGenerator::new and its iteration operate on already-loaded
     // local data (parent block, snapshots, mempool-resolved txs). The
     // typed `ShadowTxGenError` distinguishes failure classes so each lands
-    // on the correct `ValidationResult`:
+    // on the correct `ValidationResult`. The audited invariant
+    // (see `ShadowTxGenError` doc) is:
     //   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault
-    //     (local state is corrupt; two honest nodes cannot reach this).
+    //     (local state is corrupt OR the running treasury at point of
+    //     failure depends on local snapshot state; two honest nodes cannot
+    //     reach this and we prefer a loud restart to silent canonical-fork).
     //   - `TreasuryArithmetic` / `Structural` → consensus rejection
-    //     (peer's tx set produced bad fee math or out-of-range fee values).
+    //     (operand is purely peer-supplied AND the running treasury at
+    //     point of operation has not been mutated by snapshot-derived
+    //     amounts, so a fault is safely peer-attributable — peer's tx set
+    //     produced bad fee math or out-of-range fee values).
     //   - `Soft` → soft internal (existing retry-plausible fallback).
     let classify_shadow_err = |e: crate::shadow_tx_generator::ShadowTxGenError| match e {
         crate::shadow_tx_generator::ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
