@@ -1,10 +1,10 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
-use eyre::{OptionExt as _, ensure};
+use eyre::{ensure, OptionExt as _};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
-use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
+use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, BlockTree, SupplyState};
 use irys_types::{
-    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
-    Traced, app_state::DatabaseProvider,
+    app_state::DatabaseProvider, DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock,
+    SendTraced as _, SystemLedger, Traced,
 };
 use std::{
     collections::HashMap,
@@ -133,21 +133,36 @@ impl BlockMigrationService {
                 let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
 
-                for dl in &header.data_ledgers {
+                // NOTE: same-block Submit→Publish promotions are valid. Keep
+                // the term-ledger pass first so `included_height` is written
+                // before any Publish-ledger `promoted_height` write for the
+                // same tx_id; `set_data_tx_promoted_height` requires
+                // `included_height` to already exist.
+                for dl in header
+                    .data_ledgers
+                    .iter()
+                    .filter(|dl| dl.ledger_id != DataLedger::Publish as u32)
+                {
                     let tx_ids = &dl.tx_ids.0;
                     if tx_ids.is_empty() {
                         continue;
                     }
-
-                    if dl.ledger_id == DataLedger::Publish as u32 {
-                        // Publish: only set promoted_height, never touch included_height.
-                        irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    } else {
-                        // Term ledger (Submit / OneYear / ThirtyDay): set included_height.
-                        irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    // Term ledger (Submit / OneYear / ThirtyDay): set included_height.
+                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                for dl in header
+                    .data_ledgers
+                    .iter()
+                    .filter(|dl| dl.ledger_id == DataLedger::Publish as u32)
+                {
+                    let tx_ids = &dl.tx_ids.0;
+                    if tx_ids.is_empty() {
+                        continue;
                     }
+                    // Publish: only set promoted_height, never touch included_height.
+                    irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
                 if !commitment_ids.is_empty() {
                     irys_database::batch_set_commitment_tx_included_height(
@@ -328,7 +343,6 @@ impl BlockMigrationService {
                 let ledger = DataLedger::try_from(dl.ledger_id)
                     .map_err(|_| eyre::eyre!("Unknown ledger_id {}", dl.ledger_id))?;
                 let mut ledger_txs = transactions.get_ledger_txs(ledger).to_vec();
-                let tx_ids = &dl.tx_ids.0;
 
                 // Publish txs get promoted_height set on their headers
                 if ledger == DataLedger::Publish {
@@ -342,18 +356,36 @@ impl BlockMigrationService {
                 for data_tx in &ledger_txs {
                     insert_tx_header(tx, data_tx)?;
                 }
+            }
 
-                if !tx_ids.is_empty() {
-                    // `included_height` ↔ term ledgers only; never overwrite for Publish.
-                    // `promoted_height` ↔ Publish ledger only.
-                    if ledger == DataLedger::Publish {
-                        irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    } else {
-                        irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
-                            .map_err(|e| eyre::eyre!("{:?}", e))?;
-                    }
+            // NOTE: same-block Submit→Publish promotions are valid. Keep the
+            // term-ledger pass first so `included_height` exists before the
+            // Publish-ledger pass writes `promoted_height` for the same tx_id.
+            for dl in header
+                .data_ledgers
+                .iter()
+                .filter(|dl| dl.ledger_id != DataLedger::Publish as u32)
+            {
+                let tx_ids = &dl.tx_ids.0;
+                if tx_ids.is_empty() {
+                    continue;
                 }
+                // `included_height` ↔ term ledgers only; never overwrite for Publish.
+                irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+            }
+            for dl in header
+                .data_ledgers
+                .iter()
+                .filter(|dl| dl.ledger_id == DataLedger::Publish as u32)
+            {
+                let tx_ids = &dl.tx_ids.0;
+                if tx_ids.is_empty() {
+                    continue;
+                }
+                // `promoted_height` ↔ Publish ledger only.
+                irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
             }
 
             if !commitment_tx_ids.is_empty() {
@@ -409,19 +441,20 @@ mod tests {
     //! satisfied with cheap placeholders.
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
+        cache_data_root, open_or_create_db,
         tables::{CachedDataRoots, IrysTables},
+        IrysDatabaseArgs as _,
     };
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
-        IrysBlockHeader, U256,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysBlockHeader,
+        H256, U256,
     };
-    use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
+    use reth_db::Database as _;
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
@@ -723,6 +756,38 @@ mod tests {
         Arc::new(SealedBlock::new_unchecked(Arc::new(header), body))
     }
 
+    /// Wrap a header in a `SealedBlock` whose body carries the same tx_id in
+    /// both Submit and Publish. This models a same-block promotion.
+    fn make_sealed_same_block_submit_publish_promotion(
+        mut header: IrysBlockHeader,
+        tx_id: H256,
+        data_root: H256,
+    ) -> Arc<SealedBlock> {
+        header.data_ledgers[DataLedger::Publish].tx_ids = H256List(vec![tx_id]);
+        header.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx_id]);
+
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                // Submit-ledger entries already carry Publish-targeting txs.
+                ledger_id: DataLedger::Publish as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+
+        let mut data_txs_map = HashMap::new();
+        data_txs_map.insert(DataLedger::Publish, vec![tx_header.clone()]);
+        data_txs_map.insert(DataLedger::Submit, vec![tx_header]);
+
+        let body = BlockTransactions {
+            data_txs: data_txs_map,
+            ..Default::default()
+        };
+        Arc::new(SealedBlock::new_unchecked(Arc::new(header), body))
+    }
+
     fn read_data_tx_metadata(
         db: &DatabaseProvider,
         tx_id: &H256,
@@ -775,6 +840,55 @@ mod tests {
             Some(publish_height),
             "promoted_height must be set to Publish-block height"
         );
+        Ok(())
+    }
+
+    /// Same-block Submit→Publish promotion: the term-ledger metadata write
+    /// must happen before the Publish write so `promoted_height` can be set in
+    /// the same transaction.
+    #[tokio::test]
+    async fn same_block_submit_publish_promotion_sets_both_heights() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        let height = 11_u64;
+
+        let header = make_block_header(height, H256::random(), 50, vec![tx_id]);
+        let sealed = make_sealed_same_block_submit_publish_promotion(header, tx_id, data_root);
+
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        let meta =
+            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        assert_eq!(meta.included_height, Some(height));
+        assert_eq!(meta.promoted_height, Some(height));
+        Ok(())
+    }
+
+    /// `persist_block` uses the same metadata helpers as `persist_metadata`,
+    /// so same-block promotions must also write `included_height` before
+    /// `promoted_height` during migration.
+    #[tokio::test]
+    async fn persist_block_same_block_submit_publish_promotion_sets_both_heights(
+    ) -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        // Height 0 avoids block-index continuity requirements in this focused
+        // unit test while still exercising the metadata write ordering.
+        let header = make_block_header(0, H256::zero(), 50, vec![tx_id]);
+        let sealed = make_sealed_same_block_submit_publish_promotion(header, tx_id, data_root);
+
+        svc.persist_block(sealed.as_ref())?;
+
+        let meta = read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after migration");
+        assert_eq!(meta.included_height, Some(0));
+        assert_eq!(meta.promoted_height, Some(0));
         Ok(())
     }
 
