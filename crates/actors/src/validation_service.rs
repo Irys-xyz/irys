@@ -397,6 +397,16 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
+                                // VDF Invalid is a terminal verdict for this
+                                // attempt — clear any stale concurrent-cancel
+                                // retry counter so a future fresh submission
+                                // of the same hash starts from zero. Mirrors
+                                // the H4 fix at the concurrent-stage Ok arm
+                                // (line ~496) and the panic arm (line ~657);
+                                // without it, a prior attempt's cancel
+                                // counter would silently shorten a fresh
+                                // attempt's retry budget.
+                                coordinator.clear_concurrent_cancel_retries(&hash);
                                 self.send_validation_result(
                                     hash,
                                     ValidationError::VdfValidationFailed(vdf_error.to_string()).into(),
@@ -426,6 +436,10 @@ impl ValidationService {
                                     block.parent_hash = %parent_hash,
                                     "VDF Stage B: parent missing from block tree (eviction race); routing as SoftInternal"
                                 );
+                                // Terminal verdict — clear stale retry
+                                // budget. See the Invalid arm above for
+                                // the H4-mirror rationale.
+                                coordinator.clear_concurrent_cancel_retries(&hash);
                                 self.send_validation_result(
                                     hash,
                                     ValidationError::ParentBlockMissing {

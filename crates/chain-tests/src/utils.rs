@@ -3794,6 +3794,15 @@ pub enum BlockValidationOutcome {
     /// a terminal state. Again, not a validation outcome — a harness
     /// timeout. Tests that hit this should diagnose why the block stalled.
     HarnessTimeout,
+    /// The harness's broadcast receiver lagged and dropped events. The
+    /// matching `BlockStateUpdated` for this block may have been among
+    /// the missed events, so the outcome is unknown. Surfacing this
+    /// distinct variant (instead of falling through to
+    /// `NoDiscardEventObserved`) lets tests detect channel overflow and
+    /// diagnose flakiness instead of silently treating lag as a
+    /// no-event-observed result. See the broadcast channel docs for
+    /// `RecvError::Lagged`.
+    ReceiverLagged { missed: u64 },
 }
 
 pub fn assert_validation_error(
@@ -3817,26 +3826,49 @@ pub async fn read_block_from_state(
 
     // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
-        // Check for block state events (non-blocking)
-        while let Ok(event) = event_receiver.try_recv() {
-            if event.block_hash == *block_hash && event.discarded {
-                // Block was discarded; extract the underlying ValidationError
-                // from either dispatch arm. `Invalid` carries consensus
-                // rejections (peer's block is bad); `InternalFailure` carries
-                // local/runtime issues including cancel reasons like
-                // ParentMissing that route as internal. Both surface to tests
-                // via `BlockValidationOutcome::Discarded(error)` so
-                // `assert_validation_error` works on either.
-                match event.validation_result {
-                    irys_actors::block_tree_service::ValidationResult::Invalid(rejection) => {
-                        return BlockValidationOutcome::Discarded(rejection.err().clone());
+        // Drain ready events explicitly so we can distinguish "no events
+        // pending" from "channel lagged past our slow polling cadence".
+        // The prior `while let Ok(..)` loop collapsed `Lagged` into the
+        // same exit as `Empty`, which silently lost the discard event
+        // when the channel overflowed.
+        loop {
+            match event_receiver.try_recv() {
+                Ok(event) => {
+                    if event.block_hash == *block_hash && event.discarded {
+                        // Block was discarded; extract the underlying
+                        // ValidationError from either dispatch arm.
+                        // `Invalid` carries consensus rejections (peer's
+                        // block is bad); `InternalFailure` carries
+                        // local/runtime issues including cancel reasons
+                        // like ParentMissing that route as internal. Both
+                        // surface to tests via
+                        // `BlockValidationOutcome::Discarded(error)` so
+                        // `assert_validation_error` works on either.
+                        match event.validation_result {
+                            irys_actors::block_tree_service::ValidationResult::Invalid(
+                                rejection,
+                            ) => {
+                                return BlockValidationOutcome::Discarded(rejection.err().clone());
+                            }
+                            irys_actors::block_tree_service::ValidationResult::InternalFailure(
+                                internal,
+                            ) => {
+                                return BlockValidationOutcome::Discarded(internal.err().clone());
+                            }
+                            irys_actors::block_tree_service::ValidationResult::Valid => {}
+                        }
                     }
-                    irys_actors::block_tree_service::ValidationResult::InternalFailure(
-                        internal,
-                    ) => {
-                        return BlockValidationOutcome::Discarded(internal.err().clone());
-                    }
-                    irys_actors::block_tree_service::ValidationResult::Valid => {}
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                    // The discard event for `block_hash` may have been
+                    // among the missed messages — there's no way to
+                    // recover it. Surface this distinct outcome so the
+                    // test can diagnose the lag instead of falling
+                    // through to NoDiscardEventObserved or HarnessTimeout
+                    // and chasing a phantom validation failure.
+                    return BlockValidationOutcome::ReceiverLagged { missed };
                 }
             }
         }

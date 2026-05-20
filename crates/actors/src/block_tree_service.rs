@@ -1221,26 +1221,40 @@ impl BlockTreeServiceInner {
             eyre::eyre!("block tree cache write lock poisoned in discard_and_broadcast")
         })?;
 
-        let maybe_height = cache.get_block(&block_hash).map(|x| x.height);
-        let height = maybe_height.unwrap_or(0);
+        let Some(height) = cache.get_block(&block_hash).map(|x| x.height) else {
+            // Cache-miss: block was already removed (e.g., recursive sweep
+            // from a parent's `remove_block`, eviction race, duplicate
+            // dispatch). Treat as a no-op — record no metric, no LRU
+            // entry, no `BlockStateUpdated` event. Emitting any of those
+            // would (a) inflate `soft_internal_discard_total` for an
+            // action we didn't actually perform, and (b) leave an LRU
+            // entry that a later cache-hit Valid would tick as a spurious
+            // "recovery". See the `remove_block` recursive sweep note in
+            // this function's docstring.
+            tracing::debug!(block.hash = %block_hash, "Block already removed from cache; discard is a no-op");
+            return Ok(());
+        };
         let state = cache
             .get_block_and_status(&block_hash)
             .map(|(_, state)| *state)
             .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-        if maybe_height.is_some() {
-            if let Err(err) = cache.remove_block(&block_hash) {
-                tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache");
-            }
-        } else {
-            tracing::debug!(block.hash = %block_hash, "Block already removed from cache");
+        if let Err(err) = cache.remove_block(&block_hash) {
+            // Cache write did not happen — preserve the same invariant as
+            // the cache-miss path above and early-return without
+            // recording metrics, LRU, or broadcast. A spurious "discard"
+            // event for a block we failed to remove would mislead
+            // downstream observers and pollute H3 accounting.
+            tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache; skipping discard side effects");
+            return Ok(());
         }
         drop(cache);
 
         // R2 audit (L1): record the soft-internal LRU entry *after* the cache
-        // write completes. If the cache lock is poisoned and we return early
-        // above, no LRU entry is left dangling — otherwise a later Valid for
-        // the same hash would spuriously tick `soft_internal_recovered_total`.
+        // write completes. If the cache lock is poisoned or the removal
+        // failed/no-op'd and we returned early above, no LRU entry is left
+        // dangling — otherwise a later Valid for the same hash would
+        // spuriously tick `soft_internal_recovered_total`.
         if matches!(kind, DiscardKind::SoftInternal)
             && let ValidationResult::InternalFailure(inner) = &validation_result
             && !matches!(
@@ -1890,6 +1904,10 @@ mod tests {
     fn soft_internal_discard_inserts_into_lru() {
         let mut h = DiscardHarness::new();
         let block_hash = H256([0xAB; 32]);
+        // Cache must hold the block — post-finding-1, the discard side
+        // effects (LRU, metric, broadcast) are gated on the cache write
+        // actually happening.
+        h.insert_block_in_cache(block_hash, /*height=*/ 1);
 
         let result: ValidationResult =
             crate::block_validation::ValidationError::ParentBlockMissing { block_hash }.into();
@@ -2018,6 +2036,7 @@ mod tests {
         //    SoftInternal kind — we drive the real helper here.
         let mut h = DiscardHarness::new();
         let invalid_hash = H256([0x01; 32]);
+        h.insert_block_in_cache(invalid_hash, /*height=*/ 1);
         let invalid_result: ValidationResult =
             crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
         h.inner
@@ -2090,6 +2109,7 @@ mod tests {
     ) {
         let mut h = DiscardHarness::new();
         let block_hash = H256([0xEF; 32]);
+        h.insert_block_in_cache(block_hash, /*height=*/ 1);
 
         let result: ValidationResult =
             crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
@@ -2125,6 +2145,39 @@ mod tests {
                 .iter()
                 .any(|e| e.block_hash == block_hash && e.discarded),
             "ValidationCancelled discard must still broadcast a discard event"
+        );
+    }
+
+    /// Finding-1 invariant: when the block is no longer in the cache (the
+    /// recursive-sweep / eviction-race / duplicate-dispatch paths flagged
+    /// in the function docstring), `discard_and_broadcast` must be a true
+    /// no-op — no LRU entry, no metric, no `BlockStateUpdated`. Otherwise
+    /// downstream observers see a "discarded" event for a block we did
+    /// not actually discard, and H3 accounting picks up phantom entries.
+    #[test]
+    fn discard_on_cache_miss_is_a_no_op() {
+        let mut h = DiscardHarness::new();
+        let block_hash = H256([0x77; 32]);
+        // Deliberately do NOT seed the cache.
+
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ParentBlockMissing { block_hash }.into();
+        h.inner
+            .discard_and_broadcast(block_hash, result, DiscardKind::SoftInternal)
+            .expect("discard_and_broadcast must succeed even when cache is empty");
+
+        assert!(
+            h.inner
+                .recent_soft_internal_discards
+                .get(&block_hash)
+                .is_none(),
+            "cache-miss discard must not populate the H3 LRU"
+        );
+        let events = h.collect_broadcasts();
+        assert!(
+            events.is_empty(),
+            "cache-miss discard must not emit a BlockStateUpdated event; got {:?}",
+            events
         );
     }
 

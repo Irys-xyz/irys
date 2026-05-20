@@ -384,13 +384,25 @@ impl BlockCacheInner {
     ) -> Option<(BlockHash, CachedBlock)> {
         let block_hash = block.header().block_hash;
         let previous_block_hash = block.header().previous_block_hash;
+        // Preserve `last_reprocess_at` across re-inserts. When a parked
+        // block re-enters `process_block` (via `AttemptReprocessingBlock`),
+        // `add_block` is called again with the same hash. Resetting the
+        // field to `None` would bypass the 10s `REPROCESSING_COOLDOWN`
+        // for subsequent gossip while this reprocess is in flight, and —
+        // worse — for the next park if processing finds the parent still
+        // missing. Carry the prior stamp forward so the cooldown survives
+        // the retry.
+        let previous_last_reprocess_at = self
+            .blocks
+            .peek(&block_hash)
+            .and_then(|cached| cached.last_reprocess_at);
         let evicted = self.blocks.push(
             block.header().block_hash,
             CachedBlock {
                 block: Arc::clone(&block),
                 is_processing: true,
                 is_fast_tracking: fast_track,
-                last_reprocess_at: None,
+                last_reprocess_at: previous_last_reprocess_at,
             },
         );
 
