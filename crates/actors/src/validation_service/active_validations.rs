@@ -26,7 +26,9 @@ use tracing::{Instrument as _, debug, info, instrument, warn};
 use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
-use crate::validation_service::{VdfTaskStage, VdfValidationResult, record_vdf_task_progress};
+use crate::validation_service::{
+    VdfStageBParentMissing, VdfTaskStage, VdfValidationResult, record_vdf_task_progress,
+};
 
 /// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,30 +144,43 @@ impl PreemptibleVdfTask {
                 //   design/docs/vdf-validation-stall-detection.md. The
                 //   cooperative `Wait*` stages must follow the same policy.
                 // - Anything else (real validation finding) → Invalid.
-                match e.downcast_ref::<WaitForStepError>() {
-                    Some(WaitForStepError::Cancelled) => {
-                        metrics::record_validation_cancellation("vdf_preempted");
-                        VdfValidationResult::Cancelled
+                // Stage B parent-eviction race (H5): typed sentinel from
+                // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
+                // ParentMissing rather than the panic the old `.expect` site
+                // produced. Checked before the WaitForStepError downcast since
+                // it can fire at any VDF stage entry, not just the wait stage.
+                if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
+                    metrics::record_validation_cancellation("vdf_parent_missing");
+                    VdfValidationResult::ParentMissing {
+                        parent_hash: parent_missing.parent_hash,
                     }
-                    Some(WaitForStepError::Stalled { .. }) => {
-                        metrics::record_validation_cancellation("vdf_stalled");
-                        // See above. Panic propagates through the spawned task
-                        // as JoinError::is_panic(), then `resume_unwind` in the
-                        // validation service select loop re-raises it onto the
-                        // service task. The global panic hook then raises SIGINT
-                        // and the 45s shutdown watchdog forces process abort.
-                        panic!(
-                            "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
-                            self.task.sealed_block.header().block_hash,
-                            e
-                        );
-                    }
-                    None => {
-                        if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                } else {
+                    match e.downcast_ref::<WaitForStepError>() {
+                        Some(WaitForStepError::Cancelled) => {
                             metrics::record_validation_cancellation("vdf_preempted");
                             VdfValidationResult::Cancelled
-                        } else {
-                            VdfValidationResult::Invalid(e)
+                        }
+                        Some(WaitForStepError::Stalled { .. }) => {
+                            metrics::record_validation_cancellation("vdf_stalled");
+                            // See above. Panic propagates through the spawned task
+                            // as JoinError::is_panic(), then `resume_unwind` in the
+                            // validation service select loop re-raises it onto the
+                            // service task. The global panic hook then raises SIGINT
+                            // and the 45s shutdown watchdog forces process abort.
+                            panic!(
+                                "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
+                                self.task.sealed_block.header().block_hash,
+                                e
+                            );
+                        }
+                        None => {
+                            if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8
+                            {
+                                metrics::record_validation_cancellation("vdf_preempted");
+                                VdfValidationResult::Cancelled
+                            } else {
+                                VdfValidationResult::Invalid(e)
+                            }
                         }
                     }
                 }

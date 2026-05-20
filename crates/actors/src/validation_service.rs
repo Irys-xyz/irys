@@ -51,6 +51,45 @@ pub enum VdfValidationResult {
     Valid,
     Invalid(eyre::Report),
     Cancelled,
+    /// Parent block was evicted from the block tree between VDF task queuing
+    /// and Stage B (seed-data validation against parent). Same eviction race
+    /// every other site in this branch classifies as `SoftInternal`; we
+    /// surface it here instead of panicking inside `spawn_blocking`. The
+    /// dispatch loop maps this to `ValidationError::ParentBlockMissing`,
+    /// which routes through `is_internal_failure() = true` → the block parks
+    /// for retry, no peer attribution.
+    ParentMissing {
+        parent_hash: BlockHash,
+    },
+}
+
+/// Sentinel error returned from `ensure_vdf_is_valid` when Stage B observes
+/// the parent absent from `block_tree`. Downcast in `PreemptibleVdfTask::execute`
+/// and converted to `VdfValidationResult::ParentMissing`. See `H5` audit note
+/// 2026-05-20: prior code `.expect`ed the parent, panicking and triggering
+/// supervisor restart on what is a recoverable race.
+#[derive(Debug, thiserror::Error)]
+#[error("VDF Stage B: parent block {parent_hash} not found in block tree")]
+pub(crate) struct VdfStageBParentMissing {
+    pub parent_hash: BlockHash,
+}
+
+/// Look up the parent for Stage B (seed-data validation) outside the blocking
+/// closure. Returns a cloned `IrysBlockHeader` on hit, or the typed
+/// `VdfStageBParentMissing` sentinel on miss. Factored out so the
+/// lookup-then-route path can be unit-tested against a real `BlockTree`
+/// without spinning up a full `ValidationServiceInner`.
+pub(crate) fn lookup_stage_b_parent(
+    block_tree_guard: &BlockTreeReadGuard,
+    block: &IrysBlockHeader,
+) -> Result<IrysBlockHeader, VdfStageBParentMissing> {
+    let binding = block_tree_guard.read();
+    binding
+        .get_block(&block.previous_block_hash)
+        .cloned()
+        .ok_or(VdfStageBParentMissing {
+            parent_hash: block.previous_block_hash,
+        })
 }
 
 #[repr(u8)]
@@ -370,6 +409,30 @@ impl ValidationService {
                                 // recalculates priority (which may have changed
                                 // due to reorgs) before re-entering the queue.
                                 coordinator.submit_task(task);
+                            }
+                            VdfValidationResult::ParentMissing { parent_hash } => {
+                                // Stage B observed the parent missing from
+                                // block_tree (eviction race). Surface as
+                                // ParentBlockMissing → SoftInternal so the
+                                // block parks for retry and no peer attribution
+                                // occurs. See the H5 audit note and the
+                                // `seeds_validation_task` mirror path.
+                                metrics::record_validation_result("vdf", "parent_missing");
+                                metrics::record_validation_full_duration_ms(
+                                    task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                                warn!(
+                                    block.hash = %hash,
+                                    block.parent_hash = %parent_hash,
+                                    "VDF Stage B: parent missing from block tree (eviction race); routing as SoftInternal"
+                                );
+                                self.send_validation_result(
+                                    hash,
+                                    ValidationError::ParentBlockMissing {
+                                        block_hash: parent_hash,
+                                    }
+                                    .into(),
+                                );
                             }
                         }
                         Err(join_error) => if join_error.is_panic() {
@@ -802,16 +865,21 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: validating seed data against parent"
         );
         {
-            let block_tree_guard = self.block_tree_guard.clone();
+            // Lift the parent lookup OUT of the spawn_blocking closure (H5).
+            // If the parent has been evicted between VDF task queuing and now
+            // (depth-prune / reorg eviction race), surface a typed sentinel
+            // error rather than panicking inside the blocking task. The
+            // sentinel is downcast in `PreemptibleVdfTask::execute` and
+            // mapped to `VdfValidationResult::ParentMissing`, which the
+            // dispatch loop routes via `ValidationError::ParentBlockMissing`
+            // → `SoftInternal` (same shape as `seeds_validation_task` in the
+            // concurrent stage).
+            let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
             tokio::task::spawn_blocking(move || {
-                let binding = block_tree_guard.read();
-                let previous_block = binding
-                    .get_block(&block_header.previous_block_hash)
-                    .expect("previous block should exist");
                 ensure!(
                     matches!(
-                        is_seed_data_valid(&block_header, previous_block, vdf_reset_frequency),
+                        is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency),
                         crate::block_tree_service::ValidationResult::Valid
                     ),
                     "Seed data is invalid"
@@ -1151,5 +1219,88 @@ mod tests {
             rx.try_recv().is_err(),
             "only the validated prefix should be emitted"
         );
+    }
+
+    /// H5 regression: when the parent is absent from `block_tree` at Stage B
+    /// entry, the lookup helper must return the typed `VdfStageBParentMissing`
+    /// sentinel instead of panicking. The wider pipeline maps this to
+    /// `VdfValidationResult::ParentMissing` →
+    /// `ValidationError::ParentBlockMissing` → `SoftInternal`. Before the fix,
+    /// the lookup ran inside `spawn_blocking` with `.expect("previous block
+    /// should exist")` and panicked the node on a recoverable eviction race.
+    mod stage_b_parent_lookup {
+        use super::*;
+        use irys_domain::BlockTree;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{ConsensusConfig, IrysBlockHeader};
+        use std::sync::RwLock;
+
+        fn signed_genesis() -> IrysBlockHeader {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = 0;
+            header.poa.chunk = Some(Default::default());
+            header.test_sign();
+            header
+        }
+
+        fn empty_block_tree() -> BlockTreeReadGuard {
+            let genesis = signed_genesis();
+            let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)))
+        }
+
+        #[test]
+        fn returns_sentinel_when_parent_absent() {
+            let block_tree = empty_block_tree();
+
+            // Child block whose parent hash isn't in the tree (genesis isn't
+            // the parent we're pointing at).
+            let mut child = IrysBlockHeader::new_mock_header();
+            child.height = 5;
+            child.previous_block_hash = H256::from_low_u64_be(0xdead);
+
+            let err = lookup_stage_b_parent(&block_tree, &child)
+                .expect_err("missing parent must surface the typed sentinel, not panic");
+
+            assert_eq!(
+                err.parent_hash, child.previous_block_hash,
+                "sentinel must carry the parent hash so the dispatch loop can build the ParentBlockMissing error"
+            );
+        }
+
+        #[test]
+        fn returns_cloned_parent_when_present() {
+            // Genesis is present in the tree; build a child whose parent IS
+            // genesis. Lookup must hit and return the cloned header.
+            let genesis = signed_genesis();
+            let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+            let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+
+            let mut child = IrysBlockHeader::new_mock_header();
+            child.height = 1;
+            child.previous_block_hash = genesis.block_hash;
+
+            let parent = lookup_stage_b_parent(&block_tree, &child)
+                .expect("parent present in tree must return Ok");
+            assert_eq!(parent.block_hash, genesis.block_hash);
+            assert_eq!(parent.height, genesis.height);
+        }
+
+        /// Direct round-trip: confirm the sentinel error converts cleanly to
+        /// `eyre::Report` (the actual return shape of `ensure_vdf_is_valid`)
+        /// and downcasts back to the typed sentinel so
+        /// `PreemptibleVdfTask::execute` can route it.
+        #[test]
+        fn sentinel_round_trips_through_eyre_report() {
+            let parent_hash = H256::from_low_u64_be(0xbeef);
+            let original = VdfStageBParentMissing { parent_hash };
+
+            // Wrap via `.into()` exactly as `ensure_vdf_is_valid` does.
+            let report: eyre::Report = original.into();
+            let recovered = report
+                .downcast_ref::<VdfStageBParentMissing>()
+                .expect("typed sentinel must survive eyre boxing");
+            assert_eq!(recovered.parent_hash, parent_hash);
+        }
     }
 }
