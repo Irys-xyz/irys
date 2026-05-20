@@ -30,7 +30,7 @@ use crate::validation_service::ValidationServiceInner;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
 use std::ops::ControlFlow;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::task::AbortHandle;
 use tracing::{Instrument as _, debug, error, warn};
@@ -440,7 +440,17 @@ impl BlockValidationTask {
         let miner_address = self.sealed_block.header().miner_address;
         let block = self.sealed_block.header();
 
+        // Side channel for recovering safety-critical NodeFault / Invalid
+        // observations on the cancel path. Each stage writes to this
+        // BEFORE returning so a stage that completed before the cancel
+        // arm fired contributes its observation here even if
+        // `tokio::join!`'s combined future is still `Pending`. See the
+        // type-level doc on `StageFaultCaptures` for the full rationale.
+        let stage_captures: Arc<Mutex<StageFaultCaptures>> =
+            Arc::new(Mutex::new(StageFaultCaptures::default()));
+
         // Recall range validation
+        let recall_captures = Arc::clone(&stage_captures);
         let recall_task = async move {
             let started = Instant::now();
             let outcome = recall_recall_range_is_valid(
@@ -464,6 +474,11 @@ impl BlockValidationTask {
                 }
             };
             metrics::record_validation_result("recall_range", result.granular_metric_label());
+            // Side-channel write: record NodeFault / Invalid before
+            // returning so the cancel arm in `validate_block` can recover
+            // this observation even if other stages remain pending and
+            // the combined `tokio::join!` future never reports Ready.
+            capture_stage_result(&recall_captures, &result);
             result
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
@@ -565,6 +580,7 @@ impl BlockValidationTask {
             }
         };
 
+        let poa_captures = Arc::clone(&stage_captures);
         let poa_task = async move {
             let started = Instant::now();
             let res = poa_task.await;
@@ -616,6 +632,12 @@ impl BlockValidationTask {
                 }
             };
             metrics::record_validation_result("poa", result.granular_metric_label());
+            // Side-channel write: PoA is the most likely producer of a
+            // NodeFault (`TaskPanicked` from a panicked verifier thread,
+            // `BlockBoundsLookupError`, etc.), and historically was the
+            // exact stage whose Ready signal could be silently dropped
+            // by the broken drain-poll. Recording here closes that hazard.
+            capture_stage_result(&poa_captures, &result);
             result
         };
 
@@ -635,6 +657,7 @@ impl BlockValidationTask {
         let data_txs_ema_snapshot = parent_ema_snapshot.clone();
 
         let sealed_block_for_shadow = self.sealed_block.clone();
+        let shadow_tx_captures = Arc::clone(&stage_captures);
         let shadow_tx_task = async move {
             let started = Instant::now();
 
@@ -749,12 +772,29 @@ impl BlockValidationTask {
             // reach `Invalid`. Wrapping every error here as
             // `ShadowTransactionInvalid` would erase that classification
             // and peer-attribute local DB/snapshot failures.
+            //
+            // Side-channel write: shadow_tx is the second-most-likely
+            // NodeFault producer after PoA — `ShadowTxNodeFault` (treasury
+            // underflow, etc.) is the canonical hard-fault case. We
+            // observe the error via the same `Into<ValidationResult>`
+            // dispatcher used downstream, so the classification this
+            // side-channel records is identical to what the natural-join
+            // path would have routed through `merge_stage_results`.
+            // The two soft-internal early returns above
+            // (`ParentCommitmentSnapshotMissing`,
+            // `ExecutionPayloadCacheEvicted`) never produce NodeFault /
+            // Invalid, so no side-channel write is required there.
+            if let Err(ref err) = result {
+                let classified: ValidationResult = err.clone().into();
+                capture_stage_result(&shadow_tx_captures, &classified);
+            }
             result.map(|()| execution_data)
         };
 
         let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
         let seeds_block_hash = self.sealed_block.header().block_hash;
         let seeds_block_height = self.sealed_block.header().height;
+        let seeds_captures = Arc::clone(&stage_captures);
         let seeds_validation_task = async move {
             let started = Instant::now();
             let binding = self.block_tree_guard.read();
@@ -775,6 +815,13 @@ impl BlockValidationTask {
                             block.parent_hash = %self.sealed_block.header().previous_block_hash,
                             "Previous block not found in block tree"
                         );
+                        // Side-channel write: `ParentBlockMissing` is soft
+                        // internal — the capture is a no-op — but we
+                        // route through the helper so any future
+                        // reclassification of this early-exit variant
+                        // automatically participates in the cancel-arm
+                        // recovery.
+                        capture_stage_result(&seeds_captures, &result);
                         return result;
                     }
                 };
@@ -788,6 +835,7 @@ impl BlockValidationTask {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
             metrics::record_validation_result("seeds", outcome.granular_metric_label());
+            capture_stage_result(&seeds_captures, &outcome);
             outcome
         }
         .instrument(tracing::info_span!(
@@ -798,6 +846,7 @@ impl BlockValidationTask {
 
         // Commitment transaction ordering validation
         let sealed_block_for_commitment = self.sealed_block.clone();
+        let commitment_captures = Arc::clone(&stage_captures);
         let commitment_ordering_task = async move {
             let started = Instant::now();
             let outcome = commitment_txs_are_valid(
@@ -828,12 +877,14 @@ impl BlockValidationTask {
                 "commitment_ordering",
                 result.granular_metric_label(),
             );
+            capture_stage_result(&commitment_captures, &result);
             result
         };
 
         // Data transaction fee validation. Snapshots were cloned up-front
         // alongside the shadow_tx clones (see comment above shadow_tx_task).
         let sealed_block_for_data = self.sealed_block.clone();
+        let data_txs_captures = Arc::clone(&stage_captures);
         let data_txs_validation_task = async move {
             let started = Instant::now();
             let txs = sealed_block_for_data.transactions();
@@ -868,23 +919,43 @@ impl BlockValidationTask {
                 }
             };
             metrics::record_validation_result("data_txs", result.granular_metric_label());
+            capture_stage_result(&data_txs_captures, &result);
             result
         };
 
         // Race the six concurrent stages against the height-diff /
-        // channel-closed cancellation future. The cancel branch deliberately
-        // does NOT drop the in-flight stages — instead it captures the
-        // cancellation reason and falls through to a single drain-and-merge
-        // step so that any stage that already produced a `NodeFault`
-        // (e.g. `TaskPanicked`, `ShadowTxNodeFault`) is observed and wins
-        // over the cancellation via `merge_stage_results_with_cancel`'s
-        // priority. Before the fix, this race lived in the OUTER
-        // `execute_concurrent` select and would drop `validate_block` —
-        // silently demoting an already-produced node fault to a cancellation
-        // outcome, breaking the "node faults must always win" invariant.
+        // channel-closed cancellation future. On cancel, the in-flight
+        // stages are abandoned (their tuple slots in `tokio::join!` will
+        // never be observed) — BUT a safety-critical NodeFault or
+        // Invalid produced by any stage that DID complete before the
+        // cancel arm fired is recovered out-of-band via the
+        // `stage_captures` side channel.
         //
-        // The join future is boxed so it is `Unpin` and can be drained via
-        // `futures::poll!` after the cancel arm fires.
+        // # Why not drain the `tokio::join!` future on cancel?
+        //
+        // The previous implementation here boxed the join future and,
+        // on cancel, called `futures::poll!(&mut stages_join)` exactly
+        // once to "catch any stage that became Ready alongside the
+        // cancel signal". That was structurally broken:
+        // `tokio::join!`'s combined future is `Pending` until ALL six
+        // sub-futures are Ready — so a NodeFault from a stage that DID
+        // complete (say, PoA's `spawn_blocking` returning a panicked
+        // `JoinError` while shadow_tx is still awaiting an EVM payload)
+        // is invisible to the drain-poll: `poll!` returns `Pending`,
+        // the join is abandoned, and the NodeFault is silently dropped.
+        // Routing then proceeds through `cancel_outcome_to_result` →
+        // soft `InternalFailure` (post-M2), the supervisor-restart path
+        // that the central "node faults must always win" invariant
+        // demands is bypassed, and a broken node parks the block in
+        // cache instead of panicking.
+        //
+        // The fix is the side channel: each stage's async body merges
+        // its NodeFault / Invalid observation into `stage_captures`
+        // BEFORE returning. The cancel arm reads the side channel
+        // synchronously and synthesises the correct outcome — which
+        // works regardless of which siblings remain Pending, because
+        // the observation does not depend on `tokio::join!`'s aggregate
+        // readiness.
         let stages_join = async {
             tokio::join!(
                 recall_task,
@@ -895,17 +966,18 @@ impl BlockValidationTask {
                 data_txs_validation_task
             )
         };
-        let mut stages_join = Box::pin(stages_join);
         let cancel_future = self.exit_if_block_is_too_old(|_| ControlFlow::Continue(()));
 
-        // `biased;` is defensive — if both branches are simultaneously
-        // ready we prefer the stages so a NodeFault that arrived
-        // alongside the cancel signal still wins. The drain-poll below
-        // makes this practically redundant (cancel arm also picks up
-        // ready stages), but biasing is cheap insurance.
+        // `biased;` makes the natural-join branch win when both arms are
+        // simultaneously Ready. This keeps the simultaneous-completion
+        // case on the "Joined" path so the merger sees all six stages
+        // and runs its full tier ordering. (On a clean cancel-only
+        // outcome the side channel handles NodeFault / Invalid recovery,
+        // so this bias is only correctness-relevant for the
+        // simultaneous-Ready edge case.)
         let stage_outcome = tokio::select! {
             biased;
-            joined = &mut stages_join => StageOutcome::Joined(joined),
+            joined = stages_join => StageOutcome::Joined(joined),
             cancel = cancel_future => {
                 // Cancel won. Fire the PoA abort so the blocking-pool
                 // thread doesn't continue and so any panic surfaces via
@@ -914,22 +986,12 @@ impl BlockValidationTask {
                 if let Some(handle) = poa_abort_slot.get() {
                     handle.abort();
                 }
-                // Drain the join future ONCE. If any stage was already
-                // ready (in particular any NodeFault), the join completes
-                // here and we merge it with the cancel signal. If not,
-                // the cancel is the only signal and the stages are
-                // dropped below (their data is owned in this scope so
-                // dropping is safe — the PoA blocking thread has already
-                // been aborted above).
-                match futures::poll!(&mut stages_join) {
-                    std::task::Poll::Ready(joined) => StageOutcome::JoinedAfterCancel(joined, cancel),
-                    std::task::Poll::Pending => StageOutcome::Cancelled(cancel),
-                }
+                StageOutcome::Cancelled(cancel)
             }
         };
 
-        // Unpack: either we have a six-tuple of stage results (with or
-        // without a concurrent cancel), or we have only a cancel signal.
+        // Unpack: natural-join path gets the full six-tuple; cancel
+        // path is handled out-of-band via the side channel below.
         let (
             recall_result,
             poa_result,
@@ -937,21 +999,27 @@ impl BlockValidationTask {
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
-            cancel_signal,
         ) = match stage_outcome {
-            StageOutcome::Joined(joined) => {
-                let (a, b, c, d, e, f) = joined;
-                (a, b, c, d, e, f, None)
-            }
-            StageOutcome::JoinedAfterCancel(joined, cancel) => {
-                let (a, b, c, d, e, f) = joined;
-                (a, b, c, d, e, f, Some(cancel))
-            }
+            StageOutcome::Joined(joined) => joined,
             StageOutcome::Cancelled(cancel) => {
-                // No stage was ready. Cancel is the result. Drop the
-                // (still-pending) stages by letting `stages_join` fall
-                // out of scope. The PoA blocking thread was aborted in
-                // the select arm above.
+                // Drain the side channel SYNCHRONOUSLY: anything a
+                // stage already wrote before the cancel arm fired is
+                // recoverable here. NodeFault wins over Invalid (the
+                // capture type enforces this priority); only when
+                // neither was observed do we fall through to the
+                // cancellation outcome — matching the
+                // `merge_stage_results_with_cancel` tier ordering
+                // (NodeFault > Invalid > Cancellation > soft
+                // InternalFailure) without needing six per-stage
+                // results.
+                let captured = std::mem::take(
+                    &mut *stage_captures
+                        .lock()
+                        .expect("StageFaultCaptures mutex poisoned"),
+                );
+                if let Some(result) = captured.into_cancel_result() {
+                    return result;
+                }
                 return cancel_outcome_to_result(cancel);
             }
         };
@@ -975,23 +1043,6 @@ impl BlockValidationTask {
                 (err.into(), None)
             }
         };
-
-        // If cancellation fired while stages were running, we MUST go
-        // through the merger so any concurrent NodeFault wins over the
-        // cancel signal. Otherwise we hand the stages to the existing
-        // success / failure logic.
-        if let Some(cancel) = cancel_signal {
-            let stage_results = [
-                &recall_result,
-                &poa_result,
-                &shadow_tx_result,
-                &seeds_validation_result,
-                &commitment_ordering_result,
-                &data_txs_result,
-            ];
-            let cancel_result = cancel_outcome_to_result(cancel);
-            return merge_stage_results_with_cancel(&stage_results, Some(&cancel_result));
-        }
 
         match (
             &recall_result,
@@ -1079,17 +1130,18 @@ impl BlockValidationTask {
 }
 
 /// Outcome of racing the six concurrent validation stages against the
-/// inner cancellation future. See the call site in `validate_block` for
-/// the drain-poll behavior on cancel.
+/// inner cancellation future. See the call site in `validate_block`.
 enum StageOutcome<J> {
-    /// Stages completed before cancellation fired.
+    /// Stages completed before cancellation fired (case 1 in the
+    /// `validate_block` cancel race) — `tokio::select!`'s biased
+    /// ordering also routes the simultaneous-ready case here.
     Joined(J),
-    /// Cancellation fired but at least one drain-poll observed the join
-    /// future was already ready. Both signals participate in the merge so
-    /// a NodeFault can still win over the cancel.
-    JoinedAfterCancel(J, ParentValidationResult),
-    /// Cancellation fired and no stage had completed at the drain-poll
-    /// moment. The cancel signal is the result.
+    /// Cancellation fired before the combined `tokio::join!` future
+    /// reported Ready. Per-stage NodeFault / Invalid observations made
+    /// inside individual stage bodies are recovered out-of-band via the
+    /// [`StageFaultCaptures`] side channel — the join future itself is
+    /// abandoned (its stages are dropped here when this variant is
+    /// produced).
     Cancelled(ParentValidationResult),
 }
 
@@ -1131,6 +1183,119 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
             reason: ValidationCancelReason::ChannelClosed,
         }
     }
+}
+
+/// Out-of-band capture of NodeFault / Invalid outcomes produced inside
+/// individual stage async bodies, used to recover safety-critical
+/// observations when the outer `tokio::select!` cancel arm wins the race
+/// in `validate_block`.
+///
+/// # Why this exists
+///
+/// `tokio::join!`'s combined future is `Pending` until ALL sub-futures
+/// are Ready. The previous "drain-poll the boxed join with
+/// `futures::poll!`" approach to picking up a NodeFault that landed
+/// alongside the cancel was structurally broken: if even one sibling
+/// stage was still pending (the typical case — there are six stages and
+/// the PoA `spawn_blocking` thread completes on a separate scheduler at
+/// arbitrary wall-clock time), the drain-poll returns `Pending` and the
+/// NodeFault from a stage that DID complete is silently dropped on the
+/// floor as the join future is abandoned. The block then routes through
+/// the cancellation outcome (post-M2 → soft `InternalFailure`) and the
+/// supervisor-restart path that NodeFault demands is bypassed.
+///
+/// This side channel is the structural fix: each stage's async body
+/// inspects its own outcome immediately before returning and merges any
+/// NodeFault / Invalid into this shared capture. Because the merge
+/// happens BEFORE the stage's outer future returns Ready, a stage that
+/// completed before the cancel arm fired has already written its
+/// observation here — independent of whether `tokio::join!`'s aggregate
+/// future was Ready when the cancel arm ran.
+///
+/// # Priority
+///
+/// First-write-wins within each tier (NodeFault, Invalid). Both halt the
+/// block, and we only need one representative per tier — there is no
+/// downstream consumer that benefits from seeing multiple NodeFaults or
+/// multiple Invalids. NodeFault always outranks Invalid (matches the
+/// `merge_stage_results` tier-1-over-tier-2 contract). Soft
+/// `InternalFailure` is deliberately NOT captured here — it does not
+/// outrank the cancellation outcome (per the merger's tier-3-over-tier-4
+/// ordering), and surfacing it from the cancel arm would peer-attribute
+/// nothing useful while obscuring the cancellation reason.
+#[derive(Default)]
+struct StageFaultCaptures {
+    /// First NodeFault observed by any stage. Captured via
+    /// `InternalFailureError`'s `Clone` impl so the original stage result
+    /// is unchanged — this write is purely observational.
+    node_fault: Option<crate::block_tree_service::InternalFailureError>,
+    /// First consensus rejection observed by any stage. Same observational
+    /// semantics as `node_fault`.
+    invalid: Option<crate::block_tree_service::ConsensusRejectionError>,
+}
+
+impl StageFaultCaptures {
+    /// Merge a stage's `ValidationResult` into the capture. NodeFault and
+    /// Invalid observations are recorded (first-write-wins per tier); all
+    /// other outcomes (Valid, soft `InternalFailure`) are no-ops.
+    ///
+    /// This is the side-channel write performed inside each stage's
+    /// async body immediately before the stage returns. Callers MUST
+    /// invoke this before the final return so the observation is
+    /// recorded even if the stage's tuple slot in `tokio::join!` is
+    /// later abandoned by a cancel-arm win.
+    fn merge(&mut self, result: &ValidationResult) {
+        match result {
+            ValidationResult::InternalFailure(inner) if inner.is_node_fault() => {
+                if self.node_fault.is_none() {
+                    self.node_fault = Some(inner.clone());
+                }
+            }
+            ValidationResult::Invalid(rejection) => {
+                if self.invalid.is_none() {
+                    self.invalid = Some(rejection.clone());
+                }
+            }
+            // Valid: nothing to capture.
+            // Soft InternalFailure: deliberately not captured (see
+            // type-level doc on priority).
+            _ => {}
+        }
+    }
+
+    /// Synthesize the cancel-arm outcome from captured side-channel
+    /// observations: NodeFault wins over Invalid; if neither is set, the
+    /// caller falls back to the cancellation outcome.
+    ///
+    /// Mirrors `merge_stage_results_with_cancel`'s tier ordering for the
+    /// cancellation path. The merger itself can't be reused here because
+    /// it expects six per-stage `ValidationResult`s — by definition the
+    /// cancel arm doesn't have those (the join future was Pending) and
+    /// the side channel is the only signal available.
+    fn into_cancel_result(self) -> Option<ValidationResult> {
+        if let Some(node_fault) = self.node_fault {
+            return Some(ValidationResult::InternalFailure(node_fault));
+        }
+        if let Some(invalid) = self.invalid {
+            return Some(ValidationResult::Invalid(invalid));
+        }
+        None
+    }
+}
+
+/// Convenience helper for inside stage bodies: record a side-channel
+/// observation under a single lock acquisition. Keeps the call sites
+/// terse and ensures we don't hold the lock across awaits.
+fn capture_stage_result(captures: &Mutex<StageFaultCaptures>, result: &ValidationResult) {
+    // `expect` over `?` / silent fall-through: a poisoned lock here means
+    // a stage body panicked while holding it (which we never do — the
+    // critical section is just two `Option` writes). Propagating the
+    // panic surfaces a real bug rather than silently dropping the
+    // observation.
+    captures
+        .lock()
+        .expect("StageFaultCaptures mutex poisoned")
+        .merge(result);
 }
 
 /// Convert a `ParentValidationResult` from the inner cancel future into a
@@ -1806,5 +1971,502 @@ mod cancel_outcome_to_result_tests {
     #[should_panic(expected = "Continue-only extra_checks invariant broken")]
     fn ready_arm_panics_in_debug() {
         let _ = cancel_outcome_to_result(ParentValidationResult::Ready);
+    }
+}
+
+#[cfg(test)]
+mod stage_fault_captures_tests {
+    //! Unit tests for `StageFaultCaptures` — the side channel that
+    //! recovers safety-critical NodeFault / Invalid observations from
+    //! individual stage bodies when the outer `tokio::select!` cancel
+    //! arm wins in `validate_block`.
+    //!
+    //! These tests pin the priority contract (NodeFault > Invalid >
+    //! cancellation > soft InternalFailure) and the "first-write wins
+    //! within a tier" semantics. The priority MUST match
+    //! `merge_stage_results_with_cancel`'s tier ordering so the cancel
+    //! arm's synthesized outcome is indistinguishable from what the
+    //! merger would have produced if it had been given the per-stage
+    //! results.
+    //!
+    //! See the C1-regression integration test in
+    //! `side_channel_cancel_race_tests` below for proof that the side
+    //! channel actually closes the `tokio::join!`-poll-drain hazard
+    //! when wired into a real `tokio::select!`.
+    use super::*;
+    use crate::block_validation::{PreValidationError, ValidationError};
+    use irys_types::H256;
+
+    fn invalid() -> ValidationResult {
+        ValidationError::ShadowTransactionInvalid("consensus mismatch".to_string()).into()
+    }
+
+    /// Hard NodeFault produced by a panicked verifier thread. The
+    /// canonical "must surface even if the cancel arm wins" case.
+    fn node_fault() -> ValidationResult {
+        ValidationError::TaskPanicked {
+            task: "poa".to_string(),
+            details: "verifier thread panicked".to_string(),
+        }
+        .into()
+    }
+
+    /// Soft (eviction-race) InternalFailure — block parks in cache for
+    /// retry, no peer attribution, no node restart. Deliberately NOT
+    /// captured by the side channel.
+    fn soft_internal() -> ValidationResult {
+        ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        }
+        .into()
+    }
+
+    /// Sanity check: the merge() on a default capture with a single
+    /// NodeFault input must produce the NodeFault on cancel-arm read.
+    /// This is the load-bearing case the side channel exists for.
+    #[test]
+    fn merge_records_node_fault() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&node_fault());
+        let synthesized = captures
+            .into_cancel_result()
+            .expect("NodeFault should be recovered");
+        match synthesized {
+            ValidationResult::InternalFailure(inner) => assert!(
+                inner.is_node_fault(),
+                "expected node-fault InternalFailure, got soft: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected InternalFailure(node-fault), got {:?}", other),
+        }
+    }
+
+    /// A single Invalid must round-trip through the side channel.
+    #[test]
+    fn merge_records_invalid() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&invalid());
+        match captures.into_cancel_result() {
+            Some(ValidationResult::Invalid(_)) => {}
+            other => panic!("expected Some(Invalid), got {:?}", other),
+        }
+    }
+
+    /// Soft InternalFailure is deliberately NOT captured: the merger's
+    /// tier ordering has cancellation outranking soft InternalFailure,
+    /// so surfacing a soft observation from the cancel arm would
+    /// obscure the cancellation reason without changing block-pool
+    /// dispatch.
+    #[test]
+    fn merge_does_not_record_soft_internal_failure() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&soft_internal());
+        assert!(
+            captures.into_cancel_result().is_none(),
+            "soft InternalFailure must not be captured — cancellation outranks it"
+        );
+    }
+
+    /// `Valid` is a no-op for the side channel — the capture stays
+    /// empty so the cancel arm falls through to the cancellation
+    /// outcome.
+    #[test]
+    fn merge_ignores_valid() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&ValidationResult::Valid);
+        captures.merge(&ValidationResult::Valid);
+        assert!(
+            captures.into_cancel_result().is_none(),
+            "Valid results must not produce a synthesized cancel outcome"
+        );
+    }
+
+    /// NodeFault wins over Invalid REGARDLESS of merge order — matches
+    /// `merge_stage_results`' tier-1-over-tier-2 contract. This is the
+    /// C1 invariant in miniature: a NodeFault observed by any stage
+    /// must surface on cancel even if a sibling Invalid was observed
+    /// first.
+    #[test]
+    fn node_fault_wins_over_invalid_invalid_first() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&invalid());
+        captures.merge(&node_fault());
+        match captures.into_cancel_result() {
+            Some(ValidationResult::InternalFailure(inner)) => assert!(
+                inner.is_node_fault(),
+                "NodeFault must outrank Invalid: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+        }
+    }
+
+    /// Same invariant with the other ordering — NodeFault first, then
+    /// Invalid arrives later. The capture must NOT downgrade.
+    #[test]
+    fn node_fault_wins_over_invalid_node_fault_first() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&node_fault());
+        captures.merge(&invalid());
+        match captures.into_cancel_result() {
+            Some(ValidationResult::InternalFailure(inner)) => assert!(
+                inner.is_node_fault(),
+                "first NodeFault must persist when Invalid arrives later: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+        }
+    }
+
+    /// First-write-wins within the NodeFault tier — both producers are
+    /// halting outcomes, so picking one representative is sufficient
+    /// for the supervisor-restart dispatch. We just want to confirm we
+    /// don't accidentally pick up two writes and crash / reorder.
+    #[test]
+    fn first_node_fault_wins_within_tier() {
+        let mut captures = StageFaultCaptures::default();
+        // First node-fault: TaskPanicked (PoA).
+        let first: ValidationResult = ValidationError::TaskPanicked {
+            task: "poa".to_string(),
+            details: "first".to_string(),
+        }
+        .into();
+        // Second node-fault: a different variant, same tier.
+        let second: ValidationResult = ValidationError::PreValidation(
+            PreValidationError::BlockBoundsLookupError("second".to_string()),
+        )
+        .into();
+        captures.merge(&first);
+        captures.merge(&second);
+        match captures.into_cancel_result() {
+            Some(ValidationResult::InternalFailure(inner)) => {
+                // Either captured value is acceptable structurally, but
+                // the first-write-wins semantics should keep TaskPanicked.
+                assert!(
+                    matches!(inner.err(), ValidationError::TaskPanicked { .. }),
+                    "first NodeFault should persist (first-write-wins), got {:?}",
+                    inner.err()
+                );
+            }
+            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+        }
+    }
+
+    /// Empty capture → None: the cancel arm falls back to the
+    /// cancellation outcome unchanged.
+    #[test]
+    fn empty_capture_returns_none() {
+        let captures = StageFaultCaptures::default();
+        assert!(
+            captures.into_cancel_result().is_none(),
+            "empty capture must return None so the caller produces cancel_outcome_to_result"
+        );
+    }
+
+    /// Captures with only a soft InternalFailure (which the side
+    /// channel ignores) plus a Valid: still empty, still falls
+    /// through to cancellation. Regression target for the priority
+    /// contract.
+    #[test]
+    fn soft_internal_plus_valid_returns_none() {
+        let mut captures = StageFaultCaptures::default();
+        captures.merge(&soft_internal());
+        captures.merge(&ValidationResult::Valid);
+        assert!(
+            captures.into_cancel_result().is_none(),
+            "soft + Valid must not produce a cancel-arm override"
+        );
+    }
+}
+
+#[cfg(test)]
+mod side_channel_cancel_race_tests {
+    //! Integration-flavored tests for the C1 fix: exercise the real
+    //! `tokio::select!` race between `tokio::join!`-of-stages and a
+    //! cancel future, and confirm the side channel surfaces NodeFault
+    //! / Invalid observations that `futures::poll!(&mut stages_join)`
+    //! would have silently dropped.
+    //!
+    //! These tests do NOT spin up a full `BlockValidationTask` — they
+    //! reproduce ONLY the structural race: six stage-shaped async
+    //! blocks that write to a `StageFaultCaptures` side channel
+    //! before returning, raced against an immediate-cancel future
+    //! under the same `tokio::select! { biased; }` shape used in
+    //! `validate_block`. The cancel arm reads the side channel
+    //! identically to production.
+    //!
+    //! This is the only way to exhibit the demote-NodeFault-to-Cancelled
+    //! bug in a test: it requires a `tokio::join!` whose combined future
+    //! is `Pending` (some sibling is still awaiting) while one stage has
+    //! produced a NodeFault. We achieve that by making one stage await
+    //! `std::future::pending()` and the rest complete immediately —
+    //! `tokio::join!` is then permanently `Pending`, and the cancel arm
+    //! is the only escape.
+    use super::*;
+    use crate::block_validation::ValidationError;
+    use irys_types::H256;
+    use std::future::pending;
+
+    fn node_fault_result() -> ValidationResult {
+        ValidationError::TaskPanicked {
+            task: "poa".to_string(),
+            details: "verifier panic".to_string(),
+        }
+        .into()
+    }
+
+    fn invalid_result() -> ValidationResult {
+        ValidationError::ShadowTransactionInvalid("consensus mismatch".to_string()).into()
+    }
+
+    fn soft_result() -> ValidationResult {
+        ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        }
+        .into()
+    }
+
+    /// Race a six-stage `tokio::join!` (one stage permanently Pending
+    /// to prevent natural completion) against an immediate-Ready cancel
+    /// future under the SAME structural shape used in
+    /// `validate_block`. Run the resulting outcome through the same
+    /// side-channel read the production cancel arm performs.
+    ///
+    /// `stage_results` lists what each of the six stages produces. A
+    /// stage with `None` is "permanently pending" (we install
+    /// `std::future::pending()` for it). Stages with `Some(result)`
+    /// complete immediately and write `result` to the side channel.
+    async fn run_cancel_race(stage_results: [Option<ValidationResult>; 6]) -> ValidationResult {
+        let captures: Arc<Mutex<StageFaultCaptures>> =
+            Arc::new(Mutex::new(StageFaultCaptures::default()));
+
+        // Build six stage futures. Each `Some(result)` stage merges
+        // into the side channel before returning — same pattern as the
+        // real stage bodies in `validate_block`. `None` stages await
+        // `pending()` forever, ensuring `tokio::join!`'s combined
+        // future is always `Pending` at the cancel-arm fire moment.
+        let [s0, s1, s2, s3, s4, s5] = stage_results;
+        let captures_for = |c: &Arc<Mutex<StageFaultCaptures>>| Arc::clone(c);
+        let mk_stage = |result: Option<ValidationResult>, captures: Arc<Mutex<StageFaultCaptures>>| async move {
+            match result {
+                Some(r) => {
+                    capture_stage_result(&captures, &r);
+                    r
+                }
+                None => pending::<ValidationResult>().await,
+            }
+        };
+
+        let stage0 = mk_stage(s0, captures_for(&captures));
+        let stage1 = mk_stage(s1, captures_for(&captures));
+        let stage2 = mk_stage(s2, captures_for(&captures));
+        let stage3 = mk_stage(s3, captures_for(&captures));
+        let stage4 = mk_stage(s4, captures_for(&captures));
+        let stage5 = mk_stage(s5, captures_for(&captures));
+
+        let stages_join =
+            async { tokio::join!(stage0, stage1, stage2, stage3, stage4, stage5) };
+
+        // Immediate cancel — production uses `exit_if_block_is_too_old`
+        // which returns `Cancelled(HeightDifference)` when the block
+        // is too far behind tip. We mimic that synchronously.
+        let cancel_future =
+            async { ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference) };
+
+        // Give the join future one chance to make progress before the
+        // cancel fires by yielding once. Concretely: the stages
+        // listed as `Some(_)` await zero await points before reaching
+        // the side-channel write — they're immediately Ready on first
+        // poll. We want to poll them once so they execute their
+        // capture writes, THEN race the (already-Ready) cancel future.
+        // `tokio::task::yield_now()` doesn't directly drive the join,
+        // but `biased; stages_join => ...; cancel => ...` polls the
+        // join first inside the select, so the immediate-Ready stages
+        // are observed and their side-channel writes happen before
+        // the cancel arm runs.
+        let stage_outcome = tokio::select! {
+            biased;
+            joined = stages_join => StageOutcome::Joined(joined),
+            cancel = cancel_future => StageOutcome::Cancelled(cancel),
+        };
+
+        match stage_outcome {
+            // No `None` stage was supplied → all six completed
+            // immediately under biased ordering. Run them through
+            // `merge_stage_results` for symmetry with production.
+            StageOutcome::Joined((a, b, c, d, e, f)) => {
+                let arr = [&a, &b, &c, &d, &e, &f];
+                merge_stage_results(&arr)
+            }
+            // Cancel won → produce identical synthesis to the
+            // production cancel arm.
+            StageOutcome::Cancelled(cancel) => {
+                let captured = std::mem::take(
+                    &mut *captures.lock().expect("StageFaultCaptures mutex poisoned"),
+                );
+                if let Some(result) = captured.into_cancel_result() {
+                    return result;
+                }
+                cancel_outcome_to_result(cancel)
+            }
+        }
+    }
+
+    /// C1 regression target — the load-bearing test for the side
+    /// channel. Stage 1 (PoA-shaped) produces a `TaskPanicked`
+    /// NodeFault and writes it to the side channel BEFORE the cancel
+    /// arm fires. Stage 2 is permanently Pending so `tokio::join!`'s
+    /// combined future never reports Ready. With the broken
+    /// drain-poll, this case demotes the NodeFault to a cancellation
+    /// outcome. With the side channel, the NodeFault wins.
+    #[tokio::test]
+    async fn node_fault_with_pending_sibling_surfaces_through_side_channel() {
+        let result = run_cancel_race([
+            Some(ValidationResult::Valid),
+            Some(node_fault_result()),
+            None, // permanently pending sibling — exhibits the C1 bug
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::InternalFailure(inner) => assert!(
+                inner.is_node_fault(),
+                "C1 regression: side channel must surface NodeFault even when join is Pending, got soft: {:?}",
+                inner.err()
+            ),
+            other => panic!(
+                "C1 regression: expected InternalFailure(node-fault), got {:?}. The cancel arm dropped the NodeFault — the side channel is not working.",
+                other
+            ),
+        }
+    }
+
+    /// Same shape as the C1 regression, but the early-completing stage
+    /// produces an `Invalid` (consensus rejection) instead of a
+    /// NodeFault. The side channel must surface this on cancel —
+    /// the block IS bad and we observed that fact; reporting it as a
+    /// cancellation would be peer-misattribution in the opposite
+    /// direction (failing to peer-attribute a genuine consensus
+    /// rejection).
+    #[tokio::test]
+    async fn invalid_with_pending_sibling_surfaces_through_side_channel() {
+        let result = run_cancel_race([
+            Some(ValidationResult::Valid),
+            Some(invalid_result()),
+            None,
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::Invalid(_) => {}
+            other => panic!(
+                "side channel must surface Invalid over cancellation, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Both a NodeFault AND an Invalid landed before the cancel arm
+    /// fires, with a sibling permanently pending. Priority contract:
+    /// NodeFault outranks Invalid — supervisor restart matters more
+    /// than peer attribution.
+    #[tokio::test]
+    async fn node_fault_outranks_invalid_under_cancel() {
+        let result = run_cancel_race([
+            Some(invalid_result()),
+            Some(node_fault_result()),
+            None,
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::InternalFailure(inner) => assert!(
+                inner.is_node_fault(),
+                "NodeFault must outrank Invalid even under cancel: {:?}",
+                inner.err()
+            ),
+            other => panic!("expected InternalFailure(node-fault), got {:?}", other),
+        }
+    }
+
+    /// No NodeFault, no Invalid — only soft InternalFailure (which the
+    /// side channel ignores) plus Pending siblings. Cancel wins and
+    /// produces the cancellation outcome (post-M2: routed through
+    /// `InternalFailure` for the `HeightDifference` reason).
+    /// Regression target: the side channel must NOT promote soft
+    /// observations to cancel-arm overrides.
+    #[tokio::test]
+    async fn soft_internal_does_not_outrank_cancel() {
+        let result = run_cancel_race([
+            Some(soft_result()),
+            None,
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    matches!(
+                        inner.err(),
+                        ValidationError::ValidationCancelled {
+                            reason:
+                                crate::block_validation::ValidationCancelReason::HeightDifference,
+                        }
+                    ),
+                    "expected cancellation outcome, got {:?}",
+                    inner.err()
+                );
+            }
+            other => panic!(
+                "expected InternalFailure(ValidationCancelled(HeightDifference)), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// All six stages complete naturally (no Pending sibling); one
+    /// produces `Invalid` so the natural merger runs through its
+    /// failure branch and returns `Invalid`. Biased select picks the
+    /// Joined branch — confirming the side channel does NOT corrupt
+    /// the natural path (where the merger sees all six results and
+    /// decides). Regression target: pure observation, no behavior
+    /// change on the natural path.
+    ///
+    /// Picking a non-Valid stage avoids tripping the all-Valid
+    /// `debug_assert!` inside `merge_stage_results` (the merger's
+    /// caller invariant is that it's only called when at least one
+    /// stage is non-Valid OR a cancel is present).
+    #[tokio::test]
+    async fn natural_completion_invalid_unchanged() {
+        let result = run_cancel_race([
+            Some(ValidationResult::Valid),
+            Some(invalid_result()),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::Invalid(_) => {}
+            other => panic!(
+                "natural-completion failure path must yield Invalid via the merger, got {:?}",
+                other
+            ),
+        }
     }
 }
