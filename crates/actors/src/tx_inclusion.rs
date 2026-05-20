@@ -32,10 +32,17 @@ pub fn find_canonical_ledger_range(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
-    if let Some(range) = lookup_via_migrated_metadata(tx_id, max_height, db)? {
+    // Try the live block_tree first: it is the authoritative source for
+    // blocks still within the migration window.  The DB (migrated path) is
+    // the long-term backstop.  Preferring the tree here avoids any timing
+    // edge case at the migration boundary and is more defensive against a
+    // future bug in migrated-path metadata.
+    if let Some(range) =
+        lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db)?
+    {
         return Ok(Some(range));
     }
-    lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db)
+    lookup_via_migrated_metadata(tx_id, max_height, db)
 }
 
 fn lookup_via_migrated_metadata(
@@ -67,6 +74,15 @@ fn lookup_via_migrated_metadata(
                 block_hash
             )
         })?;
+        // Defense-in-depth: after P0-1, `included_height` for OneYear/ThirtyDay
+        // txs points at their own term-ledger block, not a Submit block.  If any
+        // future caller passes such a tx_id here, `compute_submit_range` would
+        // return a wrong, unrelated Submit delta.  Mirror the same guard that
+        // `lookup_via_block_tree` already applies (see line ~124).
+        let submit_txs = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
+        if !submit_txs.iter().any(|t| t == tx_id) {
+            return Ok(None);
+        }
         let prev = if block.height == 0 {
             None
         } else {
@@ -95,6 +111,12 @@ fn lookup_via_block_tree(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
+    // Today's config validation ensures depth > 0, but the function silently
+    // degrades to a 1-block window if violated.
+    debug_assert!(
+        block_migration_depth > 0,
+        "block_migration_depth must be positive"
+    );
     let tree = block_tree.read();
     let (canonical, _tip_idx) = tree.get_canonical_chain();
 
@@ -167,6 +189,13 @@ fn compute_submit_range(
     block: &IrysBlockHeader,
     prev: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
+    // Locks in caller invariant: both existing callers already enforce this
+    // with ok_or_else(eyre!...), so the assert won't fire today — it's
+    // defense for future callers.
+    debug_assert!(
+        prev.is_some() || block.height == 0,
+        "prev must be Some for non-genesis block"
+    );
     let total = block.data_ledgers[DataLedger::Submit].total_chunks;
     let prev_total = prev
         .map(|p| p.data_ledgers[DataLedger::Submit].total_chunks)
@@ -623,6 +652,204 @@ mod tests {
             &db,
         )?;
         assert!(result.is_none());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // P1-1 tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a block header whose tx_id appears in the given non-Submit
+    /// ledger (e.g. OneYear or ThirtyDay) but NOT in Submit.
+    fn make_signed_header_with_term_tx(
+        height: u64,
+        previous_block_hash: H256,
+        cumulative_diff: u64,
+        submit_total_chunks: u64,
+        term_ledger: DataLedger,
+        term_tx_id: H256,
+    ) -> IrysBlockHeader {
+        use irys_types::DataTransactionLedger;
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.previous_block_hash = previous_block_hash;
+        header.cumulative_diff = U256::from(cumulative_diff);
+        let submit = &mut header.data_ledgers[DataLedger::Submit];
+        submit.total_chunks = submit_total_chunks;
+        // Submit has no tx_ids — the tx lives only in the term ledger.
+        submit.tx_ids = H256List(vec![]);
+        // new_mock_header() only creates Publish and Submit ledgers; push the
+        // requested term ledger entry before indexing into it.
+        header.data_ledgers.push(DataTransactionLedger {
+            ledger_id: term_ledger.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List(vec![term_tx_id]),
+            total_chunks: 0,
+            expires: Some(1000),
+            proofs: None,
+            required_proof_count: None,
+        });
+        header.test_sign();
+        header
+    }
+
+    /// P1-1: when the DB has a corrupt entry but the block_tree has the
+    /// correct block, `find_canonical_ledger_range` must return the tree's
+    /// value, proving the tree path wins.
+    ///
+    /// Corruption: h1 in the DB has a wrong `total_chunks` for the Submit
+    /// ledger (999 instead of 25).  The block_tree holds the correct h1 with
+    /// total=25, so the correct range is [10, 24].  A migrated-path-first
+    /// implementation would return [10, 998] (wrong); a tree-first
+    /// implementation returns [10, 24] (correct).
+    #[test_log::test(tokio::test)]
+    async fn tree_wins_over_corrupt_db_entry() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+
+        // Correct blocks in the tree (h0: total=10, h1: total=25, adds [10,24]).
+        let h0_correct = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h1_correct = make_signed_header(1, h0_correct.block_hash, 1, 25, vec![tx_id]);
+
+        let guard = build_tree(h0_correct.clone(), vec![h1_correct.clone()]);
+
+        // Corrupt DB: store h1 with wrong total_chunks=999, and mark migrated.
+        let mut h1_corrupt = h1_correct.clone();
+        h1_corrupt.data_ledgers[DataLedger::Submit as usize].total_chunks = 999;
+        // The block hash changes if we re-sign, so deliberately keep same hash
+        // to simulate a silent DB corruption (no hash change).
+        put_block_header(&db, &h0_correct)?;
+        put_block_header(&db, &h1_corrupt)?;
+        mark_migrated(&db, 0, h0_correct.block_hash)?;
+        mark_migrated(&db, 1, h1_correct.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 1,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("expected Some(range)"))?;
+
+        // Tree path gives [10, 24]; corrupt DB path would give [10, 998].
+        assert_eq!(
+            u64::from(range.start()),
+            10,
+            "start should come from tree, not corrupt DB"
+        );
+        assert_eq!(
+            u64::from(range.end()),
+            24,
+            "end should come from tree (total=25), not corrupt DB (total=999)"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // P1-2 tests
+    // -----------------------------------------------------------------------
+
+    /// P1-2: a tx whose `included_height` points at a block where the tx is
+    /// in the OneYear ledger (not Submit) must return `Ok(None)` — the Submit
+    /// guard must fire.
+    #[test_log::test(tokio::test)]
+    async fn migrated_oneyear_only_tx_returns_none() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        // h1 has the tx in OneYear ledger, NOT in Submit.
+        let h1 =
+            make_signed_header_with_term_tx(1, h0.block_hash, 1, 10, DataLedger::OneYear, tx_id);
+
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        // Empty tree so the migrated path is the only candidate.
+        let guard = empty_block_tree_guard();
+        let result = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?;
+        assert!(
+            result.is_none(),
+            "OneYear-only tx must not produce a Submit range"
+        );
+        Ok(())
+    }
+
+    /// P1-2: a tx whose `included_height` points at a block where the tx is
+    /// in the ThirtyDay ledger (not Submit) must return `Ok(None)`.
+    #[test_log::test(tokio::test)]
+    async fn migrated_thirtyday_only_tx_returns_none() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        // h1 has the tx in ThirtyDay ledger, NOT in Submit.
+        let h1 =
+            make_signed_header_with_term_tx(1, h0.block_hash, 1, 10, DataLedger::ThirtyDay, tx_id);
+
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let guard = empty_block_tree_guard();
+        let result = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?;
+        assert!(
+            result.is_none(),
+            "ThirtyDay-only tx must not produce a Submit range"
+        );
+        Ok(())
+    }
+
+    /// P1-2 happy path: a Submit tx (Publish-promoted, tx in Submit ledger)
+    /// must still return the correct range after the guard is introduced.
+    #[test_log::test(tokio::test)]
+    async fn migrated_submit_tx_returns_correct_range_after_guard() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 25, vec![tx_id]);
+
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        // Empty tree: forces the migrated path.
+        let guard = empty_block_tree_guard();
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("expected Some(range) for Submit tx"))?;
+
+        // [10, 24] — Submit guard must not block a legitimate Submit tx.
+        assert_eq!(u64::from(range.start()), 10);
+        assert_eq!(u64::from(range.end()), 24);
         Ok(())
     }
 }
