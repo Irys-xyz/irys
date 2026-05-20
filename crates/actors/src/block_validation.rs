@@ -2531,11 +2531,11 @@ mod prevalidation_error_classification_tests {
 }
 
 /// Tests for the typed-error → `ValidationError` dispatch used inside
-/// `generate_expected_shadow_transactions`. These tests replicate the
-/// exact mapping closures (`classify_shadow_err` and the
-/// `CommitmentRefundError` match arm) so that any future drift between
-/// the typed error variants and the validator's classification is caught
-/// at compile time / test time, not in production.
+/// `generate_expected_shadow_transactions`. These tests exercise the
+/// production `classify_shadow_tx_gen_err` and `classify_commitment_refund_err`
+/// functions directly — they are NOT a copy of the mapping. If the
+/// production mapping drifts (e.g. a future variant is added and
+/// misclassified), these assertions fail at test time, not in production.
 ///
 /// SAFETY: the mappings are the single point where producer-side typed
 /// failures are translated to validator-side `ValidationResult` semantics.
@@ -2550,47 +2550,13 @@ mod shadow_tx_gen_error_dispatch_tests {
     use crate::commitment_refunds::CommitmentRefundError;
     use crate::shadow_tx_generator::ShadowTxGenError;
 
-    // Reproduce the helpers and closures used inside
-    // `generate_expected_shadow_transactions`. Keep these in lockstep
-    // with the call site.
-    fn internal(err: impl std::fmt::Display) -> ValidationError {
-        ValidationError::ShadowTxGenerationFailed(err.to_string())
-    }
-    fn node_fault(err: impl std::fmt::Display) -> ValidationError {
-        ValidationError::ShadowTxNodeFault(err.to_string())
-    }
-    fn consensus(err: impl std::fmt::Display) -> ValidationError {
-        ValidationError::ShadowTransactionInvalid(err.to_string())
-    }
-
-    fn classify_shadow_err(e: ShadowTxGenError) -> ValidationError {
-        match e {
-            ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
-            ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
-                node_fault(format!("snapshot treasury underflow: {s}"))
-            }
-            ShadowTxGenError::TreasuryArithmetic(s) => {
-                consensus(format!("treasury arithmetic: {s}"))
-            }
-            ShadowTxGenError::Structural(s) => consensus(s),
-            ShadowTxGenError::Soft(s) => internal(s),
-        }
-    }
-
-    fn classify_refund_err(e: CommitmentRefundError) -> ValidationError {
-        match e {
-            CommitmentRefundError::SnapshotInvariant(s) => {
-                node_fault(format!("commitment refund invariant: {s}"))
-            }
-        }
-    }
-
     /// `SnapshotInvariant` → `ShadowTxNodeFault` → `InternalFailure` with
     /// `is_node_fault() == true`. Triggers panic+restart so a corrupted
     /// local snapshot can't silently keep producing/validating bad blocks.
     #[test]
     fn snapshot_invariant_maps_to_node_fault() {
-        let err = classify_shadow_err(ShadowTxGenError::SnapshotInvariant("bad iter type".into()));
+        let err =
+            classify_shadow_tx_gen_err(ShadowTxGenError::SnapshotInvariant("bad iter type".into()));
         assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
         assert!(err.is_node_fault());
         let result: ValidationResult = err.into();
@@ -2614,7 +2580,7 @@ mod shadow_tx_gen_error_dispatch_tests {
     /// (silent canonical-fork).
     #[test]
     fn snapshot_treasury_underflow_maps_to_node_fault() {
-        let err = classify_shadow_err(ShadowTxGenError::SnapshotTreasuryUnderflow(
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::SnapshotTreasuryUnderflow(
             "cannot pay 10 from balance 5".into(),
         ));
         assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
@@ -2645,7 +2611,7 @@ mod shadow_tx_gen_error_dispatch_tests {
     /// as consensus rejection — block gets peer-attributed.
     #[test]
     fn treasury_arithmetic_maps_to_consensus() {
-        let err = classify_shadow_err(ShadowTxGenError::TreasuryArithmetic(
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::TreasuryArithmetic(
             "overflow adding term_fee_treasury".into(),
         ));
         assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
@@ -2665,7 +2631,7 @@ mod shadow_tx_gen_error_dispatch_tests {
     /// → `Invalid`. Peer-attributable.
     #[test]
     fn structural_maps_to_consensus() {
-        let err = classify_shadow_err(ShadowTxGenError::Structural(
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::Structural(
             "publish ledger tx missing perm_fee".into(),
         ));
         assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
@@ -2678,7 +2644,7 @@ mod shadow_tx_gen_error_dispatch_tests {
     /// → `InternalFailure` (validity unknown, block parks in cache).
     #[test]
     fn soft_maps_to_internal_failure() {
-        let err = classify_shadow_err(ShadowTxGenError::Soft("retry plausible".into()));
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::Soft("retry plausible".into()));
         assert!(matches!(err, ValidationError::ShadowTxGenerationFailed(_)));
         assert!(!err.is_node_fault());
         assert!(err.is_internal_failure());
@@ -2697,7 +2663,7 @@ mod shadow_tx_gen_error_dispatch_tests {
     /// retry can't heal it.
     #[test]
     fn commitment_refund_snapshot_invariant_maps_to_node_fault() {
-        let err = classify_refund_err(CommitmentRefundError::SnapshotInvariant(
+        let err = classify_commitment_refund_err(CommitmentRefundError::SnapshotInvariant(
             "pledge_count_before_executing = 0".into(),
         ));
         assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
@@ -2741,6 +2707,282 @@ mod height_tests {
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 12;
         assert!(height_is_valid(&block, &prev).is_err());
+    }
+}
+
+/// MERGE-BLOCKER(C1) REGRESSION TEST MODULE
+///
+/// Captures the C1 vulnerability documented at `MERGE-BLOCKER(C1)` inside
+/// `get_data_poa_bounds_with_block_tree_fallback`: for a non-canonical
+/// lineage whose ancestry descends below `block_tree`'s window, the
+/// height-only canonical-index fallback either returns wrong-fork bounds
+/// or escalates to `BlockBoundsLookupError` → `NodeFault` → remote-triggerable
+/// panic. The test below is `#[ignore]`d until the merge agent fixes C1
+/// per the production marker — at which point the `#[ignore]` is removed
+/// and the test must pass.
+#[cfg(test)]
+mod c1_side_fork_regression_tests {
+    use super::*;
+    use irys_domain::{
+        BlockIndex, BlockMetadata, BlockState, BlockTree, ChainState, EmaSnapshot,
+        dummy_epoch_snapshot,
+    };
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_testing_utils::new_mock_signed_header;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, DbSyncMode, H256,
+        H256List, IrysBlockHeader, LedgerIndexItem, SealedBlock,
+    };
+    use std::sync::{Arc, RwLock};
+    use std::time::SystemTime;
+
+    /// Build a `DataTransactionLedger` entry with the given `total_chunks`
+    /// and a freshly-randomised `tx_root`. The `tx_root` randomisation is
+    /// load-bearing: under C1, the buggy fallback returns the *canonical*
+    /// block's `tx_root` at the anchor height. If the side-fork's `tx_root`
+    /// equalled canonical's, we wouldn't catch the wrong-fork output.
+    fn ledger_with_total(ledger: DataLedger, total_chunks: u64) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id: ledger.into(),
+            tx_root: H256::random(),
+            tx_ids: H256List::new(),
+            total_chunks,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }
+    }
+
+    /// Build a synthetic side-fork header at the given height with the
+    /// given `previous_block_hash` and Submit total. The header is signed
+    /// so `SealedBlock::new` accepts it.
+    fn side_fork_header(
+        height: u64,
+        previous_block_hash: BlockHash,
+        submit_total_chunks: u64,
+    ) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.height = height;
+        h.previous_block_hash = previous_block_hash;
+        // Replace the default ledgers with explicit Submit/Publish totals so
+        // the side fork's data ledger is distinguishable from canonical.
+        h.data_ledgers = vec![
+            ledger_with_total(DataLedger::Publish, 0),
+            ledger_with_total(DataLedger::Submit, submit_total_chunks),
+        ];
+        h.test_sign(); // re-signs after mutation
+        h
+    }
+
+    /// Directly inject `header` into `block_tree.blocks` (the field is
+    /// `pub`), bypassing `add_common`'s parent-presence check. This is the
+    /// only way to construct the C1 scenario in a unit test: a side-fork
+    /// block whose `previous_block_hash` points outside `block_tree`'s
+    /// window. In production this state arises when migration prunes the
+    /// side fork's ancestors out of `block_tree`.
+    fn inject_block(tree: &mut BlockTree, header: IrysBlockHeader) {
+        let block_hash = header.block_hash;
+        let body = BlockBody {
+            block_hash,
+            ..Default::default()
+        };
+        let sealed = Arc::new(
+            SealedBlock::new(header.clone(), body)
+                .expect("synthetic side-fork block must seal successfully"),
+        );
+        let entry = BlockMetadata {
+            block: sealed,
+            chain_state: ChainState::NotOnchain(BlockState::ValidBlock),
+            timestamp: SystemTime::now(),
+            children: std::collections::HashSet::new(),
+            epoch_snapshot: dummy_epoch_snapshot(),
+            commitment_snapshot: Arc::new(CommitmentSnapshot::default()),
+            ema_snapshot: EmaSnapshot::genesis(&header),
+        };
+        tree.blocks.insert(block_hash, entry);
+    }
+
+    /// MERGE-BLOCKER(C1) REGRESSION TEST
+    ///
+    /// This test must pass before the `fix-cdr-block-set` merge ships. It
+    /// is currently ignored because the C1 vulnerability is unfixed — the
+    /// production code at `get_data_poa_bounds_with_block_tree_fallback`'s
+    /// `None =>` arm still uses a height-only canonical-index fallback
+    /// that produces wrong-fork bounds or escalates to NodeFault on
+    /// out-of-range.
+    ///
+    /// When the merge agent fixes C1 (per the `MERGE-BLOCKER(C1)` comment
+    /// in `block_validation.rs`), REMOVE the `#[ignore]` and verify this
+    /// test passes. The expected outcome is documented in the assertions
+    /// below — the side-fork PoA must NEVER produce `BlockBoundsLookupError`
+    /// (NodeFault) and must NEVER produce a successful return rooted on
+    /// canonical-chain bounds at the anchor height.
+    ///
+    /// Failure mode under current (buggy) code: returns
+    /// `Ok(BlockBounds { start_chunk_offset: 20, end_chunk_offset: 30,
+    /// tx_root: <side_fork's> })` — the height-only fallback at
+    /// `curr_height - 1 = 1` (canonical height 1) sources `prev_total = 20`
+    /// from the *canonical* chain, then combines that canonical-derived
+    /// start with the side fork's own (curr_total, tx_root) from S to
+    /// produce silently wrong-fork bounds. The PoA then validates against
+    /// the side-fork's tx_root for an offset whose start is anchored on
+    /// canonical history — a fork-deterministic violation. The other
+    /// failure shape (when the chosen offset exceeds the canonical
+    /// anchor's `anchor_max`) is `BlockBoundsLookupError` → NodeFault →
+    /// remote-triggerable panic.
+    #[ignore = "C1 not yet fixed — see MERGE-BLOCKER(C1) in block_validation.rs"]
+    #[test]
+    fn c1_side_fork_below_block_tree_window_must_not_node_fault() {
+        // --- Build a 2-block canonical chain in block_index ----------------
+        // Heights 0, 1. Genesis Submit total = 10. Canonical height 1
+        // Submit total = 20. The canonical block at height 1 has a hash
+        // DIFFERENT from any side-fork block.
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("c1_side_fork_regression")
+            .build();
+        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+            tmp_dir.path(),
+            DbSyncMode::UtterlyNoSync,
+        )
+        .expect("open db");
+        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db);
+
+        let canonical_genesis_hash = BlockHash::random();
+        let canonical_h1_hash = BlockHash::random();
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: canonical_genesis_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 10,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                0,
+            )
+            .expect("push genesis index item");
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: canonical_h1_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 20,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                1,
+            )
+            .expect("push canonical h1 index item");
+
+        // --- Build a block_tree containing the side-fork block S -----------
+        // S is at height 2, its `previous_block_hash` is a phantom hash
+        // (NOT in block_tree, NOT in block_index) — simulating an ancestor
+        // that has been pruned out of block_tree's window. S claims a
+        // Submit total_chunks = 30 (the side fork's actual chain has more
+        // submit chunks than canonical at height 1).
+        let consensus_config = ConsensusConfig::testing();
+        let genesis_for_tree = new_mock_signed_header();
+        let mut tree = BlockTree::new(&genesis_for_tree, consensus_config);
+
+        let phantom_parent_hash = BlockHash::random();
+        let side_fork_block = side_fork_header(2, phantom_parent_hash, 30);
+        let side_fork_hash = side_fork_block.block_hash;
+        let side_fork_submit_tx_root =
+            side_fork_block.data_ledgers[DataLedger::Submit as usize].tx_root;
+        inject_block(&mut tree, side_fork_block);
+
+        // --- Call the helper with the side-fork's parent identity ----------
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        // Pick an offset in the gap between canonical height-1's Submit
+        // total (20) and the side fork's claimed total (30). The walk-back
+        // from S → phantom_parent_hash is None, so the fallback fires at
+        // `curr_height - 1 = 1`. At canonical height 1 the Submit total
+        // is 20, so offset 25 fails `ensure!(25 < 20)` →
+        // BlockBoundsLookupError (NodeFault → panic).
+        let ledger_chunk_offset: u64 = 25;
+        let result = get_data_poa_bounds_with_block_tree_fallback(
+            &block_index_guard,
+            &block_tree_guard,
+            side_fork_hash,
+            2,
+            DataLedger::Submit,
+            ledger_chunk_offset,
+        );
+
+        // --- Assertions ----------------------------------------------------
+        // After C1 fix: result must be EITHER (a) a clean consensus-class
+        // rejection (`PoAChunkOffsetOutOfBlockBounds` / similar peer-
+        // attributable variant), OR (b) an explicit "off canonical lineage"
+        // outcome. It must NEVER be `BlockBoundsLookupError` (NodeFault),
+        // and it must NEVER be `Ok(_)` with bounds rooted on canonical
+        // (silent wrong-fork validation).
+        match result {
+            Err(PreValidationError::BlockBoundsLookupError(msg)) => {
+                panic!(
+                    "C1: side-fork PoA escalated to BlockBoundsLookupError (NodeFault → panic). \
+                     A peer can remote-trigger node restart by gossiping a side-fork with \
+                     out-of-range PoA offset. Error message: {msg}",
+                );
+            }
+            Ok(bb) => {
+                // The side-fork's predecessor at `curr_height - 1 = 1` is
+                // `phantom_parent_hash` — NOT `canonical_h1_hash`. Any
+                // `Ok(_)` here is wrong-fork: the production walk sourced
+                // `prev_total` from canonical block_index at height 1
+                // (whose hash is `canonical_h1_hash`), then combined that
+                // canonical-derived start with the side fork's own
+                // `curr_total` / `tx_root` from S. Two honest peers with
+                // different local views would disagree about whether
+                // `ledger_chunk_offset` is in-range, breaking fork
+                // determinism. The side-fork's tx_root in the result
+                // confirms the Frankenstein nature of the bounds —
+                // canonical start + side-fork end + side-fork tx_root.
+                let _ = side_fork_submit_tx_root;
+                let _ = canonical_h1_hash;
+                panic!(
+                    "C1: side-fork PoA silently produced wrong-fork bounds. The walk-back from \
+                     S → phantom_parent_hash hit the C1 fallback at curr_height - 1 = 1 and \
+                     sourced prev_total from the CANONICAL block_index entry at height 1 — \
+                     even though the side fork's ancestor at that height is phantom_parent_hash, \
+                     not canonical_h1_hash. Returned BlockBounds \
+                     {{ height: {}, start: {}, end: {}, tx_root: {} }}. After the C1 fix this \
+                     must return an `Err` (off-lineage or out-of-bounds), never Ok.",
+                    bb.height, bb.start_chunk_offset, bb.end_chunk_offset, bb.tx_root,
+                );
+            }
+            Err(other) => {
+                // Acceptable outcomes after the C1 fix: any non-NodeFault
+                // error. PoAChunkOffsetOutOfBlockBounds is the cleanest,
+                // but a new "off canonical lineage" variant is also OK.
+                assert!(
+                    !other.is_node_fault(),
+                    "C1: side-fork PoA produced a node-fault error {other:?}. \
+                     After the fix this must be a non-node-fault outcome.",
+                );
+            }
+        }
     }
 }
 
@@ -3527,6 +3769,71 @@ pub async fn submit_payload_to_reth(
     Ok(())
 }
 
+/// Classify a [`ShadowTxGenError`] into the appropriate
+/// [`ValidationError`] variant.
+///
+/// `ShadowTxGenerator::new` and its iteration operate on already-loaded
+/// local data (parent block, snapshots, mempool-resolved txs). The typed
+/// `ShadowTxGenError` distinguishes failure classes so each lands on the
+/// correct `ValidationResult`. The audited invariant (see
+/// `ShadowTxGenError` doc) is:
+///   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault
+///     (local state is corrupt OR the running treasury at point of
+///     failure depends on local snapshot state; two honest nodes cannot
+///     reach this and we prefer a loud restart to silent canonical-fork).
+///   - `TreasuryArithmetic` / `Structural` → consensus rejection
+///     (operand is purely peer-supplied AND the running treasury at
+///     point of operation has not been mutated by snapshot-derived
+///     amounts, so a fault is safely peer-attributable — peer's tx set
+///     produced bad fee math or out-of-range fee values).
+///   - `Soft` → soft internal (existing retry-plausible fallback).
+///
+/// SAFETY: this mapping is the single point where producer-side typed
+/// failures are translated to validator-side `ValidationResult` semantics.
+/// Misclassifying e.g. `TreasuryArithmetic` as a node fault would cause a
+/// validator to panic+restart on every peer block with bad fees — a DoS
+/// vector. Misclassifying `SnapshotInvariant` as consensus would
+/// peer-attribute a local corruption.
+pub(crate) fn classify_shadow_tx_gen_err(
+    e: crate::shadow_tx_generator::ShadowTxGenError,
+) -> ValidationError {
+    use crate::shadow_tx_generator::ShadowTxGenError;
+    match e {
+        ShadowTxGenError::SnapshotInvariant(s) => ValidationError::ShadowTxNodeFault(s),
+        ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+            ValidationError::ShadowTxNodeFault(format!("snapshot treasury underflow: {s}"))
+        }
+        ShadowTxGenError::TreasuryArithmetic(s) => {
+            ValidationError::ShadowTransactionInvalid(format!("treasury arithmetic: {s}"))
+        }
+        ShadowTxGenError::Structural(s) => ValidationError::ShadowTransactionInvalid(s),
+        ShadowTxGenError::Soft(s) => ValidationError::ShadowTxGenerationFailed(s),
+    }
+}
+
+/// Classify a [`CommitmentRefundError`] into the appropriate
+/// [`ValidationError`] variant.
+///
+/// Commitment-refund derivation operates on the parent's commitment
+/// snapshot — purely local state. Any failure here is a snapshot-invariant
+/// violation: the local state is internally inconsistent and retry cannot
+/// heal it. Routes to node fault (loud abort+restart) rather than
+/// peer-attributing to consensus.
+///
+/// The `commitment refund invariant:` prefix is load-bearing for log
+/// disambiguation between refund-derived faults and shadow-tx-generator
+/// faults.
+pub(crate) fn classify_commitment_refund_err(
+    e: crate::commitment_refunds::CommitmentRefundError,
+) -> ValidationError {
+    use crate::commitment_refunds::CommitmentRefundError;
+    match e {
+        CommitmentRefundError::SnapshotInvariant(s) => {
+            ValidationError::ShadowTxNodeFault(format!("commitment refund invariant: {s}"))
+        }
+    }
+}
+
 /// Generates expected shadow transactions.
 ///
 /// Returns a typed [`ValidationError`] on failure:
@@ -3558,11 +3865,6 @@ async fn generate_expected_shadow_transactions(
     let parent_missing = || ValidationError::ParentBlockMissing {
         block_hash: parent_hash,
     };
-    // Soft local failures (mempool absence, snapshot arithmetic, ledger-
-    // expiry walks) where retry can succeed. Block stays in cache.
-    fn internal(err: impl std::fmt::Display) -> ValidationError {
-        ValidationError::ShadowTxGenerationFailed(err.to_string())
-    }
     // Hard local I/O failures (DB reads, MDBX corruption) where retry
     // cannot help — DB is broken on this node. Triggers node-fault
     // abort+restart rather than accumulating in cache.
@@ -3687,13 +3989,7 @@ async fn generate_expected_shadow_transactions(
                 &parent_commitment_snapshot,
                 &config.consensus,
             )
-            .map_err(
-                |e: crate::commitment_refunds::CommitmentRefundError| match e {
-                    crate::commitment_refunds::CommitmentRefundError::SnapshotInvariant(s) => {
-                        node_fault(format!("commitment refund invariant: {s}"))
-                    }
-                },
-            )?
+            .map_err(classify_commitment_refund_err)?
         } else {
             Vec::new()
         };
@@ -3702,13 +3998,7 @@ async fn generate_expected_shadow_transactions(
             &parent_commitment_snapshot,
             &config.consensus,
         )
-        .map_err(
-            |e: crate::commitment_refunds::CommitmentRefundError| match e {
-                crate::commitment_refunds::CommitmentRefundError::SnapshotInvariant(s) => {
-                    node_fault(format!("commitment refund invariant: {s}"))
-                }
-            },
-        )?
+        .map_err(classify_commitment_refund_err)?
     } else {
         Vec::new()
     };
@@ -3733,32 +4023,7 @@ async fn generate_expected_shadow_transactions(
         }
     }
 
-    // ShadowTxGenerator::new and its iteration operate on already-loaded
-    // local data (parent block, snapshots, mempool-resolved txs). The
-    // typed `ShadowTxGenError` distinguishes failure classes so each lands
-    // on the correct `ValidationResult`. The audited invariant
-    // (see `ShadowTxGenError` doc) is:
-    //   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault
-    //     (local state is corrupt OR the running treasury at point of
-    //     failure depends on local snapshot state; two honest nodes cannot
-    //     reach this and we prefer a loud restart to silent canonical-fork).
-    //   - `TreasuryArithmetic` / `Structural` → consensus rejection
-    //     (operand is purely peer-supplied AND the running treasury at
-    //     point of operation has not been mutated by snapshot-derived
-    //     amounts, so a fault is safely peer-attributable — peer's tx set
-    //     produced bad fee math or out-of-range fee values).
-    //   - `Soft` → soft internal (existing retry-plausible fallback).
-    let classify_shadow_err = |e: crate::shadow_tx_generator::ShadowTxGenError| match e {
-        crate::shadow_tx_generator::ShadowTxGenError::SnapshotInvariant(s) => node_fault(s),
-        crate::shadow_tx_generator::ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
-            node_fault(format!("snapshot treasury underflow: {s}"))
-        }
-        crate::shadow_tx_generator::ShadowTxGenError::TreasuryArithmetic(s) => {
-            consensus(format!("treasury arithmetic: {s}"))
-        }
-        crate::shadow_tx_generator::ShadowTxGenError::Structural(s) => consensus(s),
-        crate::shadow_tx_generator::ShadowTxGenError::Soft(s) => internal(s),
-    };
+    // Classification rationale: see `classify_shadow_tx_gen_err` doc.
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -3777,11 +4042,11 @@ async fn generate_expected_shadow_transactions(
         &unstake_refund_events,
         &parent_epoch_snapshot,
     )
-    .map_err(classify_shadow_err)?;
+    .map_err(classify_shadow_tx_gen_err)?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
-        let metadata = result.map_err(classify_shadow_err)?;
+        let metadata = result.map_err(classify_shadow_tx_gen_err)?;
         shadow_txs_vec.push(metadata.shadow_tx);
     }
 
