@@ -1094,7 +1094,16 @@ impl BlockTreeServiceInner {
             ),
         };
 
-        error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+        // SoftInternal is a documented non-fault recovery path — warn-level
+        // keeps alerting tied to genuine peer rejections (Invalid arm).
+        match kind {
+            DiscardKind::SoftInternal => {
+                warn!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+            }
+            DiscardKind::Invalid => {
+                error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+            }
+        }
         self.chain_sync_state
             .record_block_validation_error(diagnostic_record);
 

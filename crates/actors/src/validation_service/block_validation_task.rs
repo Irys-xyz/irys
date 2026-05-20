@@ -1116,7 +1116,6 @@ fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult 
 /// 2. `Invalid` (any stage)
 /// 3. Cancellation outcome (if supplied)
 /// 4. Soft `InternalFailure` (any stage)
-/// 5. Defensive fallback
 ///
 /// Cancellation outranks soft `InternalFailure` because once cancellation
 /// has fired the in-progress stages are deliberately abandoned — a soft
@@ -1124,6 +1123,11 @@ fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult 
 /// cancel window adds no information. But cancellation must NEVER outrank
 /// a real consensus rejection (we observed the block to be bad) or a node
 /// fault (we observed our own node to be bad) — those need to surface.
+///
+/// CALLER INVARIANT: this function is only called when at least one stage
+/// is non-Valid OR `cancel` is `Some(_)`. Passing all-Valid stages with no
+/// cancellation is a caller bug — the falls-through arm `debug_assert!`s
+/// and returns `Valid` in release for safe degradation.
 fn merge_stage_results_with_cancel(
     stage_results: &[&ValidationResult],
     cancel: Option<&ValidationResult>,
@@ -1162,9 +1166,18 @@ fn merge_stage_results_with_cancel(
         return ValidationResult::InternalFailure(internal);
     }
 
-    // No failure surfaced from any task yet we're in the failure branch —
-    // defensive fallback.
-    ValidationError::Other("consensus validation failed".to_string()).into()
+    // Unreachable by caller invariant: `merge_stage_results_with_cancel` is
+    // only invoked from the consensus-failure branch (at least one stage is
+    // non-Valid) OR with a `Some(cancel)` outcome. An all-Valid input with
+    // no cancellation means the caller routed a clean block through the
+    // failure path — fail loud in debug so tests catch the regression, fail
+    // clean in release (Valid is the only safe direction for clean input;
+    // returning Invalid would wrong-attribute a peer rejection).
+    debug_assert!(
+        false,
+        "merge_stage_results_with_cancel called with all-Valid stages and no cancellation — caller invariant broken"
+    );
+    ValidationResult::Valid
 }
 
 #[cfg(test)]
@@ -1365,22 +1378,19 @@ mod merge_stage_results_tests {
     }
 
     /// All-`Valid` input is never produced by the call site (the merger only
-    /// runs in the consensus-failure branch), but the defensive fallback must
-    /// still produce a sensible `Invalid` rather than panicking or returning
-    /// `Valid`.
+    /// runs in the consensus-failure branch). The merger guards this caller
+    /// invariant with a `debug_assert!`, so debug builds (including tests)
+    /// panic loudly if the invariant is ever broken by a future refactor.
     #[test]
-    fn all_valid_returns_defensive_fallback() {
+    #[should_panic(expected = "caller invariant broken")]
+    fn all_valid_with_no_cancel_panics_in_debug() {
         let results = [
             ValidationResult::Valid,
             ValidationResult::Valid,
             ValidationResult::Valid,
         ];
         let refs: Vec<&ValidationResult> = results.iter().collect();
-        match merge_stage_results(&refs) {
-            ValidationResult::Invalid(rejection)
-                if matches!(rejection.err(), ValidationError::Other(_)) => {}
-            other => panic!("expected Invalid(Other(..)), got {:?}", other),
-        }
+        let _ = merge_stage_results(&refs);
     }
 
     // ---- merge_stage_results_with_cancel ----
