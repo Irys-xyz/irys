@@ -237,12 +237,26 @@ impl BlockIndex {
         self.get_block_bounds_at_height(ledger, chunk_offset, latest_height)
     }
 
+    // Note: `get_block_bounds_at_height` and `get_block_index_item` both
+    // binary-search the index but intentionally diverge on how they treat a
+    // probed block whose ledger entry is missing; any future refactor that
+    // unifies them must take a missing-ledger-policy parameter rather than
+    // collapse the two behaviours.
+
     /// Like [`Self::get_block_bounds`], but anchored on `anchor_height`
     /// instead of the latest indexed height. This produces fork-deterministic
     /// results across peers regardless of how far their local indices have
     /// advanced past the anchor — the caller (e.g. PoA pre-validation) passes
     /// the block's parent height so two honest peers on the same fork compute
     /// identical bounds.
+    ///
+    /// Missing-ledger policy: a probed block whose ledger entry is absent is
+    /// treated as pre-introduction (`total_chunks = 0`) so the search moves
+    /// right, preserving searchability from heights earlier than a
+    /// late-introduced ledger. This differs intentionally from
+    /// [`Self::get_block_index_item`], which reports a missing ledger as
+    /// `Err`; see the section comment above for why the two policies must
+    /// remain distinct.
     pub fn get_block_bounds_at_height(
         &self,
         ledger: DataLedger,
@@ -339,6 +353,14 @@ impl BlockIndex {
     }
 
     /// Returns the block height + block index item containing the given chunk offset
+    ///
+    /// Missing-ledger policy: a probed block whose ledger entry is absent is
+    /// reported as `Err` rather than treated as pre-introduction. Callers of
+    /// this method require an exact ledger-entry hit, so a hole in the
+    /// searched range is a corruption signal. This differs intentionally
+    /// from [`Self::get_block_bounds_at_height`], which tolerates missing
+    /// entries so late-introduced ledgers remain searchable from earlier
+    /// heights.
     pub fn get_block_index_item(
         &self,
         ledger: DataLedger,
@@ -418,7 +440,9 @@ pub struct BlockBounds {
     pub ledger: DataLedger,
     /// First chunk offset included in this block (inclusive)
     pub start_chunk_offset: u64,
-    /// Final chunk offset after processing block transactions
+    /// Exclusive upper bound on the chunk-offset range owned by this block.
+    /// Equal to the block's `total_chunks` for this ledger (one past the
+    /// highest chunk offset).
     pub end_chunk_offset: u64,
     /// Merkle root (`tx_root`) of all transactions this block applied to the ledger
     pub tx_root: H256,
