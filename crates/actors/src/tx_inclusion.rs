@@ -4,11 +4,14 @@
 //! Used by validation, chunk ingress, and cache pruning to determine the
 //! canonical confirming block for a tx without consulting `CachedDataRoots`.
 //!
-//! Two-stage lookup:
-//!   1. Migrated path: [`IrysDataTxMetadata`].`included_height` +
-//!      `MigratedBlockHashes` — O(1) DB read.
-//!   2. Pre-migration fallback: walk `block_tree` ≤ `block_migration_depth`
-//!      blocks back from `max_height`, filtered to `ChainState::Onchain`.
+//! Two-stage lookup (live tree first, migrated DB as backstop):
+//!   1. Pre-migration walk of `block_tree` ≤ `block_migration_depth` blocks
+//!      back from `max_height`, filtered to `ChainState::Onchain`.  Data
+//!      flows tree → DB on migration and never back, so the tree is the
+//!      live source of truth at the migration boundary.
+//!   2. Migrated-metadata fallback: [`IrysDataTxMetadata`].`included_height`
+//!      + `MigratedBlockHashes` — O(1) DB read once the confirming block
+//!      has migrated out of the tree window.
 
 use irys_database::{
     block_header_by_hash, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
