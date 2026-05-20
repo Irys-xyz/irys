@@ -354,12 +354,21 @@ impl PreValidationError {
     }
 
     /// Returns true for variants representing local/runtime failures (verifier
-    /// panics, transient task-join errors, etc.) that must NEVER be attributed
+    /// panics, transient task-join errors, local DB inconsistencies surfaced
+    /// by `find_canonical_ledger_range`, etc.) that must NEVER be attributed
     /// to the peer or used to mark a block as consensus-invalid. See the enum
     /// safety-critical doc for the full invariant. Grow this method as new
     /// non-consensus variants are added.
+    ///
+    /// `BlockBoundsLookupError` is included because it now also surfaces
+    /// local DB/header inconsistencies (e.g. `MigratedBlockHashes[H]` exists
+    /// but `IrysBlockHeaders[hash]` is missing) — a missing local row must
+    /// not cause us to reject a valid peer-provided block.
     pub fn is_internal_failure(&self) -> bool {
-        matches!(self, Self::InternalTaskJoin(_))
+        matches!(
+            self,
+            Self::InternalTaskJoin(_) | Self::BlockBoundsLookupError(_)
+        )
     }
 
     /// Stable, bounded-cardinality label for the
@@ -1374,6 +1383,20 @@ mod prevalidation_error_classification_tests {
         assert!(
             !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
+    }
+
+    /// `BlockBoundsLookupError` is produced by `find_canonical_ledger_range`
+    /// when local DB/header storage is inconsistent (e.g. orphan
+    /// `MigratedBlockHashes` row with no `IrysBlockHeaders` entry). A local
+    /// corruption must not be attributed to the peer that delivered an
+    /// otherwise-valid block; classify as internal so the block pool keeps
+    /// the block in cache for retry rather than removing it as
+    /// consensus-invalid.
+    #[test]
+    fn block_bounds_lookup_error_is_internal_failure() {
+        let err = PreValidationError::BlockBoundsLookupError("local DB row missing".to_string());
+        assert!(err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
     }
 }
 
