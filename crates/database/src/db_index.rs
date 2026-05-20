@@ -203,29 +203,26 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 
 /// Clear the included_height for a data transaction (used during re-orgs of term-ledger blocks).
 ///
-/// If `promoted_height` is still set, the row is kept with only `included_height` cleared.
-/// If neither field would remain set after the clear, the row is deleted entirely.
+/// Always deletes the row. A row with `{included: None, promoted: Some}` is
+/// semantically illegal — `promoted_height` requires the tx to have been
+/// included at some prior height, and the reorg invariant in
+/// `BlockMigrationService::persist_metadata` guarantees the matching Publish
+/// block is also in `blocks_to_clear`. Its `clear_data_tx_promoted_height`
+/// call becomes a no-op on the already-deleted row. If the tx is
+/// re-canonical on the new fork, Phase 2 recreates the row via
+/// `set_data_tx_included_height` and any matching Publish re-confirmation
+/// restores `promoted_height` in the same transaction.
 pub fn clear_data_tx_included_height(
-    tx: &(impl DbTxMut + DbTx),
+    tx: &impl DbTxMut,
     tx_id: &H256,
 ) -> Result<(), reth_db::DatabaseError> {
-    let Some(mut metadata) = get_data_tx_metadata(tx, tx_id)? else {
-        // Row absent — no-op; delete is safe but unnecessary.
-        return Ok(());
-    };
-    metadata.included_height = None;
-    // Only keep the row if promoted_height is still meaningful.
-    if metadata.promoted_height.is_some() {
-        tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())
-    } else {
-        tx.delete::<IrysDataTxMetadata>(*tx_id, None)?;
-        Ok(())
-    }
+    tx.delete::<IrysDataTxMetadata>(*tx_id, None)?;
+    Ok(())
 }
 
 /// Batch operation: Clear included_height for multiple data transactions (re-org handling).
 pub fn batch_clear_data_tx_included_height<'a>(
-    tx: &(impl DbTxMut + DbTx),
+    tx: &impl DbTxMut,
     tx_ids: impl IntoIterator<Item = &'a H256>,
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
@@ -429,10 +426,13 @@ mod tests {
         );
     }
 
-    /// When both `included_height` and `promoted_height` are set, clearing
-    /// `included_height` should keep the row with only `promoted_height`.
+    /// Clearing `included_height` always deletes the row, even when
+    /// `promoted_height` was set. A `{included: None, promoted: Some}` row is
+    /// semantically illegal — `promoted_height` requires the tx to have been
+    /// included at a prior height, and the reorg invariant guarantees the
+    /// matching Publish block is also being cleared in the same Phase 1.
     #[test]
-    fn clear_included_height_preserves_promoted_height() {
+    fn clear_included_height_deletes_row_even_when_promoted_is_set() {
         let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             temp_dir.path(),
@@ -456,16 +456,10 @@ mod tests {
         let meta = db
             .view(|tx| get_data_tx_metadata(tx, &tx_id))
             .unwrap()
-            .unwrap()
             .unwrap();
-        assert_eq!(
-            meta.included_height, None,
-            "included_height must be cleared"
-        );
-        assert_eq!(
-            meta.promoted_height,
-            Some(20),
-            "promoted_height must be preserved"
+        assert!(
+            meta.is_none(),
+            "row must be deleted; {{None, Some}} is an illegal persistent state"
         );
     }
 

@@ -102,19 +102,16 @@ impl BlockMigrationService {
     /// `block_set` entry has no observable effect.  Missed-`BlockConfirmed` +
     /// missing-CDR remains an unrecovered combination but is unobservable.
     ///
-    /// **Transient state between Phase 1 and Phase 2 (within the same DB
-    /// transaction):**  Phase 1 may clear `included_height` from a row whose
-    /// `promoted_height` is still set, leaving the row in a `{included:
-    /// None, promoted: Some}` state, stored directly via `tx.put` (bypassing
-    /// `put_data_tx_metadata`'s `is_included` guard).
-    /// This state is allowed *only* because Phase 2 runs in the same
-    /// transaction and restores `included_height` for any tx whose
-    /// Submit-block was re-included in the new canonical chain.  External
-    /// readers never observe this gap — the transaction commits atomically.
-    /// The reorg invariant assumed here is: if a Publish-promotion remains
-    /// canonical, the underlying Submit inclusion must also be present in
-    /// `blocks_to_confirm` (otherwise the Publish block itself would be in
-    /// `blocks_to_clear`).
+    /// Reorg invariant: if a Publish-promotion remains canonical, the
+    /// underlying Submit inclusion must also be present in `blocks_to_confirm`
+    /// — otherwise the Publish block itself would be in `blocks_to_clear`.
+    /// Therefore Phase 1 always deletes orphaned term-ledger metadata rows
+    /// outright (the `{None, Some}` state is semantically illegal:
+    /// `promoted_height` requires a prior `included_height`).  Any matching
+    /// Publish `clear_data_tx_promoted_height` becomes a no-op on the
+    /// already-deleted row.  Phase 2 then recreates rows for txs that are
+    /// re-canonical on the new fork, restoring `promoted_height` in the same
+    /// transaction when the Publish block is also re-included.
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
@@ -154,13 +151,14 @@ impl BlockMigrationService {
             // block_hash from any CachedDataRoot.block_set that retained it.
             //
             // Per-ledger semantics:
-            //   - Term-ledger (Submit, OneYear, ThirtyDay): clear `included_height` only.
-            //     If `promoted_height` is also set (Submit tx later promoted to Publish),
-            //     the row is retained with `included_height = None` so the Publish
-            //     confirmation survives the reorg.  If neither field remains the row
-            //     is deleted.
+            //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
+            //     The reorg invariant guarantees the matching Publish block is
+            //     also in `blocks_to_clear` (if the tx was promoted at all),
+            //     so either iteration order ends with the row deleted.
             //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
-            //     `included_height` on the same tx must not be disturbed.
+            //     `included_height` on the same tx must not be disturbed
+            //     (Publish-only orphan: Submit stays canonical, row kept as
+            //     `{Some, None}`).
             for block in blocks_to_clear {
                 let header = block.header();
                 let orphan_block_hash = header.block_hash;
