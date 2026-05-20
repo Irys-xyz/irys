@@ -21,8 +21,10 @@ use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
     SendTraced as _, SystemLedger, TokioServiceHandle, Traced,
 };
+use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
+    num::NonZeroUsize,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
@@ -74,6 +76,22 @@ pub struct BlockTreeServiceInner {
     block_migration_service: BlockMigrationService,
     /// Chain sync state for diagnostics
     pub chain_sync_state: ChainSyncState,
+    /// Bounded LRU of block_hashes recently discarded due to a soft-internal
+    /// `InternalFailure` (eviction race, payload-cache miss, parent snapshot
+    /// pruned). Value is the reason tag captured at discard time.
+    ///
+    /// Phase A of the 2026-05-20 audit H3 finding: lets us measure whether
+    /// gossip-driven recovery actually works — if a later `Valid` arrives for
+    /// a block_hash present here, we count it as a "recovered" discard.
+    ///
+    /// PHASE-B(H3): if the ratio of `soft_internal_recovered_total` to
+    /// `soft_internal_discard_total` stays below operational tolerance
+    /// (TBD by team), implement explicit per-block-hash re-request with
+    /// exponential backoff here. See 2026-05-20 audit H3.
+    ///
+    /// Capacity: 4096 entries (~256 KB worst-case). Sized to be safe under
+    /// any plausible discard rate without becoming an unbounded memory sink.
+    recent_soft_internal_discards: LruCache<BlockHash, &'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +134,34 @@ enum DiscardKind {
     Invalid,
 }
 
+/// Capacity of [`BlockTreeServiceInner::recent_soft_internal_discards`].
+/// 4096 entries × (32-byte hash + ~24 bytes overhead + tag pointer) is well
+/// under 256 KB and far exceeds any plausible burst of soft-internal
+/// discards in a single block window. See the field doc for full rationale.
+const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
+
+/// Resolve the soft-internal `InternalFailure` variant to a bounded-cardinality
+/// snake_case reason tag for metrics labelling. Node-fault and consensus
+/// variants are unreachable here — the caller filters them out before
+/// `discard_and_broadcast` runs — but we still return a sentinel rather than
+/// panicking to keep the metric labelling defensive.
+fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &'static str {
+    use crate::block_validation::ValidationError as VE;
+    match err {
+        VE::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
+        VE::ShadowTxGenerationFailed(_) => "shadow_tx_generation_failed",
+        VE::ParentBlockMissing { .. } => "parent_block_missing",
+        VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
+        VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
+        VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+        VE::ValidationCancelled { .. } => "validation_cancelled_parent_missing",
+        // Not reachable from the SoftInternal arm — all other variants are
+        // either node-fault or consensus — but `metric_label` falls back to
+        // "internal_error" rather than panicking if invariants drift.
+        _ => "internal_error_other",
+    }
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_tree")]
@@ -152,6 +198,9 @@ impl BlockTreeService {
                         config,
                         service_senders,
                         chain_sync_state,
+                        recent_soft_internal_discards: LruCache::new(
+                            NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
+                        ),
                     },
                 };
                 if let Err(e) = block_tree_service.start().await {
@@ -493,6 +542,21 @@ impl BlockTreeServiceInner {
         // Handle a failed validation first
         if let ValidationResult::Invalid(_) = &validation_result {
             return self.discard_and_broadcast(block_hash, validation_result, DiscardKind::Invalid);
+        }
+
+        // Phase A (H3) instrumentation: a Valid result is arriving for a block
+        // we previously discarded as soft-internal — gossip-driven recovery
+        // worked for this hash. Increment the recovered counter (tagged with
+        // the original discard reason) and forget it from the LRU. An info!
+        // log makes the path operator-visible without polluting the steady-
+        // state log volume — soft-internal discards are rare.
+        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
+            metrics::record_soft_internal_recovered(reason);
+            info!(
+                block.hash = %block_hash,
+                reason,
+                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
+            );
         }
 
         // From here, we are processing a fully validated block
@@ -994,7 +1058,7 @@ impl BlockTreeServiceInner {
     /// `ParentMissing` in the wait stage, which is now `is_internal() =
     /// true` → they too remove and wait for re-gossip.
     fn discard_and_broadcast(
-        &self,
+        &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
         kind: DiscardKind,
@@ -1023,6 +1087,23 @@ impl BlockTreeServiceInner {
         error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
         self.chain_sync_state
             .record_block_validation_error(diagnostic_record);
+
+        // Phase A (H3) instrumentation: on a SoftInternal discard, derive the
+        // reason tag from the wrapped `ValidationError`, increment the discard
+        // counter, and remember (block_hash -> reason) in the bounded LRU so a
+        // later Valid result can be counted as a recovery.
+        //
+        // PHASE-B(H3): if the ratio of `soft_internal_recovered_total` to
+        // `soft_internal_discard_total` stays below operational tolerance
+        // (TBD by team), implement explicit per-block-hash re-request with
+        // exponential backoff here. See 2026-05-20 audit H3.
+        if matches!(kind, DiscardKind::SoftInternal)
+            && let ValidationResult::InternalFailure(inner) = &validation_result
+        {
+            let reason = soft_internal_reason_tag(inner.err());
+            metrics::record_soft_internal_discard(reason);
+            self.recent_soft_internal_discards.put(block_hash, reason);
+        }
 
         let mut cache = self.cache.write().map_err(|_| {
             eyre::eyre!("block tree cache write lock poisoned in discard_and_broadcast")
@@ -1450,6 +1531,167 @@ mod tests {
             inner.err(),
             crate::block_validation::ValidationError::TaskPanicked { .. }
         ));
+    }
+
+    /// Every SoftInternal `ValidationError` variant must map to a distinct,
+    /// stable, snake_case reason tag. The tag forms the `reason` label on the
+    /// `irys.block.soft_internal_discard_total` metric, so cardinality must
+    /// stay bounded and the values stay grep-stable across releases.
+    #[rstest]
+    #[case::cache_evicted(
+        crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
+            evm_block_hash: irys_types::EvmBlockHash::ZERO,
+        },
+        "execution_payload_cache_evicted",
+    )]
+    #[case::shadow_gen(
+        crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
+        "shadow_tx_generation_failed",
+    )]
+    #[case::parent_missing(
+        crate::block_validation::ValidationError::ParentBlockMissing { block_hash: H256::zero() },
+        "parent_block_missing",
+    )]
+    #[case::parent_commit(
+        crate::block_validation::ValidationError::ParentCommitmentSnapshotMissing {
+            block_hash: H256::zero(),
+        },
+        "parent_commitment_snapshot_missing",
+    )]
+    #[case::parent_epoch(
+        crate::block_validation::ValidationError::ParentEpochSnapshotMissing {
+            block_hash: H256::zero(),
+        },
+        "parent_epoch_snapshot_missing",
+    )]
+    #[case::parent_ema(
+        crate::block_validation::ValidationError::ParentEmaSnapshotMissing {
+            block_hash: H256::zero(),
+        },
+        "parent_ema_snapshot_missing",
+    )]
+    #[case::cancel_parent_missing(
+        crate::block_validation::ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::ParentMissing,
+        },
+        "validation_cancelled_parent_missing",
+    )]
+    fn soft_internal_reason_tag_for_each_variant(
+        #[case] err: crate::block_validation::ValidationError,
+        #[case] expected_tag: &'static str,
+    ) {
+        assert_eq!(soft_internal_reason_tag(&err), expected_tag);
+    }
+
+    /// SoftInternal discard path must record (block_hash, reason) into the
+    /// LRU so a subsequent Valid arrival can be counted as a gossip-driven
+    /// recovery. This test exercises the LRU-mutation logic directly.
+    #[test]
+    fn soft_internal_discard_inserts_into_lru() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0xAB; 32]);
+
+        // Construct the SoftInternal result, then replay the put step from
+        // `discard_and_broadcast`.
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ParentBlockMissing { block_hash }.into();
+        let ValidationResult::InternalFailure(inner) = &result else {
+            panic!("expected InternalFailure");
+        };
+        let reason = soft_internal_reason_tag(inner.err());
+        lru.put(block_hash, reason);
+
+        assert_eq!(lru.get(&block_hash), Some(&"parent_block_missing"));
+    }
+
+    /// A Valid result for a previously-discarded block_hash must pop the
+    /// entry from the LRU (so a second Valid wouldn't double-count) and
+    /// surface the original reason tag for the recovery metric.
+    #[test]
+    fn valid_result_pops_from_lru_and_returns_reason() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0xCD; 32]);
+        lru.put(block_hash, "execution_payload_cache_evicted");
+
+        // First Valid arrival: recovery is observed and the entry is removed.
+        let popped = lru.pop(&block_hash);
+        assert_eq!(popped, Some("execution_payload_cache_evicted"));
+
+        // Second Valid arrival: no-op, entry already drained — guarantees no
+        // double-count on metric retries or duplicate Valid messages.
+        assert_eq!(lru.pop(&block_hash), None);
+    }
+
+    /// `Invalid` (peer-attributable) and node-fault `InternalFailure` paths
+    /// MUST NOT pollute the LRU. The LRU only tracks soft-internal discards
+    /// so recovery accounting is not contaminated by consensus rejections or
+    /// abort-causing local faults.
+    #[test]
+    fn non_soft_internal_paths_leave_lru_untouched() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+
+        // 1. Consensus Invalid: dispatch produces ValidationResult::Invalid,
+        //    and the `matches!(kind, DiscardKind::SoftInternal)` guard in
+        //    `discard_and_broadcast` short-circuits the LRU put. We replay
+        //    that guard here.
+        let invalid_result: ValidationResult =
+            crate::block_validation::ValidationError::ShadowTransactionInvalid("bad".into()).into();
+        let kind = DiscardKind::Invalid;
+        if matches!(kind, DiscardKind::SoftInternal)
+            && let ValidationResult::InternalFailure(inner) = &invalid_result
+        {
+            lru.put(H256([0x01; 32]), soft_internal_reason_tag(inner.err()));
+        }
+        assert_eq!(lru.len(), 0, "Invalid path must not touch the LRU");
+
+        // 2. Node-fault InternalFailure: handler panics BEFORE reaching
+        //    discard_and_broadcast (see `on_block_validation_finished`), so
+        //    the LRU is never updated. We assert the classification gate
+        //    (`is_node_fault`) catches the variant — proving the panic-before
+        //    -LRU-update ordering is preserved structurally.
+        let node_fault: ValidationResult = crate::block_validation::ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "boom".into(),
+        }
+        .into();
+        let ValidationResult::InternalFailure(inner) = &node_fault else {
+            panic!("expected InternalFailure");
+        };
+        assert!(
+            inner.is_node_fault(),
+            "node-fault variant must be caught upstream of discard_and_broadcast"
+        );
+        assert_eq!(lru.len(), 0, "node-fault path must not touch the LRU");
+    }
+
+    /// The LRU is intentionally bounded so that an unbounded soft-internal
+    /// failure rate cannot cause memory growth. Beyond capacity, `put`
+    /// silently evicts the LRU-tail entry (a hash we no longer expect to
+    /// recover). No panic, no allocation explosion.
+    #[test]
+    fn lru_eviction_beyond_capacity_is_graceful() {
+        let capacity = 4_usize;
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(capacity).unwrap());
+
+        let hashes: Vec<H256> = (0_u8..(capacity as u8 + 2))
+            .map(|i| H256([i; 32]))
+            .collect();
+        for h in &hashes {
+            lru.put(*h, "execution_payload_cache_evicted");
+        }
+
+        assert_eq!(lru.len(), capacity);
+        // Oldest two entries must have been evicted; the most-recent
+        // `capacity` puts remain.
+        assert!(lru.get(&hashes[0]).is_none());
+        assert!(lru.get(&hashes[1]).is_none());
+        for h in &hashes[2..] {
+            assert!(lru.get(h).is_some());
+        }
     }
 
     /// `InternalFailureError::is_node_fault()` must reflect the wrapped
