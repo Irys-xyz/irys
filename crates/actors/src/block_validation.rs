@@ -718,24 +718,31 @@ pub enum ValidationError {
     #[error("Shadow transaction generation node fault: {0}")]
     ShadowTxNodeFault(String),
 
-    /// The local `ExecutionPayloadCache` tore down the in-process
-    /// oneshot wiring for this block's `evm_block_hash` before the
-    /// payload arrived. Today the only construction path is
-    /// `ExecutionPayloadCache::wait_for_payload` returning
-    /// `ExecutionPayloadWaitError::ReceiverDisrupted` — i.e. either
-    /// the `payload_senders` LRU evicting our slot under heavy
-    /// catch-up sync (>`PAYLOAD_RECEIVERS_CAPACITY = 1000` concurrent
-    /// waiters in flight), or an explicit `remove_payload_from_cache`
-    /// for the same hash.
+    /// The local `ExecutionPayloadCache` could not deliver the payload
+    /// for this block's `evm_block_hash` before the wait completed.
+    /// `ExecutionPayloadCache::wait_for_payload` collapses two distinct
+    /// `ExecutionPayloadWaitError` variants into this single classified
+    /// error (the diagnostic distinction lives in the variant, logged
+    /// at the conversion site):
+    ///   - `ReceiverDisrupted` — the `payload_senders` LRU evicted our
+    ///     slot under heavy catch-up sync
+    ///     (>`PAYLOAD_RECEIVERS_CAPACITY = 1000` concurrent waiters in
+    ///     flight), or an explicit `remove_payload_from_cache` for the
+    ///     same hash.
+    ///   - `WaitTimeout` — the bounded
+    ///     `sync.execution_payload_wait_timeout_millis` elapsed before
+    ///     the payload arrived (peer advertised the header but never
+    ///     served the EVM payload). Caps the previously LRU-bounded
+    ///     (effectively unbounded under low load) wait.
     ///
-    /// This is local cache saturation — the node is healthy, the EL
-    /// is fine, the peer's block is innocent. Classified as a soft
-    /// internal failure (block parks in cache, retry via fresh gossip
-    /// re-entry). Specifically NOT a node fault: panicking here on
-    /// every cache eviction would self-DoS healthy nodes during
-    /// catch-up. Distinct from `ExecutionLayerTransportFailed`, which
-    /// covers genuine local-EL RPC transport failures (those remain a
-    /// node fault).
+    /// Both are local cache / wait disruption — the node is healthy,
+    /// the EL is fine, the peer's block may simply be unreachable.
+    /// Classified as a soft internal failure (block parks in cache,
+    /// retry via fresh gossip re-entry). Specifically NOT a node
+    /// fault: panicking here on every cache eviction or timeout would
+    /// self-DoS healthy nodes during catch-up. Distinct from
+    /// `ExecutionLayerTransportFailed`, which covers genuine local-EL
+    /// RPC transport failures (those remain a node fault).
     #[error("Execution payload wait disrupted by local cache (evm_block_hash {evm_block_hash})")]
     ExecutionPayloadCacheEvicted { evm_block_hash: EvmBlockHash },
 

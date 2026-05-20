@@ -490,12 +490,16 @@ where
         })?;
 
         // Fetch the execution data that was already pulled and sealed.
-        // `wait_for_payload` returns the typed `ReceiverDisrupted` error
-        // when the in-process oneshot wiring is torn down (LRU eviction
-        // of `payload_senders` under catch-up sync, or explicit cache
-        // removal). The block-pool repair path treats this as a soft
-        // `OtherInternal` so the caller retries via re-entry rather than
-        // misattributing to an EL fault.
+        // `wait_for_payload` returns one of two typed soft errors when
+        // the payload cannot be delivered: `ReceiverDisrupted` (LRU
+        // eviction of `payload_senders` or explicit cache removal) or
+        // `WaitTimeout` (bounded `execution_payload_wait_timeout`
+        // elapsed against a peer that advertised the header but never
+        // served the EVM payload). The block-pool repair path treats
+        // both as a soft `OtherInternal` so the caller retries via
+        // re-entry rather than misattributing to an EL fault; the
+        // variant-specific message (carried by thiserror's `Display`)
+        // surfaces in the formatted error for operator log grep.
         let execution_data = self
             .execution_payload_provider
             .wait_for_payload(&block_header.evm_block_hash)

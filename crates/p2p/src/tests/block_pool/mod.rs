@@ -101,8 +101,16 @@ impl MockedServices {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
             runtime_handle,
         );
-        let execution_payload_provider =
-            ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
+        let execution_payload_provider = ExecutionPayloadCache::new(
+            peer_list_data_guard.clone(),
+            RethBlockProvider::new_mock(),
+            Duration::from_millis(
+                config
+                    .node_config
+                    .sync
+                    .execution_payload_wait_timeout_millis,
+            ),
+        );
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_config = MempoolConfig::testing();

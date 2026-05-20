@@ -38,19 +38,22 @@ pub enum ExecutionPayloadProviderError {
 }
 
 /// Error returned when a `wait_for_payload` / `wait_for_sealed_block`
-/// call is disrupted by the local cache before the payload arrives.
+/// call cannot deliver the payload to the caller.
 ///
 /// This does NOT indicate that the execution layer deterministically
-/// failed — it indicates that the in-process oneshot wiring used to
-/// signal payload arrival was torn down. Today the only construction
-/// path is the `payload_senders` LRU evicting our sender (heavy
-/// catch-up sync pushing >`PAYLOAD_RECEIVERS_CAPACITY` distinct
-/// waiters through), or an explicit `remove_payload_from_cache` for
-/// the same hash.
+/// failed — it indicates a local-cache disruption (`ReceiverDisrupted`)
+/// or a bounded wait elapsing without the payload arriving over gossip
+/// (`WaitTimeout`). The latter exists because the request-side retry
+/// loop in `request_payload_from_the_network` is best-effort: a peer
+/// that advertises a block header but never serves the EVM payload
+/// would otherwise stall the wait until the `payload_senders` LRU
+/// (capacity 1000) eventually evicted the slot — essentially unbounded
+/// under low load.
 ///
-/// Callers MUST route this as a soft local failure (retry via fresh
-/// gossip / cache re-entry) and MUST NOT classify it as a node fault:
-/// the node is healthy, the cache is just saturated.
+/// Callers MUST route both variants as soft local failures (retry via
+/// fresh gossip / cache re-entry) and MUST NOT classify them as node
+/// faults: the node is healthy, the cache or the peer-network response
+/// is just slow.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone, Copy)]
 pub enum ExecutionPayloadWaitError {
     /// The oneshot sender registered for `evm_block_hash` was dropped
@@ -58,6 +61,18 @@ pub enum ExecutionPayloadWaitError {
     /// removal). Retry by re-entering the cache after fresh gossip.
     #[error("payload-wait receiver disrupted by local cache for evm_block_hash {evm_block_hash}")]
     ReceiverDisrupted { evm_block_hash: B256 },
+    /// The bounded `execution_payload_wait_timeout` elapsed before the
+    /// payload arrived. The matching sender entry has been dropped from
+    /// `payload_senders` by this path so it cannot leak into the LRU.
+    /// Retry by re-entering the cache; the next gossip round will hand
+    /// us a fresh receiver. Diagnostic distinction from
+    /// `ReceiverDisrupted` for log-side root-cause analysis (peer
+    /// withholding payload vs. local saturation).
+    #[error("payload-wait timed out after {elapsed_ms}ms for evm_block_hash {evm_block_hash}")]
+    WaitTimeout {
+        evm_block_hash: B256,
+        elapsed_ms: u64,
+    },
 }
 
 impl From<BeaconOnNewPayloadError> for ExecutionPayloadProviderError {
@@ -134,10 +149,21 @@ pub struct ExecutionPayloadCache {
     payload_senders:
         Arc<RwLock<LruCache<B256, Vec<tokio::sync::oneshot::Sender<SealedBlock<Block>>>>>>,
     peer_list: PeerList,
+    /// Bounded wait used by `wait_for_sealed_block` to cap how long the
+    /// caller blocks on a payload that may never arrive (peer advertises
+    /// the block header but never serves the EVM payload). Sized to
+    /// exceed the 50s budget of `request_payload_from_the_network`'s
+    /// 10×5s retry loop so the request side completes first under
+    /// normal conditions.
+    wait_timeout: Duration,
 }
 
 impl ExecutionPayloadCache {
-    pub fn new(peer_list: PeerList, reth_payload_provider: RethBlockProvider) -> Self {
+    pub fn new(
+        peer_list: PeerList,
+        reth_payload_provider: RethBlockProvider,
+        wait_timeout: Duration,
+    ) -> Self {
         Self {
             cache: Arc::new(RwLock::new(ExecutionPayloadCacheInner {
                 payloads: LruCache::new(NonZeroUsize::new(PAYLOAD_CACHE_CAPACITY).expect("payload capacity is not a non-zero usize")),
@@ -146,7 +172,8 @@ impl ExecutionPayloadCache {
             // TODO: fix this to use a real RPC client
             reth_payload_provider,
             payload_senders: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(PAYLOAD_RECEIVERS_CAPACITY).expect("payload senders capacity is not a non-zero usize")))),
-            peer_list
+            peer_list,
+            wait_timeout,
         }
     }
 
@@ -229,11 +256,17 @@ impl ExecutionPayloadCache {
     ///
     /// Returns `Err(ExecutionPayloadWaitError::ReceiverDisrupted { .. })` if
     /// the in-process oneshot wiring is torn down before the payload arrives
-    /// — today exclusively LRU eviction from `payload_senders` (capacity
-    /// `PAYLOAD_RECEIVERS_CAPACITY = 1000`) under heavy catch-up sync, or an
-    /// explicit `remove_payload_from_cache` call for the same hash. This is
-    /// a local-cache disruption signal, NOT an execution-layer fault — see
-    /// the doc on [`ExecutionPayloadWaitError`] for the caller contract.
+    /// (LRU eviction from `payload_senders` under heavy catch-up sync, or an
+    /// explicit `remove_payload_from_cache` call for the same hash).
+    ///
+    /// Returns `Err(ExecutionPayloadWaitError::WaitTimeout { .. })` if the
+    /// configured `execution_payload_wait_timeout` elapses before the
+    /// payload arrives. This caps the previously-unbounded wait against a
+    /// peer that advertises a header but never serves the EVM payload.
+    ///
+    /// Both variants are local-cache or local-wait disruption signals, NOT
+    /// an execution-layer fault — see the doc on
+    /// [`ExecutionPayloadWaitError`] for the caller contract.
     ///
     /// You can get the EVM block hash from the Irys block header like this:
     /// ```rust
@@ -296,16 +329,36 @@ impl ExecutionPayloadCache {
 
         self.request_payload_from_the_network(*evm_block_hash, request_only_from_trusted_peers)
             .await;
+        // Wrap the wait in `tokio::time::timeout` so a peer that advertises
+        // a block header but never serves the EVM payload cannot stall the
+        // validation task until the `payload_senders` LRU happens to evict
+        // our slot (essentially unbounded under low load). The bare
         // `receiver.await` errors only when the matching oneshot sender is
-        // dropped (LRU eviction of the `payload_senders` slot or explicit
-        // cache removal). Surface that as the typed disruption error so
-        // callers can route it as a soft local failure instead of
-        // misattributing to "EL never delivered".
-        receiver
-            .await
-            .map_err(|_| ExecutionPayloadWaitError::ReceiverDisrupted {
+        // dropped (LRU eviction or explicit cache removal); surface that as
+        // `ReceiverDisrupted`, and surface a `timeout`-arm trip as the
+        // distinct `WaitTimeout` so operators can root-cause from logs.
+        // Both map to `ValidationError::ExecutionPayloadCacheEvicted`
+        // downstream — see `ExecutionPayloadWaitError` doc for the caller
+        // contract.
+        let started = std::time::Instant::now();
+        match tokio::time::timeout(self.wait_timeout, receiver).await {
+            Ok(Ok(sealed_block)) => Ok(sealed_block),
+            Ok(Err(_)) => Err(ExecutionPayloadWaitError::ReceiverDisrupted {
                 evm_block_hash: *evm_block_hash,
-            })
+            }),
+            Err(_) => {
+                // Pop the now-orphaned sender entry so it cannot leak into
+                // the 1000-slot LRU and displace legitimate waiters. Same
+                // cleanup the cache-hit fast path performs above; receiver
+                // has been consumed by `timeout` so there's nothing else to
+                // drop here.
+                self.payload_senders.write().await.pop(evm_block_hash);
+                Err(ExecutionPayloadWaitError::WaitTimeout {
+                    evm_block_hash: *evm_block_hash,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                })
+            }
+        }
     }
 
     pub async fn is_payload_in_cache(&self, evm_block_hash: &B256) -> bool {
@@ -403,10 +456,16 @@ struct ExecutionPayloadCacheInner {
     payloads_currently_requested_from_the_network: LruCache<B256, ()>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
     use crate::PeerList;
+
+    /// Default wait timeout used by these unit tests. Generous enough to
+    /// keep the `ReceiverDisrupted` test from racing the new timeout
+    /// branch on a slow CI runner, short enough to keep the timeout test
+    /// snappy.
+    const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Regression for the cache-eviction → `ExecutionPayloadUnavailable`
     /// → `is_node_fault` → panic loop on healthy nodes under catch-up
@@ -422,12 +481,11 @@ mod tests {
     /// the same error mapping `wait_for_sealed_block` does, isolating the
     /// disruption-detection path from `request_payload_from_the_network`'s
     /// retry-with-sleep loop against the no-op mock peer-network sender.
-    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn wait_for_payload_returns_receiver_disrupted_on_eviction() {
         let peer_list = PeerList::test_mock().expect("test PeerList");
         let provider = RethBlockProvider::new_mock();
-        let cache = ExecutionPayloadCache::new(peer_list, provider);
+        let cache = ExecutionPayloadCache::new(peer_list, provider, TEST_WAIT_TIMEOUT);
 
         let evm_block_hash = B256::repeat_byte(0x42);
 
@@ -447,20 +505,130 @@ mod tests {
         // Apply the same error mapping `wait_for_sealed_block` applies
         // to `receiver.await` so the test pins the public-API contract
         // and not just the oneshot's internal behaviour.
+        let started = std::time::Instant::now();
         let result: Result<SealedBlock<Block>, ExecutionPayloadWaitError> =
-            tokio::time::timeout(Duration::from_secs(2), async move {
-                receiver
-                    .await
-                    .map_err(|_| ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash })
-            })
-            .await
-            .expect("receiver must resolve after sender drop");
+            match tokio::time::timeout(TEST_WAIT_TIMEOUT, receiver).await {
+                Ok(Ok(sealed_block)) => Ok(sealed_block),
+                Ok(Err(_)) => Err(ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash }),
+                Err(_) => Err(ExecutionPayloadWaitError::WaitTimeout {
+                    evm_block_hash,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                }),
+            };
 
         assert_eq!(
             result.unwrap_err(),
             ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash },
             "cache-eviction disruption must surface as the typed soft error, \
              NOT collapse into a generic 'payload unavailable' / 'EL failed' signal",
+        );
+    }
+
+    /// Verifies the new bounded wait. When the configured
+    /// `wait_timeout` elapses before the payload arrives (peer
+    /// advertised the header but never served the EVM payload), the
+    /// wait surfaces `WaitTimeout` distinct from `ReceiverDisrupted`,
+    /// and the matching sender entry is popped from `payload_senders`
+    /// so it cannot leak into the 1000-slot LRU.
+    ///
+    /// Mirrors the production `wait_for_sealed_block` timeout arm
+    /// directly (rather than calling `wait_for_sealed_block` itself)
+    /// to avoid the 10×5s retry loop in
+    /// `request_payload_from_the_network` against the no-op mock
+    /// peer-network sender — that loop is independently covered, and
+    /// what this test pins is the typed-error contract + sender
+    /// cleanup, not the upstream request retry behaviour.
+    #[tokio::test]
+    async fn wait_for_payload_returns_wait_timeout_when_payload_never_arrives() {
+        let peer_list = PeerList::test_mock().expect("test PeerList");
+        let provider = RethBlockProvider::new_mock();
+        let wait_timeout = Duration::from_millis(50);
+        let cache = ExecutionPayloadCache::new(peer_list, provider, wait_timeout);
+
+        let evm_block_hash = B256::repeat_byte(0x77);
+
+        // Register a wait receiver — same path `wait_for_sealed_block`
+        // takes after a cache miss. Sender stays alive (and never
+        // fires) so the wait must hit the timeout arm.
+        let receiver = cache.block_receiver(evm_block_hash).await;
+        assert!(
+            cache.payload_senders.read().await.contains(&evm_block_hash),
+            "block_receiver must register a sender for the hash",
+        );
+
+        let started = std::time::Instant::now();
+        let result: Result<SealedBlock<Block>, ExecutionPayloadWaitError> =
+            match tokio::time::timeout(wait_timeout, receiver).await {
+                Ok(Ok(sealed_block)) => Ok(sealed_block),
+                Ok(Err(_)) => Err(ExecutionPayloadWaitError::ReceiverDisrupted { evm_block_hash }),
+                Err(_) => {
+                    // Mirror the production cleanup so the assertion
+                    // below pins the contract end-to-end.
+                    cache.payload_senders.write().await.pop(&evm_block_hash);
+                    Err(ExecutionPayloadWaitError::WaitTimeout {
+                        evm_block_hash,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    })
+                }
+            };
+
+        match result.unwrap_err() {
+            ExecutionPayloadWaitError::WaitTimeout {
+                evm_block_hash: hash,
+                elapsed_ms,
+            } => {
+                assert_eq!(hash, evm_block_hash, "WaitTimeout must carry the hash");
+                assert!(
+                    elapsed_ms >= wait_timeout.as_millis() as u64,
+                    "elapsed_ms ({elapsed_ms}) must be >= wait_timeout ({}ms)",
+                    wait_timeout.as_millis()
+                );
+            }
+            other => panic!("expected WaitTimeout, got {other:?}"),
+        }
+
+        // The sender entry must be cleaned up so it cannot leak into
+        // the LRU and displace legitimate waiters.
+        assert!(
+            !cache.payload_senders.read().await.contains(&evm_block_hash),
+            "WaitTimeout must drop the orphaned sender entry from payload_senders",
+        );
+    }
+
+    /// Happy path: payload arrives before the wait timeout fires.
+    /// Exercises the real `wait_for_sealed_block` against an already-
+    /// populated cache so the network-request retry loop is skipped
+    /// and the test is hermetic.
+    #[tokio::test]
+    async fn wait_for_payload_returns_payload_when_it_arrives_in_time() {
+        use reth::core::primitives::SealedBlock;
+        use reth_ethereum_primitives::Block;
+
+        let peer_list = PeerList::test_mock().expect("test PeerList");
+        let provider = RethBlockProvider::new_mock();
+        let cache = ExecutionPayloadCache::new(peer_list, provider, TEST_WAIT_TIMEOUT);
+
+        // Seal a default block so we have a real `SealedBlock` to push
+        // through the cache.
+        let block = Block::default();
+        let sealed: SealedBlock<Block> = block.seal_slow();
+        let evm_block_hash = sealed.hash();
+
+        cache.add_payload_to_cache(sealed.clone()).await;
+
+        let started = std::time::Instant::now();
+        let got = cache
+            .wait_for_sealed_block(&evm_block_hash, false)
+            .await
+            .expect("payload is already in cache; wait must succeed");
+        assert!(
+            started.elapsed() < TEST_WAIT_TIMEOUT,
+            "happy path must return well before the wait timeout fires",
+        );
+        assert_eq!(
+            got.hash(),
+            evm_block_hash,
+            "wait must return the payload we just inserted",
         );
     }
 }

@@ -621,16 +621,23 @@ impl BlockValidationTask {
                     block_hash: block.previous_block_hash,
                 })?;
 
-            // `wait_for_payload` returns the typed `ReceiverDisrupted`
-            // error when its in-process oneshot wiring is torn down
-            // (today: `payload_senders` LRU eviction under catch-up sync,
-            // or explicit `remove_payload_from_cache`). That's a local
-            // cache disruption — NOT an execution-layer fault — so we
-            // route it to the soft `ExecutionPayloadCacheEvicted`
-            // (`is_internal_failure` true, `is_node_fault` false) and let
-            // the block re-enter via gossip. Previously this path bucketed
-            // into `ExecutionPayloadUnavailable` → `is_node_fault` →
-            // panic+SIGINT, self-DoS'ing healthy nodes during heavy sync.
+            // `wait_for_payload` returns one of two typed soft errors when
+            // its in-process oneshot wiring cannot deliver the payload:
+            //   - `ReceiverDisrupted` — `payload_senders` LRU evicted our
+            //     slot under catch-up sync, or an explicit
+            //     `remove_payload_from_cache` for the same hash.
+            //   - `WaitTimeout` — the bounded
+            //     `sync.execution_payload_wait_timeout_millis` elapsed
+            //     before the payload arrived (peer advertised the header
+            //     but never served the EVM payload). Caps the previously
+            //     LRU-bounded (unbounded under low load) wait.
+            // Both are local cache / wait disruption — NOT an
+            // execution-layer fault — so we route them to the soft
+            // `ExecutionPayloadCacheEvicted` (`is_internal_failure` true,
+            // `is_node_fault` false) and let the block re-enter via
+            // gossip. Diagnostic distinction lives one layer down in the
+            // `ExecutionPayloadWaitError` variant; we log each variant
+            // distinctly so operators can grep / count them.
             let execution_data = self
                 .service_inner
                 .execution_payload_provider
@@ -640,7 +647,24 @@ impl BlockValidationTask {
                 .map_err(|err| match err {
                     irys_domain::ExecutionPayloadWaitError::ReceiverDisrupted {
                         evm_block_hash,
-                    } => ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash },
+                    } => {
+                        tracing::warn!(
+                            ?evm_block_hash,
+                            "execution payload wait disrupted: receiver dropped (LRU eviction or cache removal)"
+                        );
+                        ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
+                    }
+                    irys_domain::ExecutionPayloadWaitError::WaitTimeout {
+                        evm_block_hash,
+                        elapsed_ms,
+                    } => {
+                        tracing::warn!(
+                            ?evm_block_hash,
+                            elapsed_ms,
+                            "execution payload wait timed out: peer advertised header but never served payload"
+                        );
+                        ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
+                    }
                 })?;
 
             let result = shadow_transactions_are_valid(
