@@ -778,39 +778,23 @@ mod tests {
         Ok(())
     }
 
-    /// OneYear direct inclusion (no prior Submit): `included_height` set, `promoted_height` None.
+    /// Direct inclusion in a term ledger (no prior Submit):
+    /// `included_height` is set, `promoted_height` stays `None`.
+    #[rstest::rstest]
+    #[case::oneyear(DataLedger::OneYear, 3_u64)]
+    #[case::thirtyday(DataLedger::ThirtyDay, 7_u64)]
     #[tokio::test]
-    async fn oneyear_direct_inclusion_sets_included_height() -> eyre::Result<()> {
+    async fn direct_inclusion_sets_included_height(
+        #[case] ledger: DataLedger,
+        #[case] height: u64,
+    ) -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
         let (svc, _svc_tmp) = make_service(db.clone());
 
         let tx_id = H256::random();
-        let height = 3_u64;
 
-        let header =
-            make_block_header_with_ledger(height, H256::random(), DataLedger::OneYear, tx_id);
-        let sealed = make_sealed_single_ledger_tx(header, DataLedger::OneYear, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
-
-        let meta =
-            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
-        assert_eq!(meta.included_height, Some(height));
-        assert_eq!(meta.promoted_height, None);
-        Ok(())
-    }
-
-    /// ThirtyDay direct inclusion: analogous to OneYear.
-    #[tokio::test]
-    async fn thirtyday_direct_inclusion_sets_included_height() -> eyre::Result<()> {
-        let (db, _db_tmp) = open_db()?;
-        let (svc, _svc_tmp) = make_service(db.clone());
-
-        let tx_id = H256::random();
-        let height = 7_u64;
-
-        let header =
-            make_block_header_with_ledger(height, H256::random(), DataLedger::ThirtyDay, tx_id);
-        let sealed = make_sealed_single_ledger_tx(header, DataLedger::ThirtyDay, tx_id);
+        let header = make_block_header_with_ledger(height, H256::random(), ledger, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, ledger, tx_id);
         svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
 
         let meta =
@@ -899,19 +883,23 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 1 orphan of OneYear confirmation: tx in OneYear at H.
-    /// Orphan. `included_height` cleared.
+    /// Phase 1 orphan of a term-ledger confirmation: tx in `ledger` at H.
+    /// Orphan. `included_height` cleared and the row is deleted.
+    #[rstest::rstest]
+    #[case::oneyear(DataLedger::OneYear, 6_u64)]
+    #[case::thirtyday(DataLedger::ThirtyDay, 9_u64)]
     #[tokio::test]
-    async fn phase1_orphan_oneyear_clears_included_height() -> eyre::Result<()> {
+    async fn phase1_orphan_term_ledger_clears_included_height(
+        #[case] ledger: DataLedger,
+        #[case] height: u64,
+    ) -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
         let (svc, _svc_tmp) = make_service(db.clone());
 
         let tx_id = H256::random();
-        let height = 6_u64;
 
-        let header =
-            make_block_header_with_ledger(height, H256::random(), DataLedger::OneYear, tx_id);
-        let sealed = make_sealed_single_ledger_tx(header, DataLedger::OneYear, tx_id);
+        let header = make_block_header_with_ledger(height, H256::random(), ledger, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, ledger, tx_id);
         svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
 
         assert!(read_data_tx_metadata(&db, &tx_id).is_some());
@@ -920,33 +908,7 @@ mod tests {
 
         assert!(
             read_data_tx_metadata(&db, &tx_id).is_none(),
-            "row must be deleted when OneYear-block is orphaned"
-        );
-        Ok(())
-    }
-
-    /// Phase 1 orphan of ThirtyDay confirmation: tx in ThirtyDay at H.
-    /// Orphan. `included_height` cleared.
-    #[tokio::test]
-    async fn phase1_orphan_thirtyday_clears_included_height() -> eyre::Result<()> {
-        let (db, _db_tmp) = open_db()?;
-        let (svc, _svc_tmp) = make_service(db.clone());
-
-        let tx_id = H256::random();
-        let height = 9_u64;
-
-        let header =
-            make_block_header_with_ledger(height, H256::random(), DataLedger::ThirtyDay, tx_id);
-        let sealed = make_sealed_single_ledger_tx(header, DataLedger::ThirtyDay, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
-
-        assert!(read_data_tx_metadata(&db, &tx_id).is_some());
-
-        svc.persist_metadata(std::slice::from_ref(&sealed), &[])?;
-
-        assert!(
-            read_data_tx_metadata(&db, &tx_id).is_none(),
-            "row must be deleted when ThirtyDay-block is orphaned"
+            "row must be deleted when {ledger:?}-block is orphaned"
         );
         Ok(())
     }
