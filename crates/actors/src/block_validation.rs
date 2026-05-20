@@ -1398,6 +1398,21 @@ mod prevalidation_error_classification_tests {
         assert!(err.is_internal_failure());
         assert!(!err.is_fatal_corruption());
     }
+
+    /// `PublishTxMissingPriorSubmit` is a consensus-invalidity verdict: a peer
+    /// gave us a block whose Publish-ledger txs lack a prior Submit confirmation.
+    /// It must classify as a peer-attributable failure so the block-pool removes
+    /// the offending block.  This is the counterpart of
+    /// `BlockBoundsLookupError`: the two arms of the Publish prior-Submit fallback
+    /// in `data_txs_are_valid` (`Ok(None)` and `Err(_)` respectively) must remain
+    /// on opposite sides of `is_internal_failure()` so a local DB inconsistency is
+    /// never confused with a peer-supplied invalid block.
+    #[test]
+    fn publish_tx_missing_prior_submit_is_peer_attributable() {
+        let err = PreValidationError::PublishTxMissingPriorSubmit { tx_id: H256::zero() };
+        assert!(!err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
+    }
 }
 
 #[cfg(test)]
@@ -2710,20 +2725,37 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // check the db — constrained to canonical chain at or before the parent
+                        // Past Submit inclusion was not in the historical scan
+                        // window — fall back to the canonical DB index.  A
+                        // `Some` here is sufficient evidence of prior Submit:
+                        // the structural pre-pass guarantees `tx.ledger_id ==
+                        // Publish`, and term ledgers reject `ledger_id ==
+                        // Publish`, so the only term ledger that could have
+                        // produced this `included_height` is Submit.  An
+                        // `Err` is a local DB/header inconsistency and must
+                        // be classified as internal, matching the
+                        // `BlockBoundsLookupError` treatment elsewhere — not
+                        // peer-attributed as `PublishTxMissingPriorSubmit`.
                         let parent_height = block.height.saturating_sub(1);
-                        if let Ok(Some(_header)) =
-                            tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height)
-                        {
-                            warn!(
-                                "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
-                                &_header, &tx.id, &tx
-                            );
-                        } else {
-                            // Publish tx with no past inclusion - INVALID
-                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
-                                tx_id: tx.id,
-                            });
+                        match tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height) {
+                            Ok(Some(_header)) => {
+                                warn!(
+                                    tx.id = %tx.id,
+                                    parent_height,
+                                    "submit inclusion not in anchor window; resolved via canonical DB index"
+                                );
+                            }
+                            Ok(None) => {
+                                return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                    tx_id: tx.id,
+                                });
+                            }
+                            Err(e) => {
+                                return Err(PreValidationError::BlockBoundsLookupError(format!(
+                                    "tx_header_by_txid_canonical failed for tx {} during prior-Submit check: {}",
+                                    tx.id, e
+                                )));
+                            }
                         }
                     }
                     DataLedger::Submit => {

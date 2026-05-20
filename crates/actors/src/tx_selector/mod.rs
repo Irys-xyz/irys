@@ -881,23 +881,37 @@ async fn get_publish_txs_and_proofs(
                 );
                 continue;
             }
-            // check for previous submit inclusion in a parent block
-            // we do this by checking if the tx is in the block tree or database.
-            // if it is, we know it could've only gotten there by being included in the submit ledger.
+            // check for previous submit inclusion in a parent block.
+            // The Publish-targeting tx (ledger_id == Publish) can only have
+            // gotten `included_height` set via Submit-ledger inclusion: term
+            // ledgers (OneYear / ThirtyDay) reject `ledger_id == Publish` at
+            // structural validation, so a `Some` from the canonical DB index
+            // is sufficient evidence of prior Submit.
             if !submit_txs_from_canonical.contains(&tx_header.id) {
-                // check database — constrained to canonical chain at or before parent
-                if ctx
+                match ctx
                     .db
-                    .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_header.id, current_height))?
-                    .is_none()
+                    .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_header.id, current_height))
                 {
-                    // no previous inclusion
-                    warn!(
-                        tx.id = ?tx_header.id,
-                        tx.data_root = ?tx_header.data_root,
-                        "Unable to find previous submit inclusion for publish candidate"
-                    );
-                    continue;
+                    Ok(Some(_)) => {
+                        // canonical Submit inclusion past the live-tree window
+                    }
+                    Ok(None) => {
+                        warn!(
+                            tx.id = ?tx_header.id,
+                            tx.data_root = ?tx_header.data_root,
+                            "Unable to find previous submit inclusion for publish candidate"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            tx.id = ?tx_header.id,
+                            tx.data_root = ?tx_header.data_root,
+                            error = %e,
+                            "tx_header_by_txid_canonical failed for publish candidate; skipping"
+                        );
+                        continue;
+                    }
                 }
             }
 
