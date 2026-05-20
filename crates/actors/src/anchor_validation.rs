@@ -2,7 +2,7 @@ use crate::mempool_service::TxIngressError;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{BlockTreeEntry, BlockTreeReadGuard};
 use irys_types::ingress::IngressProof;
-use irys_types::{H256, IrysTransactionCommon, app_state::DatabaseProvider};
+use irys_types::{ConsensusConfig, H256, IrysTransactionCommon, app_state::DatabaseProvider};
 use tracing::{debug, warn};
 
 /// Resolves an anchor (block hash) to its height.
@@ -136,6 +136,31 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
         );
         Ok(false)
     }
+}
+
+/// Computes the valid anchor height range for transaction inclusion during block production.
+///
+/// Returns `(min_anchor_height, max_anchor_height)` where:
+/// - `max` = `height - block_migration_depth` (blocks must be finalized)
+/// - `min` = `height - (tx_anchor_expiry_depth - block_migration_depth)` (anchor freshness)
+pub fn tx_inclusion_anchor_range(consensus: &ConsensusConfig, height: u64) -> (u64, u64) {
+    let migration = u64::from(consensus.block_migration_depth);
+    let expiry = u64::from(consensus.mempool.tx_anchor_expiry_depth);
+    let min = height.saturating_sub(expiry.saturating_sub(migration));
+    let max = height.saturating_sub(migration);
+    (min, max)
+}
+
+/// Computes the minimum block height for a transaction anchor to be considered non-expired.
+pub fn min_tx_anchor_height(consensus: &ConsensusConfig, height: u64) -> u64 {
+    height.saturating_sub(u64::from(consensus.mempool.tx_anchor_expiry_depth))
+}
+
+/// Computes the minimum block height for an ingress proof anchor to be considered non-expired.
+pub fn min_ingress_proof_anchor_height(consensus: &ConsensusConfig, height: u64) -> u64 {
+    height.saturating_sub(u64::from(
+        consensus.mempool.ingress_proof_anchor_expiry_depth,
+    ))
 }
 
 #[cfg(test)]
