@@ -38,7 +38,6 @@ chunk_request_timeout = "15s"
 max_pending_chunk_requests = 100
 
 [packing.local]
-cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
 
 [cache]
@@ -78,8 +77,6 @@ max_valid_submit_txs = 3000  # Conservative: max_data_txs_per_block * block_migr
 max_valid_commitment_addresses = 300  # Conservative: ~100 miners * 3
 max_commitments_per_address = 20  # Limit per-address resource consumption
 
-[vdf]
-parallel_verification_thread_limit = 4
 
 
 [consensus.Custom]

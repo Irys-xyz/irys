@@ -58,7 +58,8 @@ max_pending_chunk_requests = 100
 
 [packing]
 [packing.local]
-cpu_packing_concurrency = 4
+# Pinned to prevent host oversubscription when multiple containers share a test host.
+cpu_packing_concurrency = 2
 gpu_packing_batch_size = 1024
 
 [cache]
@@ -84,7 +85,8 @@ max_valid_commitment_addresses = 300
 max_commitments_per_address = 20
 
 [vdf]
-parallel_verification_thread_limit = 8
+# Pinned to prevent host oversubscription when multiple containers share a test host.
+parallel_verification_thread_limit = 2
 
 [consensus.Custom]
 chain_id = 1270
