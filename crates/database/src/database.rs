@@ -385,14 +385,14 @@ pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
     };
     let already_present = cdr.block_set.contains(&block_hash);
     let needs_expiry_clear = cdr.expiry_height.is_some();
+    if already_present && !needs_expiry_clear {
+        return Ok(false);
+    }
     if !already_present {
         cdr.block_set.push(block_hash);
     }
     if needs_expiry_clear {
         cdr.expiry_height = None;
-    }
-    if already_present && !needs_expiry_clear {
-        return Ok(false);
     }
     tx.put::<CachedDataRoots>(data_root, cdr)?;
     Ok(true)
