@@ -489,6 +489,32 @@ mod tests {
         assert!(meta.is_none());
     }
 
+    /// Calling `clear_data_tx_promoted_height` on a missing row is a no-op and
+    /// must not return an error.
+    #[test]
+    fn clear_promoted_height_missing_row_is_noop() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        // No setup — row doesn't exist.
+        db.update(|tx| clear_data_tx_promoted_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Still absent, no panic/error.
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(meta.is_none());
+    }
+
     /// `batch_clear_data_tx_included_height` clears all supplied tx_ids.
     #[test]
     fn batch_clear_included_height_happy_path() {

@@ -379,10 +379,24 @@ impl InnerCacheTask {
 
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
+        // Per-eviction observability state, buffered inside the write tx and
+        // emitted only after `commit()` succeeds — otherwise a failed commit
+        // (or a mid-loop delete error that drops the tx) would report
+        // evictions/chunks that never persisted.
+        struct EvictionRecord {
+            data_root: H256,
+            block_set: Vec<H256>,
+            txid_set_size: usize,
+            inclusion_max_height: Option<u64>,
+            expiry_height: Option<u64>,
+            horizon: Option<u64>,
+        }
+
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
+        let mut evictions: Vec<EvictionRecord> = Vec::new();
         let _span = info_span!(
             irys_utils::MDBX_RW_TX_SPAN,
             db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
@@ -512,32 +526,51 @@ impl InnerCacheTask {
                     continue;
                 }
 
-                info!(
-                    %data_root,
-                    block_set_size = cached.block_set.len(),
-                    txid_set_size = cached.txid_set.len(),
-                    last_inclusion_height = ?inclusion_max_height,
-                    expiry_height = ?cached.expiry_height,
-                    horizon = ?horizon,
-                    %prune_height,
-                    has_local_proof,
-                    "cached_data_root.evict"
-                );
-                debug!(
-                    %data_root,
-                    block_set = ?cached.block_set,
-                    "cached_data_root.evict.block_set"
-                );
+                // Capture txid_set_size before `cached` is partially moved below.
+                let txid_set_size = cached.txid_set.len();
+                let expiry_height = cached.expiry_height;
+
                 write_tx.delete::<IngressProofs>(data_root, None)?;
                 chunks_pruned = chunks_pruned
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
                 eviction_count += 1;
-                metrics::record_cached_data_root_evicted();
+
+                evictions.push(EvictionRecord {
+                    data_root,
+                    block_set: cached.block_set,
+                    txid_set_size,
+                    inclusion_max_height,
+                    expiry_height,
+                    horizon,
+                });
             }
         }
-        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
+
+        // Post-commit: only now is it safe to report what actually persisted.
+        // `has_local_proof` is hardcoded false because the eviction branch
+        // `continue`s on `has_local_proof == true` before reaching this buffer.
+        for entry in &evictions {
+            info!(
+                data_root = %entry.data_root,
+                block_set_size = entry.block_set.len(),
+                txid_set_size = entry.txid_set_size,
+                last_inclusion_height = ?entry.inclusion_max_height,
+                expiry_height = ?entry.expiry_height,
+                horizon = ?entry.horizon,
+                %prune_height,
+                has_local_proof = false,
+                "cached_data_root.evict"
+            );
+            debug!(
+                data_root = %entry.data_root,
+                block_set = ?entry.block_set,
+                "cached_data_root.evict.block_set"
+            );
+            metrics::record_cached_data_root_evicted();
+        }
+        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
 
         Ok(())
     }

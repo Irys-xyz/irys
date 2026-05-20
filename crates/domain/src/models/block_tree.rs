@@ -2721,42 +2721,46 @@ mod tests {
     /// `BTreeMap<_, BTreeSet<_>>`, iteration order was random, and which of
     /// the qualifying blocks was returned varied across nodes — a
     /// consensus-fork vector for any future caller of this function.
+    ///
+    /// Test shape: insert the two tied blocks in *opposite* orders into two
+    /// independent caches and assert both return the same block.  Repeating
+    /// the call on a single cache wouldn't catch a regression to
+    /// `HashMap`/`HashSet`, because a single hashed container is
+    /// iteration-stable within its own lifetime — only cross-instance variance
+    /// surfaces the bug.
     #[tokio::test]
     async fn get_by_solution_hash_is_deterministic_under_exact_match_tie() {
         let b1 = random_block(U256::from(0));
         let comm_cache = Arc::new(CommitmentSnapshot::default());
-        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
 
         // Two competing children of b1 with the same solution_hash and the
         // same cumulative_diff — both qualify under Case 1 (exact match).
         let shared_solution = H256::random();
         let mut b2 = extend_chain(random_block(U256::from(5)), &b1);
         b2.solution_hash = shared_solution;
-        cache
-            .add_block(
-                &seal_block(&mut b2),
-                comm_cache.clone(),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-            )
-            .expect("add b2");
+        let sealed_b2 = seal_block(&mut b2);
 
         let mut b3 = extend_chain(random_block(U256::from(5)), &b1);
         b3.solution_hash = shared_solution;
-        cache
-            .add_block(
-                &seal_block(&mut b3),
-                comm_cache,
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-            )
-            .expect("add b3");
+        let sealed_b3 = seal_block(&mut b3);
 
         let expected = std::cmp::min(b2.block_hash, b3.block_hash);
 
-        // 100 iterations: every call must return the same block (smallest
-        // block_hash under BTreeSet's ascending order).
-        for _ in 0..100 {
+        for inserts in [
+            [&sealed_b2, &sealed_b3], // forward order
+            [&sealed_b3, &sealed_b2], // reversed order
+        ] {
+            let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
+            for sealed in inserts {
+                cache
+                    .add_block(
+                        sealed,
+                        comm_cache.clone(),
+                        dummy_epoch_snapshot(),
+                        dummy_ema_snapshot(),
+                    )
+                    .expect("add block");
+            }
             let got = cache
                 .get_by_solution_hash(
                     &shared_solution,
@@ -2768,19 +2772,18 @@ mod tests {
                 .block_hash;
             assert_eq!(
                 got, expected,
-                "selection must be deterministic; expected smallest block_hash"
+                "selection must be deterministic across insertion orders; expected smallest block_hash"
             );
         }
     }
 
     /// Regression companion: when no candidate matches Case 1 or Case 2, the
     /// `best_block` fallback must also be deterministic — same root cause,
-    /// different arm.
+    /// different arm.  Same cross-instance shape as the exact-match-tie test.
     #[tokio::test]
     async fn get_by_solution_hash_is_deterministic_under_fallback() {
         let b1 = random_block(U256::from(0));
         let comm_cache = Arc::new(CommitmentSnapshot::default());
-        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
 
         // Two children with shared solution_hash but DIFFERENT cumulative_diff
         // values, neither matching the query cumdiff — both fall through to
@@ -2788,31 +2791,31 @@ mod tests {
         let shared_solution = H256::random();
         let mut b2 = extend_chain(random_block(U256::from(7)), &b1);
         b2.solution_hash = shared_solution;
-        cache
-            .add_block(
-                &seal_block(&mut b2),
-                comm_cache.clone(),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-            )
-            .expect("add b2");
+        let sealed_b2 = seal_block(&mut b2);
 
         let mut b3 = extend_chain(random_block(U256::from(11)), &b1);
         b3.solution_hash = shared_solution;
-        cache
-            .add_block(
-                &seal_block(&mut b3),
-                comm_cache,
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-            )
-            .expect("add b3");
+        let sealed_b3 = seal_block(&mut b3);
 
         let expected = std::cmp::min(b2.block_hash, b3.block_hash);
 
-        // Query cumdiff (=3) doesn't match either block; Case 2 also can't
-        // fire because the previous_cumulative_difficulty bound is high.
-        for _ in 0..100 {
+        for inserts in [
+            [&sealed_b2, &sealed_b3], // forward order
+            [&sealed_b3, &sealed_b2], // reversed order
+        ] {
+            let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
+            for sealed in inserts {
+                cache
+                    .add_block(
+                        sealed,
+                        comm_cache.clone(),
+                        dummy_epoch_snapshot(),
+                        dummy_ema_snapshot(),
+                    )
+                    .expect("add block");
+            }
+            // Query cumdiff (=3) doesn't match either block; Case 2 also can't
+            // fire because the previous_cumulative_difficulty bound is high.
             let got = cache
                 .get_by_solution_hash(
                     &shared_solution,
@@ -2824,7 +2827,7 @@ mod tests {
                 .block_hash;
             assert_eq!(
                 got, expected,
-                "fallback selection must be deterministic; expected smallest block_hash"
+                "fallback selection must be deterministic across insertion orders; expected smallest block_hash"
             );
         }
     }
