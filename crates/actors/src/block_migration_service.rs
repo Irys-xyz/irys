@@ -24,6 +24,40 @@ pub struct BlockMigrationService {
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
 }
 
+/// Write `included_height` for term ledgers and `promoted_height` for the
+/// Publish ledger from a single block's `data_ledgers` slice.
+///
+/// NOTE: Keep the term-ledger pass first — same-block Submit→Publish
+/// promotions require `included_height` to exist before
+/// `set_data_tx_promoted_height` runs for the same tx_id.
+fn write_data_ledger_metadata(
+    tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+    data_ledgers: &[irys_types::DataTransactionLedger],
+    height: u64,
+) -> Result<(), reth_db::DatabaseError> {
+    // Term ledgers (Submit / OneYear / ThirtyDay): set included_height.
+    for dl in data_ledgers
+        .iter()
+        .filter(|dl| dl.ledger_id != DataLedger::Publish as u32)
+    {
+        let tx_ids = &dl.tx_ids.0;
+        if !tx_ids.is_empty() {
+            irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)?;
+        }
+    }
+    // Publish ledger: set promoted_height only — never touch included_height.
+    for dl in data_ledgers
+        .iter()
+        .filter(|dl| dl.ledger_id == DataLedger::Publish as u32)
+    {
+        let tx_ids = &dl.tx_ids.0;
+        if !tx_ids.is_empty() {
+            irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)?;
+        }
+    }
+    Ok(())
+}
+
 impl BlockMigrationService {
     pub fn new(
         db: DatabaseProvider,
@@ -71,7 +105,8 @@ impl BlockMigrationService {
     /// **Transient state between Phase 1 and Phase 2 (within the same DB
     /// transaction):**  Phase 1 may clear `included_height` from a row whose
     /// `promoted_height` is still set, leaving the row in a `{included:
-    /// None, promoted: Some}` state that `put_data_tx_metadata` would reject.
+    /// None, promoted: Some}` state, stored directly via `tx.put` (bypassing
+    /// `put_data_tx_metadata`'s `is_included` guard).
     /// This state is allowed *only* because Phase 2 runs in the same
     /// transaction and restores `included_height` for any tx whose
     /// Submit-block was re-included in the new canonical chain.  External
@@ -175,35 +210,7 @@ impl BlockMigrationService {
                 let height = header.height;
                 let block_hash = header.block_hash;
 
-                // NOTE: same-block Submit→Publish promotions are valid. Keep
-                // the term-ledger pass first so `included_height` is written
-                // before any Publish-ledger `promoted_height` write for the
-                // same tx_id; `set_data_tx_promoted_height` requires
-                // `included_height` to already exist.
-                for dl in header
-                    .data_ledgers
-                    .iter()
-                    .filter(|dl| dl.ledger_id != DataLedger::Publish as u32)
-                {
-                    let tx_ids = &dl.tx_ids.0;
-                    if tx_ids.is_empty() {
-                        continue;
-                    }
-                    // Term ledger (Submit / OneYear / ThirtyDay): set included_height.
-                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)?;
-                }
-                for dl in header
-                    .data_ledgers
-                    .iter()
-                    .filter(|dl| dl.ledger_id == DataLedger::Publish as u32)
-                {
-                    let tx_ids = &dl.tx_ids.0;
-                    if tx_ids.is_empty() {
-                        continue;
-                    }
-                    // Publish: only set promoted_height, never touch included_height.
-                    irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)?;
-                }
+                write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
                 if !commitment_ids.is_empty() {
                     irys_database::batch_set_commitment_tx_included_height(
                         tx,
@@ -391,33 +398,7 @@ impl BlockMigrationService {
                 }
             }
 
-            // NOTE: same-block Submit→Publish promotions are valid. Keep the
-            // term-ledger pass first so `included_height` exists before the
-            // Publish-ledger pass writes `promoted_height` for the same tx_id.
-            for dl in header
-                .data_ledgers
-                .iter()
-                .filter(|dl| dl.ledger_id != DataLedger::Publish as u32)
-            {
-                let tx_ids = &dl.tx_ids.0;
-                if tx_ids.is_empty() {
-                    continue;
-                }
-                // `included_height` ↔ term ledgers only; never overwrite for Publish.
-                irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)?;
-            }
-            for dl in header
-                .data_ledgers
-                .iter()
-                .filter(|dl| dl.ledger_id == DataLedger::Publish as u32)
-            {
-                let tx_ids = &dl.tx_ids.0;
-                if tx_ids.is_empty() {
-                    continue;
-                }
-                // `promoted_height` ↔ Publish ledger only.
-                irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)?;
-            }
+            write_data_ledger_metadata(tx, &header.data_ledgers, block_height)?;
 
             if !commitment_tx_ids.is_empty() {
                 irys_database::batch_set_commitment_tx_included_height(
@@ -1104,6 +1085,105 @@ mod tests {
             cdr.expiry_height.is_none(),
             "expiry remains cleared post-Phase 3"
         );
+        Ok(())
+    }
+
+    /// Multi-block reorg: both `blocks_to_clear` and `blocks_to_confirm` have
+    /// length 2 in a single `persist_metadata` call.
+    ///
+    /// Guards atomicity across the loop: an early `?` exit, off-by-one, or
+    /// phase ordering bug would leave one of the two txs in a stale state.
+    #[tokio::test]
+    async fn persist_metadata_multi_block_reorg_handles_both_slices() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        // Two distinct tx_id / data_root pairs.
+        let tx_id_a = H256::random();
+        let data_root_a = H256::random();
+        let tx_id_b = H256::random();
+        let data_root_b = H256::random();
+
+        // Build orphan blocks (different hashes via different previous_block_hash).
+        let orphan1 = make_block_header(1, H256::random(), 50, vec![tx_id_a]);
+        let orphan1_hash = orphan1.block_hash;
+        let orphan2 = make_block_header(2, orphan1.block_hash, 50, vec![tx_id_b]);
+        let orphan2_hash = orphan2.block_hash;
+
+        // Seed CDRs with orphan hashes in block_set and a non-None expiry_height.
+        seed_cdr(&db, data_root_a, tx_id_a, vec![orphan1_hash], Some(10));
+        seed_cdr(&db, data_root_b, tx_id_b, vec![orphan2_hash], Some(20));
+
+        // Pre-write IrysDataTxMetadata rows with included_height = Some(orphan_height).
+        db.update_eyre(|tx| {
+            irys_database::batch_set_data_tx_included_height(tx, &[tx_id_a], 1)?;
+            irys_database::batch_set_data_tx_included_height(tx, &[tx_id_b], 2)?;
+            Ok(())
+        })?;
+
+        // Build canonical blocks on the new fork.
+        let new1 = make_block_header(10, H256::random(), 50, vec![tx_id_a]);
+        let new1_hash = new1.block_hash;
+        let new2 = make_block_header(11, new1.block_hash, 50, vec![tx_id_b]);
+        let new2_hash = new2.block_hash;
+
+        let orphan1_sealed = make_sealed_with_submit_txs(orphan1, &[(tx_id_a, data_root_a)]);
+        let orphan2_sealed = make_sealed_with_submit_txs(orphan2, &[(tx_id_b, data_root_b)]);
+        let new1_sealed = make_sealed_with_submit_txs(new1, &[(tx_id_a, data_root_a)]);
+        let new2_sealed = make_sealed_with_submit_txs(new2, &[(tx_id_b, data_root_b)]);
+
+        // Single call with both slices of length 2.
+        svc.persist_metadata(
+            &[orphan1_sealed, orphan2_sealed],
+            &[new1_sealed, new2_sealed],
+        )?;
+
+        // Phase 1 cleared → Phase 2 restored: included_height == new block heights.
+        let meta_a = read_data_tx_metadata(&db, &tx_id_a)
+            .expect("tx_a metadata must exist after re-confirmation");
+        assert_eq!(
+            meta_a.included_height,
+            Some(10),
+            "tx_a included_height must be updated to new canonical height"
+        );
+
+        let meta_b = read_data_tx_metadata(&db, &tx_id_b)
+            .expect("tx_b metadata must exist after re-confirmation");
+        assert_eq!(
+            meta_b.included_height,
+            Some(11),
+            "tx_b included_height must be updated to new canonical height"
+        );
+
+        // Phase 1 scrubbed orphan hashes; Phase 3 appended new canonical hashes.
+        let cdr_a = read_cdr(&db, data_root_a).expect("CDR A present");
+        assert!(
+            !cdr_a.block_set.contains(&orphan1_hash),
+            "orphan1 hash must be scrubbed from CDR A"
+        );
+        assert!(
+            cdr_a.block_set.contains(&new1_hash),
+            "new1 hash must be appended to CDR A"
+        );
+        assert!(
+            cdr_a.expiry_height.is_none(),
+            "CDR A expiry cleared by Phase 3"
+        );
+
+        let cdr_b = read_cdr(&db, data_root_b).expect("CDR B present");
+        assert!(
+            !cdr_b.block_set.contains(&orphan2_hash),
+            "orphan2 hash must be scrubbed from CDR B"
+        );
+        assert!(
+            cdr_b.block_set.contains(&new2_hash),
+            "new2 hash must be appended to CDR B"
+        );
+        assert!(
+            cdr_b.expiry_height.is_none(),
+            "CDR B expiry cleared by Phase 3"
+        );
+
         Ok(())
     }
 }
