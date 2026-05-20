@@ -27,7 +27,6 @@ use crate::block_validation::{
 };
 use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
-use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
 use std::ops::ControlFlow;
@@ -198,62 +197,37 @@ impl BlockValidationTask {
             ValidationError::ValidationCancelled { reason }.into()
         };
 
-        let wait_for_parent_validation = self
-            .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
-            .boxed();
-        // Shared slot for the blocking PoA task's abort handle. When the
-        // outer `select` below picks the "wait_for_parent_validation won"
-        // (cancel) branch, `validate_block` is dropped — but the inner
-        // `spawn_blocking` PoA JoinHandle would otherwise be detached:
-        // panics on it get swallowed (never reaching the `TaskPanicked` /
-        // node-fault dispatch) and the work keeps consuming a blocking-pool
-        // thread. We thread an `Arc<OnceLock<AbortHandle>>` into
-        // `validate_block` so it can publish the handle as soon as the
-        // PoA task is spawned, then `.abort()` it from the cancel arm.
+        // The height-diff / channel-closed cancellation future is now
+        // consumed *inside* `validate_block` so that a `NodeFault` produced
+        // by any stage in flight can win over the cancel via
+        // `merge_stage_results`. Previously the outer `select` here could
+        // drop `validate_block` while a stage had already produced a
+        // `NodeFault`, silently demoting it to `Cancelled` →
+        // `Invalid`/`InternalFailure(soft)` — which broke the central
+        // "node faults must always win and panic" invariant of this branch.
+        // See the doc on `validate_block` for the inner-select shape.
+        //
+        // The `poa_abort_slot` is still threaded through so the PoA
+        // blocking task's `JoinHandle` is aborted on cancel rather than
+        // detached (preserves the panic→`TaskPanicked` path and stops a
+        // blocking-pool thread from leaking).
         let poa_abort_slot: Arc<OnceLock<AbortHandle>> = Arc::new(OnceLock::new());
-        let validate_block = self.validate_block(Arc::clone(&poa_abort_slot)).boxed();
-        let final_result = match futures::future::select(validate_block, wait_for_parent_validation)
-            .await
-        {
-            futures::future::Either::Left((validation_result, _block_too_old_future)) => {
-                // If validation is successful, wait for parent to be validated before reporting
-                if matches!(validation_result, ValidationResult::Valid) {
-                    let parent_wait_started = Instant::now();
-                    let parent_wait_outcome = self.wait_for_parent_validation().await;
-                    metrics::record_parent_wait_duration_ms(
-                        parent_wait_started.elapsed().as_secs_f64() * 1000.0,
-                    );
-                    match parent_wait_outcome {
-                        ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
-                        ParentValidationResult::Ready => validation_result,
-                    }
-                } else {
-                    validation_result
-                }
+        let validation_result = self.validate_block(Arc::clone(&poa_abort_slot)).await;
+
+        let final_result = if matches!(validation_result, ValidationResult::Valid) {
+            // Stages passed and no in-flight cancel fired: now block on
+            // parent validation before reporting upward.
+            let parent_wait_started = Instant::now();
+            let parent_wait_outcome = self.wait_for_parent_validation().await;
+            metrics::record_parent_wait_duration_ms(
+                parent_wait_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            match parent_wait_outcome {
+                ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
+                ParentValidationResult::Ready => validation_result,
             }
-            futures::future::Either::Right((parent_wait_outcome, _validation_task)) => {
-                // Cancel path: abort the detached blocking PoA task (if it
-                // was already spawned). `abort()` is fire-and-forget — the
-                // spawn_blocking thread won't actually be interrupted
-                // mid-computation, but its JoinHandle is no longer leaked
-                // and any panic surfaces via the JoinError that the inner
-                // awaiter would observe (the awaiter itself is being
-                // dropped here, but we've at least stopped detaching the
-                // handle; if the task hasn't started yet, `abort()` does
-                // prevent it from running).
-                if let Some(handle) = poa_abort_slot.get() {
-                    handle.abort();
-                }
-                match parent_wait_outcome {
-                    ParentValidationResult::Cancelled(reason) => into_cancelled_result(reason),
-                    // exit_if_block_is_too_old only returns `Ready` from
-                    // `extra_checks`; the trivial-continue closure above
-                    // never breaks with `Ready`, so this arm is unreachable.
-                    ParentValidationResult::Ready => unreachable!(
-                        "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
-                    ),
-                }
-            }
+        } else {
+            validation_result
         };
 
         metrics::record_validation_stage_duration_ms(
@@ -841,7 +815,65 @@ impl BlockValidationTask {
             result
         };
 
-        // Wait for all validation tasks to complete
+        // Race the six concurrent stages against the height-diff /
+        // channel-closed cancellation future. The cancel branch deliberately
+        // does NOT drop the in-flight stages — instead it captures the
+        // cancellation reason and falls through to a single drain-and-merge
+        // step so that any stage that already produced a `NodeFault`
+        // (e.g. `TaskPanicked`, `ShadowTxNodeFault`) is observed and wins
+        // over the cancellation via `merge_stage_results_with_cancel`'s
+        // priority. Before the fix, this race lived in the OUTER
+        // `execute_concurrent` select and would drop `validate_block` —
+        // silently demoting an already-produced node fault to a cancellation
+        // outcome, breaking the "node faults must always win" invariant.
+        //
+        // The join future is boxed so it is `Unpin` and can be drained via
+        // `futures::poll!` after the cancel arm fires.
+        let stages_join = async {
+            tokio::join!(
+                recall_task,
+                poa_task,
+                shadow_tx_task,
+                seeds_validation_task,
+                commitment_ordering_task,
+                data_txs_validation_task
+            )
+        };
+        let mut stages_join = Box::pin(stages_join);
+        let cancel_future = self.exit_if_block_is_too_old(|_| ControlFlow::Continue(()));
+
+        // `biased;` is defensive — if both branches are simultaneously
+        // ready we prefer the stages so a NodeFault that arrived
+        // alongside the cancel signal still wins. The drain-poll below
+        // makes this practically redundant (cancel arm also picks up
+        // ready stages), but biasing is cheap insurance.
+        let stage_outcome = tokio::select! {
+            biased;
+            joined = &mut stages_join => StageOutcome::Joined(joined),
+            cancel = cancel_future => {
+                // Cancel won. Fire the PoA abort so the blocking-pool
+                // thread doesn't continue and so any panic surfaces via
+                // the `JoinError` path (rather than being detached and
+                // silently swallowed).
+                if let Some(handle) = poa_abort_slot.get() {
+                    handle.abort();
+                }
+                // Drain the join future ONCE. If any stage was already
+                // ready (in particular any NodeFault), the join completes
+                // here and we merge it with the cancel signal. If not,
+                // the cancel is the only signal and the stages are
+                // dropped below (their data is owned in this scope so
+                // dropping is safe — the PoA blocking thread has already
+                // been aborted above).
+                match futures::poll!(&mut stages_join) {
+                    std::task::Poll::Ready(joined) => StageOutcome::JoinedAfterCancel(joined, cancel),
+                    std::task::Poll::Pending => StageOutcome::Cancelled(cancel),
+                }
+            }
+        };
+
+        // Unpack: either we have a six-tuple of stage results (with or
+        // without a concurrent cancel), or we have only a cancel signal.
         let (
             recall_result,
             poa_result,
@@ -849,14 +881,24 @@ impl BlockValidationTask {
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
-        ) = tokio::join!(
-            recall_task,
-            poa_task,
-            shadow_tx_task,
-            seeds_validation_task,
-            commitment_ordering_task,
-            data_txs_validation_task
-        );
+            cancel_signal,
+        ) = match stage_outcome {
+            StageOutcome::Joined(joined) => {
+                let (a, b, c, d, e, f) = joined;
+                (a, b, c, d, e, f, None)
+            }
+            StageOutcome::JoinedAfterCancel(joined, cancel) => {
+                let (a, b, c, d, e, f) = joined;
+                (a, b, c, d, e, f, Some(cancel))
+            }
+            StageOutcome::Cancelled(cancel) => {
+                // No stage was ready. Cancel is the result. Drop the
+                // (still-pending) stages by letting `stages_join` fall
+                // out of scope. The PoA blocking thread was aborted in
+                // the select arm above.
+                return cancel_outcome_to_result(cancel);
+            }
+        };
 
         // shadow_tx_task returns a typed `ValidationError` on failure;
         // route through `.into()` so eviction races / node-fault paths
@@ -877,6 +919,23 @@ impl BlockValidationTask {
                 (err.into(), None)
             }
         };
+
+        // If cancellation fired while stages were running, we MUST go
+        // through the merger so any concurrent NodeFault wins over the
+        // cancel signal. Otherwise we hand the stages to the existing
+        // success / failure logic.
+        if let Some(cancel) = cancel_signal {
+            let stage_results = [
+                &recall_result,
+                &poa_result,
+                &shadow_tx_result,
+                &seeds_validation_result,
+                &commitment_ordering_result,
+                &data_txs_result,
+            ];
+            let cancel_result = cancel_outcome_to_result(cancel);
+            return merge_stage_results_with_cancel(&stage_results, Some(&cancel_result));
+        }
 
         match (
             &recall_result,
@@ -963,6 +1022,37 @@ impl BlockValidationTask {
     }
 }
 
+/// Outcome of racing the six concurrent validation stages against the
+/// inner cancellation future. See the call site in `validate_block` for
+/// the drain-poll behavior on cancel.
+enum StageOutcome<J> {
+    /// Stages completed before cancellation fired.
+    Joined(J),
+    /// Cancellation fired but at least one drain-poll observed the join
+    /// future was already ready. Both signals participate in the merge so
+    /// a NodeFault can still win over the cancel.
+    JoinedAfterCancel(J, ParentValidationResult),
+    /// Cancellation fired and no stage had completed at the drain-poll
+    /// moment. The cancel signal is the result.
+    Cancelled(ParentValidationResult),
+}
+
+/// Convert a `ParentValidationResult` from the inner cancel future into a
+/// `ValidationResult`. The inner cancel future uses a Continue-only
+/// `extra_checks` closure, so only the `Cancelled(_)` arm is reachable.
+fn cancel_outcome_to_result(outcome: ParentValidationResult) -> ValidationResult {
+    match outcome {
+        ParentValidationResult::Cancelled(reason) => {
+            ValidationError::ValidationCancelled { reason }.into()
+        }
+        // The Continue-only extra_checks closure used here never breaks
+        // with `Ready`; this arm is unreachable in production.
+        ParentValidationResult::Ready => unreachable!(
+            "exit_if_block_is_too_old must not return Ready when given a Continue-only extra_checks closure"
+        ),
+    }
+}
+
 /// Merge concurrent stage results into a single `ValidationResult` using a
 /// three-tier priority ordering:
 ///
@@ -984,6 +1074,34 @@ impl BlockValidationTask {
 /// Order within each tier is the input array order so the priority is
 /// deterministic.
 fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult {
+    merge_stage_results_with_cancel(stage_results, None)
+}
+
+/// Same as [`merge_stage_results`] but also accepts an OPTIONAL
+/// cancellation outcome. Used by the inner cancel race in
+/// `validate_block`: when cancellation fires while stages are still
+/// running, the drain-poll captures any ready stage results and this
+/// merger guarantees a `NodeFault` from any stage still beats the
+/// cancel signal.
+///
+/// Priority including the cancel input:
+///
+/// 1. Node-fault `InternalFailure` (any stage)
+/// 2. `Invalid` (any stage)
+/// 3. Cancellation outcome (if supplied)
+/// 4. Soft `InternalFailure` (any stage)
+/// 5. Defensive fallback
+///
+/// Cancellation outranks soft `InternalFailure` because once cancellation
+/// has fired the in-progress stages are deliberately abandoned — a soft
+/// internal failure produced by, say, a snapshot eviction during the
+/// cancel window adds no information. But cancellation must NEVER outrank
+/// a real consensus rejection (we observed the block to be bad) or a node
+/// fault (we observed our own node to be bad) — those need to surface.
+fn merge_stage_results_with_cancel(
+    stage_results: &[&ValidationResult],
+    cancel: Option<&ValidationResult>,
+) -> ValidationResult {
     // Tier 1: node-fault InternalFailure must win over Invalid so the
     // supervisor restarts the node.
     if let Some(node_fault) = stage_results.iter().find_map(|r| match r {
@@ -1001,7 +1119,15 @@ fn merge_stage_results(stage_results: &[&ValidationResult]) -> ValidationResult 
         return ValidationResult::Invalid(invalid);
     }
 
-    // Tier 3: remaining (soft) InternalFailure — block parks in cache for
+    // Tier 3: cancellation outcome (if any). Inserted between consensus
+    // rejection and soft internal failure: cancellation says "we gave up
+    // before we could decide", which is a stronger statement than an
+    // eviction race observed on an already-abandoned stage.
+    if let Some(cancel) = cancel {
+        return cancel.clone();
+    }
+
+    // Tier 4: remaining (soft) InternalFailure — block parks in cache for
     // retry, no peer attribution.
     if let Some(internal) = stage_results.iter().find_map(|r| match r {
         ValidationResult::InternalFailure(inner) => Some(inner.clone()),
@@ -1228,6 +1354,160 @@ mod merge_stage_results_tests {
             ValidationResult::Invalid(rejection)
                 if matches!(rejection.err(), ValidationError::Other(_)) => {}
             other => panic!("expected Invalid(Other(..)), got {:?}", other),
+        }
+    }
+
+    // ---- merge_stage_results_with_cancel ----
+    //
+    // The cancel-aware merger is what defends the H2 invariant: when the
+    // inner cancellation future fires while stages are still running, the
+    // drain-poll in `validate_block` captures any already-ready stage
+    // results and hands them here together with the cancel outcome.
+    // A NodeFault in any stage MUST still win over the cancel; otherwise
+    // the supervisor restart path is silently bypassed at exactly the
+    // case where it matters most.
+
+    /// Cancellation outcome fixture for the
+    /// `HeightDifference` reason (the classic "outer select drops the
+    /// validate future" trigger before the H2 fix).
+    fn cancel_height_diff() -> ValidationResult {
+        ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+        }
+        .into()
+    }
+
+    /// Cancellation outcome fixture for the `ChannelClosed` reason
+    /// (shutdown). Also routes through `Invalid` per the
+    /// `ValidationCancelReason::is_internal` classification — the OTHER
+    /// half of the H2 hazard.
+    fn cancel_channel_closed() -> ValidationResult {
+        ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::ChannelClosed,
+        }
+        .into()
+    }
+
+    /// H2 regression target: NodeFault stage produced while siblings were
+    /// pending, and cancel fires before the join would complete. The
+    /// drain-poll in `validate_block` captures the NodeFault and hands it
+    /// here together with the cancel; the merger MUST surface the
+    /// NodeFault (so the block_tree_service handler panics) rather than
+    /// returning the cancellation outcome (which routes to `Invalid`,
+    /// peer-attributing a local fault and silently parking the broken
+    /// node).
+    #[rstest]
+    #[case::node_fault_with_height_diff_cancel(cancel_height_diff())]
+    #[case::node_fault_with_channel_closed_cancel(cancel_channel_closed())]
+    fn node_fault_wins_over_cancellation(#[case] cancel: ValidationResult) {
+        let node_fault = node_fault_internal();
+        let pending_proxy = ValidationResult::Valid; // stand-in for a stage that never produced
+        let results = [
+            &pending_proxy,
+            &node_fault,
+            &pending_proxy,
+            &pending_proxy,
+            &pending_proxy,
+            &pending_proxy,
+        ];
+        match merge_stage_results_with_cancel(&results, Some(&cancel)) {
+            ValidationResult::InternalFailure(inner) => assert!(
+                inner.is_node_fault(),
+                "H2 regression: cancel outranked NodeFault, got soft InternalFailure: {:?}",
+                inner.err()
+            ),
+            other => panic!(
+                "H2 regression: expected InternalFailure(node-fault), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Cancellation does NOT outrank a real consensus rejection observed
+    /// before cancel arrived: an `Invalid` observed in a sibling stage
+    /// means the block IS bad, and we should report it as such rather
+    /// than as a cancellation.
+    #[test]
+    fn invalid_wins_over_cancellation() {
+        let invalid_r = invalid();
+        let valid_r = ValidationResult::Valid;
+        let cancel = cancel_height_diff();
+        let results = [&valid_r, &invalid_r, &valid_r, &valid_r, &valid_r, &valid_r];
+        match merge_stage_results_with_cancel(&results, Some(&cancel)) {
+            ValidationResult::Invalid(rejection) => assert!(
+                matches!(
+                    rejection.err(),
+                    ValidationError::ShadowTransactionInvalid(_)
+                ),
+                "expected ShadowTransactionInvalid, got {:?}",
+                rejection.err()
+            ),
+            other => panic!("expected Invalid, got {:?}", other),
+        }
+    }
+
+    /// Cancellation outranks soft `InternalFailure`: once cancellation
+    /// has fired, the in-progress stages are deliberately abandoned —
+    /// a snapshot-eviction observed during the cancel window adds no
+    /// information and the caller already knows we gave up.
+    #[test]
+    fn cancellation_wins_over_soft_internal_failure() {
+        let soft = soft_internal();
+        let valid_r = ValidationResult::Valid;
+        let cancel = cancel_height_diff();
+        let results = [&valid_r, &soft, &valid_r, &valid_r, &valid_r, &valid_r];
+        match merge_stage_results_with_cancel(&results, Some(&cancel)) {
+            ValidationResult::Invalid(rejection) => assert!(
+                matches!(
+                    rejection.err(),
+                    ValidationError::ValidationCancelled {
+                        reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+                    }
+                ),
+                "expected cancellation outcome to survive, got {:?}",
+                rejection.err()
+            ),
+            other => panic!("expected Invalid(ValidationCancelled), got {:?}", other),
+        }
+    }
+
+    /// With no cancellation, behavior matches the legacy `merge_stage_results`
+    /// (regression coverage for the wrapper).
+    #[test]
+    fn no_cancel_matches_legacy_merger() {
+        let invalid_r = invalid();
+        let soft = soft_internal();
+        let valid_r = ValidationResult::Valid;
+        let results = [&valid_r, &soft, &invalid_r, &valid_r, &valid_r, &valid_r];
+        let with_cancel = merge_stage_results_with_cancel(&results, None);
+        let legacy = merge_stage_results(&results);
+        match (with_cancel, legacy) {
+            (ValidationResult::Invalid(_), ValidationResult::Invalid(_)) => {}
+            (a, b) => panic!(
+                "wrapper diverged from legacy: with_cancel={:?}, legacy={:?}",
+                a, b
+            ),
+        }
+    }
+
+    /// All-Valid stages with a cancel input: cancel is the result.
+    /// Mirrors the "drain-poll observed a join that was Ready but every
+    /// stage happened to be Valid" path — extremely rare but the merger
+    /// must still produce the cancel outcome rather than the defensive
+    /// `Other(..)` fallback (which would obliterate the cancellation
+    /// reason).
+    #[test]
+    fn all_valid_with_cancel_returns_cancellation() {
+        let valid_r = ValidationResult::Valid;
+        let cancel = cancel_height_diff();
+        let results = [&valid_r, &valid_r, &valid_r, &valid_r, &valid_r, &valid_r];
+        match merge_stage_results_with_cancel(&results, Some(&cancel)) {
+            ValidationResult::Invalid(rejection) => assert!(
+                matches!(rejection.err(), ValidationError::ValidationCancelled { .. }),
+                "expected cancellation outcome, got {:?}",
+                rejection.err()
+            ),
+            other => panic!("expected Invalid(ValidationCancelled), got {:?}", other),
         }
     }
 }
