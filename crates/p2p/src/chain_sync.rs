@@ -316,7 +316,14 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .get_orphaned_blocks_by_parent(&block_hash)
             .await;
 
-        if let Some(orphaned_blocks) = maybe_orphaned_blocks {
+        if let Some(mut orphaned_blocks) = maybe_orphaned_blocks {
+            // Sort by block_hash before dispatch so that when multiple orphans share the same
+            // parent, the order in which they are submitted to the block pool is deterministic.
+            // `get_orphaned_blocks_by_parent` returns a Vec built upstream from a HashSet, so
+            // its element order varies across runs; sorting here pins the dispatch order. Without
+            // this, transient-tip selection is non-deterministic and potentially observable via
+            // RPC/gossip before the next canonical update resolves it.
+            orphaned_blocks.sort_by_key(|b| b.block.header().block_hash);
             let mut futures = Vec::new();
             for orphaned_block in orphaned_blocks {
                 info!(
