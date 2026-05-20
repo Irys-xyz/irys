@@ -504,7 +504,8 @@ impl ChunkIngressServiceInner {
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
     /// - data_size is confirmed (rightmost chunk merkle validation)
-    /// - data_root is included in a confirmed block (block_set non-empty)
+    /// - `block_set` is non-empty (cheap "has this data_root been confirmed
+    ///   in some block?" hint maintained by `cache_data_root`)
     /// - no local proof already exists
     /// - all expected chunks are present
     pub(crate) fn try_generate_ingress_proof_for_root(
@@ -526,9 +527,13 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Only generate ingress proofs for txs confirmed in a block's submit ledger.
-        // block_set is populated by cache_data_root() when called with a block header
-        // during block confirmation (lifecycle.rs). Empty means mempool-only.
+        // Cheap "has this data_root been confirmed in any canonical block?"
+        // gate.  `block_set` is maintained atomically with tip changes by
+        // `BlockMigrationService::persist_metadata` (scrub + add in one DB
+        // tx), so a non-empty set means at least one canonical block has
+        // included a referencing tx.  Range / slot lookups still go through
+        // `tx_inclusion::find_canonical_ledger_range` at validation /
+        // promotion time.
         if cdr.block_set.is_empty() {
             return Ok(());
         }

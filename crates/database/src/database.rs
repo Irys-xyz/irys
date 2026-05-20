@@ -316,7 +316,15 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         cached_data_root.data_size = tx_header.data_size;
     }
 
-    // If the entry exists and a block header reference was provided, add the block hash reference if necessary
+    // If a block header is provided, record it in block_set and clear any
+    // pre-confirmation expiry.  Authoritative block_set maintenance happens
+    // atomically with the tip change in
+    // `BlockMigrationService::persist_metadata` (see
+    // `update_data_root_block_set` / `remove_data_root_block_set_entry`) —
+    // by the time this is called from mempool's `on_block_confirmed`, the
+    // hash is already present.  The append is kept as a defensive idempotent
+    // write so direct callers of `cache_data_root` (tests, etc.) get
+    // consistent state.
     if let Some(block_header) = block_header {
         if !cached_data_root
             .block_set
@@ -324,12 +332,30 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         {
             cached_data_root.block_set.push(block_header.block_hash);
         }
-        // Clear any pre-confirmation expiry once the data_root is included in a block
         cached_data_root.expiry_height = None;
     }
 
     // Update the database with the modified or new entry
     tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;
+
+    // Surface anomalous writes: a CDR with `block_set.is_empty()` and
+    // `expiry_height.is_none()` has no lifetime bound and will land in the
+    // `(None, None)` arm of `prune_data_root_cache` (evicted unless a local
+    // ingress proof is present).  Under the authoritative-writer model this
+    // should not be produced by the normal flow: confirmed entries get
+    // their block_set populated by `BlockMigrationService::persist_metadata`
+    // Phase 3, and unconfirmed entries get `expiry_height` set by
+    // `cache_data_root_with_expiry`.  Direct callers of `cache_data_root`
+    // that bypass both paths (test fixtures, pre-fix code) can produce
+    // this state — warn so operators see them.
+    if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
+        warn!(
+            data_root = %key,
+            tx.id = %tx_header.id,
+            had_block_header = block_header.is_some(),
+            "cached_data_root.anomalous_write: block_set empty and expiry_height None — entry has no lifetime bound"
+        );
+    }
 
     Ok(Some(cached_data_root))
 }
@@ -340,6 +366,75 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
     data_root: DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_root)?)
+}
+
+/// Ensures `block_hash` is present in the `block_set` of an existing
+/// [`CachedDataRoot`] and clears `expiry_height` (matching `cache_data_root`'s
+/// confirmation semantics).  No-op if no entry exists for `data_root` — this
+/// helper is intended for migration-time consistency and must not fabricate
+/// cache entries for data_roots whose chunks the node never tracked.
+///
+/// Returns `true` if the row was modified.
+pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let already_present = cdr.block_set.contains(&block_hash);
+    let needs_expiry_clear = cdr.expiry_height.is_some();
+    if !already_present {
+        cdr.block_set.push(block_hash);
+    }
+    if needs_expiry_clear {
+        cdr.expiry_height = None;
+    }
+    if already_present && !needs_expiry_clear {
+        return Ok(false);
+    }
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    Ok(true)
+}
+
+/// Removes `block_hash` from the `block_set` of an existing [`CachedDataRoot`].
+/// Used when migration clears an orphaned block during reorg so `block_set`
+/// stops accumulating dead references.  No-op if the entry is absent or the
+/// hash is not present.  `expiry_height` is intentionally left untouched: any
+/// re-anchoring of an orphaned tx is handled by the mempool reorg path.
+///
+/// Returns `true` if the row was modified.
+pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let before = cdr.block_set.len();
+    cdr.block_set.retain(|h| h != &block_hash);
+    if cdr.block_set.len() == before {
+        return Ok(false);
+    }
+    let now_anomalous = cdr.block_set.is_empty() && cdr.expiry_height.is_none();
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    if now_anomalous {
+        // Reorg scrub left the CDR with no canonical block hashes and no
+        // pre-confirmation expiry.  Mempool's orphan re-anchor path
+        // (`handle_confirmed_data_tx_reorg`) is expected to re-ingest the
+        // orphaned tx and restore `expiry_height` via
+        // `cache_data_root_with_expiry`.  If that doesn't happen, the entry
+        // sits in the `(None, None)` arm and is only evicted by
+        // `prune_data_root_cache` after the local-proof exemption check.
+        warn!(
+            %data_root,
+            removed_block_hash = %block_hash,
+            "cached_data_root.anomalous_state_after_scrub: block_set now empty and expiry_height None — awaiting mempool orphan re-anchor or prune"
+        );
+    }
+    Ok(true)
 }
 
 type IsDuplicate = bool;
@@ -988,6 +1083,233 @@ mod tests {
                 result.is_some(),
                 expect_found,
                 "max_height={max_height}, migrated={insert_migration} => found={expect_found}"
+            );
+        }
+    }
+
+    /// Direct tests for the `update_data_root_block_set` /
+    /// `remove_data_root_block_set_entry` helpers introduced for the
+    /// `BlockMigrationService`-as-authoritative-writer refactor.  These pin
+    /// the idempotency / no-op / expiry-handling semantics independently of
+    /// the migration call site.
+    mod data_root_block_set_helpers {
+        use crate::{
+            IrysDatabaseArgs as _, cache_data_root,
+            db::IrysDatabaseExt as _,
+            open_or_create_db, remove_data_root_block_set_entry,
+            tables::{CachedDataRoots, IrysTables},
+            update_data_root_block_set,
+        };
+        use irys_testing_utils::utils::tempfile;
+        use irys_types::{DataTransactionHeader, H256};
+        use reth_db::{
+            Database as _,
+            mdbx::DatabaseArguments,
+            transaction::{DbTx as _, DbTxMut as _},
+        };
+
+        /// Returns `(env, tempdir)`.  The caller must bind the tempdir to a
+        /// variable that lives the duration of the test — dropping it before
+        /// the env removes the underlying directory.
+        fn open_db() -> (reth_db::mdbx::DatabaseEnv, tempfile::TempDir) {
+            let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let env = open_or_create_db(
+                tmp.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            (env, tmp)
+        }
+
+        /// Build a CDR for `data_root` with the given txid in its txid_set
+        /// and `block_set = initial_block_set`, `expiry_height = expiry`.
+        fn seed_cdr(
+            db: &reth_db::mdbx::DatabaseEnv,
+            data_root: H256,
+            tx_id: H256,
+            initial_block_set: Vec<H256>,
+            expiry: Option<u64>,
+        ) {
+            let tx_header =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: irys_types::DataTransactionHeaderV1 {
+                        id: tx_id,
+                        data_root,
+                        data_size: 64,
+                        ..Default::default()
+                    },
+                    metadata: Default::default(),
+                });
+            db.update(|tx| -> eyre::Result<()> {
+                cache_data_root(tx, &tx_header, None)?;
+                let mut cdr = tx
+                    .get::<CachedDataRoots>(data_root)?
+                    .expect("seed_cdr: cache_data_root must produce an entry");
+                cdr.block_set = initial_block_set;
+                cdr.expiry_height = expiry;
+                tx.put::<CachedDataRoots>(data_root, cdr)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        }
+
+        fn read_cdr(
+            db: &reth_db::mdbx::DatabaseEnv,
+            data_root: H256,
+        ) -> Option<crate::db_cache::CachedDataRoot> {
+            db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+                .unwrap()
+                .unwrap()
+        }
+
+        #[test]
+        fn update_returns_false_when_cdr_missing() {
+            let (db, _tmp) = open_db();
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, H256::random(), H256::random()))
+                .unwrap();
+            assert!(!res, "missing CDR must be a no-op returning false");
+        }
+
+        #[test]
+        fn update_appends_hash_and_clears_expiry() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let new_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![], Some(42));
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, new_hash))
+                .unwrap();
+            assert!(res, "append + clear-expiry must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![new_hash]);
+            assert!(cdr.expiry_height.is_none(), "expiry must be cleared");
+        }
+
+        #[test]
+        fn update_is_idempotent_when_hash_present_and_expiry_already_cleared() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let existing_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![existing_hash], None);
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .unwrap();
+            assert!(
+                !res,
+                "no-op when hash already present and expiry already cleared"
+            );
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![existing_hash], "block_set unchanged");
+        }
+
+        #[test]
+        fn update_clears_expiry_even_if_hash_already_present() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let existing_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![existing_hash], Some(99));
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .unwrap();
+            assert!(res, "modification reported when expiry is cleared");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![existing_hash], "block_set unchanged");
+            assert!(cdr.expiry_height.is_none(), "expiry cleared");
+        }
+
+        #[test]
+        fn remove_returns_false_when_cdr_missing() {
+            let (db, _tmp) = open_db();
+            let res = db
+                .update_eyre(|tx| {
+                    remove_data_root_block_set_entry(tx, H256::random(), H256::random())
+                })
+                .unwrap();
+            assert!(!res, "missing CDR must be a no-op returning false");
+        }
+
+        #[test]
+        fn remove_returns_false_when_hash_absent() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let other_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![other_hash], Some(5));
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, H256::random()))
+                .unwrap();
+            assert!(!res, "hash not in block_set must be a no-op");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![other_hash], "block_set unchanged");
+            assert_eq!(cdr.expiry_height, Some(5), "expiry unchanged");
+        }
+
+        #[test]
+        fn remove_strips_hash_and_leaves_expiry_alone() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let target_hash = H256::random();
+            let keep_hash = H256::random();
+            seed_cdr(
+                &db,
+                data_root,
+                tx_id,
+                vec![target_hash, keep_hash],
+                Some(50),
+            );
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, target_hash))
+                .unwrap();
+            assert!(res, "hash present must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![keep_hash], "only target removed");
+            assert_eq!(
+                cdr.expiry_height,
+                Some(50),
+                "expiry_height intentionally left untouched per helper docblock"
+            );
+        }
+
+        /// Scrubbing the last hash from `block_set` while `expiry_height` is
+        /// already `None` leaves the CDR in the anomalous (None, None)
+        /// state.  The helper still completes successfully; the warn! at the
+        /// call site (logged but not test-asserted here) is the observable
+        /// signal for operators.
+        #[test]
+        fn remove_can_leave_cdr_in_anomalous_state() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let only_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![only_hash], None);
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, only_hash))
+                .unwrap();
+            assert!(res, "hash present must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert!(cdr.block_set.is_empty(), "block_set scrubbed to empty");
+            assert!(
+                cdr.expiry_height.is_none(),
+                "expiry intentionally left untouched"
             );
         }
     }

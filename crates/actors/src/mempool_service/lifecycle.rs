@@ -42,9 +42,13 @@ impl Inner {
             .unwrap_or(&[]);
         let commitment_txids = block.commitment_tx_ids();
 
-        let all_data_txids: Vec<H256> = submit_txids
+        // Only term-ledger txids (Submit / OneYear / ThirtyDay) receive
+        // `included_height`. Publish txids are excluded here because Publish
+        // confirmation sets `promoted_height` (passed separately below), not
+        // `included_height`; the `included_height` for a Publish tx was already
+        // recorded at the time the tx was first confirmed in Submit.
+        let term_ledger_txids: Vec<H256> = submit_txids
             .iter()
-            .chain(publish_txids.iter())
             .chain(one_year_txids.iter())
             .chain(thirty_day_txids.iter())
             .copied()
@@ -52,7 +56,7 @@ impl Inner {
         if let Err(e) = self
             .mempool_state
             .apply_block_confirmed_updates(
-                &all_data_txids,
+                &term_ledger_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
@@ -76,9 +80,12 @@ impl Inner {
             return Ok(());
         }
 
-        // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
-        // Track which roots were successfully cached so we only trigger proof generation
-        // for roots whose block_set was actually updated.
+        // Idempotently touch `CachedDataRoots` for each Submit-ledger tx in
+        // the confirmed block.  Authoritative block_set + expiry_height
+        // maintenance already happened atomically with the tip change in
+        // `BlockMigrationService::persist_metadata`; this loop only tracks
+        // which data_roots had a CDR row so the proof-generation
+        // notification below targets them.
         let mut confirmed_data_roots = Vec::new();
         for submit_tx in sealed_block
             .transactions()
@@ -91,23 +98,33 @@ impl Inner {
             }) {
                 Ok(()) => {
                     info!(
-                        "Successfully cached data_root {:?} for tx {:?}",
-                        data_root, submit_tx.id
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        incoming_block.height = block.height,
+                        "cached_data_root.write"
                     );
                     confirmed_data_roots.push(data_root);
                 }
                 Err(db_error) => {
                     error!(
-                        "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                        data_root, submit_tx.id, db_error
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        error = ?db_error,
+                        "cached_data_root.write_failed"
                     );
                 }
             };
         }
 
-        // After block_set is populated for each confirmed data_root, notify the
-        // chunk ingress service to try generating ingress proofs. These will now
-        // pass the block_set gate since the block hash was just recorded above.
+        // Notify chunk ingress to try generating ingress proofs for the
+        // confirmed data_roots.  `persist_metadata` has already populated
+        // `block_set` so the cheap gate in
+        // `try_generate_ingress_proof_for_root` will pass; downstream
+        // validation/promotion paths still re-verify canonicality.
         if !confirmed_data_roots.is_empty()
             && let Err(e) = self.service_senders.chunk_ingress.send_traced(
                 ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
@@ -741,28 +758,16 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
-        // Clear included_height for orphaned publish transactions. Same
-        // contention semantics as the term-tx loop above.
-        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
-            match self
-                .mempool_state
-                .clear_data_tx_included_height(tx_id)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        ?e,
-                        tx.id = %tx_id,
-                        "Mempool contention during publish-tx reorg cleanup; aborting"
-                    );
-                    return Ok(());
-                }
-            }
-        }
+        // NOTE: do NOT clear `included_height` for orphaned Publish txs here.
+        // `included_height` is owned by term-ledger confirmations (Submit /
+        // OneYear / ThirtyDay).  If only the Publish-promotion is orphaned
+        // (the underlying Submit is on a shared ancestor and still
+        // canonical), clearing `included_height` would undo a still-valid
+        // confirmation.  The term-tx loop above is responsible for clearing
+        // `included_height` whenever the term confirmation itself is
+        // orphaned; the Publish-orphan path only needs to clear
+        // `promoted_height`, which the next loop (`mark_unpromoted_in_mempool`)
+        // does.
 
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {

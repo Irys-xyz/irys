@@ -1532,21 +1532,28 @@ impl AtomicMempoolState {
     /// mempool still treats its txs as pending.
     pub async fn apply_block_confirmed_updates(
         &self,
-        submit_and_publish_txids: &[H256],
+        term_ledger_txids: &[H256],
         commitment_txids: &[H256],
         publish_txids: &[H256],
         height: u64,
     ) -> Result<(), MempoolError> {
         let mut state = self.write().await?;
 
-        // 1. Set included_height (with overwrite) for submit + publish data txs
-        for txid in submit_and_publish_txids {
+        // 1. Set included_height for term-ledger txs (Submit / OneYear / ThirtyDay).
+        //    Publish-ledger txs are excluded: they only receive promoted_height (phase 3
+        //    below). Setting included_height on a Publish tx would overwrite the
+        //    Submit-block height that was recorded when the tx was first confirmed.
+        for txid in term_ledger_txids {
             if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(txid) {
+                let prior = wrapped_tx.metadata().included_height;
                 wrapped_tx.metadata_mut().included_height = Some(height);
+                // `overwrite` flags the intentional-clobber case (reorg replay
+                // re-confirming a tx that already carried an included_height).
+                // Useful when diffing logs across replays.
                 tracing::debug!(
                     tx.id = %txid,
                     included_height = height,
-                    overwrite = true,
+                    overwrite = prior.is_some(),
                     "Set included_height in mempool"
                 );
                 state.recent_valid_tx.put(*txid, ());
@@ -3115,6 +3122,10 @@ mod test_helpers {
     }
 
     pub(super) fn data_tx_with_id(id: H256) -> DataTransactionHeader {
+        data_tx_with_ledger(id, DataLedger::Submit)
+    }
+
+    pub(super) fn data_tx_with_ledger(id: H256, ledger: DataLedger) -> DataTransactionHeader {
         DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id,
@@ -3125,7 +3136,7 @@ mod test_helpers {
                 header_size: 0,
                 term_fee: U256::from(1_u64).into(),
                 perm_fee: Some(U256::from(1_u64).into()),
-                ledger_id: DataLedger::Submit as u32,
+                ledger_id: ledger as u32,
                 metadata_format: 0,
                 signature: IrysSignature::default(),
                 chain_id: 1,
@@ -3339,12 +3350,19 @@ mod lock_contention_tests {
 /// the confirmed canonical chain.
 #[cfg(test)]
 mod apply_block_confirmed_updates_tests {
-    use super::test_helpers::{commitment_tx_with_id, data_tx_with_id, empty_mempool_state};
+    use super::test_helpers::{
+        commitment_tx_with_id, data_tx_with_id, data_tx_with_ledger, empty_mempool_state,
+    };
     use super::*;
+    use irys_types::DataLedger;
 
-    /// Success path: all three update phases (data tx included_height,
+    /// Success path: all three update phases (term-ledger tx included_height,
     /// commitment tx included_height, publish tx promoted_height) apply
     /// atomically under a single write lock and the function returns Ok.
+    ///
+    /// Crucially, `publish_id` receives `promoted_height` (phase 3) but NOT
+    /// `included_height` (phase 1) — the phase-1 slice only contains term-ledger
+    /// txids, mirroring the call-site filtering in `handle_block_confirmed_message`.
     #[tokio::test]
     async fn success_path_applies_all_three_update_phases_atomically() {
         let data_id = H256::random();
@@ -3366,13 +3384,9 @@ mod apply_block_confirmed_updates_tests {
         let mempool_state = AtomicMempoolState::new(state);
         let height = 42_u64;
 
+        // phase-1 only contains term-ledger txids; publish_id is excluded
         let result = mempool_state
-            .apply_block_confirmed_updates(
-                &[data_id, publish_id],
-                &[commitment_id],
-                &[publish_id],
-                height,
-            )
+            .apply_block_confirmed_updates(&[data_id], &[commitment_id], &[publish_id], height)
             .await;
         assert!(
             result.is_ok(),
@@ -3388,7 +3402,7 @@ mod apply_block_confirmed_updates_tests {
                 .metadata()
                 .included_height,
             Some(height),
-            "data tx must have included_height set"
+            "term-ledger tx must have included_height set"
         );
         assert_eq!(
             guard
@@ -3407,8 +3421,8 @@ mod apply_block_confirmed_updates_tests {
                 .unwrap()
                 .metadata()
                 .included_height,
-            Some(height),
-            "publish tx must also have included_height set (covered by submit_and_publish_txids)"
+            None,
+            "publish tx must NOT have included_height set by the Publish-block confirmation"
         );
         assert_eq!(
             guard
@@ -3467,6 +3481,147 @@ mod apply_block_confirmed_updates_tests {
                 .included_height,
             Some(7),
             "present tx must still get its update"
+        );
+    }
+
+    /// A Submit→Publish promotion: the Publish-block `apply_block_confirmed_updates`
+    /// call must NOT overwrite the `included_height` that was set when the tx was
+    /// first confirmed in a Submit block.
+    ///
+    /// Sequence:
+    ///   1. Submit-block confirmation sets included_height = submit_height.
+    ///   2. Publish-block confirmation sets promoted_height but must leave
+    ///      included_height unchanged.
+    #[tokio::test]
+    async fn publish_confirmation_does_not_overwrite_submit_included_height() {
+        let tx_id = H256::random();
+        let submit_height = 10_u64;
+        let publish_height = 20_u64;
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(tx_id, data_tx_with_ledger(tx_id, DataLedger::Publish));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        // Step 1: simulate Submit-block confirmation (tx_id is a term-ledger txid here)
+        mempool_state
+            .apply_block_confirmed_updates(&[tx_id], &[], &[], submit_height)
+            .await
+            .unwrap();
+
+        // Step 2: simulate Publish-block confirmation (tx_id only in publish_txids,
+        // not in term_ledger_txids)
+        mempool_state
+            .apply_block_confirmed_updates(&[], &[], &[tx_id], publish_height)
+            .await
+            .unwrap();
+
+        let guard = mempool_state.state.read().await;
+        let meta = guard.valid_submit_ledger_tx.get(&tx_id).unwrap().metadata();
+        assert_eq!(
+            meta.included_height,
+            Some(submit_height),
+            "included_height must remain at Submit-block height after Publish confirmation"
+        );
+        assert_eq!(
+            meta.promoted_height,
+            Some(publish_height),
+            "promoted_height must be set to Publish-block height"
+        );
+    }
+
+    /// A OneYear-ledger tx confirmed directly: `apply_block_confirmed_updates` must
+    /// set `included_height` to the OneYear-block height.
+    #[tokio::test]
+    async fn oneyear_direct_confirmation_sets_included_height() {
+        let tx_id = H256::random();
+        let height = 15_u64;
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(tx_id, data_tx_with_ledger(tx_id, DataLedger::OneYear));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        mempool_state
+            .apply_block_confirmed_updates(&[tx_id], &[], &[], height)
+            .await
+            .unwrap();
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&tx_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "OneYear tx must have included_height set to its confirmation block height"
+        );
+    }
+
+    /// A ThirtyDay-ledger tx confirmed directly: `apply_block_confirmed_updates` must
+    /// set `included_height` to the ThirtyDay-block height.
+    #[tokio::test]
+    async fn thirtyday_direct_confirmation_sets_included_height() {
+        let tx_id = H256::random();
+        let height = 25_u64;
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(tx_id, data_tx_with_ledger(tx_id, DataLedger::ThirtyDay));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        mempool_state
+            .apply_block_confirmed_updates(&[tx_id], &[], &[], height)
+            .await
+            .unwrap();
+
+        let guard = mempool_state.state.read().await;
+        assert_eq!(
+            guard
+                .valid_submit_ledger_tx
+                .get(&tx_id)
+                .unwrap()
+                .metadata()
+                .included_height,
+            Some(height),
+            "ThirtyDay tx must have included_height set to its confirmation block height"
+        );
+    }
+
+    /// A Publish-only tx (never in Submit; `ledger_id == Publish`) confirmed in a
+    /// Publish block must receive `promoted_height` but NOT `included_height`.
+    #[tokio::test]
+    async fn publish_only_tx_gets_promoted_height_not_included_height() {
+        let tx_id = H256::random();
+        let height = 30_u64;
+
+        let mut state = empty_mempool_state();
+        state
+            .valid_submit_ledger_tx
+            .insert(tx_id, data_tx_with_ledger(tx_id, DataLedger::Publish));
+        let mempool_state = AtomicMempoolState::new(state);
+
+        // Publish-block confirmation: tx_id only in publish_txids, not in term_ledger_txids
+        mempool_state
+            .apply_block_confirmed_updates(&[], &[], &[tx_id], height)
+            .await
+            .unwrap();
+
+        let guard = mempool_state.state.read().await;
+        let meta = guard.valid_submit_ledger_tx.get(&tx_id).unwrap().metadata();
+        assert_eq!(
+            meta.included_height, None,
+            "Publish-only tx must not have included_height set"
+        );
+        assert_eq!(
+            meta.promoted_height,
+            Some(height),
+            "Publish-only tx must have promoted_height set"
         );
     }
 }
