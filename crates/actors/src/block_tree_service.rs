@@ -251,8 +251,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::EpochCommitmentMismatch { .. }
         | VE::EpochExtraCommitment { .. }
         | VE::EpochMissingCommitment { .. }
-        | VE::CommitmentWrongOrder { .. }
-        | VE::Other(_) => {
+        | VE::CommitmentWrongOrder { .. } => {
             unreachable!(
                 "Consensus variant routed to DiscardKind::Invalid at on_block_validation_finished, never reaches soft_internal_reason_tag"
             )
@@ -1218,18 +1217,6 @@ impl BlockTreeServiceInner {
         // inflate `soft_internal_discard_total` with local "we moved on" events
         // and the recovery counter would never match (fresh gossip rarely
         // re-triggers the same cancellation race for the same hash).
-        if matches!(kind, DiscardKind::SoftInternal)
-            && let ValidationResult::InternalFailure(inner) = &validation_result
-            && !matches!(
-                inner.err(),
-                crate::block_validation::ValidationError::ValidationCancelled { .. }
-            )
-        {
-            let reason = soft_internal_reason_tag(inner.err());
-            metrics::record_soft_internal_discard(reason);
-            self.recent_soft_internal_discards.put(block_hash, reason);
-        }
-
         let mut cache = self.cache.write().map_err(|_| {
             eyre::eyre!("block tree cache write lock poisoned in discard_and_broadcast")
         })?;
@@ -1249,6 +1236,22 @@ impl BlockTreeServiceInner {
             tracing::debug!(block.hash = %block_hash, "Block already removed from cache");
         }
         drop(cache);
+
+        // R2 audit (L1): record the soft-internal LRU entry *after* the cache
+        // write completes. If the cache lock is poisoned and we return early
+        // above, no LRU entry is left dangling — otherwise a later Valid for
+        // the same hash would spuriously tick `soft_internal_recovered_total`.
+        if matches!(kind, DiscardKind::SoftInternal)
+            && let ValidationResult::InternalFailure(inner) = &validation_result
+            && !matches!(
+                inner.err(),
+                crate::block_validation::ValidationError::ValidationCancelled { .. }
+            )
+        {
+            let reason = soft_internal_reason_tag(inner.err());
+            metrics::record_soft_internal_discard(reason);
+            self.recent_soft_internal_discards.put(block_hash, reason);
+        }
 
         // todo: restructure the event so that `height` and `state` is not part of it
         let event = BlockStateUpdated {

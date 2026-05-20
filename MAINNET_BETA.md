@@ -178,7 +178,7 @@ OR run the executable directly:
 
 **Important:** you must run the node under a supervisor that automatically restarts it on exit (e.g. `systemd` with `Restart=always`, Docker with `--restart=unless-stopped`, or equivalent). This is a requirement, not a recommendation. Without one, the node stays offline after any crash until you manually restart it, falls behind the network, and stops earning rewards.
 
-On any unrecoverable local fault — a failed DB read, a poisoned lock, a verifier thread panic, an internal arithmetic bug, etc. — the node exits the process immediately. There is no threshold, no retry, and no in-process recovery: a single occurrence ends the process and the supervisor must bring it back up.
+On any unrecoverable local fault — a failed DB read, a poisoned lock, a verifier thread panic, an internal arithmetic bug, etc. — the node exits the process immediately. There is no occurrence threshold, no retry, and no in-process recovery: a single unrecoverable fault ends the process and the supervisor must bring it back up.
 
 **Behavioural change:** earlier releases logged these local faults and kept running. This release exits on the same conditions. If you are upgrading and do not already have an auto-restart supervisor in place, add one before running this build.
 

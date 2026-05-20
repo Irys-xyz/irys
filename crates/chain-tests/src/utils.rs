@@ -3784,6 +3784,16 @@ pub enum BlockValidationOutcome {
     StoredOnNode(ChainState),
     /// Block was discarded with validation error details.
     Discarded(irys_actors::block_validation::ValidationError),
+    /// Harness observed the block disappear from the block tree without
+    /// receiving a corresponding `BlockStateUpdated { discarded: true }`
+    /// event. This is a property of the test harness's event-observation
+    /// loop, NOT a validation outcome — the block may have been discarded
+    /// for any reason that didn't traverse the event broadcaster.
+    NoDiscardEventObserved,
+    /// Harness exhausted its polling budget without seeing the block reach
+    /// a terminal state. Again, not a validation outcome — a harness
+    /// timeout. Tests that hit this should diagnose why the block stalled.
+    HarnessTimeout,
 }
 
 pub fn assert_validation_error(
@@ -3841,14 +3851,14 @@ pub async fn read_block_from_state(
         };
 
         let Some(chain_state) = result else {
-            // If we previously saw "validation scheduled" and now block status is None,
-            // it means the block was discarded
+            // If we previously saw "validation scheduled" and now block status
+            // is None, the block was discarded — but without the matching
+            // event the harness can't surface the underlying ValidationError.
+            // Tests that need to assert on a specific error must observe via
+            // `assert_validation_error`, which will treat this synthetic
+            // outcome as a panic (correct: no event = no assertion possible).
             if was_validation_scheduled {
-                return BlockValidationOutcome::Discarded(
-                    irys_actors::block_validation::ValidationError::Other(
-                        "Block was discarded without validation error event".to_string(),
-                    ),
-                );
+                return BlockValidationOutcome::NoDiscardEventObserved;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -3862,9 +3872,7 @@ pub async fn read_block_from_state(
             _ => return BlockValidationOutcome::StoredOnNode(chain_state),
         }
     }
-    BlockValidationOutcome::Discarded(irys_actors::block_validation::ValidationError::Other(
-        "Timeout waiting for block validation".to_string(),
-    ))
+    BlockValidationOutcome::HarnessTimeout
 }
 
 /// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.

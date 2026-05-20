@@ -14,6 +14,7 @@ irys_utils::define_metrics! {
     gauge VALIDATION_QUEUE_OLDEST_AGE_MS("irys.validation.queue_oldest_age_ms", "Age of the oldest pending VDF task in milliseconds");
     counter VALIDATION_TASK_FORCE_ABORTED("irys.validation.task_force_aborted_total", "Validation watchdog force-aborts of stalled VDF tasks");
     counter VALIDATION_CONCURRENT_CANCEL_REQUEUED("irys.validation.concurrent_cancel_requeued_total", "Concurrent validation tasks requeued after unexpected JoinError::Cancelled (sustained occurrence implies Tokio distress or external abort source)");
+    counter VALIDATION_CONCURRENT_CANCEL_REPEATED("irys.validation.concurrent_cancel_repeated_total", "Concurrent validation tasks parked as RepeatedCancellation SoftInternal after exceeding MAX_CONCURRENT_CANCEL_RETRIES (recovery delegated to fresh gossip).");
     gauge CACHE_CHUNK_COUNT("irys.cache.chunk_count", "Number of cached chunks");
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
@@ -140,6 +141,10 @@ pub(crate) fn record_validation_task_force_aborted(stage: &'static str) {
 
 pub(crate) fn record_validation_concurrent_cancel_requeued() {
     VALIDATION_CONCURRENT_CANCEL_REQUEUED.add(1, &[]);
+}
+
+pub(crate) fn record_validation_concurrent_cancel_repeated() {
+    VALIDATION_CONCURRENT_CANCEL_REPEATED.add(1, &[]);
 }
 
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {

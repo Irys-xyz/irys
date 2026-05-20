@@ -515,6 +515,7 @@ mod tests {
     //   before validation completes.
     #[rstest]
     #[case(ChainState::NotOnchain(BlockState::Unknown))]
+    #[case(ChainState::NotOnchain(BlockState::ValidationScheduled))]
     #[case(ChainState::Validated(BlockState::Unknown))]
     #[case(ChainState::Validated(BlockState::ValidationScheduled))]
     fn block_status_returns_in_tree_pending_validation(#[case] chain_state: ChainState) {

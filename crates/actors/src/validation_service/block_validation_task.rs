@@ -661,6 +661,14 @@ impl BlockValidationTask {
         let shadow_tx_task = async move {
             let started = Instant::now();
 
+            // R2 audit (M3): both soft-internal early returns below record
+            // the shadow_tx stage duration + result before returning, and
+            // route through `capture_stage_result` so any future
+            // reclassification of these early-exit variants automatically
+            // participates in the cancel-arm recovery. Prior shape used `?`
+            // which bypassed both. Matches the pattern used by
+            // `seeds_validation_task` for its `ParentBlockMissing` exit.
+
             // Eviction-race: parent's commitment snapshot was present at
             // prevalidation but the in-memory window has since rotated.
             // Surfacing this as the typed `ParentCommitmentSnapshotMissing`
@@ -668,13 +676,26 @@ impl BlockValidationTask {
             // out of the consensus-rejection bucket — previously this path
             // was bucketed into `ShadowTransactionInvalid` via the eyre
             // `?`, which misclassified an honest peer's block.
-            let parent_commitment_snapshot = self
+            let parent_commitment_snapshot = match self
                 .block_tree_guard
                 .read()
                 .get_commitment_snapshot(&block.previous_block_hash)
-                .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
-                    block_hash: block.previous_block_hash,
-                })?;
+            {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    let err = ValidationError::ParentCommitmentSnapshotMissing {
+                        block_hash: block.previous_block_hash,
+                    };
+                    metrics::record_validation_stage_duration_ms(
+                        "shadow_tx",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    metrics::record_validation_result("shadow_tx", err.metric_label());
+                    let classified: ValidationResult = err.clone().into();
+                    capture_stage_result(&shadow_tx_captures, &classified);
+                    return Err(err);
+                }
+            };
 
             // `wait_for_payload` returns one of two typed soft errors when
             // its in-process oneshot wiring cannot deliver the payload:
@@ -693,34 +714,47 @@ impl BlockValidationTask {
             // gossip. Diagnostic distinction lives one layer down in the
             // `ExecutionPayloadWaitError` variant; we log each variant
             // distinctly so operators can grep / count them.
-            let execution_data = self
+            let execution_data = match self
                 .service_inner
                 .execution_payload_provider
                 .wait_for_payload(&block.evm_block_hash)
                 .in_current_span()
                 .await
-                .map_err(|err| match err {
-                    irys_domain::ExecutionPayloadWaitError::ReceiverDisrupted {
-                        evm_block_hash,
-                    } => {
-                        tracing::warn!(
-                            ?evm_block_hash,
-                            "execution payload wait disrupted: receiver dropped (LRU eviction or cache removal)"
-                        );
-                        ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
-                    }
-                    irys_domain::ExecutionPayloadWaitError::WaitTimeout {
-                        evm_block_hash,
-                        elapsed_ms,
-                    } => {
-                        tracing::warn!(
-                            ?evm_block_hash,
+            {
+                Ok(payload) => payload,
+                Err(err) => {
+                    let validation_err = match err {
+                        irys_domain::ExecutionPayloadWaitError::ReceiverDisrupted {
+                            evm_block_hash,
+                        } => {
+                            tracing::warn!(
+                                ?evm_block_hash,
+                                "execution payload wait disrupted: receiver dropped (LRU eviction or cache removal)"
+                            );
+                            ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
+                        }
+                        irys_domain::ExecutionPayloadWaitError::WaitTimeout {
+                            evm_block_hash,
                             elapsed_ms,
-                            "execution payload wait timed out: peer advertised header but never served payload"
-                        );
-                        ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
-                    }
-                })?;
+                        } => {
+                            tracing::warn!(
+                                ?evm_block_hash,
+                                elapsed_ms,
+                                "execution payload wait timed out: peer advertised header but never served payload"
+                            );
+                            ValidationError::ExecutionPayloadCacheEvicted { evm_block_hash }
+                        }
+                    };
+                    metrics::record_validation_stage_duration_ms(
+                        "shadow_tx",
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    metrics::record_validation_result("shadow_tx", validation_err.metric_label());
+                    let classified: ValidationResult = validation_err.clone().into();
+                    capture_stage_result(&shadow_tx_captures, &classified);
+                    return Err(validation_err);
+                }
+            };
 
             let result = shadow_transactions_are_valid(
                 config,
@@ -782,8 +816,10 @@ impl BlockValidationTask {
             // path would have routed through `merge_stage_results`.
             // The two soft-internal early returns above
             // (`ParentCommitmentSnapshotMissing`,
-            // `ExecutionPayloadCacheEvicted`) never produce NodeFault /
-            // Invalid, so no side-channel write is required there.
+            // `ExecutionPayloadCacheEvicted`) also call
+            // `capture_stage_result` post-R2 (M3) — the capture is a no-op
+            // for soft-internal today but guards against future
+            // reclassification.
             if let Err(ref err) = result {
                 let classified: ValidationResult = err.clone().into();
                 capture_stage_result(&shadow_tx_captures, &classified);
@@ -2351,6 +2387,119 @@ mod side_channel_cancel_race_tests {
             ),
             other => panic!(
                 "C1 regression: expected InternalFailure(node-fault), got {:?}. The cancel arm dropped the NodeFault — the side channel is not working.",
+                other
+            ),
+        }
+    }
+
+    /// R2 audit (L3) — end-to-end wiring test for the H1 + C1 fixes.
+    /// Exercises the real path: a `spawn_blocking` task panics, producing
+    /// `JoinError::is_panic() = true`, which `classify_poa_join_error`
+    /// translates into `TaskPanicked` (NodeFault), which `capture_stage_result`
+    /// writes to the side channel. A concurrent cancel fires before the
+    /// `tokio::join!` can naturally complete (sibling permanently Pending).
+    /// The cancel arm must surface the NodeFault, NOT demote to Cancelled.
+    ///
+    /// This is the only test that exercises the FULL chain (real panic →
+    /// real JoinError::is_panic → classify_poa_join_error → side channel →
+    /// cancel-arm readback). The pieces are individually unit-tested in
+    /// `classify_poa_join_error_tests`, `StageFaultCaptures` tests, and
+    /// `node_fault_with_pending_sibling_surfaces_through_side_channel`,
+    /// but only this test catches a regression where the wiring drifts
+    /// (e.g. someone removes the `capture_stage_result` call in the PoA
+    /// task's panic-arm).
+    #[tokio::test]
+    async fn poa_spawn_blocking_panic_surfaces_through_side_channel_under_cancel() {
+        use tokio::sync::Notify;
+
+        let captures: Arc<Mutex<StageFaultCaptures>> =
+            Arc::new(Mutex::new(StageFaultCaptures::default()));
+        let poa_captures = Arc::clone(&captures);
+        // `panic_captured` gates the cancel arm: it fires AFTER the PoA
+        // stage has written its NodeFault to the side channel, so the
+        // race is deterministic (not timing-dependent). Without this
+        // gate, `spawn_blocking`'s `.await` yields control and the
+        // cancel arm can win before the capture lands — exercising a
+        // DIFFERENT (and uninteresting) race.
+        let panic_captured = Arc::new(Notify::new());
+        let panic_captured_signal = Arc::clone(&panic_captured);
+
+        // Stage 0 mirrors the real `poa_task` shape: spawn a blocking
+        // task that panics, then convert the resulting `JoinError` via
+        // `classify_poa_join_error` and write to the side channel before
+        // returning. The stage's own future reaches `Ready` here, but
+        // `tokio::join!`'s combined future stays `Pending` because
+        // stage 2 is permanently parked.
+        let poa_stage = async move {
+            let handle = tokio::task::spawn_blocking(|| {
+                panic!("simulated poa verifier panic for L3 wiring test");
+            });
+            let result: ValidationResult = match handle.await {
+                Ok(()) => ValidationResult::Valid,
+                Err(join_err) => classify_poa_join_error(&join_err).into(),
+            };
+            capture_stage_result(&poa_captures, &result);
+            panic_captured_signal.notify_one();
+            result
+        };
+
+        let mk_valid = || async { ValidationResult::Valid };
+        let stages_join = async {
+            tokio::join!(
+                poa_stage,
+                mk_valid(),
+                pending::<ValidationResult>(),
+                mk_valid(),
+                mk_valid(),
+                mk_valid(),
+            )
+        };
+
+        // Cancel only after the PoA panic has been captured. This is the
+        // exact race the C1 fix defends: panic landed in side channel,
+        // sibling permanently Pending blocks natural join completion,
+        // cancel arm must surface the NodeFault from the side channel.
+        let cancel_future = async move {
+            panic_captured.notified().await;
+            ParentValidationResult::Cancelled(ValidationCancelReason::HeightDifference)
+        };
+
+        let stage_outcome = tokio::select! {
+            biased;
+            joined = stages_join => StageOutcome::Joined(joined),
+            cancel = cancel_future => StageOutcome::Cancelled(cancel),
+        };
+
+        let result = match stage_outcome {
+            StageOutcome::Joined((a, b, c, d, e, f)) => {
+                let arr = [&a, &b, &c, &d, &e, &f];
+                merge_stage_results(&arr)
+            }
+            StageOutcome::Cancelled(cancel) => {
+                let captured = std::mem::take(
+                    &mut *captures.lock().expect("StageFaultCaptures mutex poisoned"),
+                );
+                captured
+                    .into_cancel_result()
+                    .unwrap_or_else(|| cancel_outcome_to_result(cancel))
+            }
+        };
+
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "real spawn_blocking panic must surface as NodeFault via side channel, got soft: {:?}",
+                    inner.err()
+                );
+                assert!(
+                    matches!(inner.err(), ValidationError::TaskPanicked { task, .. } if task == "poa"),
+                    "TaskPanicked.task must be \"poa\", got {:?}",
+                    inner.err()
+                );
+            }
+            other => panic!(
+                "L3 wiring regression: real PoA panic + cancel must yield InternalFailure(node-fault, TaskPanicked), got {:?}. classify_poa_join_error or capture_stage_result is broken.",
                 other
             ),
         }

@@ -527,11 +527,16 @@ impl ValidationService {
                                 // give-up path parks the block as
                                 // SoftInternal; fresh gossip is the recovery
                                 // lane. See branch review finding H4.
-                                metrics::record_validation_concurrent_cancel_requeued();
+                                //
+                                // R2 audit (M1): metric increments are now
+                                // routed by decision (requeued vs repeated) so
+                                // operator dashboards can distinguish self-
+                                // healing from terminal cap-hit park events.
                                 if let Some((hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
                                     let decision = coordinator.record_concurrent_cancel(hash);
                                     match decision {
                                         active_validations::ConcurrentCancelDecision::Requeue { attempt } => {
+                                            metrics::record_validation_concurrent_cancel_requeued();
                                             warn!(
                                                 block.hash = %hash,
                                                 custom.error = %e,
@@ -584,6 +589,7 @@ impl ValidationService {
                                             // block parks for fresh gossip
                                             // recovery alongside other
                                             // SoftInternal discards).
+                                            metrics::record_validation_concurrent_cancel_repeated();
                                             error!(
                                                 block.hash = %hash,
                                                 custom.error = %e,

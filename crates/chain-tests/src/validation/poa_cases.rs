@@ -183,7 +183,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 partition_hash,
             };
 
-            // Validate both the entropy chunk PoA. Parent for the hypothetical
+            // Validate the entropy chunk PoA. Parent for the hypothetical
             // validating block is `new_block` — its height anchors the PoA
             // pre-check on a parent-deterministic view of the chain.
             poa_is_valid(

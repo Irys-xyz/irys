@@ -987,10 +987,6 @@ pub enum ValidationError {
     /// Commitment transaction in wrong order
     #[error("Commitment transaction at position {position} in wrong order")]
     CommitmentWrongOrder { position: usize },
-
-    /// Generic validation error for edge cases
-    #[error("Validation failed: {0}")]
-    Other(String),
 }
 
 impl ValidationError {
@@ -1063,8 +1059,7 @@ impl ValidationError {
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
             | Self::EpochMissingCommitment { .. }
-            | Self::CommitmentWrongOrder { .. }
-            | Self::Other(_) => ErrorClass::Consensus,
+            | Self::CommitmentWrongOrder { .. } => ErrorClass::Consensus,
         }
     }
 
@@ -1127,8 +1122,7 @@ impl ValidationError {
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
             | Self::EpochMissingCommitment { .. }
-            | Self::CommitmentWrongOrder { .. }
-            | Self::Other(_) => "invalid",
+            | Self::CommitmentWrongOrder { .. } => "invalid",
         }
     }
 }
@@ -1213,8 +1207,6 @@ mod metric_label_tests {
         let err = ValidationError::SeedDataInvalid("bad seed".into());
         assert_eq!(err.metric_label(), "invalid");
         let err = ValidationError::RecallRangeInvalid("out of range".into());
-        assert_eq!(err.metric_label(), "invalid");
-        let err = ValidationError::Other("misc".into());
         assert_eq!(err.metric_label(), "invalid");
 
         // PreValidation — delegates to the inner variant's `metric_reason()`

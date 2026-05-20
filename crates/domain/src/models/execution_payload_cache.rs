@@ -376,6 +376,18 @@ impl ExecutionPayloadCache {
         // we were the last subscriber) is bounded by the LRU and will be
         // evicted naturally — well below the cost of breaking sibling
         // waiters.
+        //
+        // R2 NOTE (M2 deferred): wrapping `request_payload_from_the_network`
+        // inside this same timeout would bound the worst-case latency from
+        // `request_budget + wait_timeout` (50s+60s=110s in prod) to
+        // `wait_timeout` (60s). It is deferred because (a) the larger
+        // worst-case only fires in already-degraded peer-network states,
+        // and (b) several integration tests rely on the wider effective
+        // budget to feed payloads after validation starts — the request
+        // budget gives them a ~55s window even with the 5s test
+        // `wait_timeout`. A real fix needs to retune
+        // `NodeConfig::testing()`'s `execution_payload_wait_timeout_millis`
+        // alongside the move (see audit BRANCH_REVIEW_R2.md).
         let started = std::time::Instant::now();
         match tokio::time::timeout(self.wait_timeout, async {
             loop {
