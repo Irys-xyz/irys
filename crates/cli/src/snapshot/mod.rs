@@ -248,9 +248,10 @@ mod round_trip_tests {
     }
 
     /// CDX-1: an archive that smuggles in `reth/jwt.hex` (NOT in manifest.files)
-    /// must not result in that file being placed in the target data dir.
+    /// is rejected by the recursive tree validation before any placement runs,
+    /// so the target data dir is never touched.
     #[test]
-    fn import_does_not_place_smuggled_files() {
+    fn import_rejects_smuggled_files() {
         let src_keep = TempDirBuilder::new().build();
         build_source(src_keep.path());
         let (_orig_keep, original) = build_snapshot(src_keep.path(), 4242);
@@ -264,23 +265,21 @@ mod round_trip_tests {
         let target_keep = TempDirBuilder::new().build();
         let target_dir = target_keep.path().join("victim");
 
-        run_import(ImportOpts {
+        let err = run_import(ImportOpts {
             input: smuggled_archive,
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 4242,
             expected_irys_schema_version: 3,
         })
-        .expect("import succeeds (smuggled file is silently dropped)");
-
+        .expect_err("smuggled archive must be rejected");
         assert!(
-            !target_dir.join("reth/jwt.hex").exists(),
-            "smuggled jwt.hex must not appear in target after import"
+            err.to_string().contains("reth/jwt.hex") && err.to_string().contains("undeclared"),
+            "expected undeclared-file rejection, got: {err}"
         );
-        // Legitimate manifest-declared files are still placed.
         assert!(
-            target_dir.join("reth/db/mdbx.dat").is_file(),
-            "legitimate reth mdbx still placed"
+            !target_dir.join("reth/db/mdbx.dat").exists(),
+            "rejection must happen before any file placement"
         );
     }
 

@@ -117,12 +117,13 @@ fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
     }
 }
 
-/// Refuse to label an export with `chain_id` when the snapshotted data dir
-/// has a `.irys_genesis.json` that does not match the active config's
+/// Refuse to label an export with `chain_id` unless the snapshotted data dir's
+/// `.irys_genesis.json` is present and byte-identical to the active config's
 /// `base_directory/.irys_genesis.json`. Genesis blocks are deterministic per
-/// chain, so a byte mismatch means the data dir belongs to a different
-/// network than the config — labelling the archive with the config's
-/// chain_id would incorrectly stamp the snapshot.
+/// chain, so identical genesis bytes prove the data dir belongs to the
+/// configured network. Fails closed: a missing genesis on either side means
+/// the chain identity cannot be proven, so the export is refused rather than
+/// stamped with an unverified `chain_id`.
 fn verified_chain_id_for_export(
     node_config: &NodeConfig,
     data_dir: &std::path::Path,
@@ -132,11 +133,20 @@ fn verified_chain_id_for_export(
         .base_directory
         .join(crate::snapshot::GENESIS_FILE);
     let target_path = data_dir.join(crate::snapshot::GENESIS_FILE);
-    let local_bytes = read_optional_file(&local_path)?;
-    let target_bytes = read_optional_file(&target_path)?;
-    if let (Some(local), Some(target)) = (local_bytes, target_bytes)
-        && local != target
-    {
+    let (Some(local), Some(target)) = (
+        read_optional_file(&local_path)?,
+        read_optional_file(&target_path)?,
+    ) else {
+        eyre::bail!(
+            "cannot verify chain identity for export: {} must be present in both \
+             --data-dir {} and the configured base_directory {}. Refusing to label \
+             the snapshot with an unverified chain_id={chain_id}.",
+            crate::snapshot::GENESIS_FILE,
+            data_dir.display(),
+            node_config.base_directory.display(),
+        );
+    };
+    if local != target {
         eyre::bail!(
             "--data-dir {} has a different {} than the configured base_directory {}; \
              the data dir appears to belong to a different chain. Refusing to label \

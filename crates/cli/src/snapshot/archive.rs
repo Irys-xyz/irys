@@ -10,6 +10,11 @@ use super::manifest::{MANIFEST_FILENAME, ManifestFile, SnapshotManifest};
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+/// Upper bound on manifest size in bytes. A real manifest is well under 1 MiB
+/// even for archives with thousands of files; 16 MiB is a comfortable cap that
+/// prevents a crafted archive from forcing an unbounded allocation before any
+/// checksum or compatibility guard runs.
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Walk `staging_dir`, hashing every regular file (excluding `manifest.json`)
 /// and producing a sorted file list suitable for embedding in a `SnapshotManifest`.
@@ -114,6 +119,15 @@ pub(crate) fn unpack(archive: &Path, target_dir: &Path) -> eyre::Result<Snapshot
 /// Read the manifest from an already-extracted snapshot directory.
 pub(crate) fn read_manifest_from_dir(dir: &Path) -> eyre::Result<SnapshotManifest> {
     let path = dir.join(MANIFEST_FILENAME);
+    let metadata =
+        std::fs::metadata(&path).with_context(|| format!("stat manifest {}", path.display()))?;
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        eyre::bail!(
+            "manifest {} is {} bytes, exceeds {MAX_MANIFEST_BYTES}-byte cap",
+            path.display(),
+            metadata.len()
+        );
+    }
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("reading manifest {}", path.display()))?;
     serde_json::from_str(&contents).with_context(|| format!("parsing manifest {}", path.display()))
@@ -152,7 +166,19 @@ pub(crate) fn read_manifest_from_archive(archive: &Path) -> eyre::Result<Snapsho
             );
         }
         let mut buf = String::new();
-        entry.read_to_string(&mut buf)?;
+        // Read at most MAX_MANIFEST_BYTES + 1 — if the read returns more than
+        // the cap, the entry is oversized. Bounding here protects against a
+        // crafted archive whose manifest entry advertises (or actually emits)
+        // gigabytes of bytes.
+        let read = (&mut entry)
+            .take(MAX_MANIFEST_BYTES + 1)
+            .read_to_string(&mut buf)?;
+        if u64::try_from(read).expect("read len fits in u64") > MAX_MANIFEST_BYTES {
+            eyre::bail!(
+                "archive {} root {MANIFEST_FILENAME} exceeds {MAX_MANIFEST_BYTES}-byte cap",
+                archive.display()
+            );
+        }
         manifest_json = Some(buf);
     }
     let buf = manifest_json.ok_or_else(|| {

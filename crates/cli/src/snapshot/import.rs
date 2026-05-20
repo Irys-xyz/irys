@@ -58,7 +58,7 @@ pub(crate) fn run_import(opts: ImportOpts) -> eyre::Result<()> {
     verify_checksums(staging.path(), &extracted.files)?;
 
     let allowed_roots = manifest_root_entries(&extracted.files);
-    verify_no_extra_entries(staging.path(), &allowed_roots)?;
+    verify_no_extra_entries(staging.path(), &extracted.files)?;
     sanity_check_consensus_db(staging.path())?;
     sanity_check_reth_db(staging.path())?;
 
@@ -169,23 +169,40 @@ fn manifest_root_entries(files: &[ManifestFile]) -> BTreeSet<OsString> {
         .collect()
 }
 
-/// Every top-level entry in `staging` must be either the manifest or one of
-/// the manifest-declared roots. Crafted archives smuggling in extra files
-/// (e.g., `reth/jwt.hex`) are rejected here.
-fn verify_no_extra_entries(staging: &Path, allowed_roots: &BTreeSet<OsString>) -> eyre::Result<()> {
-    for entry in
-        std::fs::read_dir(staging).with_context(|| format!("reading {}", staging.display()))?
-    {
+/// Every file in the extracted `staging` tree must be either `manifest.json`
+/// or one of the manifest-declared paths. Crafted archives smuggling in extra
+/// files at any depth (e.g., `reth/jwt.hex`, `irys_consensus_data/extra`) are
+/// rejected here. Symlinks, devices, and other non-regular entries are also
+/// rejected at the tree level so they never reach checksum or placement.
+fn verify_no_extra_entries(staging: &Path, declared: &[ManifestFile]) -> eyre::Result<()> {
+    let allowed: BTreeSet<&str> = declared.iter().map(|f| f.path.as_str()).collect();
+    walk_and_verify(staging, staging, &allowed)
+}
+
+fn walk_and_verify(root: &Path, dir: &Path, allowed: &BTreeSet<&str>) -> eyre::Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
-        let name = entry.file_name();
-        if name == MANIFEST_FILENAME {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            walk_and_verify(root, &path, allowed)?;
             continue;
         }
-        if !allowed_roots.contains(&name) {
+        let rel = path
+            .strip_prefix(root)
+            .expect("path is under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !file_type.is_file() {
             eyre::bail!(
-                "archive contains unexpected top-level entry {:?} not declared in manifest",
-                name
+                "archive contains non-regular entry {rel:?} (symlinks and special files are rejected)"
             );
+        }
+        if rel == MANIFEST_FILENAME {
+            continue;
+        }
+        if !allowed.contains(rel.as_str()) {
+            eyre::bail!("archive contains undeclared file {rel:?} not present in manifest");
         }
     }
     Ok(())
@@ -228,6 +245,7 @@ fn place_manifest_files(
 ) -> eyre::Result<()> {
     for entry in files {
         let src = staging.join(&entry.path);
+        ensure_regular_file(&src)?;
         let dst = target.join(&entry.path);
         if dst.exists() {
             if !force {
@@ -268,9 +286,29 @@ fn verify_data_dir_state(opts: &ImportOpts) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Reject anything that is not a regular file before hashing or moving it.
+/// Uses non-following `symlink_metadata` so a crafted archive cannot smuggle a
+/// symlink (or device/dir) as a manifest entry — `verify_checksums` would
+/// otherwise hash the link target and `place_manifest_files` would install the
+/// link into `data_dir`, escaping the snapshot boundary. The export side
+/// already refuses symlinks (`copy_dir_recursive`), so legitimate archives
+/// never contain them.
+fn ensure_regular_file(path: &Path) -> eyre::Result<()> {
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat extracted file {}", path.display()))?;
+    if !meta.file_type().is_file() {
+        eyre::bail!(
+            "manifest entry {} is not a regular file (symlinks and special files are rejected)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn verify_checksums(staging: &std::path::Path, expected: &[ManifestFile]) -> eyre::Result<()> {
     for entry in expected {
         let path = staging.join(&entry.path);
+        ensure_regular_file(&path)?;
         let reader = std::io::BufReader::new(
             std::fs::File::open(&path)
                 .with_context(|| format!("opening extracted file {}", path.display()))?,
@@ -464,6 +502,72 @@ mod tests {
         std::fs::write(reth_db.join("mdbx.dat"), b"not-a-real-mdbx").expect("write garbage");
         let err = sanity_check_reth_db(dir.path()).unwrap_err();
         assert!(err.to_string().contains("sanity opening"), "got: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_regular_file_rejects_symlink_and_dir() {
+        let dir = TempDirBuilder::new().build();
+        let regular = dir.path().join("real");
+        std::fs::write(&regular, b"x").expect("write regular");
+        ensure_regular_file(&regular).expect("regular file accepted");
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&regular, &link).expect("mk symlink");
+        let err = ensure_regular_file(&link).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "got: {err}");
+
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).expect("mkdir");
+        assert!(
+            ensure_regular_file(&subdir).is_err(),
+            "dir must be rejected"
+        );
+    }
+
+    /// A crafted archive can ship undeclared files nested under a manifest-declared
+    /// directory (e.g. `reth/jwt.hex` while the manifest declares `reth/db/mdbx.dat`).
+    /// `verify_no_extra_entries` must walk the staging tree and reject any file
+    /// not present in the manifest, not just top-level entries.
+    #[test]
+    fn verify_no_extra_entries_rejects_nested_undeclared_file() {
+        let dir = TempDirBuilder::new().build();
+        let reth = dir.path().join("reth");
+        std::fs::create_dir_all(&reth).expect("mkdir reth");
+        std::fs::write(reth.join("mdbx.dat"), b"db").expect("write declared");
+        std::fs::write(reth.join("jwt.hex"), b"smuggled").expect("write undeclared");
+
+        let declared = vec![mf("reth/mdbx.dat")];
+        let err = verify_no_extra_entries(dir.path(), &declared).unwrap_err();
+        assert!(
+            err.to_string().contains("reth/jwt.hex") && err.to_string().contains("undeclared"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_no_extra_entries_accepts_declared_tree() {
+        let dir = TempDirBuilder::new().build();
+        std::fs::create_dir_all(dir.path().join("reth/db")).expect("mkdir");
+        std::fs::write(dir.path().join("reth/db/mdbx.dat"), b"db").expect("write");
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), b"{}").expect("write manifest");
+
+        let declared = vec![mf("reth/db/mdbx.dat")];
+        verify_no_extra_entries(dir.path(), &declared).expect("declared tree accepted");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verify_no_extra_entries_rejects_nested_symlink() {
+        let dir = TempDirBuilder::new().build();
+        let reth = dir.path().join("reth");
+        std::fs::create_dir_all(&reth).expect("mkdir reth");
+        std::fs::write(reth.join("mdbx.dat"), b"db").expect("write declared");
+        std::os::unix::fs::symlink("/etc/passwd", reth.join("link")).expect("mk symlink");
+
+        let declared = vec![mf("reth/mdbx.dat"), mf("reth/link")];
+        let err = verify_no_extra_entries(dir.path(), &declared).unwrap_err();
+        assert!(err.to_string().contains("non-regular"), "got: {err}");
     }
 
     fn make_archive(manifest: &SnapshotManifest) -> (tempfile::TempDir, PathBuf) {
