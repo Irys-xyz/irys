@@ -725,24 +725,41 @@ pub enum ValidationCancelReason {
     /// Routes through `is_internal() = true` so shutdown-induced discards
     /// never poison consensus-rejection metrics.
     ChannelClosed,
+    /// Concurrent-stage `JoinError::Cancelled` recurred for the same block
+    /// past the per-block retry cap (`MAX_CONCURRENT_CANCEL_RETRIES`) in the
+    /// validation-service result loop. A single cancel is a Tokio hiccup we
+    /// transparently requeue; sustained recurrence for the same block means
+    /// something local keeps tearing the task down (poisoned runtime, a
+    /// sibling-worker panic loop, a watchdog edge case) and re-running it
+    /// will likely just burn cycles. Routes through `is_internal() = true`
+    /// so the block parks rather than being peer-attributed — the validity
+    /// of the child block is still unknown, the cancellation said nothing
+    /// about it. Recovery is fresh gossip re-entry (same lane as other
+    /// SoftInternal parks) once the local condition clears.
+    RepeatedCancellation,
 }
 
 impl ValidationCancelReason {
     /// Returns true when the cancellation reflects a local node-side
     /// condition rather than a peer-attributable defect in the child block.
     ///
-    /// All three variants are local-side outcomes (M2 audit 2026-05-20):
-    /// `HeightDifference` says "our tip advanced past this block while
-    /// validation was in flight", `ParentMissing` says "the parent is
-    /// missing from our cache", `ChannelClosed` says "we're shutting down".
-    /// None of these are statements about the peer's block, so all route to
-    /// `InternalFailure` rather than `Invalid`. The H3 LRU recording site in
+    /// All variants are local-side outcomes (M2 audit 2026-05-20, H4 fix
+    /// 2026-05-20): `HeightDifference` says "our tip advanced past this block
+    /// while validation was in flight", `ParentMissing` says "the parent is
+    /// missing from our cache", `ChannelClosed` says "we're shutting down",
+    /// `RepeatedCancellation` says "the concurrent stage keeps getting
+    /// torn down for this block past the retry cap". None of these are
+    /// statements about the peer's block, so all route to `InternalFailure`
+    /// rather than `Invalid`. The H3 LRU recording site in
     /// `block_tree_service` separately filters cancellations out of the
     /// soft-internal discard counter (cancellations are not gossip-
     /// recoverable retries, so they don't belong in that bookkeeping).
     pub fn is_internal(&self) -> bool {
         match self {
-            Self::HeightDifference | Self::ParentMissing | Self::ChannelClosed => true,
+            Self::HeightDifference
+            | Self::ParentMissing
+            | Self::ChannelClosed
+            | Self::RepeatedCancellation => true,
         }
     }
 }
@@ -753,6 +770,7 @@ impl std::fmt::Display for ValidationCancelReason {
             Self::HeightDifference => write!(f, "height difference"),
             Self::ParentMissing => write!(f, "parent missing"),
             Self::ChannelClosed => write!(f, "channel closed"),
+            Self::RepeatedCancellation => write!(f, "repeated cancellation"),
         }
     }
 }
@@ -1137,6 +1155,7 @@ mod metric_label_tests {
             ValidationCancelReason::HeightDifference,
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
+            ValidationCancelReason::RepeatedCancellation,
         ] {
             let err = ValidationError::ValidationCancelled { reason };
             assert_eq!(
@@ -2039,6 +2058,7 @@ mod prevalidation_error_classification_tests {
     #[case::height_difference(ValidationCancelReason::HeightDifference, true)]
     #[case::channel_closed(ValidationCancelReason::ChannelClosed, true)]
     #[case::parent_missing(ValidationCancelReason::ParentMissing, true)]
+    #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation, true)]
     fn validation_cancel_reason_classifier_dispatch(
         #[case] reason: ValidationCancelReason,
         #[case] expected_internal: bool,
@@ -2092,6 +2112,10 @@ mod prevalidation_error_classification_tests {
     )]
     #[case::parent_missing(
         ValidationCancelReason::ParentMissing,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::repeated_cancellation(
+        ValidationCancelReason::RepeatedCancellation,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
@@ -2352,6 +2376,7 @@ mod prevalidation_error_classification_tests {
             ValidationCancelReason::HeightDifference,
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
+            ValidationCancelReason::RepeatedCancellation,
         ] {
             assert!(
                 !ValidationError::ValidationCancelled { reason }.is_node_fault(),

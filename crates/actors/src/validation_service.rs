@@ -487,6 +487,13 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
+                            // The block produced a verdict — clear any
+                            // accumulated cancel-retry counter so a future
+                            // resubmission of the same hash starts fresh
+                            // (no stale state from a prior burst of cancels
+                            // that didn't reach the cap before the run
+                            // succeeded). See H4 fix.
+                            coordinator.clear_concurrent_cancel_retries(&validation.block_hash);
                             metrics::record_validation_full_duration_ms(
                                 validation.enqueued_at.elapsed().as_secs_f64() * 1000.0,
                             );
@@ -506,54 +513,130 @@ impl ValidationService {
                                 // the shutdown signal — i.e. it cannot reach
                                 // this arm. So a cancel landing here is a
                                 // runtime hiccup (sibling worker panic,
-                                // runtime tear-down race, etc.). Requeue the
-                                // block via the priority queue so the
-                                // validation pass restarts; do NOT dispatch
-                                // a result, since we never produced one. The
-                                // requeue mirrors the VDF cancel arm's
-                                // "defensive resubmit" pattern.
+                                // runtime tear-down race, etc.). The first
+                                // few cancellations for a given block are
+                                // transparently requeued (mirrors the VDF
+                                // cancel arm's "defensive resubmit"); past
+                                // `MAX_CONCURRENT_CANCEL_RETRIES` we stop
+                                // looping and route the block out via
+                                // `ValidationCancelReason::RepeatedCancellation`
+                                // so a poisoned local condition (sibling-
+                                // worker panic loop, runtime distress, etc.)
+                                // can't tight-loop between the VDF queue and
+                                // the JoinSet and starve other blocks. The
+                                // give-up path parks the block as
+                                // SoftInternal; fresh gossip is the recovery
+                                // lane. See branch review finding H4.
                                 metrics::record_validation_concurrent_cancel_requeued();
-                                warn!(
-                                    block.hash = ?removed.as_ref().map(|(h, _, _, _)| h),
-                                    custom.error = %e,
-                                    custom.metric = "validation_concurrent_cancel_requeued",
-                                    "Concurrent validation task unexpectedly cancelled; requeuing - sustained occurrence suggests Tokio runtime distress or external abort source"
-                                );
-                                if let Some((_hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
-                                    // Do NOT fire `record_validation_full_duration_ms`
-                                    // here — this validation is still in
-                                    // flight. Firing now would double-count
-                                    // when the requeued task finally
-                                    // completes. Preserve `enqueued_at` so
-                                    // the eventual completion records the
-                                    // true gossip-to-completion latency
-                                    // including the cancelled attempt.
-                                    //
-                                    // Resubmit through `submit_task` (which
-                                    // enters the VDF queue first). Re-running
-                                    // VDF for an already-VDF-validated block
-                                    // is wasted work but cheap, and the cancel
-                                    // could have fired at any stage — VDF
-                                    // re-entry is the only path that covers
-                                    // every possibility safely.
-                                    //
-                                    // Original `parent_span` (gossip trace
-                                    // context) was consumed when the task was
-                                    // first constructed; on requeue, attach
-                                    // to the current span so the trace tree
-                                    // continues from this handler rather than
-                                    // dangling.
-                                    let task = block_validation_task::BlockValidationTask::new_with_enqueued_at(
-                                        sealed_block,
-                                        Arc::clone(&self.inner),
-                                        self.inner.block_tree_guard.clone(),
-                                        skip_vdf_validation,
-                                        tracing::Span::current(),
-                                        enqueued_at,
+                                if let Some((hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
+                                    let decision = coordinator.record_concurrent_cancel(hash);
+                                    match decision {
+                                        active_validations::ConcurrentCancelDecision::Requeue { attempt } => {
+                                            warn!(
+                                                block.hash = %hash,
+                                                custom.error = %e,
+                                                custom.metric = "validation_concurrent_cancel_requeued",
+                                                retry.attempt = attempt,
+                                                retry.max_attempts = active_validations::MAX_CONCURRENT_CANCEL_RETRIES,
+                                                "Concurrent validation task unexpectedly cancelled; requeuing - sustained occurrence suggests Tokio runtime distress or external abort source"
+                                            );
+                                            // Do NOT fire `record_validation_full_duration_ms`
+                                            // here — this validation is still in
+                                            // flight. Firing now would double-count
+                                            // when the requeued task finally
+                                            // completes. Preserve `enqueued_at` so
+                                            // the eventual completion records the
+                                            // true gossip-to-completion latency
+                                            // including the cancelled attempt.
+                                            //
+                                            // Resubmit through `submit_task` (which
+                                            // enters the VDF queue first). Re-running
+                                            // VDF for an already-VDF-validated block
+                                            // is wasted work but cheap, and the cancel
+                                            // could have fired at any stage — VDF
+                                            // re-entry is the only path that covers
+                                            // every possibility safely.
+                                            //
+                                            // Original `parent_span` (gossip trace
+                                            // context) was consumed when the task was
+                                            // first constructed; on requeue, attach
+                                            // to the current span so the trace tree
+                                            // continues from this handler rather than
+                                            // dangling.
+                                            let task = block_validation_task::BlockValidationTask::new_with_enqueued_at(
+                                                sealed_block,
+                                                Arc::clone(&self.inner),
+                                                self.inner.block_tree_guard.clone(),
+                                                skip_vdf_validation,
+                                                tracing::Span::current(),
+                                                enqueued_at,
+                                            );
+                                            coordinator.submit_task(task);
+                                            // No `record_validation_finished` here:
+                                            // we're keeping the validation in flight.
+                                        }
+                                        active_validations::ConcurrentCancelDecision::GiveUp { attempt } => {
+                                            // Cap hit — stop looping on this
+                                            // block. Route through
+                                            // `RepeatedCancellation` (SoftInternal:
+                                            // validity unknown, the cancel said
+                                            // nothing about the peer's block, the
+                                            // block parks for fresh gossip
+                                            // recovery alongside other
+                                            // SoftInternal discards).
+                                            error!(
+                                                block.hash = %hash,
+                                                custom.error = %e,
+                                                custom.metric = "validation_concurrent_cancel_repeated",
+                                                retry.attempt = attempt,
+                                                retry.max_attempts = active_validations::MAX_CONCURRENT_CANCEL_RETRIES,
+                                                "Concurrent validation task cancelled past retry cap; routing as RepeatedCancellation SoftInternal — fresh gossip is the recovery lane"
+                                            );
+                                            // Fire the full-duration metric
+                                            // now (validation is leaving the
+                                            // active set — the cancelled
+                                            // attempts collectively count
+                                            // toward this final outcome).
+                                            metrics::record_validation_full_duration_ms(
+                                                enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                            );
+                                            // `_sealed_block` and
+                                            // `_skip_vdf_validation` are not
+                                            // needed on the give-up path —
+                                            // we're not constructing another
+                                            // BlockValidationTask. Dropping
+                                            // them releases the Arc refcount.
+                                            let _ = (sealed_block, skip_vdf_validation);
+                                            // Mirror the panic-arm shape: route
+                                            // through `.into()` so the From
+                                            // dispatcher classifies as
+                                            // InternalFailure SoftInternal.
+                                            if !self.send_validation_result(
+                                                hash,
+                                                ValidationError::ValidationCancelled {
+                                                    reason: crate::block_validation::ValidationCancelReason::RepeatedCancellation,
+                                                }
+                                                .into(),
+                                            ) {
+                                                // Block tree won't handle diagnostics since send failed,
+                                                // so record directly as a fallback.
+                                                self.inner.chain_sync_state.record_validation_finished(&hash);
+                                                self.inner.chain_sync_state.record_block_validation_error(
+                                                    format!("block={} error=concurrent task cancelled past retry cap: {}", hash, e),
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // No tuple in `concurrent_task_blocks` for
+                                    // this id — pre-H4 behaviour just silently
+                                    // logged the cancel. Preserve that since
+                                    // we have no hash to route on.
+                                    warn!(
+                                        custom.error = %e,
+                                        custom.metric = "validation_concurrent_cancel_requeued",
+                                        "Concurrent validation task unexpectedly cancelled but bookkeeping entry was already removed; nothing to requeue"
                                     );
-                                    coordinator.submit_task(task);
-                                    // No `record_validation_finished` here:
-                                    // we're keeping the validation in flight.
                                 }
                             } else {
                                 error!(
@@ -562,6 +645,10 @@ impl ValidationService {
                                     "Concurrent validation task panicked"
                                 );
                                 if let Some((hash, enqueued_at, _sealed_block, _skip_vdf)) = removed {
+                                    // Panic terminates the attempt — clear
+                                    // any accumulated cancel-retry counter
+                                    // so a future resubmission starts fresh.
+                                    coordinator.clear_concurrent_cancel_retries(&hash);
                                     metrics::record_validation_full_duration_ms(
                                         enqueued_at.elapsed().as_secs_f64() * 1000.0,
                                     );

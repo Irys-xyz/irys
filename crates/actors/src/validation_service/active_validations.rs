@@ -521,6 +521,48 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
     }
 }
 
+/// Per-block decision returned by [`ValidationCoordinator::record_concurrent_cancel`].
+///
+/// A cancellation in the concurrent-stage `JoinSet` result handler may be a
+/// one-off Tokio hiccup (the only intentional cancel path runs at shutdown,
+/// which can't reach that arm). The first few cancellations for a given block
+/// are transparently requeued; sustained recurrence indicates a poisoned
+/// local condition (sibling-worker panic loop, runtime tear-down race,
+/// watchdog edge case) and we stop re-running the block to avoid starving
+/// the rest of the queue. Recovery is fresh gossip re-entry once the local
+/// condition clears (same SoftInternal park lane as
+/// [`crate::block_validation::ValidationCancelReason::ParentMissing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConcurrentCancelDecision {
+    /// Retry budget is still available — requeue the block via
+    /// `submit_task`. Caller carries `attempt` for tracing/metrics only.
+    Requeue { attempt: u8 },
+    /// Retry budget exhausted — do NOT requeue. Caller must route the block
+    /// via `send_validation_result` with
+    /// `ValidationCancelReason::RepeatedCancellation` (SoftInternal: validity
+    /// unknown, park the block, fresh gossip is the recovery lane).
+    GiveUp { attempt: u8 },
+}
+
+/// Per-block cap on concurrent-stage `JoinError::Cancelled` requeues before
+/// the validation service stops looping on the same block and routes it
+/// through `ValidationCancelReason::RepeatedCancellation`.
+///
+/// Rationale for `3`: one cancel is plausibly a transient Tokio hiccup
+/// (worker panic, runtime tear-down race) that genuinely benefits from a
+/// retry. Two is the safety margin for a brief window of distress that
+/// clears between attempts. Past three the local condition is structural —
+/// continuing to requeue tight-loops between the VDF queue and the
+/// concurrent JoinSet, burning cycles while starving other blocks of
+/// validation slots. The existing `MAX_RETRY_ATTEMPTS = 5` in
+/// `block_producer` is the only sibling retry constant; a producer retry is
+/// cheap (rebuild on a new parent) and the cost of giving up is "no block
+/// this slot", whereas a validation retry pays the full VDF+concurrent
+/// pipeline cost on every loop and giving up just parks the block in cache
+/// for gossip recovery. The lower cap reflects the higher per-attempt cost
+/// and the cheaper give-up path. See branch review finding H4.
+pub(super) const MAX_CONCURRENT_CANCEL_RETRIES: u8 = 3;
+
 /// Main validation coordinator
 pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn> {
     /// VDF validation scheduler
@@ -540,6 +582,18 @@ pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn
     pub concurrent_task_blocks:
         HashMap<tokio::task::Id, (BlockHash, Instant, Arc<SealedBlock>, bool)>,
 
+    /// Per-block counter of concurrent-stage `JoinError::Cancelled`
+    /// requeues. Keyed on `BlockHash` (not `tokio::task::Id`) because the
+    /// requeue path traverses `submit_task → VDF queue → spawn_concurrent`,
+    /// which mints a fresh `Id` each time — a per-Id counter would reset on
+    /// every requeue and never trip the cap. Counter is cleared when the
+    /// block exits via the Ok / panic arms (validation produced a verdict,
+    /// or a node-fault was surfaced), or when the cap is hit (the block is
+    /// being routed out via `RepeatedCancellation` and won't re-enter
+    /// without fresh gossip). See [`ConcurrentCancelDecision`] for the
+    /// decision shape and [`MAX_CONCURRENT_CANCEL_RETRIES`] for the cap.
+    pub concurrent_cancel_retries: HashMap<BlockHash, u8>,
+
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
 }
@@ -553,6 +607,7 @@ impl ValidationCoordinator {
             vdf_scheduler: VdfScheduler::new(runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            concurrent_cancel_retries: HashMap::new(),
             block_tree_guard,
         }
     }
@@ -568,6 +623,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             vdf_scheduler,
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            concurrent_cancel_retries: HashMap::new(),
             block_tree_guard,
         }
     }
@@ -673,6 +729,53 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
         // Abort all concurrent validation tasks
         self.concurrent_tasks.abort_all();
         self.concurrent_task_blocks.clear();
+        self.concurrent_cancel_retries.clear();
+    }
+
+    /// Record a concurrent-stage cancellation for `block_hash` and decide
+    /// whether to requeue or give up. Increments the per-block counter and
+    /// compares against [`MAX_CONCURRENT_CANCEL_RETRIES`].
+    ///
+    /// - `attempt == 1` on the first cancellation seen for the block.
+    /// - Returns `Requeue` while `attempt < MAX_CONCURRENT_CANCEL_RETRIES`.
+    /// - Returns `GiveUp` and clears the counter at the cap so the entry
+    ///   doesn't linger after the block leaves the active set.
+    ///
+    /// Counter clearing on `GiveUp`: the block is being routed out via
+    /// `ValidationCancelReason::RepeatedCancellation` and won't re-enter
+    /// without fresh gossip. Fresh gossip starts the count from zero —
+    /// the new entry is a different validation attempt, not a continuation
+    /// of the give-up'd one.
+    pub(super) fn record_concurrent_cancel(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> ConcurrentCancelDecision {
+        let counter = self
+            .concurrent_cancel_retries
+            .entry(block_hash)
+            .or_insert(0);
+        // Saturate so an attacker can't roll the counter back to 0 by
+        // forcing 256 cancellations (defensive — the cap is 3, so this
+        // is unreachable in practice, but cheap to guard).
+        *counter = counter.saturating_add(1);
+        let attempt = *counter;
+        if attempt >= MAX_CONCURRENT_CANCEL_RETRIES {
+            // Cap hit — drop the counter so we don't leak entries for
+            // every block that ever burned through its retry budget.
+            self.concurrent_cancel_retries.remove(&block_hash);
+            ConcurrentCancelDecision::GiveUp { attempt }
+        } else {
+            ConcurrentCancelDecision::Requeue { attempt }
+        }
+    }
+
+    /// Clear the cancel-retry counter for `block_hash`. Invoked when the
+    /// block exits the concurrent stage via a verdict (Ok arm) or via a
+    /// task panic (panic arm) — both terminate the validation attempt,
+    /// so a future cancel for a future submission of the same hash should
+    /// start fresh from zero rather than inheriting stale state.
+    pub(super) fn clear_concurrent_cancel_retries(&mut self, block_hash: &BlockHash) {
+        self.concurrent_cancel_retries.remove(block_hash);
     }
 
     /// Reevaluate all priorities after reorg
@@ -1968,6 +2071,170 @@ mod tests {
             cancel.load(std::sync::atomic::Ordering::Relaxed),
             CancelEnum::Continue as u8,
             "Cancel signal should not be set when priority is unchanged"
+        );
+    }
+
+    /// H4 — concurrent-stage cancel-retry cap.
+    ///
+    /// After `MAX_CONCURRENT_CANCEL_RETRIES` cancellations for the same
+    /// block hash, the coordinator must stop returning `Requeue` and start
+    /// returning `GiveUp`. The first `cap - 1` calls Requeue (so we don't
+    /// over-eagerly give up on a transient hiccup); the cap-th call is
+    /// the one that returns GiveUp. The GiveUp path is what the
+    /// validation-service cancel arm uses to route a
+    /// `ValidationCancelReason::RepeatedCancellation` outcome instead of
+    /// looping back into `submit_task`.
+    #[tokio::test]
+    async fn cancel_retry_cap_returns_giveup_at_threshold() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // The first `cap - 1` cancels must return Requeue with the
+        // running attempt count.
+        for expected_attempt in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            let decision = coordinator.record_concurrent_cancel(hash);
+            assert_eq!(
+                decision,
+                ConcurrentCancelDecision::Requeue {
+                    attempt: expected_attempt
+                },
+                "cancel #{expected_attempt} (cap={MAX_CONCURRENT_CANCEL_RETRIES}) must Requeue"
+            );
+        }
+
+        // The cap-th cancel must return GiveUp. attempt equals the cap.
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::GiveUp {
+                attempt: MAX_CONCURRENT_CANCEL_RETRIES
+            },
+            "cap-th cancel must return GiveUp"
+        );
+
+        // After GiveUp, the counter entry is cleared (the block is being
+        // routed out via RepeatedCancellation — fresh gossip starts a new
+        // count). The next cancel for the same hash starts from attempt 1.
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "GiveUp must clear the counter so the entry doesn't leak"
+        );
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "after GiveUp clears the counter, a fresh cancel starts from attempt 1"
+        );
+    }
+
+    /// H4 — a Valid (Ok-arm) outcome clears the cancel-retry counter so a
+    /// subsequent burst of cancels doesn't immediately trip the cap from
+    /// stale state.
+    #[tokio::test]
+    async fn cancel_retry_counter_cleared_on_verdict() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // Accumulate cancels up to but not including the cap.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+            "counter should be at cap-1 before the verdict"
+        );
+
+        // Simulate a Valid/Invalid verdict arriving for the block: the
+        // Ok-arm in the validation-service loop calls
+        // `clear_concurrent_cancel_retries`.
+        coordinator.clear_concurrent_cancel_retries(&hash);
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "verdict must clear the per-block counter"
+        );
+
+        // A fresh cancel for the same hash starts from attempt 1, not
+        // from cap-1 — the verdict was a clean exit, the previous
+        // burst is unrelated to whatever cancels we see next.
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "post-clear, the counter must start over from 1"
+        );
+    }
+
+    /// H4 — distinct block hashes maintain independent cancel counters.
+    /// A poisoned block burning through its retry budget must not push a
+    /// different healthy block past its cap.
+    #[tokio::test]
+    async fn cancel_retry_counters_are_per_hash() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash_a = BlockHash::random();
+        let hash_b = BlockHash::random();
+        assert_ne!(hash_a, hash_b, "test precondition: distinct hashes");
+
+        // Push hash_a to the cap (so it would GiveUp on the next call).
+        for _ in 0..(MAX_CONCURRENT_CANCEL_RETRIES - 1) {
+            let d = coordinator.record_concurrent_cancel(hash_a);
+            assert!(matches!(d, ConcurrentCancelDecision::Requeue { .. }));
+        }
+
+        // hash_b is untouched — its first cancel must return Requeue with
+        // attempt = 1, not GiveUp.
+        let decision_b = coordinator.record_concurrent_cancel(hash_b);
+        assert_eq!(
+            decision_b,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "hash_b counter must be independent of hash_a's"
+        );
+
+        // hash_a's next cancel still trips the cap as expected.
+        let decision_a = coordinator.record_concurrent_cancel(hash_a);
+        assert_eq!(
+            decision_a,
+            ConcurrentCancelDecision::GiveUp {
+                attempt: MAX_CONCURRENT_CANCEL_RETRIES
+            },
+            "hash_a should still GiveUp at the cap regardless of hash_b activity"
+        );
+    }
+
+    /// H4 — `RepeatedCancellation` classifies as `SoftInternal` (not
+    /// `NodeFault`, not `Invalid`). This is the routing invariant: when
+    /// the cap-hit path constructs the variant and routes it via
+    /// `From<ValidationError>`, the block must park rather than be
+    /// peer-attributed or trigger a node-fault abort. Pair with
+    /// `validation_cancel_reason_classifier_dispatch` and
+    /// `validation_cancelled_converts_per_reason`, which also gain
+    /// `RepeatedCancellation` cases.
+    #[test]
+    fn repeated_cancellation_classifies_as_softinternal() {
+        use crate::block_tree_service::ValidationResult;
+        use crate::block_validation::{ValidationCancelReason, ValidationError};
+
+        let reason = ValidationCancelReason::RepeatedCancellation;
+        assert!(
+            reason.is_internal(),
+            "RepeatedCancellation must be classified as internal so the wrapping \
+             ValidationCancelled routes to SoftInternal"
+        );
+
+        let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
+        let ValidationResult::InternalFailure(inner) = &result else {
+            panic!("RepeatedCancellation must dispatch to InternalFailure, got {result:?}");
+        };
+        assert!(
+            !inner.is_node_fault(),
+            "RepeatedCancellation is a soft retry give-up, not a node fault — \
+             the supervisor must NOT restart the node on this"
         );
     }
 }

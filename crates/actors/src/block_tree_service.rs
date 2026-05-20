@@ -1605,6 +1605,7 @@ mod tests {
             ValidationCancelReason::HeightDifference,
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::RepeatedCancellation,
         ] {
             let result: ValidationResult =
                 crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
@@ -1690,6 +1691,12 @@ mod tests {
     #[case::cancel_channel_closed(
         crate::block_validation::ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::ChannelClosed,
+        },
+        "validation_cancelled",
+    )]
+    #[case::cancel_repeated_cancellation(
+        crate::block_validation::ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::RepeatedCancellation,
         },
         "validation_cancelled",
     )]
@@ -1968,6 +1975,9 @@ mod tests {
     #[case::height_difference(crate::block_validation::ValidationCancelReason::HeightDifference)]
     #[case::channel_closed(crate::block_validation::ValidationCancelReason::ChannelClosed)]
     #[case::parent_missing(crate::block_validation::ValidationCancelReason::ParentMissing)]
+    #[case::repeated_cancellation(
+        crate::block_validation::ValidationCancelReason::RepeatedCancellation
+    )]
     fn validation_cancelled_softinternal_skips_lru_and_counter(
         #[case] reason: crate::block_validation::ValidationCancelReason,
     ) {
