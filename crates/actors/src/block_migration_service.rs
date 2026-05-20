@@ -92,15 +92,28 @@ impl BlockMigrationService {
     /// `block_set` that retained them so the hint stays meaningful across
     /// reorgs.
     ///
-    /// Phase 3 is the migration-time backstop for cases where the
-    /// `BlockConfirmed`-driven fast path in mempool did not run or failed —
-    /// but it is **update-only**: `update_data_root_block_set` is a no-op for
-    /// data_roots with no existing [`CachedDataRoot`] row.  In practice this
-    /// is the right scope: a node only holds a `CachedDataRoot` for a tx if
-    /// it has the chunks (`cache_chunk` rejects writes without one), so a
-    /// missing CDR ⇒ no chunks ⇒ nothing to ingress-proof, and the absent
-    /// `block_set` entry has no observable effect.  Missed-`BlockConfirmed` +
-    /// missing-CDR remains an unrecovered combination but is unobservable.
+    /// **`block_set` writer model.**  `block_set` is a hint, not consensus
+    /// state — canonical truth lives in `IrysDataTxMetadata` +
+    /// `MigratedBlockHashes`.  Two writers maintain the hint:
+    ///   - The mempool `BlockConfirmed` path (`cache_data_root(_, Some(block))`)
+    ///     fires *before* migration and serves as a forward-fill: it records
+    ///     the confirming `block_hash` so when chunks arrive *after* block
+    ///     confirmation, [`try_generate_ingress_proof_for_root`] finds a
+    ///     populated `block_set` and proceeds.  It may fabricate a CDR row
+    ///     for a data_root the node has no chunks for yet; the entry is
+    ///     harmless until either chunks arrive or the prune pass evicts it.
+    ///   - `persist_metadata` (this function) runs at migration time and is
+    ///     the authoritative writer for canonical state changes: Phase 1
+    ///     scrubs orphan block_hashes from any retained `block_set`, and
+    ///     Phase 3's `update_data_root_block_set` is update-only — it never
+    ///     fabricates, because by migration time any data_root the node
+    ///     cares about already has a CDR (either chunks have arrived, or
+    ///     the mempool BlockConfirmed path put one there).
+    ///
+    /// A stale `BlockConfirmed` arriving after a reorg can re-add an orphan
+    /// block_hash to `block_set`; that is tolerated because consumers treat
+    /// `block_set` as a hint and re-verify canonicality through
+    /// `find_canonical_ledger_range` before acting.
     ///
     /// Reorg invariant: if a Publish-promotion remains canonical, the
     /// underlying Submit inclusion must also be present in `blocks_to_confirm`
@@ -122,9 +135,10 @@ impl BlockMigrationService {
         // returns `&[]` for a SealedBlock whose body has been stripped, even
         // if `header.data_ledgers[Submit].tx_ids` is populated — silently
         // skipping every `block_set` mutation.  The in-memory block-tree path
-        // always carries full transactions, but future code paths (e.g. blocks
-        // hydrated from disk without their body) could regress this without
-        // any error.  Catch the divergence in debug builds.
+        // always carries full transactions, but future code paths (e.g.
+        // blocks hydrated from disk without their body) could regress this
+        // without any error.  Surface the divergence in every build so the
+        // caller fails loudly rather than committing partial state.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
             let header_submit_count = block
                 .header()
@@ -136,9 +150,8 @@ impl BlockMigrationService {
                 .transactions()
                 .get_ledger_txs(DataLedger::Submit)
                 .len();
-            debug_assert_eq!(
-                header_submit_count,
-                body_submit_count,
+            ensure!(
+                header_submit_count == body_submit_count,
                 "SealedBlock {} has header/body Submit-tx count mismatch ({} vs {}); transactions appear stripped — block_set mutations would silently no-op",
                 block.header().block_hash,
                 header_submit_count,

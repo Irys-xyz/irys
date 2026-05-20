@@ -432,7 +432,15 @@ impl InnerCacheTask {
                     // prune chunks the pending tx still needs — e.g. a Publish-
                     // promotion sibling of an already-confirmed term-ledger tx that
                     // shares the same `data_root`.
-                    None => all_txs_confirmed = false,
+                    //
+                    // Once any tx is pending, the horizon below ignores
+                    // `inclusion_max_height` and defers to `expiry_height`, so
+                    // further metadata reads are wasted DB work inside the open
+                    // write tx.  Bail early.
+                    None => {
+                        all_txs_confirmed = false;
+                        break;
+                    }
                 }
             }
 
@@ -1917,10 +1925,15 @@ mod tests {
         Ok(())
     }
 
-    /// Pending-tx + local-proof: the local-proof exemption is a second
-    /// safety net.  The pending-tx guard already protects this CDR (so the
-    /// local-proof check is not reached), but verifying the entry survives
-    /// covers both protections by construction.
+    /// `(None, None)` anomalous-state arm with local-proof exemption:
+    /// `all_txs_confirmed == true` (only reachable with empty `txid_set`,
+    /// since any non-confirmed tx flips the flag false) combined with
+    /// `inclusion_max_height == None` and `expiry_height == None`.  Under
+    /// the eviction-candidate rule this fires the `(None, true)` arm and
+    /// would evict — except the local-proof check at the bottom of the arm
+    /// preserves any entry that still carries a useful commitment.  This
+    /// test exercises that exact path: clearing `txid_set` to reach
+    /// `all_txs_confirmed = true` without metadata, then asserting survival.
     #[tokio::test]
     async fn does_not_prune_anomalous_none_none_state_with_local_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
@@ -1940,8 +1953,20 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
+        // Seed the CDR via the normal path, then clear `txid_set` and
+        // `expiry_height` to reach the `(None, None)` + `all_txs_confirmed`
+        // state.  An empty `txid_set` is the only way to get
+        // `all_txs_confirmed = true` together with `inclusion_max_height = None`:
+        // every other path through the prune loop flips the flag to false
+        // whenever metadata is missing.
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry after seed"))?;
+            cdr.txid_set.clear();
+            cdr.expiry_height = None;
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
             eyre::Ok(())
         })??;
 
