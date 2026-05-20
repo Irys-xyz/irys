@@ -211,7 +211,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         // increment for any ValidationCancelled variant — see commit
         // c3fd8963a). Tag retained as a stable defensive sentinel so a
         // future drift in that gate surfaces here as a distinct label
-        // rather than silently mis-labelling. Inner reason is intentionally
+        // rather than silently mislabelling. Inner reason is intentionally
         // not pattern-matched — the `ValidationCancelled` discriminator is
         // sufficient and inner-reason cardinality is a separate concern.
         VE::ValidationCancelled { .. } => "validation_cancelled",
