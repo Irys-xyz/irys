@@ -2986,6 +2986,104 @@ mod c1_side_fork_regression_tests {
     }
 }
 
+#[cfg(test)]
+mod perm_fee_threshold_tests {
+    use super::*;
+    use irys_types::U256;
+    use rstest::rstest;
+
+    fn tx_id() -> H256 {
+        H256::from_slice(&[0xab; 32])
+    }
+
+    /// `perm_fee` well above the expected threshold is accepted.
+    #[test]
+    fn above_threshold_is_ok() {
+        let expected = U256::from(1_000_u64);
+        let actual = Some(BoundedFee::new(U256::from(2_000_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_ok());
+    }
+
+    /// Boundary: `actual == expected` is accepted. The comparison uses strict
+    /// less-than, mirroring the original inlined check in `validate_publish_price`.
+    #[test]
+    fn at_threshold_is_ok() {
+        let expected = U256::from(1_000_u64);
+        let actual = Some(BoundedFee::new(U256::from(1_000_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_ok());
+    }
+
+    /// `actual = expected - 1` is rejected and carries the expected/actual
+    /// values verbatim.
+    #[test]
+    fn just_below_threshold_is_err_with_fields() {
+        let expected = U256::from(1_000_u64);
+        let actual_amount = U256::from(999_u64);
+        let actual = Some(BoundedFee::new(actual_amount));
+        let id = tx_id();
+        let err = check_perm_fee_sufficient(id, actual, expected)
+            .expect_err("below-threshold perm_fee must be rejected");
+        match err {
+            PreValidationError::InsufficientPermFee {
+                tx_id: got_id,
+                expected: got_expected,
+                actual: got_actual,
+            } => {
+                assert_eq!(got_id, id);
+                assert_eq!(got_expected, expected);
+                assert_eq!(got_actual, actual_amount);
+            }
+            other => panic!("expected InsufficientPermFee, got {other:?}"),
+        }
+    }
+
+    /// `perm_fee == 0` (explicit) against a non-zero expected is rejected.
+    #[test]
+    fn zero_perm_fee_is_err() {
+        let expected = U256::from(1_u64);
+        let actual = Some(BoundedFee::zero());
+        let err = check_perm_fee_sufficient(tx_id(), actual, expected)
+            .expect_err("zero perm_fee must be rejected against non-zero expected");
+        assert!(matches!(
+            err,
+            PreValidationError::InsufficientPermFee { .. }
+        ));
+    }
+
+    /// Missing `perm_fee` (`None`) is treated as zero — rejected against a
+    /// non-zero expected. Preserves the `unwrap_or(BoundedFee::zero())`
+    /// behaviour of the inlined check.
+    #[test]
+    fn missing_perm_fee_is_err() {
+        let expected = U256::from(1_u64);
+        let err = check_perm_fee_sufficient(tx_id(), None, expected)
+            .expect_err("missing perm_fee must be rejected against non-zero expected");
+        match err {
+            PreValidationError::InsufficientPermFee { actual, .. } => {
+                assert_eq!(actual, U256::zero());
+            }
+            other => panic!("expected InsufficientPermFee, got {other:?}"),
+        }
+    }
+
+    /// Expected threshold of zero accepts anything, including missing perm_fee.
+    #[rstest]
+    #[case::missing(None)]
+    #[case::zero(Some(BoundedFee::zero()))]
+    #[case::large(Some(BoundedFee::new(U256::MAX)))]
+    fn zero_expected_accepts_anything(#[case] actual: Option<BoundedFee>) {
+        assert!(check_perm_fee_sufficient(tx_id(), actual, U256::zero()).is_ok());
+    }
+
+    /// Extreme low (1) against a high expected is rejected.
+    #[test]
+    fn extreme_low_perm_fee_is_err() {
+        let expected = U256::from(u128::MAX);
+        let actual = Some(BoundedFee::new(U256::from(1_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_err());
+    }
+}
+
 /// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
@@ -4392,6 +4490,28 @@ pub fn calculate_term_storage_base_network_fee(
     )
 }
 
+/// Validates that a transaction's `perm_fee` meets the minimum expected amount.
+///
+/// Extracted from `validate_publish_price` so the threshold comparison can be
+/// unit-tested directly. Behaviour is byte-identical to the inlined check:
+/// a missing `perm_fee` is treated as zero, and the comparison is strict
+/// less-than (so `actual == expected` is accepted as sufficient).
+pub(crate) fn check_perm_fee_sufficient(
+    tx_id: H256,
+    actual_perm_fee: Option<BoundedFee>,
+    expected: U256,
+) -> Result<(), PreValidationError> {
+    let actual = actual_perm_fee.unwrap_or(BoundedFee::zero());
+    if actual < expected {
+        return Err(PreValidationError::InsufficientPermFee {
+            tx_id,
+            expected,
+            actual: actual.get(),
+        });
+    }
+    Ok(())
+}
+
 /// Validates pricing for a transaction targeting the Publish ledger (Submit→Publish promotion path).
 /// Checks both term_fee and perm_fee meet minimums, and that fee distribution structures are valid.
 fn validate_publish_price(
@@ -4427,14 +4547,8 @@ fn validate_publish_price(
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     // Validate perm_fee is at least the expected amount
+    check_perm_fee_sufficient(tx.id, tx.perm_fee, expected_perm_fee.amount)?;
     let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
-    if actual_perm_fee < expected_perm_fee.amount {
-        return Err(PreValidationError::InsufficientPermFee {
-            tx_id: tx.id,
-            expected: expected_perm_fee.amount,
-            actual: actual_perm_fee.get(),
-        });
-    }
 
     // Validate term_fee is at least the expected amount
     let actual_term_fee = tx.term_fee;
