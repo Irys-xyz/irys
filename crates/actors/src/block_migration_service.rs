@@ -56,8 +56,17 @@ impl BlockMigrationService {
     /// contains the confirming block hash and `expiry_height` is `None`.
     /// Orphan block hashes from `blocks_to_clear` are scrubbed from any
     /// `block_set` that retained them so the hint stays meaningful across
-    /// reorgs.  This is the migration-time backstop for cases where the
-    /// `BlockConfirmed`-driven fast path in mempool did not run or failed.
+    /// reorgs.
+    ///
+    /// Phase 3 is the migration-time backstop for cases where the
+    /// `BlockConfirmed`-driven fast path in mempool did not run or failed —
+    /// but it is **update-only**: `update_data_root_block_set` is a no-op for
+    /// data_roots with no existing [`CachedDataRoot`] row.  In practice this
+    /// is the right scope: a node only holds a `CachedDataRoot` for a tx if
+    /// it has the chunks (`cache_chunk` rejects writes without one), so a
+    /// missing CDR ⇒ no chunks ⇒ nothing to ingress-proof, and the absent
+    /// `block_set` entry has no observable effect.  Missed-`BlockConfirmed` +
+    /// missing-CDR remains an unrecovered combination but is unobservable.
     ///
     /// **Transient state between Phase 1 and Phase 2 (within the same DB
     /// transaction):**  Phase 1 may clear `included_height` from a row whose
@@ -76,6 +85,32 @@ impl BlockMigrationService {
         blocks_to_clear: &[Arc<SealedBlock>],
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
+        // Phase 1 scrub and Phase 3 append both iterate
+        // `block.transactions().get_ledger_txs(DataLedger::Submit)`. That call
+        // returns `&[]` for a SealedBlock whose body has been stripped, even
+        // if `header.data_ledgers[Submit].tx_ids` is populated — silently
+        // skipping every `block_set` mutation.  The in-memory block-tree path
+        // always carries full transactions, but future code paths (e.g. blocks
+        // hydrated from disk without their body) could regress this without
+        // any error.  Catch the divergence in debug builds.
+        for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
+            let header_submit_count = block
+                .header()
+                .data_ledgers
+                .iter()
+                .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
+                .map_or(0, |dl| dl.tx_ids.0.len());
+            let body_submit_count = block.transactions().get_ledger_txs(DataLedger::Submit).len();
+            debug_assert_eq!(
+                header_submit_count,
+                body_submit_count,
+                "SealedBlock {} has header/body Submit-tx count mismatch ({} vs {}); transactions appear stripped — block_set mutations would silently no-op",
+                block.header().block_hash,
+                header_submit_count,
+                body_submit_count,
+            );
+        }
+
         self.db.update_eyre(|tx| {
             // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
             // block_hash from any CachedDataRoot.block_set that retained it.
