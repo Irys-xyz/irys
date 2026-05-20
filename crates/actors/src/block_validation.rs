@@ -689,17 +689,26 @@ impl PreValidationError {
 /// Sub-classifications drive [`ValidationCancelReason::is_internal`], which
 /// in turn dictates whether the wrapping `ValidationError::ValidationCancelled`
 /// routes through `ValidationResult::InternalFailure` (validity unknown,
-/// retry plausible) or `ValidationResult::Invalid` (we've given up,
-/// discard the block).
+/// retry plausible) or `ValidationResult::Invalid` (peer-attributable
+/// consensus rejection — block is bad on its merits).
 ///
-/// `ParentMissing` is the one internal reason: parent absence is never
-/// peer-attributable. `HeightDifference` and `ChannelClosed` reflect
-/// node-state observations that don't say anything about the child block's
-/// validity, so they discard.
+/// All three reasons are local-side outcomes that say nothing about the
+/// peer's block. Per the M2 audit (2026-05-20), every variant routes through
+/// `is_internal() = true` → `InternalFailure` so the peer is never blamed
+/// for a "we moved on" event. Historically `HeightDifference` and
+/// `ChannelClosed` returned `false` here under the older rationale that
+/// "the block can never become canonical, so discard rather than retry" —
+/// that rationale conflated "block is bad" with "we're not pursuing it any
+/// more". Discard still happens (the block is removed from cache), but it
+/// is no longer recorded as a consensus rejection in metrics / logs / any
+/// future peer-scoring code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationCancelReason {
     /// Canonical tip moved past this block by more than `block_tree_depth`.
-    /// The block can never become canonical; discard rather than retry.
+    /// The block can never become canonical, but its validity is unknown —
+    /// our tip simply advanced past it while validation was in flight.
+    /// Routes through `is_internal() = true` so the block discards as a
+    /// soft local outcome rather than peer-attributed Invalid.
     HeightDifference,
     /// Parent block absent from the in-memory block tree during the
     /// parent-wait stage. The parent's absence is never peer-attributable:
@@ -712,8 +721,9 @@ pub enum ValidationCancelReason {
     /// returns).
     ParentMissing,
     /// Block-state broadcast channel closed (typically during node shutdown).
-    /// Treated as a "give up, discard" outcome — on shutdown there is no
-    /// future retry opportunity from this in-memory task.
+    /// A shutdown is a local event, not a statement about the peer's block.
+    /// Routes through `is_internal() = true` so shutdown-induced discards
+    /// never poison consensus-rejection metrics.
     ChannelClosed,
 }
 
@@ -721,14 +731,18 @@ impl ValidationCancelReason {
     /// Returns true when the cancellation reflects a local node-side
     /// condition rather than a peer-attributable defect in the child block.
     ///
-    /// Only `ParentMissing` qualifies: parent absence is not the child's
-    /// fault. `HeightDifference` and `ChannelClosed` reflect "this node has
-    /// moved on" (tip advanced beyond `block_tree_depth`, or shutdown),
-    /// where retry has nothing to gain.
+    /// All three variants are local-side outcomes (M2 audit 2026-05-20):
+    /// `HeightDifference` says "our tip advanced past this block while
+    /// validation was in flight", `ParentMissing` says "the parent is
+    /// missing from our cache", `ChannelClosed` says "we're shutting down".
+    /// None of these are statements about the peer's block, so all route to
+    /// `InternalFailure` rather than `Invalid`. The H3 LRU recording site in
+    /// `block_tree_service` separately filters cancellations out of the
+    /// soft-internal discard counter (cancellations are not gossip-
+    /// recoverable retries, so they don't belong in that bookkeeping).
     pub fn is_internal(&self) -> bool {
         match self {
-            Self::ParentMissing => true,
-            Self::HeightDifference | Self::ChannelClosed => false,
+            Self::HeightDifference | Self::ParentMissing | Self::ChannelClosed => true,
         }
     }
 }
@@ -987,8 +1001,10 @@ impl ValidationError {
             // Cancellation classification is sub-variant-dependent; delegate
             // so a future retry-plausible reason doesn't silently become a
             // node fault — that decision should be explicit at the reason
-            // site. (Today: `ParentMissing` → SoftInternal; `HeightDifference`
-            // / `ChannelClosed` → Consensus.)
+            // site. (Today, post-M2 audit 2026-05-20: all three reasons —
+            // `ParentMissing`, `HeightDifference`, `ChannelClosed` — are
+            // local-side outcomes and route to `SoftInternal`. No
+            // cancellation reason ever peer-attributes the child block.)
             Self::ValidationCancelled { reason } => {
                 if reason.is_internal() {
                     ErrorClass::SoftInternal
@@ -2010,16 +2026,18 @@ mod prevalidation_error_classification_tests {
         );
     }
 
-    /// "Chain moved on" cancellation reasons must route to `Invalid` (discard
-    /// the block); `ParentMissing` must route to `InternalFailure` since
-    /// parent absence is never peer-attributable.
+    /// Post-M2 audit (2026-05-20): every `ValidationCancelReason` is a
+    /// local-side outcome and routes through `InternalFailure`. None are
+    /// peer-attributable, so `is_internal()` is `true` for every variant
+    /// and the wrapping `ValidationError::ValidationCancelled` is an
+    /// `is_internal_failure()`.
     ///
     /// One case per `ValidationCancelReason` variant so per-variant failures
     /// surface as distinct nextest reports (matches the repo convention used
     /// by `is_parent_ready_chain_state_dispatch` / `block_status_returns_in_tree_pending_validation`).
     #[rstest]
-    #[case::height_difference(ValidationCancelReason::HeightDifference, false)]
-    #[case::channel_closed(ValidationCancelReason::ChannelClosed, false)]
+    #[case::height_difference(ValidationCancelReason::HeightDifference, true)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed, true)]
     #[case::parent_missing(ValidationCancelReason::ParentMissing, true)]
     fn validation_cancel_reason_classifier_dispatch(
         #[case] reason: ValidationCancelReason,
@@ -2043,27 +2061,35 @@ mod prevalidation_error_classification_tests {
 
     /// Expected `ValidationResult` shape for a given `ValidationCancelReason`
     /// after round-tripping through `From<ValidationError>`.
+    ///
+    /// Post-M2 audit (2026-05-20): every cancel reason routes to
+    /// `InternalFailureSoft`. Retained as an enum (rather than a single
+    /// assertion) to preserve the per-variant rstest case structure — adding
+    /// a new variant that must land on a different shape stays mechanically
+    /// expressible without a churn.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ExpectedRoundtripShape {
-        /// Node-state cancel ("chain moved on") → consensus discard.
-        Invalid,
-        /// Parent-absence cancel → soft internal failure (not a node fault).
+        /// Soft internal failure (not a node fault). The block discards from
+        /// cache but is NOT peer-attributed as consensus-rejected.
         InternalFailureSoft,
     }
 
-    /// Round-trip: `ParentMissing` must land on
+    /// Round-trip: every `ValidationCancelReason` must land on
     /// `ValidationResult::InternalFailure(_)` via the
-    /// `From<ValidationError> for ValidationResult` dispatcher. The
-    /// node-state reasons must land on `Invalid`.
+    /// `From<ValidationError> for ValidationResult` dispatcher. Post-M2,
+    /// no cancel reason peer-attributes the block as `Invalid`.
     ///
     /// One case per `ValidationCancelReason` variant so per-variant failures
     /// surface as distinct nextest reports.
     #[rstest]
     #[case::height_difference(
         ValidationCancelReason::HeightDifference,
-        ExpectedRoundtripShape::Invalid
+        ExpectedRoundtripShape::InternalFailureSoft
     )]
-    #[case::channel_closed(ValidationCancelReason::ChannelClosed, ExpectedRoundtripShape::Invalid)]
+    #[case::channel_closed(
+        ValidationCancelReason::ChannelClosed,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
     #[case::parent_missing(
         ValidationCancelReason::ParentMissing,
         ExpectedRoundtripShape::InternalFailureSoft
@@ -2076,7 +2102,6 @@ mod prevalidation_error_classification_tests {
 
         let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
         match (expected, &result) {
-            (ExpectedRoundtripShape::Invalid, ValidationResult::Invalid(_)) => {}
             (
                 ExpectedRoundtripShape::InternalFailureSoft,
                 ValidationResult::InternalFailure(inner),

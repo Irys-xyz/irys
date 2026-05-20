@@ -145,6 +145,11 @@ const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
 /// variants are unreachable here — the caller filters them out before
 /// `discard_and_broadcast` runs — but we still return a sentinel rather than
 /// panicking to keep the metric labelling defensive.
+///
+/// `ValidationCancelled` is also gated out of the LRU/counter recording site
+/// in `discard_and_broadcast` post-M2 (cancellations are not gossip-recoverable
+/// retries), so its tag is a defensive sentinel that should never actually
+/// appear in metrics; if it does, it indicates the gate drifted.
 fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &'static str {
     use crate::block_validation::ValidationError as VE;
     match err {
@@ -154,7 +159,12 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
-        VE::ValidationCancelled { .. } => "validation_cancelled_parent_missing",
+        // Post-M2: should never be observed in the metric (the discard-site
+        // gate skips both the LRU put and the counter increment for any
+        // ValidationCancelled variant). Tag retained as a stable defensive
+        // sentinel so a future drift in that gate surfaces here rather than
+        // silently mis-labelling.
+        VE::ValidationCancelled { .. } => "validation_cancelled",
         // Not reachable from the SoftInternal arm — all other variants are
         // either node-fault or consensus — but `metric_label` falls back to
         // "internal_error" rather than panicking if invariants drift.
@@ -1097,8 +1107,21 @@ impl BlockTreeServiceInner {
         // `soft_internal_discard_total` stays below operational tolerance
         // (TBD by team), implement explicit per-block-hash re-request with
         // exponential backoff here. See 2026-05-20 audit H3.
+        //
+        // M2-GATE (2026-05-20): `ValidationCancelled` reaches the SoftInternal
+        // arm post-M2 (HeightDifference / ChannelClosed flipped to
+        // `is_internal() = true`), but cancellations are NOT gossip-recoverable
+        // failures — the block's validation outcome is unknown ("we moved on"),
+        // not "failed and needing retry". Recording them in the H3 LRU would
+        // inflate `soft_internal_discard_total` with local "we moved on" events
+        // and the recovery counter would never match (fresh gossip rarely
+        // re-triggers the same cancellation race for the same hash).
         if matches!(kind, DiscardKind::SoftInternal)
             && let ValidationResult::InternalFailure(inner) = &validation_result
+            && !matches!(
+                inner.err(),
+                crate::block_validation::ValidationError::ValidationCancelled { .. }
+            )
         {
             let reason = soft_internal_reason_tag(inner.err());
             metrics::record_soft_internal_discard(reason);
@@ -1486,33 +1509,33 @@ mod tests {
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
 
-    /// `ValidationCancelled` dispatches by sub-reason: node-state reasons
-    /// (`HeightDifference`, `ChannelClosed`) → `Invalid`; `ParentMissing` →
-    /// `InternalFailure` since parent absence is not peer-attributable.
+    /// Post-M2 audit (2026-05-20): every `ValidationCancelled` sub-reason
+    /// routes to `InternalFailure`. `HeightDifference` and `ChannelClosed`
+    /// were historically `Invalid` under the older "we moved on" rationale,
+    /// but neither reflects the peer's block — both are local-side events.
+    /// They now route through `is_internal() = true` → `InternalFailure`
+    /// alongside `ParentMissing`. Discard still happens in the block_tree
+    /// service handler; the block is just no longer peer-attributed.
     #[test]
     fn validation_cancelled_converts_per_reason() {
         use crate::block_validation::ValidationCancelReason;
         for reason in [
             ValidationCancelReason::HeightDifference,
             ValidationCancelReason::ChannelClosed,
+            ValidationCancelReason::ParentMissing,
         ] {
             let result: ValidationResult =
                 crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
             assert!(
-                matches!(result, ValidationResult::Invalid(_)),
-                "reason {:?} should dispatch to Invalid",
+                matches!(result, ValidationResult::InternalFailure(_)),
+                "reason {:?} should dispatch to InternalFailure post-M2",
                 reason
             );
-            assert_eq!(result.metric_label(), "invalid");
+            // Per-stage label collapses cancellations to "cancelled"; the
+            // overall `ValidationResult::metric_label` returns the underlying
+            // bucket ("internal_error" for `InternalFailure`).
+            assert_eq!(result.metric_label(), "internal_error");
         }
-
-        let result: ValidationResult =
-            crate::block_validation::ValidationError::ValidationCancelled {
-                reason: ValidationCancelReason::ParentMissing,
-            }
-            .into();
-        assert!(matches!(result, ValidationResult::InternalFailure(_)));
-        assert_eq!(result.metric_label(), "internal_error");
     }
 
     /// `InternalFailureError::err()` exposes the underlying ValidationError
@@ -1574,7 +1597,19 @@ mod tests {
         crate::block_validation::ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::ParentMissing,
         },
-        "validation_cancelled_parent_missing",
+        "validation_cancelled",
+    )]
+    #[case::cancel_height_difference(
+        crate::block_validation::ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+        },
+        "validation_cancelled",
+    )]
+    #[case::cancel_channel_closed(
+        crate::block_validation::ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::ChannelClosed,
+        },
+        "validation_cancelled",
     )]
     fn soft_internal_reason_tag_for_each_variant(
         #[case] err: crate::block_validation::ValidationError,
@@ -1665,6 +1700,66 @@ mod tests {
             "node-fault variant must be caught upstream of discard_and_broadcast"
         );
         assert_eq!(lru.len(), 0, "node-fault path must not touch the LRU");
+    }
+
+    /// M2 audit (2026-05-20): a `ValidationCancelled` SoftInternal discard
+    /// MUST NOT insert into the H3 LRU and MUST NOT increment the
+    /// `soft_internal_discard_total` counter. Cancellations are local "we
+    /// moved on" events, not gossip-recoverable failures — recording them
+    /// would inflate the discard counter and leave the recovery counter
+    /// permanently behind (fresh gossip rarely re-triggers the same cancel
+    /// race for the same hash). Replays the gate in `discard_and_broadcast`.
+    #[rstest]
+    #[case::height_difference(crate::block_validation::ValidationCancelReason::HeightDifference)]
+    #[case::channel_closed(crate::block_validation::ValidationCancelReason::ChannelClosed)]
+    #[case::parent_missing(crate::block_validation::ValidationCancelReason::ParentMissing)]
+    fn validation_cancelled_softinternal_skips_lru_and_counter(
+        #[case] reason: crate::block_validation::ValidationCancelReason,
+    ) {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0xEF; 32]);
+
+        // Build the SoftInternal result the same way `discard_and_broadcast`
+        // sees it post-M2 (every cancel reason routes to InternalFailure).
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
+        let ValidationResult::InternalFailure(inner) = &result else {
+            panic!("post-M2 ValidationCancelled must dispatch to InternalFailure");
+        };
+        assert!(
+            !inner.is_node_fault(),
+            "ValidationCancelled is a soft InternalFailure, not a node fault"
+        );
+
+        // Replay the exact gate from `discard_and_broadcast`. The
+        // `matches!(.., ValidationCancelled { .. })` guard short-circuits
+        // BOTH the metric increment and the LRU put — neither runs for
+        // any cancel reason.
+        let kind = DiscardKind::SoftInternal;
+        let mut metric_increments = 0_u32;
+        if matches!(kind, DiscardKind::SoftInternal)
+            && let ValidationResult::InternalFailure(inner) = &result
+            && !matches!(
+                inner.err(),
+                crate::block_validation::ValidationError::ValidationCancelled { .. }
+            )
+        {
+            metric_increments += 1; // would call metrics::record_soft_internal_discard here
+            lru.put(block_hash, soft_internal_reason_tag(inner.err()));
+        }
+
+        assert_eq!(
+            lru.len(),
+            0,
+            "ValidationCancelled (reason {:?}) must not touch the H3 LRU",
+            reason
+        );
+        assert_eq!(
+            metric_increments, 0,
+            "ValidationCancelled (reason {:?}) must not increment soft_internal_discard_total",
+            reason
+        );
     }
 
     /// The LRU is intentionally bounded so that an unbounded soft-internal

@@ -235,12 +235,14 @@ impl BlockValidationTask {
             concurrent_started.elapsed().as_secs_f64() * 1000.0,
         );
         // Split "cancelled" / "panicked" out of the generic "invalid" /
-        // "internal_error" buckets for observability. `ValidationCancelled`
-        // can land in either `Invalid` (HeightDifference / ChannelClosed)
-        // or `InternalFailure` (ParentMissing / RuntimeCancelled-style soft
-        // reasons) depending on its sub-reason — both should label as
-        // "cancelled". `TaskPanicked` only routes through `InternalFailure`
-        // and labels as "panicked".
+        // "internal_error" buckets for observability. Post-M2 audit
+        // (2026-05-20) every `ValidationCancelled` sub-reason routes
+        // through `InternalFailure` — none are peer-attributable — but the
+        // "cancelled" label is preserved on both wrappers so dashboards
+        // that historically tracked cancellations continue to work, and any
+        // legacy code path that still produces an `Invalid(cancelled)`
+        // labels consistently. `TaskPanicked` only routes through
+        // `InternalFailure` and labels as "panicked".
         //
         // Delegates to `ValidationError::metric_label()` (which is the
         // exhaustive match — adding a new variant there produces a compile
@@ -1394,6 +1396,10 @@ mod merge_stage_results_tests {
     /// Cancellation outcome fixture for the
     /// `HeightDifference` reason (the classic "outer select drops the
     /// validate future" trigger before the H2 fix).
+    ///
+    /// Post-M2 audit (2026-05-20): routes through `InternalFailure` (not
+    /// `Invalid`) — `HeightDifference` is a local-side event, not a
+    /// statement about the peer's block.
     fn cancel_height_diff() -> ValidationResult {
         ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::HeightDifference,
@@ -1402,9 +1408,10 @@ mod merge_stage_results_tests {
     }
 
     /// Cancellation outcome fixture for the `ChannelClosed` reason
-    /// (shutdown). Also routes through `Invalid` per the
-    /// `ValidationCancelReason::is_internal` classification — the OTHER
-    /// half of the H2 hazard.
+    /// (shutdown). Post-M2 audit (2026-05-20): routes through
+    /// `InternalFailure` per the updated `ValidationCancelReason::is_internal`
+    /// classification (shutdown is local, not a peer-attributable event) —
+    /// the OTHER half of the H2 hazard.
     fn cancel_channel_closed() -> ValidationResult {
         ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::ChannelClosed,
@@ -1417,9 +1424,11 @@ mod merge_stage_results_tests {
     /// drain-poll in `validate_block` captures the NodeFault and hands it
     /// here together with the cancel; the merger MUST surface the
     /// NodeFault (so the block_tree_service handler panics) rather than
-    /// returning the cancellation outcome (which routes to `Invalid`,
-    /// peer-attributing a local fault and silently parking the broken
-    /// node).
+    /// returning the cancellation outcome (which post-M2 routes to a soft
+    /// `InternalFailure`, parking a broken node in cache forever; pre-M2
+    /// it routed to `Invalid`, peer-attributing a local fault). Either way,
+    /// the supervisor-restart path is silently bypassed if cancel outranks
+    /// NodeFault, which is exactly what this test guards against.
     #[rstest]
     #[case::node_fault_with_height_diff_cancel(cancel_height_diff())]
     #[case::node_fault_with_channel_closed_cancel(cancel_channel_closed())]
@@ -1474,6 +1483,10 @@ mod merge_stage_results_tests {
     /// has fired, the in-progress stages are deliberately abandoned —
     /// a snapshot-eviction observed during the cancel window adds no
     /// information and the caller already knows we gave up.
+    ///
+    /// Post-M2 audit (2026-05-20): the cancel outcome is now an
+    /// `InternalFailure` (was `Invalid`), but the merger's tier-3 priority
+    /// is unchanged — cancel still outranks soft `InternalFailure`.
     #[test]
     fn cancellation_wins_over_soft_internal_failure() {
         let soft = soft_internal();
@@ -1481,17 +1494,28 @@ mod merge_stage_results_tests {
         let cancel = cancel_height_diff();
         let results = [&valid_r, &soft, &valid_r, &valid_r, &valid_r, &valid_r];
         match merge_stage_results_with_cancel(&results, Some(&cancel)) {
-            ValidationResult::Invalid(rejection) => assert!(
-                matches!(
-                    rejection.err(),
-                    ValidationError::ValidationCancelled {
-                        reason: crate::block_validation::ValidationCancelReason::HeightDifference,
-                    }
-                ),
-                "expected cancellation outcome to survive, got {:?}",
-                rejection.err()
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "cancel outcome must be a soft InternalFailure, not a node fault: {:?}",
+                    inner.err()
+                );
+                assert!(
+                    matches!(
+                        inner.err(),
+                        ValidationError::ValidationCancelled {
+                            reason:
+                                crate::block_validation::ValidationCancelReason::HeightDifference,
+                        }
+                    ),
+                    "expected cancellation outcome to survive, got {:?}",
+                    inner.err()
+                );
+            }
+            other => panic!(
+                "expected InternalFailure(ValidationCancelled) post-M2, got {:?}",
+                other
             ),
-            other => panic!("expected Invalid(ValidationCancelled), got {:?}", other),
         }
     }
 
@@ -1520,18 +1544,26 @@ mod merge_stage_results_tests {
     /// must still produce the cancel outcome rather than the defensive
     /// `Other(..)` fallback (which would obliterate the cancellation
     /// reason).
+    ///
+    /// Post-M2 audit (2026-05-20): cancel routes through `InternalFailure`
+    /// (was `Invalid`). Sub-reason still surfaces unchanged.
     #[test]
     fn all_valid_with_cancel_returns_cancellation() {
         let valid_r = ValidationResult::Valid;
         let cancel = cancel_height_diff();
         let results = [&valid_r, &valid_r, &valid_r, &valid_r, &valid_r, &valid_r];
         match merge_stage_results_with_cancel(&results, Some(&cancel)) {
-            ValidationResult::Invalid(rejection) => assert!(
-                matches!(rejection.err(), ValidationError::ValidationCancelled { .. }),
-                "expected cancellation outcome, got {:?}",
-                rejection.err()
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    matches!(inner.err(), ValidationError::ValidationCancelled { .. }),
+                    "expected cancellation outcome, got {:?}",
+                    inner.err()
+                );
+            }
+            other => panic!(
+                "expected InternalFailure(ValidationCancelled) post-M2, got {:?}",
+                other
             ),
-            other => panic!("expected Invalid(ValidationCancelled), got {:?}", other),
         }
     }
 }
