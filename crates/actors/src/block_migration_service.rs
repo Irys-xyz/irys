@@ -58,6 +58,19 @@ impl BlockMigrationService {
     /// `block_set` that retained them so the hint stays meaningful across
     /// reorgs.  This is the migration-time backstop for cases where the
     /// `BlockConfirmed`-driven fast path in mempool did not run or failed.
+    ///
+    /// **Transient state between Phase 1 and Phase 2 (within the same DB
+    /// transaction):**  Phase 1 may clear `included_height` from a row whose
+    /// `promoted_height` is still set, leaving the row in a `{included:
+    /// None, promoted: Some}` state that `put_data_tx_metadata` would reject.
+    /// This state is allowed *only* because Phase 2 runs in the same
+    /// transaction and restores `included_height` for any tx whose
+    /// Submit-block was re-included in the new canonical chain.  External
+    /// readers never observe this gap — the transaction commits atomically.
+    /// The reorg invariant assumed here is: if a Publish-promotion remains
+    /// canonical, the underlying Submit inclusion must also be present in
+    /// `blocks_to_confirm` (otherwise the Publish block itself would be in
+    /// `blocks_to_clear`).
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
@@ -66,19 +79,33 @@ impl BlockMigrationService {
         self.db.update_eyre(|tx| {
             // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
             // block_hash from any CachedDataRoot.block_set that retained it.
+            //
+            // Per-ledger semantics:
+            //   - Term-ledger (Submit, OneYear, ThirtyDay): clear `included_height` only.
+            //     If `promoted_height` is also set (Submit tx later promoted to Publish),
+            //     the row is retained with `included_height = None` so the Publish
+            //     confirmation survives the reorg.  If neither field remains the row
+            //     is deleted.
+            //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
+            //     `included_height` on the same tx must not be disturbed.
             for block in blocks_to_clear {
                 let header = block.header();
                 let orphan_block_hash = header.block_hash;
-                let all_data_tx_ids: Vec<_> = header
-                    .data_ledgers
-                    .iter()
-                    .flat_map(|dl| dl.tx_ids.0.iter())
-                    .collect();
                 let commitment_ids = header.commitment_tx_ids();
 
-                if !all_data_tx_ids.is_empty() {
-                    irys_database::batch_clear_data_tx_metadata(tx, all_data_tx_ids.into_iter())
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                for dl in &header.data_ledgers {
+                    let tx_ids = &dl.tx_ids.0;
+                    if tx_ids.is_empty() {
+                        continue;
+                    }
+                    if dl.ledger_id == DataLedger::Publish as u32 {
+                        irys_database::batch_clear_data_tx_promoted_height(tx, tx_ids)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    } else {
+                        // Term ledger (Submit / OneYear / ThirtyDay)
+                        irys_database::batch_clear_data_tx_included_height(tx, tx_ids)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
                 }
                 if !commitment_ids.is_empty() {
                     irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)
@@ -95,6 +122,12 @@ impl BlockMigrationService {
                 }
             }
             // Phase 2: Write confirmed metadata
+            //
+            // `included_height` ↔ term ledgers (Submit, OneYear, ThirtyDay) only.
+            // `promoted_height` ↔ Publish ledger only.
+            // Writing `included_height` for Publish txs would overwrite the
+            // Submit-block height that was set when the tx first entered the
+            // Submit ledger, violating the "first included in Submit" invariant.
             for block in blocks_to_confirm {
                 let header = block.header();
                 let commitment_ids = header.commitment_tx_ids();
@@ -105,12 +138,14 @@ impl BlockMigrationService {
                     if tx_ids.is_empty() {
                         continue;
                     }
-                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
 
-                    // Publish ledger txs also get promoted_height
                     if dl.ledger_id == DataLedger::Publish as u32 {
+                        // Publish: only set promoted_height, never touch included_height.
                         irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, height)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    } else {
+                        // Term ledger (Submit / OneYear / ThirtyDay): set included_height.
+                        irys_database::batch_set_data_tx_included_height(tx, tx_ids, height)
                             .map_err(|e| eyre::eyre!("{:?}", e))?;
                     }
                 }
@@ -309,11 +344,13 @@ impl BlockMigrationService {
                 }
 
                 if !tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))?;
-
+                    // `included_height` ↔ term ledgers only; never overwrite for Publish.
+                    // `promoted_height` ↔ Publish ledger only.
                     if ledger == DataLedger::Publish {
                         irys_database::batch_set_data_tx_promoted_height(tx, tx_ids, block_height)
+                            .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    } else {
+                        irys_database::batch_set_data_tx_included_height(tx, tx_ids, block_height)
                             .map_err(|e| eyre::eyre!("{:?}", e))?;
                     }
                 }
@@ -620,6 +657,296 @@ mod tests {
         assert!(
             cdr.expiry_height.is_none(),
             "expiry_height intentionally left untouched per helper docblock"
+        );
+        Ok(())
+    }
+
+    /// Build a block header that carries a single tx_id in the given ledger.
+    /// For ledgers not present in `new_mock_header()` (OneYear, ThirtyDay),
+    /// appends the appropriate `DataTransactionLedger` entry.
+    fn make_block_header_with_ledger(
+        height: u64,
+        previous_block_hash: H256,
+        ledger: DataLedger,
+        tx_id: H256,
+    ) -> IrysBlockHeader {
+        use irys_types::DataTransactionLedger;
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.previous_block_hash = previous_block_hash;
+        header.cumulative_diff = U256::from(height);
+
+        match ledger {
+            DataLedger::Publish | DataLedger::Submit => {
+                // These ledgers are already present in new_mock_header; just set tx_ids.
+                let entry = &mut header.data_ledgers[ledger as usize];
+                entry.tx_ids = H256List(vec![tx_id]);
+            }
+            DataLedger::OneYear | DataLedger::ThirtyDay => {
+                header.data_ledgers.push(DataTransactionLedger {
+                    ledger_id: ledger.into(),
+                    tx_root: H256::zero(),
+                    tx_ids: H256List(vec![tx_id]),
+                    total_chunks: 0,
+                    expires: Some(10),
+                    proofs: None,
+                    required_proof_count: None,
+                });
+            }
+        }
+        header.test_sign();
+        header
+    }
+
+    /// Wrap a header in a `SealedBlock` whose body carries a single
+    /// `DataTransactionHeader` for `tx_id` in `ledger`.
+    fn make_sealed_single_ledger_tx(
+        header: IrysBlockHeader,
+        ledger: DataLedger,
+        tx_id: H256,
+    ) -> Arc<SealedBlock> {
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root: H256::random(),
+                ledger_id: ledger as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let mut data_txs_map = HashMap::new();
+        data_txs_map.insert(ledger, vec![tx_header]);
+        let body = BlockTransactions {
+            data_txs: data_txs_map,
+            ..Default::default()
+        };
+        Arc::new(SealedBlock::new_unchecked(Arc::new(header), body))
+    }
+
+    fn read_data_tx_metadata(
+        db: &DatabaseProvider,
+        tx_id: &H256,
+    ) -> Option<DataTransactionMetadata> {
+        db.view(|tx| irys_database::get_data_tx_metadata(tx, tx_id))
+            .unwrap()
+            .unwrap()
+    }
+
+    // ---- included_height / promoted_height correctness tests ----
+
+    /// Submit→Publish promotion: after confirming in a Submit block at height H,
+    /// then a Publish block at height H+N, `included_height` must still be H
+    /// and `promoted_height` must be H+N.
+    #[tokio::test]
+    async fn submit_to_publish_promotion_preserves_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let submit_height = 1_u64;
+        let publish_height = 5_u64;
+
+        // Confirm in Submit ledger at height 1
+        let submit_header =
+            make_block_header_with_ledger(submit_height, H256::random(), DataLedger::Submit, tx_id);
+        let submit_sealed = make_sealed_single_ledger_tx(submit_header, DataLedger::Submit, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&submit_sealed))?;
+
+        // Confirm same tx in Publish ledger at height 5
+        let publish_header = make_block_header_with_ledger(
+            publish_height,
+            H256::random(),
+            DataLedger::Publish,
+            tx_id,
+        );
+        let publish_sealed =
+            make_sealed_single_ledger_tx(publish_header, DataLedger::Publish, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&publish_sealed))?;
+
+        let meta =
+            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        assert_eq!(
+            meta.included_height,
+            Some(submit_height),
+            "included_height must stay at Submit-block height, not be overwritten by Publish"
+        );
+        assert_eq!(
+            meta.promoted_height,
+            Some(publish_height),
+            "promoted_height must be set to Publish-block height"
+        );
+        Ok(())
+    }
+
+    /// OneYear direct inclusion (no prior Submit): `included_height` set, `promoted_height` None.
+    #[tokio::test]
+    async fn oneyear_direct_inclusion_sets_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let height = 3_u64;
+
+        let header =
+            make_block_header_with_ledger(height, H256::random(), DataLedger::OneYear, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, DataLedger::OneYear, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        let meta =
+            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        assert_eq!(meta.included_height, Some(height));
+        assert_eq!(meta.promoted_height, None);
+        Ok(())
+    }
+
+    /// ThirtyDay direct inclusion: analogous to OneYear.
+    #[tokio::test]
+    async fn thirtyday_direct_inclusion_sets_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let height = 7_u64;
+
+        let header =
+            make_block_header_with_ledger(height, H256::random(), DataLedger::ThirtyDay, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, DataLedger::ThirtyDay, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        let meta =
+            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        assert_eq!(meta.included_height, Some(height));
+        assert_eq!(meta.promoted_height, None);
+        Ok(())
+    }
+
+    /// Phase 1 orphan of Publish promotion only:
+    /// tx confirmed in Submit at H, promoted in Publish at H+N.
+    /// Orphan the Publish block. `included_height` must stay at H; `promoted_height` cleared.
+    #[tokio::test]
+    async fn phase1_orphan_publish_only_preserves_submit_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let submit_height = 2_u64;
+        let publish_height = 8_u64;
+
+        // Confirm in Submit at height 2
+        let submit_header =
+            make_block_header_with_ledger(submit_height, H256::random(), DataLedger::Submit, tx_id);
+        let submit_sealed = make_sealed_single_ledger_tx(submit_header, DataLedger::Submit, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&submit_sealed))?;
+
+        // Promote in Publish at height 8
+        let publish_header = make_block_header_with_ledger(
+            publish_height,
+            H256::random(),
+            DataLedger::Publish,
+            tx_id,
+        );
+        let publish_sealed =
+            make_sealed_single_ledger_tx(publish_header, DataLedger::Publish, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&publish_sealed))?;
+
+        // Verify both are set
+        let meta = read_data_tx_metadata(&db, &tx_id).unwrap();
+        assert_eq!(meta.included_height, Some(submit_height));
+        assert_eq!(meta.promoted_height, Some(publish_height));
+
+        // Orphan the Publish block only
+        svc.persist_metadata(std::slice::from_ref(&publish_sealed), &[])?;
+
+        let meta = read_data_tx_metadata(&db, &tx_id)
+            .expect("row must still exist: included_height is preserved");
+        assert_eq!(
+            meta.included_height,
+            Some(submit_height),
+            "Submit-block included_height must survive Publish-block orphan"
+        );
+        assert_eq!(
+            meta.promoted_height, None,
+            "promoted_height must be cleared by Phase 1"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 orphan of Submit confirmation: tx in Submit at H.
+    /// Orphan that block. `included_height` cleared, row deleted.
+    #[tokio::test]
+    async fn phase1_orphan_submit_clears_included_height_and_deletes_row() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let height = 4_u64;
+
+        let header =
+            make_block_header_with_ledger(height, H256::random(), DataLedger::Submit, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, DataLedger::Submit, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        // Verify it exists
+        assert!(read_data_tx_metadata(&db, &tx_id).is_some());
+
+        // Orphan it
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[])?;
+
+        assert!(
+            read_data_tx_metadata(&db, &tx_id).is_none(),
+            "row must be deleted when Submit-block is orphaned"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 orphan of OneYear confirmation: tx in OneYear at H.
+    /// Orphan. `included_height` cleared.
+    #[tokio::test]
+    async fn phase1_orphan_oneyear_clears_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let height = 6_u64;
+
+        let header =
+            make_block_header_with_ledger(height, H256::random(), DataLedger::OneYear, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, DataLedger::OneYear, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        assert!(read_data_tx_metadata(&db, &tx_id).is_some());
+
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[])?;
+
+        assert!(
+            read_data_tx_metadata(&db, &tx_id).is_none(),
+            "row must be deleted when OneYear-block is orphaned"
+        );
+        Ok(())
+    }
+
+    /// Phase 1 orphan of ThirtyDay confirmation: tx in ThirtyDay at H.
+    /// Orphan. `included_height` cleared.
+    #[tokio::test]
+    async fn phase1_orphan_thirtyday_clears_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id = H256::random();
+        let height = 9_u64;
+
+        let header =
+            make_block_header_with_ledger(height, H256::random(), DataLedger::ThirtyDay, tx_id);
+        let sealed = make_sealed_single_ledger_tx(header, DataLedger::ThirtyDay, tx_id);
+        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+
+        assert!(read_data_tx_metadata(&db, &tx_id).is_some());
+
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[])?;
+
+        assert!(
+            read_data_tx_metadata(&db, &tx_id).is_none(),
+            "row must be deleted when ThirtyDay-block is orphaned"
         );
         Ok(())
     }
