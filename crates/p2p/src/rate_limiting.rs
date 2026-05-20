@@ -74,14 +74,18 @@ impl DataRequestRecord {
     /// Check if the tracking window has expired
     pub fn is_window_expired(&self) -> bool {
         let now = now_as_millis();
-        now - self.window_start > WINDOW_DURATION_MS
+        // saturating_sub: wall clock may move backward (NTP correction); a
+        // negative delta means "no time has passed", not "panic".
+        now.saturating_sub(self.window_start) > WINDOW_DURATION_MS
     }
 
     /// Check if enough time has passed since last request (deduplication window)
     pub fn is_duplicate_request(&self) -> bool {
         let now = now_as_millis();
-        // Consider duplicate if within the configured milliseconds
-        (now - self.last_request) < self.duplicate_request_milliseconds
+        // Consider duplicate if within the configured milliseconds.
+        // saturating_sub guards against backward wall-clock jumps; a
+        // zero delta keeps us in the duplicate window, which is safe.
+        now.saturating_sub(self.last_request) < self.duplicate_request_milliseconds
     }
 
     /// Reset for new tracking window
@@ -229,7 +233,10 @@ impl DataRequestTracker {
         // Collect keys to remove (can't remove while iterating)
         let mut keys_to_remove = Vec::new();
         for entry in self.request_history.iter() {
-            let age = now - entry.window_start;
+            // saturating_sub: a backward wall-clock jump must not crash
+            // cleanup; treating age as 0 just defers removal until the
+            // clock recovers.
+            let age = now.saturating_sub(entry.window_start);
             if age > ENTRY_EXPIRY_MS {
                 keys_to_remove.push(*entry.key());
             }
@@ -255,7 +262,9 @@ impl DataRequestTracker {
         let last_cleanup = self.last_cleanup.load(Ordering::Relaxed) as u128;
         let cleanup_interval_ms = self.cleanup_interval.as_millis();
 
-        if now - last_cleanup > cleanup_interval_ms {
+        // saturating_sub: same backward-clock guard as the other sites
+        // in this file; a zero delta simply skips this cleanup tick.
+        if now.saturating_sub(last_cleanup) > cleanup_interval_ms {
             // Use compare_exchange to ensure only one thread does cleanup
             if self
                 .last_cleanup
@@ -406,5 +415,47 @@ mod tests {
         if !last_request_should_serve {
             assert_eq!(last_result, RequestCheckResult::BlockRequest,);
         }
+    }
+
+    // Regression: a backward wall-clock jump (e.g. NTP correction) used to
+    // panic with "attempt to subtract with overflow" because timestamps are
+    // sourced from `SystemTime` (non-monotonic). All time deltas in this
+    // module must use saturating_sub.
+    #[test]
+    fn record_methods_survive_backward_clock_jump() {
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
+
+        // Stored timestamps ahead of `now` — what a backward NTP correction
+        // looks like to code that has cached an earlier wall-clock value.
+        let future = now_as_millis() + WINDOW_DURATION_MS + 10_000;
+        record.window_start = future;
+        record.last_request = future;
+
+        assert!(!record.is_window_expired());
+        assert!(record.is_duplicate_request());
+    }
+
+    #[test]
+    fn tracker_cleanup_survives_backward_clock_jump() {
+        let tracker = DataRequestTracker::new();
+        let peer_id = IrysPeerId::from(IrysAddress::from([4_u8; 20]));
+
+        let future = now_as_millis() + ENTRY_EXPIRY_MS + 10_000;
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
+        record.window_start = future;
+        record.last_request = future;
+        tracker.request_history.insert(peer_id, record);
+
+        let future_u64 = u64::try_from(future).expect("ms timestamp fits in u64");
+        tracker.last_cleanup.store(future_u64, Ordering::Relaxed);
+
+        // Both used to panic when last_cleanup / window_start exceeded `now`.
+        tracker.cleanup_if_needed();
+        tracker.cleanup_expired_entries();
+
+        // saturating_sub yields age=0, so the entry must not be evicted —
+        // we'd rather hold stale state briefly than drop peer records on a
+        // clock glitch.
+        assert!(tracker.get_peer_stats(&peer_id).is_some());
     }
 }
