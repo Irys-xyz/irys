@@ -762,9 +762,7 @@ mod tests {
     #[case::oneyear(DataLedger::OneYear)]
     #[case::thirtyday(DataLedger::ThirtyDay)]
     #[tokio::test]
-    async fn migrated_term_only_tx_returns_none(
-        #[case] ledger: DataLedger,
-    ) -> eyre::Result<()> {
+    async fn migrated_term_only_tx_returns_none(#[case] ledger: DataLedger) -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;
 
         let tx_id = H256::random();

@@ -1406,7 +1406,9 @@ mod prevalidation_error_classification_tests {
     /// never confused with a peer-supplied invalid block.
     #[test]
     fn publish_tx_missing_prior_submit_is_peer_attributable() {
-        let err = PreValidationError::PublishTxMissingPriorSubmit { tx_id: H256::zero() };
+        let err = PreValidationError::PublishTxMissingPriorSubmit {
+            tx_id: H256::zero(),
+        };
         assert!(!err.is_internal_failure());
         assert!(!err.is_fatal_corruption());
     }
