@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779293172346,
+  "lastUpdate": 1779296903704,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -3823,6 +3823,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "1399038c03134a8c02ff2745baf324a53764b302",
+          "message": "Fix/assigned miners determinism",
+          "timestamp": "2026-05-20T15:50:39Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1423/commits/1399038c03134a8c02ff2745baf324a53764b302"
+        },
+        "date": 1779296902732,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011943,
+            "range": "± 0.00008",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119547,
+            "range": "± 0.001659",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.196075,
+            "range": "± 0.018315",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.880044,
+            "range": "± 0.011882",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074714,
+            "range": "± 0.000095",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.055843,
+            "range": "± 0.744722",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.496516,
+            "range": "± 0.824156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120054,
+            "range": "± 0.000221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1198.683621,
+            "range": "± 0.89993",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1557.848618,
+            "range": "± 1.126621",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035146,
+            "range": "± 0.000686",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.756347,
+            "range": "± 0.197726",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.282596,
+            "range": "± 0.278014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
