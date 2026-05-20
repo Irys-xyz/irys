@@ -2849,26 +2849,16 @@ pub async fn data_txs_are_valid(
                 &parent_epoch_snapshot,
             )?;
 
-            let timestamp_secs = block.timestamp_secs();
-            let mut expected_assigned_proofs =
-                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
-
-            // While the protocol can require X number of assigned proofs, if there
-            // is less than that many assigned to the slot, it still needs to function.
-            if assigned_miners < expected_assigned_proofs {
-                warn!(
-                    "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
-                    expected_assigned_proofs, assigned_miners
-                );
-                expected_assigned_proofs = assigned_miners;
-            }
-
-            if assigned_proofs.len() < expected_assigned_proofs {
-                return Err(PreValidationError::AssignedProofCountMismatch {
-                    expected: expected_assigned_proofs,
-                    actual: assigned_proofs.len(),
-                });
-            }
+            // Clamp the protocol requirement to the number of eligible
+            // assignees, then verify enough assigned proofs were submitted.
+            // Extracted into a pure helper so unit tests exercise the exact
+            // production logic byte-for-byte — see `check_assigned_proof_count`.
+            check_assigned_proof_count(
+                config.number_of_ingress_proofs_from_assignees_at(block.timestamp_secs())
+                    as usize,
+                assigned_miners,
+                assigned_proofs.len(),
+            )?;
 
             // Enforce data availability by verifying ingress proofs with the actual chunks
             // possible future improvements: refresh peer list on failure of all 5, try peers concurrently
@@ -3429,6 +3419,40 @@ fn merge_same_block_historical_ledgers(
         }
         _ => None,
     }
+}
+
+/// Clamp-and-check used by the per-tx Publish proof loop in
+/// [`data_txs_are_valid`].  Extracted as a pure helper so unit tests can
+/// exercise the exact production logic byte-for-byte instead of modelling it
+/// (caller currently invoked once, inside the publish-tx validation loop).
+///
+/// - `expected_initial` is `number_of_ingress_proofs_from_assignees_at(ts)`.
+/// - If fewer miners are eligible than the protocol demands, the requirement
+///   is clamped down to what's actually achievable (the protocol can require
+///   X assigned proofs, but if fewer than X miners are assigned to the
+///   intersecting slots it still needs to function).
+/// - The final check compares the submitted assigned-proof count against the
+///   (possibly clamped) requirement.
+pub(crate) fn check_assigned_proof_count(
+    expected_initial: usize,
+    assigned_miners: usize,
+    assigned_proofs_len: usize,
+) -> Result<(), PreValidationError> {
+    let mut expected = expected_initial;
+    if assigned_miners < expected {
+        warn!(
+            "Clamping expected_assigned_proofs from {} to {} to match number of assigned miners ",
+            expected, assigned_miners
+        );
+        expected = assigned_miners;
+    }
+    if assigned_proofs_len < expected {
+        return Err(PreValidationError::AssignedProofCountMismatch {
+            expected,
+            actual: assigned_proofs_len,
+        });
+    }
+    Ok(())
 }
 
 pub fn get_assigned_ingress_proofs(
@@ -5264,6 +5288,175 @@ mod tests {
             assigned.len(),
             1,
             "Alice's proof must be classified as assigned"
+        );
+
+        Ok(())
+    }
+
+    /// The `assigned_miners` rule change is invisible under the current
+    /// network config (`number_of_ingress_proofs_from_assignees = 0` across
+    /// `ConsensusConfig::testing()` / `testnet()` / `mainnet()`) and only
+    /// "lights up" when a future hardfork bumps `from_assignees > 0`.
+    ///
+    /// Setup mirrors `assigned_miners_distinct_miners_across_intersecting_slots`:
+    /// Alice in slot 1, Bob in slot 2, block_range [10,24] spans both, Alice
+    /// submits one proof.  Under the two semantics:
+    ///   - Old (per-proof, count of unique addresses in the proof signer's
+    ///     single intersecting slot): 1
+    ///   - New (unique addresses across all intersecting slots): 2
+    ///
+    /// We model the consumer logic at block_validation.rs:2853-2870 as a pure
+    /// function and verify:
+    ///   - With `from_assignees = 0`: BOTH values produce ACCEPT (the clamp
+    ///     and the count check are both no-ops; the rule change has no
+    ///     observable effect on validation).
+    ///   - With `from_assignees = 2`: the values diverge — old ACCEPTS
+    ///     (assigned.len()=1 >= clamp(2,1)=1) and new REJECTS
+    ///     (assigned.len()=1 < clamp(2,2)=2).
+    ///
+    /// Conclusion: activation of the new semantics is implicitly tied to the
+    /// future hardfork that bumps `from_assignees > 0` (which is itself a
+    /// coordinated network upgrade), so no separate hardfork gate for this
+    /// rule change is required on the current branch.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_rule_change_invisible_under_current_config() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let alice = IrysSigner::random_signer(&consensus);
+        let bob = IrysSigner::random_signer(&consensus);
+
+        // Alice in slot 1, Bob in slot 2.  Both slots intersect block_range
+        // [10, 24] given num_chunks_in_partition = 10 (slot 1 = [10,20),
+        // slot 2 = [20,30)).
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for (miner_address, slot_index) in [(alice.address(), 1_usize), (bob.address(), 2_usize)] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Alice submits exactly one proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &alice,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, new_miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert_eq!(new_miners, 2, "new semantics across both intersecting slots");
+        assert_eq!(assigned.len(), 1);
+
+        // Reproduce the OLD algorithm's value computation in-place to keep
+        // this test honest if anyone later changes `get_assigned_ingress_proofs`:
+        // for each proof, take the proof signer's slots, find the first that
+        // intersects block_range, return the count of unique addresses
+        // assigned to *that* slot (and overwrite on each proof iteration —
+        // here there is only one proof so the "last write wins" detail
+        // doesn't change the result).
+        let proof_address = alice.address();
+        let alice_slot_indices: Vec<usize> = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_, pa)| {
+                pa.miner_address == proof_address
+                    && pa.ledger_id == Some(DataLedger::Submit as u32)
+            })
+            .filter_map(|(_, pa)| pa.slot_index)
+            .collect();
+        // Alice is assigned only to slot 1, which intersects block_range.
+        let old_miners: usize = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .iter()
+            .filter(|(_, pa)| {
+                pa.ledger_id == Some(DataLedger::Submit as u32)
+                    && pa.slot_index.is_some_and(|i| alice_slot_indices.contains(&i))
+            })
+            .map(|(_, pa)| pa.miner_address)
+            .collect::<HashSet<IrysAddress>>()
+            .len();
+        assert_eq!(
+            old_miners, 1,
+            "old semantics: only Alice in her single intersecting slot"
+        );
+        assert_ne!(
+            old_miners, new_miners,
+            "the rule change actually changes the computed value in this scenario"
+        );
+
+        // Call the *real* production helper that the publish-tx loop in
+        // `data_txs_are_valid` uses.  Same function, same code — no modelling
+        // gap between test and prod.
+        let accepts = |from_assignees: usize, miners: usize, proofs_len: usize| -> bool {
+            check_assigned_proof_count(from_assignees, miners, proofs_len).is_ok()
+        };
+
+        // Current network config: from_assignees = 0 in every deployed
+        // ConsensusConfig (mainnet/testnet/testing).  The clamp is dead
+        // (no usize < 0) and the count check is vacuously true.  Both old
+        // and new produce the identical accept-everything outcome — the
+        // rule change has zero effect on validation today.
+        let from_assignees_current = 0;
+        assert!(
+            accepts(from_assignees_current, old_miners, assigned.len()),
+            "old semantics under from_assignees=0 must ACCEPT"
+        );
+        assert!(
+            accepts(from_assignees_current, new_miners, assigned.len()),
+            "new semantics under from_assignees=0 must ACCEPT"
+        );
+        assert_eq!(
+            accepts(from_assignees_current, old_miners, assigned.len()),
+            accepts(from_assignees_current, new_miners, assigned.len()),
+            "under current network config the rule change is invisible"
+        );
+
+        // Future hardfork config: from_assignees = 2 (matches the commented
+        // post-Frontier reference at testnet_config.toml:167-168 — total=4,
+        // from_assignees=2).  This is the moment the new semantics becomes
+        // a visible consensus change.
+        let from_assignees_future = 2;
+        assert!(
+            accepts(from_assignees_future, old_miners, assigned.len()),
+            "old semantics under from_assignees=2: 1 proof >= clamp(2,1)=1 → ACCEPT"
+        );
+        let err = check_assigned_proof_count(from_assignees_future, new_miners, assigned.len())
+            .expect_err("new semantics under from_assignees=2 must REJECT");
+        assert!(
+            matches!(
+                err,
+                PreValidationError::AssignedProofCountMismatch {
+                    expected: 2,
+                    actual: 1,
+                }
+            ),
+            "expected AssignedProofCountMismatch {{ expected: 2, actual: 1 }}, got: {err:?}"
         );
 
         Ok(())
