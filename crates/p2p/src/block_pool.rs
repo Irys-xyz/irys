@@ -1239,7 +1239,20 @@ where
         block_hash: &BlockHash,
         block_height: u64,
     ) -> bool {
-        if self.blocks_cache.is_block_processing(block_hash).await {
+        // Any presence in `blocks_cache` — actively processing
+        // (`is_processing = true`) OR parked after a SoftInternal failure
+        // (`is_processing = false`, awaiting orphan-cascade or
+        // `AttemptReprocessingBlock` re-entry) — is "known locally" for
+        // dedup purposes. Without the parked-block short-circuit, every
+        // gossip arrival during the `is_processing = false` window would
+        // re-spawn mempool ingestion, shadow-tx generation, and PoA
+        // validation from scratch; bounded but expensive amplification
+        // under high gossip rate against a chronically failing block.
+        // The cache is bounded (`BLOCK_POOL_CACHE_SIZE`), entries are
+        // LRU-evictable, and parked blocks are re-driven from children's
+        // orphan-resolve or sync-service retries — so parked blocks
+        // cannot shadow indefinitely.
+        if self.blocks_cache.contains_block(block_hash).await {
             return true;
         }
         let status = self
@@ -1374,6 +1387,23 @@ where
     /// Used by GossipDataHandler for network-enabled tx fetching.
     pub(crate) async fn get_cached_block(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.blocks_cache.get_block_cloned(block_hash).await
+    }
+
+    /// Test-only: insert a block directly into the internal cache, then set
+    /// its `is_processing` flag. Lets tests exercise the parked-block
+    /// (`is_processing = false`) branch of `is_block_processing_or_processed`
+    /// without driving the full `process_block` flow.
+    #[cfg(test)]
+    pub(crate) async fn test_insert_block_into_cache(
+        &self,
+        block: Arc<SealedBlock>,
+        is_processing: bool,
+    ) {
+        let block_hash = block.header().block_hash;
+        self.blocks_cache.add_block(block, false).await;
+        self.blocks_cache
+            .change_block_processing_status(block_hash, is_processing)
+            .await;
     }
 }
 

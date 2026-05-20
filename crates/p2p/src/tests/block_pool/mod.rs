@@ -1205,3 +1205,51 @@ fn setup_not_processed(
 ) -> (irys_types::BlockHash, u64) {
     (irys_types::BlockHash::repeat_byte(0x42), 7)
 }
+
+/// M4 regression: a block parked in `blocks_cache` with `is_processing =
+/// false` (SoftInternal failure path leaving it for retry) must dedup as
+/// "known locally". Without this short-circuit, every gossip arrival in
+/// the parked window re-spawns mempool ingestion, shadow-tx generation,
+/// and PoA validation from scratch.
+#[tokio::test]
+async fn is_block_processing_or_processed_dedups_parked_soft_internal_block() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+
+    // Park the block: present in cache with is_processing = false. Status
+    // provider has no record of it (NotProcessed), so without the cache
+    // short-circuit the predicate would fall through to `false` and gossip
+    // would re-enter `process_block`.
+    pool.test_insert_block_into_cache(sealed, false).await;
+
+    assert!(
+        pool.is_block_processing_or_processed(&block.block_hash, block.height)
+            .await,
+        "parked SoftInternal block in blocks_cache must dedup as already-known"
+    );
+}
+
+/// Regression for the original `is_processing = true` semantics: a block
+/// actively being processed must still dedup.
+#[tokio::test]
+async fn is_block_processing_or_processed_dedups_actively_processing_block() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+
+    pool.test_insert_block_into_cache(sealed, true).await;
+
+    assert!(
+        pool.is_block_processing_or_processed(&block.block_hash, block.height)
+            .await
+    );
+}
