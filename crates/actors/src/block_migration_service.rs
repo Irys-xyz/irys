@@ -1,10 +1,10 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
-use eyre::{ensure, OptionExt as _};
+use eyre::{OptionExt as _, ensure};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
-use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, BlockTree, SupplyState};
+use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
 use irys_types::{
-    app_state::DatabaseProvider, DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, Traced,
+    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
+    Traced, app_state::DatabaseProvider,
 };
 use std::{
     collections::HashMap,
@@ -441,20 +441,19 @@ mod tests {
     //! satisfied with cheap placeholders.
     use super::*;
     use irys_database::{
-        cache_data_root, open_or_create_db,
+        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
         tables::{CachedDataRoots, IrysTables},
-        IrysDatabaseArgs as _,
     };
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysBlockHeader,
-        H256, U256,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+        IrysBlockHeader, U256,
     };
+    use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::{DbTx as _, DbTxMut as _};
-    use reth_db::Database as _;
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
@@ -871,8 +870,8 @@ mod tests {
     /// so same-block promotions must also write `included_height` before
     /// `promoted_height` during migration.
     #[tokio::test]
-    async fn persist_block_same_block_submit_publish_promotion_sets_both_heights(
-    ) -> eyre::Result<()> {
+    async fn persist_block_same_block_submit_publish_promotion_sets_both_heights()
+    -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
         let (svc, _svc_tmp) = make_service(db.clone());
 
