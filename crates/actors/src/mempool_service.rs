@@ -1134,50 +1134,6 @@ impl AtomicMempoolState {
         }
     }
 
-    /// Set included_height for a data transaction with optional overwrite
-    ///
-    /// # Parameters
-    /// - `tx_id`: Transaction ID to update
-    /// - `height`: Block height to set
-    /// - `overwrite`: If false, only sets height if currently None; if true, sets unconditionally
-    ///
-    /// Returns true if the included_height was actually changed, false otherwise.
-    /// Also updates the recent_valid_tx cache when the transaction is found.
-    async fn set_data_tx_included_height_inner(
-        &self,
-        tx_id: H256,
-        height: u64,
-        overwrite: bool,
-    ) -> bool {
-        let mut state = match self.write().await {
-            Ok(g) => g,
-            Err(e) => {
-                warn!(
-                    ?e,
-                    "Mempool write lock contention; set_data_tx_included_height_inner returning false"
-                );
-                return false;
-            }
-        };
-        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            let updated = overwrite || wrapped_tx.metadata().included_height.is_none();
-            if updated {
-                wrapped_tx.metadata_mut().included_height = Some(height);
-                tracing::debug!(
-                    tx.id = %tx_id,
-                    included_height = height,
-                    overwrite = overwrite,
-                    "Set included_height in mempool"
-                );
-            }
-            // Always update recent_valid_tx cache when tx is found
-            state.recent_valid_tx.put(tx_id, ());
-            updated
-        } else {
-            false
-        }
-    }
-
     /// Clear included_height for a data transaction (re-org handling).
     ///
     /// Returns:
@@ -1494,28 +1450,11 @@ impl AtomicMempoolState {
         Some(result)
     }
 
-    /// Atomically sets the included_height on a data transaction in the mempool.
-    /// This is a convenience wrapper around set_tx_included_height with overwrite=false.
-    /// Returns true if the tx was found and updated, false otherwise.
-    pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
-        // Use the consolidated method with overwrite=false to maintain backward compatibility
-        self.set_data_tx_included_height_inner(txid, height, false)
-            .await
-    }
-
-    /// Set included_height for a data transaction with overwrite enabled
-    /// This is used when processing canonical confirmations to ensure the height
-    /// is updated even if previously set (e.g., after a reorg)
-    pub async fn set_data_tx_included_height_overwrite(&self, txid: H256, height: u64) -> bool {
-        self.set_data_tx_included_height_inner(txid, height, true)
-            .await
-    }
-
     /// Applies all metadata updates for a confirmed block under a single write lock.
     ///
-    /// This batches the work of `set_data_tx_included_height_overwrite`,
-    /// `set_commitment_tx_included_height`, and `set_promoted_height` to avoid
-    /// acquiring the write lock once per transaction (~120 times per block).
+    /// Batches included_height, commitment-included_height, and promoted_height
+    /// writes to avoid acquiring the write lock once per transaction (~120
+    /// times per block).
     ///
     /// All three update phases run atomically under a single write guard: either
     /// every applicable tx in the mempool gets its metadata updated, or none do.

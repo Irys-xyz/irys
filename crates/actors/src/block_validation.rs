@@ -219,8 +219,6 @@ pub enum PreValidationError {
     ParentEpochSnapshotNotFound { block_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
-    #[error("Failed to fetch transactions: {0}")]
-    TransactionFetchFailed(String),
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
@@ -429,7 +427,6 @@ impl PreValidationError {
             Self::BlockEmaSnapshotNotFound { .. } => "block_ema_snapshot_not_found",
             Self::ParentEpochSnapshotNotFound { .. } => "parent_epoch_snapshot_not_found",
             Self::DataLedgerExtractionFailed(_) => "data_ledger_extraction_failed",
-            Self::TransactionFetchFailed(_) => "tx_fetch_failed",
             Self::PreviousTxInclusionsFailed(_) => "prev_tx_inclusions_failed",
             Self::InvalidLedgerIdForTx { .. } => "invalid_ledger_id_for_tx",
             Self::InvalidLedgerId { .. } => "invalid_ledger_id",

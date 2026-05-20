@@ -132,12 +132,7 @@ fn lookup_via_block_tree(
     // tip-anchored window silently dropped canonical confirmations whenever
     // max_height was far enough below the tip that the tip-anchored slice
     // contained only blocks with `height > max_height`.
-    // u32 → usize: usize is ≥ u32 on every supported target, so this is
-    // infallible in practice.  Kept as `try_from + expect` rather than
-    // `as usize` so a future widening of `block_migration_depth` to u64
-    // surfaces here at the call site instead of truncating silently.
-    let depth = usize::try_from(block_migration_depth)
-        .expect("convert block_migration_depth to usize failed: value out of range");
+    let depth = block_migration_depth as usize;
     let Some(max_idx) = canonical
         .iter()
         .rposition(|entry| entry.header().height <= max_height)
