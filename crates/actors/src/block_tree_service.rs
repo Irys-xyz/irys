@@ -141,34 +141,95 @@ enum DiscardKind {
 const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
 
 /// Resolve the soft-internal `InternalFailure` variant to a bounded-cardinality
-/// snake_case reason tag for metrics labelling. Node-fault and consensus
-/// variants are unreachable here — the caller filters them out before
-/// `discard_and_broadcast` runs — but we still return a sentinel rather than
-/// panicking to keep the metric labelling defensive.
+/// snake_case reason tag for metrics labelling.
 ///
-/// `ValidationCancelled` is also gated out of the LRU/counter recording site
-/// in `discard_and_broadcast` post-M2 (cancellations are not gossip-recoverable
-/// retries), so its tag is a defensive sentinel that should never actually
-/// appear in metrics; if it does, it indicates the gate drifted.
+/// Reachability invariant: only variants that
+/// [`ValidationError::classify`](crate::block_validation::ValidationError::classify)
+/// returns `ErrorClass::SoftInternal` for can reach this function.
+/// `on_block_validation_finished` (see `:532-549`) panics on node-fault
+/// `InternalFailure` before calling `discard_and_broadcast`, and routes
+/// `Consensus` outcomes to `DiscardKind::Invalid` (skipping the soft-internal
+/// recording site at `:1128-1138`). Anything else here is an upstream
+/// classification drift and surfaces as a compile error (via the exhaustive
+/// match) or a panic (via the `unreachable!` arms below).
+///
+/// `ValidationCancelled` is additionally gated out of the LRU/counter
+/// recording site in `discard_and_broadcast` post-M2 (cancellations are not
+/// gossip-recoverable retries), so its tag is a defensive sentinel that
+/// should never actually appear in metrics; if it does, it indicates the
+/// gate drifted.
+///
+/// SAFETY: the match is exhaustive — no `_` wildcard. Adding a new
+/// `ValidationError` variant without a label here is a compile error by
+/// design. If the new variant is `SoftInternal`, add a real snake_case tag;
+/// otherwise add an explicit `unreachable!` arm naming the filtering site.
 fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &'static str {
     use crate::block_validation::ValidationError as VE;
     match err {
+        // === SoftInternal variants (per `ValidationError::classify`) ===
         VE::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
         VE::ShadowTxGenerationFailed(_) => "shadow_tx_generation_failed",
         VE::ParentBlockMissing { .. } => "parent_block_missing",
         VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+        // PreValidation has a sub-classifier — only its SoftInternal inner
+        // variants (`AssignedProofBlockMissing`, `ParentNotInCache`) reach
+        // here. We delegate to the inner's `metric_reason()` so each one
+        // gets a distinct, grep-stable snake_case tag rather than collapsing
+        // to a single "pre_validation" bucket.
+        VE::PreValidation(inner) => inner.metric_reason(),
         // Post-M2: should never be observed in the metric (the discard-site
-        // gate skips both the LRU put and the counter increment for any
-        // ValidationCancelled variant). Tag retained as a stable defensive
-        // sentinel so a future drift in that gate surfaces here rather than
-        // silently mis-labelling.
+        // gate at `:1128-1133` skips both the LRU put and the counter
+        // increment for any ValidationCancelled variant — see commit
+        // c3fd8963a). Tag retained as a stable defensive sentinel so a
+        // future drift in that gate surfaces here as a distinct label
+        // rather than silently mis-labelling. Inner reason is intentionally
+        // not pattern-matched — the `ValidationCancelled` discriminator is
+        // sufficient and inner-reason cardinality is a separate concern.
         VE::ValidationCancelled { .. } => "validation_cancelled",
-        // Not reachable from the SoftInternal arm — all other variants are
-        // either node-fault or consensus — but `metric_label` falls back to
-        // "internal_error" rather than panicking if invariants drift.
-        _ => "internal_error_other",
+
+        // === NodeFault variants — filtered at `:532-543` (handler panics
+        // before reaching `discard_and_broadcast`). ===
+        VE::TaskPanicked { .. } => {
+            unreachable!(
+                "TaskPanicked is NodeFault; on_block_validation_finished panics before discard_and_broadcast"
+            )
+        }
+        VE::ExecutionLayerTransportFailed(_) => {
+            unreachable!(
+                "ExecutionLayerTransportFailed is NodeFault; on_block_validation_finished panics before discard_and_broadcast"
+            )
+        }
+        VE::ShadowTxNodeFault(_) => {
+            unreachable!(
+                "ShadowTxNodeFault is NodeFault; on_block_validation_finished panics before discard_and_broadcast"
+            )
+        }
+
+        // === Consensus variants — filtered at `:553-554` (routed to
+        // `DiscardKind::Invalid`, which skips the soft-internal recording
+        // site at `:1128-1138`). ===
+        VE::VdfValidationFailed(_)
+        | VE::SeedDataInvalid(_)
+        | VE::ExecutionLayerFailed(_)
+        | VE::RecallRangeInvalid(_)
+        | VE::ShadowTransactionInvalid(_)
+        | VE::CommitmentValueInvalid { .. }
+        | VE::CommitmentVersionInvalid { .. }
+        | VE::CommitmentTypeNotAllowed { .. }
+        | VE::CommitmentOrderingFailed(_)
+        | VE::CommitmentSnapshotRejected { .. }
+        | VE::UnpledgePartitionNotOwned { .. }
+        | VE::EpochCommitmentMismatch { .. }
+        | VE::EpochExtraCommitment { .. }
+        | VE::EpochMissingCommitment { .. }
+        | VE::CommitmentWrongOrder { .. }
+        | VE::Other(_) => {
+            unreachable!(
+                "Consensus variant routed to DiscardKind::Invalid at on_block_validation_finished, never reaches soft_internal_reason_tag"
+            )
+        }
     }
 }
 
@@ -1951,5 +2012,145 @@ mod tests {
         let err = validate_reorg_within_migration_depth(usize::MAX, 5, 0)
             .expect_err("usize::MAX must be treated as exceeding migration depth");
         assert!(err.to_string().contains("reorg depth"));
+    }
+
+    /// M4: `PreValidation` reaches `soft_internal_reason_tag` whenever its
+    /// inner variant classifies as `SoftInternal`
+    /// (`AssignedProofBlockMissing`, `ParentNotInCache`). The tag must come
+    /// from the inner's `metric_reason()` so each one gets a distinct,
+    /// grep-stable label instead of collapsing into a generic catch-all.
+    #[rstest]
+    #[case::preval_assigned_proof_missing(
+        crate::block_validation::ValidationError::PreValidation(
+            crate::block_validation::PreValidationError::AssignedProofBlockMissing {
+                block_hash: H256::zero(),
+                tx_id: H256::zero(),
+            },
+        ),
+        "assigned_proof_block_missing",
+    )]
+    #[case::preval_parent_not_in_cache(
+        crate::block_validation::ValidationError::PreValidation(
+            crate::block_validation::PreValidationError::ParentNotInCache {
+                parent_hash: H256::zero(),
+                expected_height: 0,
+            },
+        ),
+        "parent_not_in_cache",
+    )]
+    fn soft_internal_reason_tag_delegates_for_prevalidation_soft_variants(
+        #[case] err: crate::block_validation::ValidationError,
+        #[case] expected_tag: &'static str,
+    ) {
+        assert_eq!(soft_internal_reason_tag(&err), expected_tag);
+        // Belt-and-braces: confirm the error actually classifies as
+        // SoftInternal — if a future audit flips it, this test wedges the
+        // contract instead of silently testing nothing.
+        assert_eq!(
+            err.classify(),
+            crate::block_validation::ErrorClass::SoftInternal,
+            "test fixture must be SoftInternal-classified",
+        );
+    }
+
+    /// M4: every `SoftInternal`-classified `ValidationError` variant must map
+    /// to a label distinct from the legacy `"internal_error_other"` sentinel
+    /// (which was the pre-M4 catch-all that absorbed unhandled variants and
+    /// caused undercounting). Sanity-checks the exhaustive match.
+    #[test]
+    fn soft_internal_reason_tags_are_not_legacy_catch_all() {
+        let cases: Vec<crate::block_validation::ValidationError> = vec![
+            crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
+                evm_block_hash: irys_types::EvmBlockHash::ZERO,
+            },
+            crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
+            crate::block_validation::ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentEpochSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentEmaSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::PreValidation(
+                crate::block_validation::PreValidationError::AssignedProofBlockMissing {
+                    block_hash: H256::zero(),
+                    tx_id: H256::zero(),
+                },
+            ),
+            crate::block_validation::ValidationError::PreValidation(
+                crate::block_validation::PreValidationError::ParentNotInCache {
+                    parent_hash: H256::zero(),
+                    expected_height: 0,
+                },
+            ),
+            crate::block_validation::ValidationError::ValidationCancelled {
+                reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+            },
+        ];
+
+        for err in &cases {
+            let tag = soft_internal_reason_tag(err);
+            assert_ne!(
+                tag, "internal_error_other",
+                "variant {err:?} must have a real label, not the legacy catch-all",
+            );
+            assert!(
+                !tag.is_empty(),
+                "variant {err:?} mapped to an empty tag",
+            );
+        }
+    }
+
+    /// M4: distinct `SoftInternal` variants (excluding the
+    /// `ValidationCancelled` defensive sentinel, which is filtered upstream
+    /// per the M2 gate and intentionally collapses to a single tag) must map
+    /// to distinct labels so the discard metric can attribute root causes.
+    #[test]
+    fn soft_internal_reason_tags_are_unique_per_variant() {
+        use std::collections::HashSet;
+        let cases: Vec<crate::block_validation::ValidationError> = vec![
+            crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
+                evm_block_hash: irys_types::EvmBlockHash::ZERO,
+            },
+            crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
+            crate::block_validation::ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentEpochSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::ParentEmaSnapshotMissing {
+                block_hash: H256::zero(),
+            },
+            crate::block_validation::ValidationError::PreValidation(
+                crate::block_validation::PreValidationError::AssignedProofBlockMissing {
+                    block_hash: H256::zero(),
+                    tx_id: H256::zero(),
+                },
+            ),
+            crate::block_validation::ValidationError::PreValidation(
+                crate::block_validation::PreValidationError::ParentNotInCache {
+                    parent_hash: H256::zero(),
+                    expected_height: 0,
+                },
+            ),
+        ];
+
+        let mut seen: HashSet<&'static str> = HashSet::with_capacity(cases.len());
+        for err in &cases {
+            let tag = soft_internal_reason_tag(err);
+            assert!(
+                seen.insert(tag),
+                "duplicate soft-internal reason tag {tag:?} from variant {err:?}",
+            );
+        }
     }
 }
