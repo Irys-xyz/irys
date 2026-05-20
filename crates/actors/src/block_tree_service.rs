@@ -615,22 +615,16 @@ impl BlockTreeServiceInner {
             return self.discard_and_broadcast(block_hash, validation_result, DiscardKind::Invalid);
         }
 
-        // Phase A (H3) instrumentation: a Valid result is arriving for a block
-        // we previously discarded as soft-internal — gossip-driven recovery
-        // worked for this hash. Increment the recovered counter (tagged with
-        // the original discard reason) and forget it from the LRU. An info!
-        // log makes the path operator-visible without polluting the steady-
-        // state log volume — soft-internal discards are rare.
-        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
-            metrics::record_soft_internal_recovered(reason);
-            info!(
-                block.hash = %block_hash,
-                reason,
-                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
-            );
-        }
-
-        // From here, we are processing a fully validated block
+        // From here, we are processing a fully validated block.
+        //
+        // Confirm cache presence BEFORE touching the soft-internal recovery
+        // LRU. A spurious `Valid` arrival for a hash no longer in the cache
+        // (eviction race with `remove_block`, duplicate gossip racing
+        // classification, or a soft-internal-parked block whose entry was
+        // just removed by another path) must not pop the LRU entry — doing
+        // so would (a) lose the recovery marker that a legitimate fresh
+        // re-delivery would have matched and (b) overcount this spurious
+        // path as a recovery on the metric.
         let Some(height) = self
             .cache
             .read()
@@ -644,6 +638,24 @@ impl BlockTreeServiceInner {
             );
             return Ok(());
         };
+
+        // Phase A (H3) instrumentation: a Valid result is arriving for a block
+        // we previously discarded as soft-internal — gossip-driven recovery
+        // worked for this hash. Increment the recovered counter (tagged with
+        // the original discard reason) and forget it from the LRU. An info!
+        // log makes the path operator-visible without polluting the steady-
+        // state log volume — soft-internal discards are rare.
+        //
+        // Pop only on confirmed cache hit; spurious Valid arrivals must not
+        // clear the recovery LRU.
+        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
+            metrics::record_soft_internal_recovered(reason);
+            info!(
+                block.hash = %block_hash,
+                reason,
+                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
+            );
+        }
         debug!(
             "On validation complete: result {} {:?} at height: {}",
             block_hash, validation_result, height
@@ -2152,5 +2164,137 @@ mod tests {
                 "duplicate soft-internal reason tag {tag:?} from variant {err:?}",
             );
         }
+    }
+
+    // --- M6 regression tests ------------------------------------------------
+    //
+    // The recovery path in `on_block_validation_finished` previously popped
+    // `recent_soft_internal_discards` and incremented
+    // `record_soft_internal_recovered` BEFORE confirming the block was still
+    // in the cache. A spurious `Valid` arrival for a hash no longer in cache
+    // (eviction race, duplicate gossip, etc.) therefore both lost the
+    // recovery marker that a legitimate later re-delivery would have matched,
+    // and overcounted the spurious path as a recovery.
+    //
+    // The fix moves the cache-presence check first; only on a confirmed cache
+    // hit does the LRU entry get popped and the recovery metric incremented.
+    // These tests replay the ordering invariant with a small in-test model
+    // (same style as the existing LRU tests above) since constructing a real
+    // `BlockTreeServiceInner` requires the full service-senders graph.
+
+    /// Helper modelling the post-fix ordering in
+    /// `on_block_validation_finished`. Returns whether the recovery metric
+    /// would have been incremented (and with which reason).
+    ///
+    /// `in_cache` simulates the result of the `cache.read().get_block(...)`
+    /// lookup. On `false`, the function returns without touching the LRU and
+    /// without recording a recovery — matching the production warn-and-return
+    /// branch.
+    fn simulate_recovery_ordering(
+        lru: &mut LruCache<BlockHash, &'static str>,
+        block_hash: BlockHash,
+        in_cache: bool,
+    ) -> Option<&'static str> {
+        if !in_cache {
+            // Cache miss: do not touch the LRU, do not record a recovery.
+            return None;
+        }
+        // Cache hit: pop the LRU and report the reason so the caller can
+        // record the recovery metric.
+        lru.pop(&block_hash)
+    }
+
+    /// Spurious `Valid` for a hash not in the cache MUST NOT pop the LRU
+    /// entry and MUST NOT increment the recovery metric. The LRU marker must
+    /// remain so a later, legitimate `Valid` arrival can still be counted as
+    /// a gossip-driven recovery.
+    #[test]
+    fn spurious_valid_with_cache_miss_preserves_lru_and_metric() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0x6A; 32]);
+        lru.put(block_hash, "execution_payload_cache_evicted");
+
+        let recovered = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ false);
+
+        assert!(
+            recovered.is_none(),
+            "cache-miss recovery path must not surface a reason (metric must not fire)"
+        );
+        assert_eq!(
+            lru.get(&block_hash),
+            Some(&"execution_payload_cache_evicted"),
+            "LRU entry must be preserved when the block is no longer in cache — \
+             a later legitimate re-delivery still needs it to be counted as a recovery"
+        );
+    }
+
+    /// `Valid` for a hash present in the cache MUST pop the LRU entry and
+    /// MUST report the recovery reason so the metric is incremented exactly
+    /// once.
+    #[test]
+    fn valid_with_cache_hit_pops_lru_and_records_recovery() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0x6B; 32]);
+        lru.put(block_hash, "parent_block_missing");
+
+        let recovered = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ true);
+
+        assert_eq!(
+            recovered,
+            Some("parent_block_missing"),
+            "cache-hit recovery must surface the original discard reason for the metric"
+        );
+        assert!(
+            lru.get(&block_hash).is_none(),
+            "LRU entry must be popped on confirmed recovery to prevent double-count"
+        );
+    }
+
+    /// Sequence: spurious cache-miss Valid arrives first (LRU must stay
+    /// intact), then a legitimate Valid arrives with the block back in cache
+    /// (LRU is finally consumed and the recovery is recorded). This
+    /// specifically guards against the M6 regression mode where the
+    /// pre-fix order would have dropped the recovery on the spurious arrival
+    /// and left the legitimate arrival un-counted.
+    #[test]
+    fn spurious_then_legitimate_valid_counts_recovery_exactly_once() {
+        let mut lru: LruCache<BlockHash, &'static str> =
+            LruCache::new(NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap());
+        let block_hash = H256([0x6C; 32]);
+        lru.put(block_hash, "shadow_tx_generation_failed");
+
+        // First arrival: spurious — block not in cache. No recovery.
+        let first = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ false);
+        assert!(
+            first.is_none(),
+            "spurious arrival must not record a recovery"
+        );
+        assert!(
+            lru.get(&block_hash).is_some(),
+            "LRU must survive a spurious arrival"
+        );
+
+        // Second arrival: legitimate — block back in cache via re-gossip.
+        let second = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ true);
+        assert_eq!(
+            second,
+            Some("shadow_tx_generation_failed"),
+            "legitimate arrival must surface the original discard reason"
+        );
+        assert!(
+            lru.get(&block_hash).is_none(),
+            "LRU must be drained by the legitimate recovery"
+        );
+
+        // Third arrival: any further duplicate Valid for the same hash is a
+        // no-op (matches existing valid_result_pops_from_lru_and_returns_reason
+        // semantics).
+        let third = simulate_recovery_ordering(&mut lru, block_hash, /*in_cache=*/ true);
+        assert!(
+            third.is_none(),
+            "duplicate Valid for already-recovered hash must not double-count"
+        );
     }
 }
