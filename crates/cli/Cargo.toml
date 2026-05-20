@@ -33,11 +33,17 @@ reth-node-types.workspace = true
 reth-tasks.workspace = true
 hex.workspace = true
 serde_json.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+zstd.workspace = true
 alloy-signer.workspace = true
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+irys-testing-utils.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
