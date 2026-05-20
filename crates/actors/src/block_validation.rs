@@ -105,6 +105,17 @@ pub enum PreValidationError {
     /// this variant is constructed the failure is a local-index inconsistency
     /// (empty index, MDBX I/O, missing predecessor that should be present).
     /// Classified as `is_node_fault` — retry will hit the same broken state.
+    ///
+    /// MERGE-PAIR(C1): the `is_node_fault` classification is contingent on
+    /// every construction site genuinely being a local-index inconsistency.
+    /// The `get_block_bounds` walk-off-tree fallback (see the
+    /// `MERGE-BLOCKER(C1)` marker in `get_block_bounds`) currently
+    /// constructs this variant from a peer-controllable side-fork lookup —
+    /// which means a remote peer can drive a `NodeFault` panic. When the
+    /// `fix-cdr-block-set` merge replaces that fallback with a canonical
+    /// lookup that returns `Ok(None)` for off-lineage, re-audit ALL
+    /// remaining construction sites here: if any are still peer-
+    /// controllable, demote the classification or split the variant.
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
 
@@ -122,6 +133,26 @@ pub enum PreValidationError {
     ///
     /// `Err(_)` from `get_ledger_range` is a local DB fault, NOT this
     /// variant — it routes through `BlockBoundsLookupError` (node fault).
+    ///
+    /// MERGE-NOTE(C2): this variant exists to soften the fork-spanning
+    /// `CachedDataRoots.block_set` walk. Branch `fix-cdr-block-set`
+    /// (4e21e25a) replaces that walk with
+    /// `tx_inclusion::find_canonical_ledger_range`, which is
+    /// parent-anchored + `ChainState::Onchain`-filtered and cannot
+    /// surface a "pruned side-fork hash" outcome. Additional commits
+    /// in that branch (7479e10e, ed27fada, c8e79e48, 9b64d7ab) demote
+    /// `block_set` to a non-trusted hint with authoritative migration
+    /// writes. When merging:
+    ///   1. Verify this variant has no remaining construction site
+    ///      (the only caller — `get_assigned_ingress_proofs` —
+    ///      should now use `find_canonical_ledger_range` instead).
+    ///   2. If no construction sites remain, DELETE this variant
+    ///      along with its classification entry in
+    ///      `PreValidationError::classify()` and the
+    ///      `metric_label`/`metric_reason` tags.
+    ///   3. Also re-evaluate the `H1` livelock concern (audit
+    ///      2026-05-20): closed by the same merge because `block_set`
+    ///      no longer drives consensus.
     #[error(
         "Assigned-proof block {block_hash} for tx {tx_id} no longer resolvable in block_tree or DB (likely pruned side fork)"
     )]
@@ -2755,10 +2786,41 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 curr = prev_header;
             }
             None => {
+                // MERGE-BLOCKER(C1): this fallback is NOT fork-deterministic.
+                // The 2026-05-20 multi-reviewer audit (CodeRabbit + Codex,
+                // both Critical, independent agreement) confirmed:
+                //   - For a non-canonical lineage whose ancestry descends
+                //     below block_tree's window, this height-only canonical-
+                //     index lookup returns bounds for the WRONG block
+                //     (canonical hash at that height ≠ walk's `prev_hash`).
+                //   - The out-of-range case escalates to
+                //     `BlockBoundsLookupError` → `NodeFault` → panic, i.e.
+                //     a peer can craft a side-fork block that remote-
+                //     triggers a node restart.
+                //
+                // When merging with branch `fix-cdr-block-set` (4e21e25a),
+                // REPLACE this `None =>` arm with a canonical lookup
+                // mirroring `tx_inclusion::find_canonical_ledger_range`:
+                //   1. Use `curr_height - 1` as the `max_height` anchor.
+                //   2. Walk `block_tree` filtered to
+                //      `ChainState::Onchain`, fall through to
+                //      `MigratedBlockHashes` + `IrysBlockHeaders` for
+                //      older history.
+                //   3. Return `Ok(None)` on "off canonical lineage" —
+                //      caller routes this as a `Consensus` outcome,
+                //      NEVER as `BlockBoundsLookupError` / `NodeFault`.
+                //   4. Re-evaluate whether `BlockBoundsLookupError`'s
+                //      `NodeFault` classification still applies once this
+                //      site is the only construction path (paired marker
+                //      lives on the variant doc).
+                //
+                // Until that replacement lands, this arm is the C1
+                // vulnerability — DO NOT remove this comment without the
+                // replacement.
+                //
                 // Predecessor is below block_tree's window — delegate the
                 // remainder of the search to block_index's binary search,
-                // anchored at (curr_height - 1) so the bounds are
-                // fork-deterministic with the rest of this lookup.
+                // anchored at (curr_height - 1).
                 drop(tree);
                 let index = block_index_guard.read();
                 return index
