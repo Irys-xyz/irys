@@ -706,6 +706,10 @@ impl ValidationService {
                         // The operator gets a loud crash signal; the underlying bug isn't
                         // re-triggered by the next block as a silent data-level failure.
                         // See design/docs/vdf-validation-stall-detection.md.
+                        // SAFETY: abort_stalled_current(...) does not .await, and there is no other
+                        // .await between that call and this re-read, so the watchdog cannot have been
+                        // cleared by a concurrent task. Do not insert .await between these two points
+                        // without revisiting this expect.
                         let current_vdf = coordinator
                             .vdf_scheduler
                             .current

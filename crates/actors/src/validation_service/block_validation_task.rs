@@ -321,6 +321,19 @@ impl BlockValidationTask {
     ) -> ParentValidationResult {
         let parent_hash = self.sealed_block.header().previous_block_hash;
 
+        // Subscribe BEFORE the first state read so any parent state transition
+        // that happens between subscribe and read is buffered on the channel
+        // and observed by the next `recv()`. The previous lost-update window
+        // was historically closed by a `recent_validation_result` seed-store
+        // (removed in commit 10bb8c222 "drop dead recent_validation_result
+        // machinery"); the current safety net is structural: if the parent is
+        // absent from the tree at first-read, the `extra_checks` closure routes
+        // through `ValidationCancelReason::ParentMissing` → `is_internal() =
+        // true` → `InternalFailure` (SoftInternal). We do not need to observe
+        // the parent's exact fault outcome to safely park the child — any
+        // disappearance is treated as a soft-internal race and re-gossip will
+        // retry. Do not reorder: a check-then-subscribe variant would re-open
+        // the lost-update window.
         let mut block_state_rx = self
             .service_inner
             .service_senders

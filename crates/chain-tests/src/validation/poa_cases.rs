@@ -252,12 +252,8 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
 /// Distinct from `multi_slot_poa_test` (above), which forces migration by
 /// overriding `block_migration_depth = 1` and explicitly awaiting
 /// `wait_until_block_index_height` — masking the at-tip code path.
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()> {
-    // SAFETY: test code; env var set before other threads spawn.
-    unsafe { std::env::set_var("RUST_LOG", "info") };
-    initialize_tracing();
-
     let seconds_to_wait = 20;
     let chunk_size: usize = 32;
 

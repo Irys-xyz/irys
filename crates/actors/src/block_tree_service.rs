@@ -140,6 +140,33 @@ enum DiscardKind {
 /// discards in a single block window. See the field doc for full rationale.
 const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
 
+/// Emit the discard log line at the correct level for the given `DiscardKind`.
+///
+/// SoftInternal is a documented non-fault recovery path (eviction race,
+/// payload-cache miss, parent snapshot pruned) — `warn!` keeps alert noise
+/// tied to genuine peer rejections (the `Invalid` arm), which stay at
+/// `error!`. The structured fields are identical between the two arms so
+/// log-aggregation queries see the same shape.
+///
+/// Extracted from `discard_and_broadcast` so the level split is directly
+/// testable via `tracing-test` (see `log_level_split_tests`). A regression
+/// that flattens both arms to a single level would break those tests.
+fn emit_discard_log(
+    kind: DiscardKind,
+    block_hash: H256,
+    error_display: &str,
+    error_log_msg: &'static str,
+) {
+    match kind {
+        DiscardKind::SoftInternal => {
+            warn!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+        }
+        DiscardKind::Invalid => {
+            error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
+        }
+    }
+}
+
 /// Resolve the soft-internal `InternalFailure` variant to a bounded-cardinality
 /// snake_case reason tag for metrics labelling.
 ///
@@ -1169,14 +1196,7 @@ impl BlockTreeServiceInner {
 
         // SoftInternal is a documented non-fault recovery path — warn-level
         // keeps alerting tied to genuine peer rejections (Invalid arm).
-        match kind {
-            DiscardKind::SoftInternal => {
-                warn!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
-            }
-            DiscardKind::Invalid => {
-                error!(block.hash = %block_hash, error = %error_display, "{}", error_log_msg);
-            }
-        }
+        emit_discard_log(kind, block_hash, &error_display, error_log_msg);
         self.chain_sync_state
             .record_block_validation_error(diagnostic_record);
 
@@ -2448,5 +2468,69 @@ mod tests {
             third.is_none(),
             "duplicate Valid for already-recovered hash must not double-count"
         );
+    }
+
+    /// L8 regression coverage for the warn/error split landed in commit
+    /// `4a0d407cf` (chore(validation): close L2 + L5 — split discard log
+    /// levels). Before that change, every `discard_and_broadcast` arm logged
+    /// at `error!`, inflating alert noise on healthy nodes that hit eviction
+    /// races (SoftInternal is intentionally non-alarming — passive recovery
+    /// via the H3 LRU + re-gossip). Without these tests, a future refactor
+    /// that re-flattens both arms to a single level would silently re-trigger
+    /// the originally-flagged false-positive alert load.
+    ///
+    /// Tests bind to the level emitted by `emit_discard_log` (the helper
+    /// extracted from `discard_and_broadcast` so the split is unit-testable
+    /// without standing up the full block-tree service).
+    mod log_level_split_tests {
+        use super::*;
+
+        /// SoftInternal discards MUST log at `WARN` and MUST NOT log at
+        /// `ERROR`. A regression that flattens the split to a single
+        /// `error!` will fail the second assertion.
+        #[tracing_test::traced_test]
+        #[test]
+        fn soft_internal_discard_logs_at_warn() {
+            emit_discard_log(
+                DiscardKind::SoftInternal,
+                H256([0x11; 32]),
+                "execution payload cache evicted",
+                "block validation hit an internal failure (soft race); removing block from cache, fresh gossip can retry",
+            );
+
+            assert!(
+                logs_contain("WARN"),
+                "SoftInternal discard must emit at WARN level"
+            );
+            assert!(
+                !logs_contain("ERROR"),
+                "SoftInternal discard must NOT emit at ERROR level — that would re-trigger the L2 false-positive alert load"
+            );
+        }
+
+        /// Invalid (consensus-rejected, peer-attributable) discards MUST log
+        /// at `ERROR` and MUST NOT log at `WARN`. A regression that flattens
+        /// the split to a single `warn!` will fail the second assertion;
+        /// downgrading genuine peer rejections to WARN would hide a real
+        /// peer-attribution signal from `error!`-rate alerts.
+        #[tracing_test::traced_test]
+        #[test]
+        fn invalid_discard_logs_at_error() {
+            emit_discard_log(
+                DiscardKind::Invalid,
+                H256([0x22; 32]),
+                "shadow transaction invalid",
+                "block validation failed",
+            );
+
+            assert!(
+                logs_contain("ERROR"),
+                "Invalid discard must emit at ERROR level"
+            );
+            assert!(
+                !logs_contain("WARN"),
+                "Invalid discard must NOT emit at WARN level — peer-attributable rejections need to fire ERROR alerts"
+            );
+        }
     }
 }
