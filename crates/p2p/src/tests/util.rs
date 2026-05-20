@@ -1028,7 +1028,6 @@ pub(crate) fn data_handler_stub(
         chunk_ingress,
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
-
         gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_secs(5),
             IrysAddress::repeat_byte(2),

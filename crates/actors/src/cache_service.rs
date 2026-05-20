@@ -506,7 +506,7 @@ impl InnerCacheTask {
 
                 info!(
                     %data_root,
-                    block_set_at_eviction = ?cached.block_set,
+                    block_set_size = cached.block_set.len(),
                     txid_set_size = cached.txid_set.len(),
                     last_inclusion_height = ?inclusion_max_height,
                     expiry_height = ?cached.expiry_height,
@@ -514,6 +514,11 @@ impl InnerCacheTask {
                     %prune_height,
                     has_local_proof,
                     "cached_data_root.evict"
+                );
+                debug!(
+                    %data_root,
+                    block_set = ?cached.block_set,
+                    "cached_data_root.evict.block_set"
                 );
                 write_tx.delete::<IngressProofs>(data_root, None)?;
                 chunks_pruned = chunks_pruned
