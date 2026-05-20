@@ -3442,7 +3442,6 @@ pub fn get_assigned_ingress_proofs(
 ) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
-    let mut assigned_miners = 0;
 
     //  a) Get the canonical Submit-ledger range this tx contributed to at or
     //     before `parent_height`.  This replaces the historical
@@ -3470,7 +3469,76 @@ pub fn get_assigned_ingress_proofs(
         return Ok((vec![], 0));
     };
 
-    // Loop through all the ingress proofs for the published transaction and pre-validate them
+    // CONSENSUS RULE CHANGE (vs. the code this replaces):
+    //
+    // Old semantics: `assigned_miners` was set inside the per-proof loop, once
+    // per intersecting slot found for *that proof's* signer address.  Because
+    // the inner `slot_ranges` was a `HashMap`, iteration order was
+    // non-deterministic (RandomState), so when a miner held multiple
+    // intersecting slots the value written was whichever slot the HashMap
+    // happened to yield first.  In addition, the value was re-overwritten on
+    // each proof iteration ("last write wins"), so the final result depended on
+    // both proof ordering and HashMap randomness — a consensus-fork vector.
+    //
+    // New semantics: `assigned_miners` is the count of **unique miner
+    // addresses** assigned to *any* Submit-ledger slot whose chunk range
+    // intersects `block_range`.  It is a pure function of `(block_range,
+    // epoch_snapshot)` and is computed once, before the per-proof loop.
+    //
+    // Why the new semantics is correct:
+    //   1. Deterministic: the result is the same on every node regardless of
+    //      HashMap/BTreeMap key order or proof submission order.
+    //   2. Matches the variable name and the intent of the caller (the
+    //      `expected_assigned_proofs` clamp at the call site): "how many
+    //      distinct miners are eligible to contribute an assigned proof for
+    //      this tx?"  That is a property of the epoch, not of which proofs
+    //      were actually submitted.
+    //   3. Robust: if the "same miner never assigned to the same slot twice"
+    //      invariant is ever violated we still get a correct unique-address
+    //      count rather than double-counting.
+    //
+    // When `block_range` spans multiple slots whose miner sets overlap, the
+    // new value will be >= the old value (strictly larger if any miner covers
+    // more than one intersecting slot).  This is a consensus rule change and
+    // must be coordinated with a network upgrade.
+
+    // 1. Collect the slot indices of all Submit-ledger partitions whose
+    //    chunk range intersects block_range.
+    let intersecting_slots: HashSet<usize> = epoch_snapshot
+        .partition_assignments
+        .data_partitions
+        .iter()
+        .filter(|(_, pa)| pa.ledger_id == Some(DataLedger::Submit.into()))
+        .filter_map(|(_, pa)| pa.slot_index)
+        .filter(|&slot| {
+            let start = slot as u64 * config.consensus.num_chunks_in_partition;
+            let end = start + config.consensus.num_chunks_in_partition;
+            let slot_range = LedgerChunkRange(ie(
+                LedgerChunkOffset::from(start),
+                LedgerChunkOffset::from(end),
+            ));
+            block_range.intersection(&slot_range).is_some()
+        })
+        .collect();
+
+    // 2. Unique miner addresses across all intersecting slots.  This is the
+    //    eligibility population used to clamp `expected_assigned_proofs`.
+    let assigned_miners: usize = epoch_snapshot
+        .partition_assignments
+        .data_partitions
+        .iter()
+        .filter(|(_, pa)| {
+            pa.ledger_id == Some(DataLedger::Submit.into())
+                && pa
+                    .slot_index
+                    .is_some_and(|i| intersecting_slots.contains(&i))
+        })
+        .map(|(_, pa)| pa.miner_address)
+        .collect::<HashSet<IrysAddress>>()
+        .len();
+
+    // 3. Per-proof: classify each proof as assigned-or-not.  Never mutates
+    //    `assigned_miners` — that value is now fixed above.
     for ingress_proof in tx_proofs.iter() {
         // Validate ingress proof signature and data_root match the transaction
         let proof_address = ingress_proof
@@ -3480,36 +3548,10 @@ pub fn get_assigned_ingress_proofs(
                 reason: e.to_string(),
             })?;
 
-        // 1.) is the proof from a miner assigned to store the data in the submit ledger?
-
-        //  c) Get the slots the proof address is assigned to store
-        let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
-
-        // d) Get the ledger ranges of the slot indexes
-        let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
-            .iter()
-            .map(|index| {
-                let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
-                let start = *index as u64 * num_chunks_in_partition;
-                let end = start + num_chunks_in_partition;
-                let range = LedgerChunkRange(ie(
-                    LedgerChunkOffset::from(start),
-                    LedgerChunkOffset::from(end),
-                ));
-                (*index, range)
-            })
-            .collect();
-
-        // e) Get the number of unique addresses assigned to each slot
-        let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
-
-        //  f) are there any intersections of block and slot ranges?
-        for (slot_index, slot_range) in &slot_ranges {
-            if block_range.intersection(slot_range).is_some() {
-                assigned_miners = *slot_address_counts.get(slot_index).unwrap();
-                assigned_proofs.push(ingress_proof.clone());
-                break;
-            }
+        // Is the proof from a miner assigned to store the data in the submit ledger?
+        let proof_slots = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
+        if proof_slots.iter().any(|i| intersecting_slots.contains(i)) {
+            assigned_proofs.push(ingress_proof.clone());
         }
     }
 
@@ -3526,29 +3568,6 @@ fn get_submit_ledger_slot_assignments(
         .iter()
         .map(|pa| pa.slot_index.unwrap())
         .collect()
-}
-
-fn get_submit_ledger_slot_addresses(
-    slot_indexes: &Vec<usize>,
-    epoch_snapshot: &EpochSnapshot,
-) -> HashMap<usize, usize> {
-    let mut num_addresses_per_slot: HashMap<usize, usize> = HashMap::new();
-
-    for slot_index in slot_indexes {
-        let num_addresses = epoch_snapshot
-            .partition_assignments
-            .data_partitions
-            .iter()
-            .filter(|(_hash, pa)| {
-                pa.ledger_id == Some(DataLedger::Submit.into())
-                    && pa.slot_index == Some(*slot_index)
-            })
-            .count();
-
-        num_addresses_per_slot.insert(*slot_index, num_addresses);
-    }
-
-    num_addresses_per_slot
 }
 
 #[cfg(test)]
@@ -4918,6 +4937,387 @@ mod tests {
             miners, 1,
             "exactly one miner registered to the intersecting slot"
         );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // assigned_miners determinism tests
+    //
+    // These tests exercise the new semantics introduced by the consensus rule
+    // change in `get_assigned_ingress_proofs`:
+    //
+    //   assigned_miners = count of unique miner addresses across ALL
+    //   Submit-ledger slots intersecting block_range.
+    //
+    // The shared DB / BlockTree setup is the same across all three tests:
+    //   h0: Submit total_chunks = 10  (slot 0 covers [0, 10))
+    //   h1: Submit total_chunks = 25  (tx contributes chunks 10..=24, slot 1
+    //       covers [10, 20) and slot 2 covers [20, 30))
+    //
+    // ConsensusConfig::testing() has num_chunks_in_partition = 10, so:
+    //   slot 0 = [0, 10), slot 1 = [10, 20), slot 2 = [20, 30)
+    //
+    // block_range resolves to ii(10, 24) which intersects both slot 1 and
+    // slot 2.
+    // -----------------------------------------------------------------------
+
+    /// Helper: build the shared DB + BlockTree used by the three determinism
+    /// tests.  Returns (db, block_tree_guard, config, tx_id, data_root,
+    /// tx_header).
+    fn build_determinism_test_fixtures() -> eyre::Result<(
+        DatabaseProvider,
+        irys_domain::BlockTreeReadGuard,
+        Config,
+        H256,
+        H256,
+        DataTransactionHeader,
+    )> {
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height,
+            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::BlockTree;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            H256List,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        // Leak the TempDir so it lives for the duration of the test; the OS
+        // will clean it up anyway.
+        let _tmp = Box::leak(Box::new(tmp));
+
+        let env = open_or_create_db(
+            _tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        // tx contributes chunks 10..=24 to the Submit ledger
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        Ok((db, block_tree_guard, config, tx_id, data_root, header))
+    }
+
+    /// Regression: `block_range` spans two slots (slot 1 = [10,20), slot 2 =
+    /// [20,30)).  One signer is assigned to both slots (two partitions, same
+    /// miner).  `assigned_miners` must equal 1 (one unique address), be
+    /// stable across repeated calls, and the proof must be classified as
+    /// assigned.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_multi_slot_unique_address_count() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&consensus);
+
+        // Same miner assigned to two partitions, one in slot 1 and one in
+        // slot 2.  Both slots intersect block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for slot_index in [1_usize, 2_usize] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address: signer.address(),
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Generate a proof signed by the miner
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        // Call multiple times — result must be identical every time.
+        for run in 0..5 {
+            let (assigned, miners) = get_assigned_ingress_proofs(
+                std::slice::from_ref(&proof),
+                &header,
+                /* parent_height */ 5,
+                &block_tree_guard,
+                &db,
+                &config,
+                &epoch_snapshot,
+            )?;
+            assert_eq!(
+                miners, 1,
+                "run {run}: assigned_miners must be 1 (one unique address across both slots)"
+            );
+            assert_eq!(
+                assigned.len(),
+                1,
+                "run {run}: proof from the assigned miner must be classified as assigned"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Single-slot: `block_range` intersects exactly one slot.  Two distinct
+    /// miners each hold a partition in that slot.  `assigned_miners` == 2.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_single_slot_two_miners() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let signer_a = IrysSigner::random_signer(&consensus);
+        let signer_b = IrysSigner::random_signer(&consensus);
+
+        // Two miners, both assigned to slot 1 = [10, 20), which intersects
+        // the tx's block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for miner_address in [signer_a.address(), signer_b.address()] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(1),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Only signer_a submits a proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer_a,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            miners, 2,
+            "assigned_miners must equal the replication count of the intersecting slot"
+        );
+        assert_eq!(assigned.len(), 1, "signer_a's proof must be classified");
+
+        Ok(())
+    }
+
+    /// Rule-change lock-in: distinct miners in DIFFERENT intersecting slots.
+    /// This is the exact scenario where the new semantics (unique addresses
+    /// across all intersecting slots) diverges from the old semantics (count
+    /// from whichever single slot the HashMap happened to yield first).
+    ///
+    /// Setup: `block_range` = [10, 24] spans slot 1 = [10, 20) and slot 2 =
+    /// [20, 30).  Alice holds the only partition in slot 1; Bob holds the
+    /// only partition in slot 2.  Alice submits a proof.
+    ///
+    /// - Old code: would have iterated Alice's slot list, found slot 1 as
+    ///   her sole intersecting slot, and returned `assigned_miners = 1`
+    ///   (count of addresses in slot 1).
+    /// - New code: counts unique addresses across all intersecting slots —
+    ///   {Alice, Bob} = 2.
+    ///
+    /// Asserting `miners == 2` locks in the new value.  A regression to the
+    /// old semantics would return 1 and fail this test.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_distinct_miners_across_intersecting_slots() -> eyre::Result<()> {
+        use irys_types::{
+            ConsensusConfig, ingress::generate_ingress_proof, irys::IrysSigner,
+            partition::PartitionAssignment,
+        };
+
+        let (db, block_tree_guard, config, _tx_id, data_root, header) =
+            build_determinism_test_fixtures()?;
+
+        let consensus = ConsensusConfig::testing();
+        let alice = IrysSigner::random_signer(&consensus);
+        let bob = IrysSigner::random_signer(&consensus);
+
+        // Alice in slot 1, Bob in slot 2.  Both slots intersect block_range.
+        let mut epoch_snapshot = EpochSnapshot::default();
+        for (miner_address, slot_index) in [(alice.address(), 1_usize), (bob.address(), 2_usize)] {
+            let pa = PartitionAssignment {
+                partition_hash: H256::random(),
+                miner_address,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(slot_index),
+            };
+            epoch_snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(pa.partition_hash, pa);
+        }
+
+        // Alice submits a proof.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &alice,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            miners, 2,
+            "new semantics: unique addresses across both intersecting slots = 2 \
+             (old semantics would have returned 1 — the count from Alice's single slot)"
+        );
+        assert_eq!(
+            assigned.len(),
+            1,
+            "Alice's proof must be classified as assigned"
+        );
+
+        Ok(())
+    }
+
+    /// Zero proofs: with at least one intersecting slot `assigned_miners > 0`
+    /// and `assigned_proofs` is empty.  With no intersecting slot (block_range
+    /// is None / tx unconfirmed) both are 0.
+    #[test_log::test(tokio::test)]
+    async fn assigned_miners_zero_proofs_returns_correct_counts() -> eyre::Result<()> {
+        use irys_types::partition::PartitionAssignment;
+
+        let (db, block_tree_guard, config, _tx_id, _data_root, header) =
+            build_determinism_test_fixtures()?;
+
+        // Register one miner to slot 1 — intersects block_range [10, 24].
+        let mut epoch_snapshot = EpochSnapshot::default();
+        let pa = PartitionAssignment {
+            partition_hash: H256::random(),
+            miner_address: IrysAddress::random(),
+            ledger_id: Some(DataLedger::Submit as u32),
+            slot_index: Some(1),
+        };
+        epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .insert(pa.partition_hash, pa);
+
+        // Pass zero proofs — must still count the intersecting miners correctly.
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert!(assigned.is_empty(), "no proofs submitted");
+        assert_eq!(miners, 1, "one miner in the intersecting slot");
+
+        // With an empty epoch_snapshot (no partitions) assigned_miners == 0.
+        let empty_snapshot = EpochSnapshot::default();
+        let (assigned2, miners2) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &empty_snapshot,
+        )?;
+        assert!(assigned2.is_empty());
+        assert_eq!(miners2, 0, "no partitions → zero assigned_miners");
 
         Ok(())
     }
