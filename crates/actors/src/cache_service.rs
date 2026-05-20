@@ -418,26 +418,59 @@ impl InnerCacheTask {
             // candidate for eviction — but keep the local-proof exemption so
             // an entry that still carries a useful commitment survives.
             let mut inclusion_max_height: Option<u64> = None;
+            let mut all_txs_confirmed = true;
             for tx_id in cached.txid_set.iter() {
-                if let Some(metadata) = irys_database::get_data_tx_metadata(&write_tx, tx_id)?
-                    && let Some(h) = metadata.included_height
+                match irys_database::get_data_tx_metadata(&write_tx, tx_id)?
+                    .and_then(|m| m.included_height)
                 {
-                    inclusion_max_height = Some(inclusion_max_height.map_or(h, |x| x.max(h)));
+                    Some(h) => {
+                        inclusion_max_height =
+                            Some(inclusion_max_height.map_or(h, |x| x.max(h)));
+                    }
+                    // No metadata row, or row exists with `included_height = None`:
+                    // this tx (sharing `data_root` with the rest of `txid_set`) is
+                    // still pending.  `inclusion_max_height` alone would prematurely
+                    // prune chunks the pending tx still needs — e.g. a Publish-
+                    // promotion sibling of an already-confirmed term-ledger tx that
+                    // shares the same `data_root`.
+                    None => all_txs_confirmed = false,
                 }
             }
-            let horizon = match (inclusion_max_height, cached.expiry_height) {
-                (Some(h), _) => Some(h),
-                (None, Some(e)) => Some(e),
-                (None, None) => None,
+
+            // Horizon policy:
+            //  - All txs confirmed: use the latest `included_height` as the
+            //    boundary (falling back to `expiry_height`, then `(None, None)`
+            //    anomalous-eviction).
+            //  - Any tx still pending: defer to `expiry_height`.  An already-
+            //    confirmed sibling's `included_height` does NOT bind the
+            //    pending tx's chunk lifetime; using it as the horizon would
+            //    prematurely prune chunks the pending tx still needs.  If
+            //    expiry was already cleared by the sibling confirmation,
+            //    `horizon` is `None` and the eviction-candidate arm protects
+            //    the entry until the pending tx either confirms or is dropped
+            //    by mempool TTL.
+            let horizon = if all_txs_confirmed {
+                match (inclusion_max_height, cached.expiry_height) {
+                    (Some(h), _) => Some(h),
+                    (None, Some(e)) => Some(e),
+                    (None, None) => None,
+                }
+            } else {
+                cached.expiry_height
             };
 
             // Decide whether this entry is a candidate for eviction.
             //  * horizon present: the historical "past the bound" check.
-            //  * horizon absent: anomalous (None, None) state — evict unless
-            //    the local-proof exemption below applies.
-            let is_eviction_candidate = match horizon {
-                Some(max_height) => max_height < prune_height,
-                None => true,
+            //  * horizon absent + all txs confirmed: truly anomalous state
+            //    (empty `txid_set`, or all txs confirmed-and-orphaned with
+            //    expiry already cleared) — evict unless the local-proof
+            //    exemption below applies.
+            //  * horizon absent + pending tx remains: protect (see horizon
+            //    policy above).
+            let is_eviction_candidate = match (horizon, all_txs_confirmed) {
+                (Some(max_height), _) => max_height < prune_height,
+                (None, true) => true,
+                (None, false) => false,
             };
 
             trace!(
@@ -1003,7 +1036,7 @@ impl ChunkCacheService {
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, database, open_or_create_db,
+        IrysDatabaseArgs as _, database, db_cache::CachedDataRoot, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
@@ -1805,15 +1838,19 @@ mod tests {
         Ok(())
     }
 
-    /// Anomalous `(None, None)` state — no `expiry_height`, no
-    /// `included_height` for any txid in `txid_set`, no local ingress proof.
-    /// Under the lifetime model this entry has lost both bounds and should be
-    /// evicted on the next prune cycle.  Reachable in practice when a reorg
-    /// cleared `included_height` for an orphaned tx, `expiry_height` had
-    /// already been cleared at the now-orphaned confirmation, and the mempool
-    /// orphan re-anchor path did not restore expiry.
+    /// Truly anomalous `(None, None)` state: empty `txid_set`, no
+    /// `expiry_height`, no local ingress proof.  Under the lifetime model
+    /// this entry has no remaining tenants and no bound — evict on next
+    /// prune cycle.
+    ///
+    /// Note: the prior version of this test exercised a CDR with a pending
+    /// tx in `txid_set` and asserted eviction.  That semantics was changed
+    /// when the pending-tx guard was added to protect cross-ledger
+    /// same-`data_root` sibling txs from premature prune; pending txs now
+    /// keep the CDR alive (see `does_not_prune_cdr_with_pending_sibling_tx`).
+    /// The truly-anomalous arm now only fires when `txid_set` is empty.
     #[tokio::test]
-    async fn prunes_anomalous_none_none_state() -> eyre::Result<()> {
+    async fn prunes_truly_anomalous_empty_txid_set() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
@@ -1824,32 +1861,20 @@ mod tests {
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-            tx: DataTransactionHeaderV1 {
-                data_size: 64,
-                ..Default::default()
-            },
-            metadata: DataTransactionMetadata::new(),
-        });
-        // cache_data_root(_, _, None) leaves expiry_height=None, and we never
-        // populate IrysDataTxMetadata for the tx — so the txid_set walk in
-        // prune_data_root_cache produces inclusion_max_height=None.  The
-        // resulting CDR is in the (None, None) state.
-        db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
-            eyre::Ok(())
-        })??;
-
-        // Sanity: entry exists and is in the (None, None) state.
-        db.view(|rtx| -> eyre::Result<()> {
-            let cdr = rtx
-                .get::<CachedDataRoots>(tx_header.data_root)?
-                .ok_or_else(|| eyre::eyre!("CachedDataRoots missing before prune"))?;
-            eyre::ensure!(
-                cdr.expiry_height.is_none(),
-                "fixture expected expiry_height=None, got {:?}",
-                cdr.expiry_height
-            );
+        // Construct a CDR with empty txid_set directly — the only state
+        // reachable by `(horizon=None, all_txs_confirmed=true)` after the
+        // pending-tx guard.
+        let data_root = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![],
+            block_set: vec![],
+            expiry_height: None,
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
         })??;
 
@@ -1872,15 +1897,13 @@ mod tests {
             cache_sender: tx,
         };
 
-        // Any prune_height — the (None, None) state has no bound, so the
-        // entry is an eviction candidate regardless.
         service_task.prune_data_root_cache(1)?;
 
         db.view(|rtx| -> eyre::Result<()> {
-            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
             eyre::ensure!(
                 !has_root,
-                "anomalous (None, None) CachedDataRoots entry should have been pruned"
+                "truly-anomalous CachedDataRoots entry (empty txid_set, no bounds) should be pruned"
             );
             Ok(())
         })??;
@@ -1888,10 +1911,10 @@ mod tests {
         Ok(())
     }
 
-    /// Companion to `prunes_anomalous_none_none_state`: the same anomalous
-    /// `(None, None)` state, but with a local ingress proof present.  The
-    /// local-proof exemption should override the eviction so any useful
-    /// commitment is preserved.
+    /// Pending-tx + local-proof: the local-proof exemption is a second
+    /// safety net.  The pending-tx guard already protects this CDR (so the
+    /// local-proof check is not reached), but verifying the entry survives
+    /// covers both protections by construction.
     #[tokio::test]
     async fn does_not_prune_anomalous_none_none_state_with_local_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
@@ -1954,6 +1977,90 @@ mod tests {
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots in (None, None) state with local proof should NOT have been pruned"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Cross-ledger same-`data_root` regression: when two txs share a
+    /// `data_root` and one is confirmed (has `included_height`) while the
+    /// other is still pending (no metadata row), the CDR must NOT be evicted
+    /// on the confirmed tx's height alone — the pending tx still needs the
+    /// chunks.  Without the `all_txs_confirmed` guard, `inclusion_max_height`
+    /// derived from the confirmed sibling would shadow the now-cleared
+    /// `expiry_height` and the CDR would be pruned prematurely, breaking
+    /// Publish-promotion liveness when two ledgers reference the same data.
+    #[tokio::test]
+    async fn does_not_prune_cdr_with_pending_sibling_tx() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let data_root = H256::random();
+        let confirmed_tx_id = H256::random();
+        let pending_tx_id = H256::random();
+        let make_tx = |id: H256| {
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id,
+                    data_root,
+                    data_size: 64,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            })
+        };
+        let confirmed_tx = make_tx(confirmed_tx_id);
+        let pending_tx = make_tx(pending_tx_id);
+
+        db.update(|wtx| -> eyre::Result<()> {
+            // Both txs land in the same CDR.txid_set via the shared data_root.
+            database::cache_data_root(wtx, &confirmed_tx, None)?;
+            database::cache_data_root(wtx, &pending_tx, None)?;
+            // The confirmed sibling gets an inclusion height (term-ledger
+            // confirmation); the pending tx remains without a metadata row.
+            irys_database::set_data_tx_included_height(wtx, &confirmed_tx_id, 5)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {:?}", e))?;
+            Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // `prune_height = 100` is well past the confirmed tx's `included_height`
+        // = 5.  Without the pending-tx guard the CDR would be evicted on
+        // inclusion alone.
+        service_task.prune_data_root_cache(100)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
+            eyre::ensure!(
+                has_root,
+                "CDR with pending sibling tx (no included_height) must NOT be pruned"
             );
             Ok(())
         })??;
