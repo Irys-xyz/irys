@@ -578,6 +578,110 @@ impl PreValidationError {
     pub fn is_internal_failure(&self) -> bool {
         self.classify().is_internal_failure()
     }
+
+    /// Per-variant snake_case label for the
+    /// `irys.block.pre_validation_failed_total{reason}` counter and used by
+    /// [`ValidationError::metric_label`] when delegating the `PreValidation`
+    /// arm. Bounded-cardinality (capped at enum size).
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without labelling it here is a
+    /// compile error by design: silently routing through a generic
+    /// `"invalid"` would mask per-stage node-fault rates (M1 audit
+    /// 2026-05-20). Mirrors the SAFETY pattern documented on
+    /// [`PreValidationError::classify`].
+    ///
+    /// MERGE-NOTE: tag values for variants shared with branch
+    /// `fix-cdr-block-set` (commit 4e21e25a) match identically so the
+    /// cross-branch merge is mechanically clean and dashboards see
+    /// continuity. Tags for variants only in this branch
+    /// (`AssignedProofBlockMissing`, `PoALedgerInactive`) follow the same
+    /// snake_case style.
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::BlockBoundsLookupError(_) => "block_bounds_lookup",
+            Self::AssignedProofBlockMissing { .. } => "assigned_proof_block_missing",
+            Self::BlockSignatureInvalid => "block_signature_invalid",
+            Self::CascadeNotConfigured { .. } => "cascade_not_configured",
+            Self::CumulativeDifficultyMismatch { .. } => "cumulative_difficulty_mismatch",
+            Self::DifficultyMismatch { .. } => "difficulty_mismatch",
+            Self::EmaMismatch => "ema_mismatch",
+            Self::EmaSnapshotError(_) => "ema_snapshot_error",
+            Self::IngressProofsMissing => "ingress_proofs_missing",
+            Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
+            Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
+            Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
+            Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
+            Self::MerkleProofInvalid(_) => "merkle_proof_invalid",
+            Self::OraclePriceInvalid => "oracle_price_invalid",
+            Self::UpdateCacheForScheduledValidationError(_) => "update_cache_scheduled_validation",
+            Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
+            Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
+            Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
+            Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
+            Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
+            Self::PoAChunkOffsetOutOfTxBounds => "poa_chunk_offset_out_of_tx_bounds",
+            Self::PartitionAssignmentMissing { .. } => "partition_assignment_missing",
+            Self::PartitionAssignmentSlotIndexMissing { .. } => "partition_slot_index_missing",
+            Self::PartitionAssignmentSlotIndexTooLarge { .. } => "partition_slot_index_too_large",
+            Self::PoADataPartitionExpired { .. } => "poa_data_partition_expired",
+            Self::PreviousCumulativeDifficultyMismatch { .. } => "prev_cumulative_diff_mismatch",
+            Self::PreviousSolutionHashMismatch { .. } => "prev_solution_hash_mismatch",
+            Self::RewardCurveError(_) => "reward_curve_error",
+            Self::RewardMismatch { .. } => "reward_mismatch",
+            Self::SolutionHashBelowDifficulty { .. } => "solution_hash_below_difficulty",
+            Self::SolutionHashLinkInvalid { .. } => "solution_hash_link_invalid",
+            Self::SystemTimeError(_) => "system_time_error",
+            Self::TermLedgerExpiryMismatch { .. } => "term_ledger_expiry_mismatch",
+            Self::TimestampOlderThanParent { .. } => "timestamp_older_than_parent",
+            Self::TimestampTooFarInFuture { .. } => "timestamp_too_far_in_future",
+            Self::ValidationServiceUnreachable => "validation_service_unreachable",
+            Self::InternalTaskJoin(_) => "internal_task_join",
+            Self::VDFCheckpointsInvalid(_) => "vdf_checkpoints_invalid",
+            Self::VDFPreviousOutputMismatch { .. } => "vdf_prev_output_mismatch",
+            Self::HeightInvalid { .. } => "height_invalid",
+            Self::LastEpochHashMismatch { .. } => "last_epoch_hash_mismatch",
+            Self::PublishTxMissingPriorSubmit { .. } => "publish_tx_missing_prior_submit",
+            Self::PublishTxAlreadyIncluded { .. } => "publish_tx_already_included",
+            Self::InvalidPromotionPath { .. } => "invalid_promotion_path",
+            Self::SubmitTxAlreadyIncluded { .. } => "submit_tx_already_included",
+            Self::TxFoundInMultipleBlocks { .. } => "tx_in_multiple_blocks",
+            Self::TxInMultipleLedgers { .. } => "tx_in_multiple_ledgers",
+            Self::PublishTxProofLengthMismatch => "publish_tx_proof_length_mismatch",
+            Self::DataLedgerExtractionFailed(_) => "data_ledger_extraction_failed",
+            Self::PreviousTxInclusionsFailed(_) => "prev_tx_inclusions_failed",
+            Self::InvalidLedgerIdForTx { .. } => "invalid_ledger_id_for_tx",
+            Self::InvalidLedgerId { .. } => "invalid_ledger_id",
+            Self::FeeCalculationFailed(_) => "fee_calculation_failed",
+            Self::InsufficientPermFee { .. } => "insufficient_perm_fee",
+            Self::InsufficientTermFee { .. } => "insufficient_term_fee",
+            Self::InvalidTermFeeStructure { .. } => "invalid_term_fee_structure",
+            Self::InvalidPermFeeStructure { .. } => "invalid_perm_fee_structure",
+            Self::SubmitTxHasPromotedHeight { .. } => "submit_tx_has_promoted_height",
+            Self::TermLedgerTxHasPermFee { .. } => "term_ledger_tx_has_perm_fee",
+            Self::PublishLedgerProofCountMismatch { .. } => "publish_ledger_proof_count_mismatch",
+            Self::IngressProofCountMismatch { .. } => "ingress_proof_count_mismatch",
+            Self::AssignedProofCountMismatch { .. } => "assigned_proof_count_mismatch",
+            Self::InvalidIngressProof { .. } => "invalid_ingress_proof",
+            Self::IngressProofMismatch { .. } => "ingress_proof_mismatch",
+            Self::DuplicateIngressProofSigner { .. } => "duplicate_ingress_proof_signer",
+            Self::UnstakedIngressProofSigner { .. } => "unstaked_ingress_proof_signer",
+            Self::DatabaseError { .. } => "database_error",
+            Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
+            Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
+            Self::MissingTransactions(_) => "missing_transactions",
+            Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
+            Self::InvalidTransactionSignature(_) => "invalid_tx_signature",
+            Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
+            Self::UnexpectedCommitmentTransactions => "unexpected_commitment_txs",
+            Self::InvalidDataLedgersLength { .. } => "invalid_data_ledgers_length",
+            Self::AddBlockFailed { .. } => "add_block_failed",
+            Self::CachePoisoned { .. } => "cache_poisoned",
+            Self::ParentNotInCache { .. } => "parent_not_in_cache",
+        }
+    }
 }
 
 /// Why a block validation task was cancelled before producing a verdict.
@@ -969,9 +1073,13 @@ impl ValidationError {
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. } => "internal_error",
+            // Per-variant snake_case tag — pre-validation may surface
+            // node-fault, soft-internal, or peer-attributable rejections;
+            // the generic `"invalid"` would undercount local-state corruption
+            // at this stage (M1 audit 2026-05-20).
+            Self::PreValidation(e) => e.metric_reason(),
             // consensus rejections — all remaining variants.
-            Self::PreValidation(_)
-            | Self::VdfValidationFailed(_)
+            Self::VdfValidationFailed(_)
             | Self::SeedDataInvalid(_)
             | Self::ExecutionLayerFailed(_)
             | Self::RecallRangeInvalid(_)
@@ -1073,6 +1181,77 @@ mod metric_label_tests {
         assert_eq!(err.metric_label(), "invalid");
         let err = ValidationError::Other("misc".into());
         assert_eq!(err.metric_label(), "invalid");
+
+        // PreValidation — delegates to the inner variant's `metric_reason()`
+        // so dashboards can isolate node-fault / soft-internal / consensus
+        // failures at the pre-validation stage (M1 audit 2026-05-20).
+        // Spot-check one variant from each `ErrorClass`:
+        //   * NodeFault — `DatabaseError` (local MDBX I/O failure).
+        let err = ValidationError::PreValidation(PreValidationError::DatabaseError {
+            error: "mdbx i/o".into(),
+        });
+        assert_eq!(err.metric_label(), "database_error");
+        //   * SoftInternal — `ParentNotInCache` (reorg/prune race; peer innocent).
+        let err = ValidationError::PreValidation(PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        });
+        assert_eq!(err.metric_label(), "parent_not_in_cache");
+        //   * Consensus — `MerkleProofInvalid` (peer-attributable).
+        let err =
+            ValidationError::PreValidation(PreValidationError::MerkleProofInvalid("bad".into()));
+        assert_eq!(err.metric_label(), "merkle_proof_invalid");
+    }
+
+    /// `PreValidationError::metric_reason` returns a distinct snake_case tag
+    /// per variant; the match has no `_` wildcard so adding a new variant
+    /// without tagging it is a compile error. Spot-check one representative
+    /// from each `ErrorClass` (NodeFault / SoftInternal / Consensus) — the
+    /// rest is covered by the compile-time exhaustiveness check.
+    #[test]
+    fn pre_validation_metric_reason_exhaustive_coverage() {
+        // NodeFault — local MDBX I/O.
+        let err = PreValidationError::DatabaseError {
+            error: "mdbx i/o".into(),
+        };
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "database_error");
+
+        // NodeFault — block-bounds local-index inconsistency.
+        let err = PreValidationError::BlockBoundsLookupError("empty index".into());
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "block_bounds_lookup");
+
+        // NodeFault — verifier-thread panic captured by spawn_blocking.
+        let err = PreValidationError::InternalTaskJoin("panicked".into());
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "internal_task_join");
+
+        // SoftInternal — fork-spanning `block_set` walk surfaced a pruned hash.
+        let err = PreValidationError::AssignedProofBlockMissing {
+            block_hash: H256::zero(),
+            tx_id: H256::zero(),
+        };
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert_eq!(err.metric_reason(), "assigned_proof_block_missing");
+
+        // SoftInternal — parent missing from in-memory cache due to prune/reorg race.
+        let err = PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        };
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert_eq!(err.metric_reason(), "parent_not_in_cache");
+
+        // Consensus — peer-attributable merkle proof failure.
+        let err = PreValidationError::MerkleProofInvalid("bad".into());
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert_eq!(err.metric_reason(), "merkle_proof_invalid");
+
+        // Consensus — peer-supplied ledger id inactive in the local chain.
+        let err = PreValidationError::PoALedgerInactive { ledger_id: 99 };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert_eq!(err.metric_reason(), "poa_ledger_inactive");
     }
 
     /// Regression coverage for the round-6 + R7 work: the
