@@ -24,6 +24,7 @@ use irys_types::{
 use nodit::interval::ii;
 use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
+use std::sync::Arc;
 
 /// Returns the Submit-ledger chunk range that this tx contributed to its
 /// confirming canonical block, or `None` if the tx is not yet confirmed on
@@ -158,26 +159,31 @@ fn lookup_via_block_tree(
             continue;
         }
 
-        let prev = if let Some(p) = tree.get_block(&block.previous_block_hash).cloned() {
-            Some(p)
-        } else if block.height == 0 {
-            None
-        } else {
-            // Same invariant as the migrated path: a non-genesis canonical
-            // block's parent must be reachable.  None from both tree and DB
-            // would silently degrade the range; treat it as corruption.
-            let from_db =
-                db.view(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))??;
-            Some(from_db.ok_or_else(|| {
-                eyre::eyre!(
-                    "block header storage inconsistent: block {} at height {} references prev {} which is missing from both block_tree and IrysBlockHeaders",
-                    block.block_hash,
-                    block.height,
-                    block.previous_block_hash
-                )
-            })?)
-        };
-        return compute_submit_range(block.as_ref(), prev.as_ref());
+        // Tree-resident parent: cheap clone, no DB I/O, guard stays held.
+        if let Some(prev) = tree.get_block(&block.previous_block_hash).cloned() {
+            return compute_submit_range(block.as_ref(), Some(&prev));
+        }
+        if block.height == 0 {
+            return compute_submit_range(block.as_ref(), None);
+        }
+        // Parent is past the tree window — fall back to the DB.  Clone the
+        // current block (Arc bump) and release the read guard before issuing
+        // the MDBX read so we don't hold the BlockTree lock across I/O.  Same
+        // invariant as the migrated path: a non-genesis canonical block's
+        // parent must be reachable; None from both tree and DB is corruption.
+        let block = Arc::clone(block);
+        let prev_hash = block.previous_block_hash;
+        drop(tree);
+        let from_db = db.view(|tx| block_header_by_hash(tx, &prev_hash, false))??;
+        let prev = from_db.ok_or_else(|| {
+            eyre::eyre!(
+                "block header storage inconsistent: block {} at height {} references prev {} which is missing from both block_tree and IrysBlockHeaders",
+                block.block_hash,
+                block.height,
+                block.previous_block_hash
+            )
+        })?;
+        return compute_submit_range(block.as_ref(), Some(&prev));
     }
     Ok(None)
 }
@@ -754,18 +760,22 @@ mod tests {
     // Submit-membership guard on the migrated path
     // -----------------------------------------------------------------------
 
-    /// A tx whose `included_height` points at a block where the tx is in the
-    /// OneYear ledger (not Submit) must return `Ok(None)` — the Submit guard
-    /// must fire.
-    #[test_log::test(tokio::test)]
-    async fn migrated_oneyear_only_tx_returns_none() -> eyre::Result<()> {
+    /// A tx whose `included_height` points at a block where the tx lives in a
+    /// non-Submit term ledger (OneYear / ThirtyDay) must return `Ok(None)` —
+    /// the Submit-membership guard must fire.
+    #[rstest::rstest]
+    #[case::oneyear(DataLedger::OneYear)]
+    #[case::thirtyday(DataLedger::ThirtyDay)]
+    #[tokio::test]
+    async fn migrated_term_only_tx_returns_none(
+        #[case] ledger: DataLedger,
+    ) -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;
 
         let tx_id = H256::random();
         let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
-        // h1 has the tx in OneYear ledger, NOT in Submit.
-        let h1 =
-            make_signed_header_with_term_tx(1, h0.block_hash, 1, 10, DataLedger::OneYear, tx_id);
+        // h1 has the tx in the term ledger only, NOT in Submit.
+        let h1 = make_signed_header_with_term_tx(1, h0.block_hash, 1, 10, ledger, tx_id);
 
         put_block_header(&db, &h0)?;
         put_block_header(&db, &h1)?;
@@ -784,40 +794,7 @@ mod tests {
         )?;
         assert!(
             result.is_none(),
-            "OneYear-only tx must not produce a Submit range"
-        );
-        Ok(())
-    }
-
-    /// A tx whose `included_height` points at a block where the tx is in the
-    /// ThirtyDay ledger (not Submit) must return `Ok(None)`.
-    #[test_log::test(tokio::test)]
-    async fn migrated_thirtyday_only_tx_returns_none() -> eyre::Result<()> {
-        let (db, _tmp) = open_db()?;
-
-        let tx_id = H256::random();
-        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
-        // h1 has the tx in ThirtyDay ledger, NOT in Submit.
-        let h1 =
-            make_signed_header_with_term_tx(1, h0.block_hash, 1, 10, DataLedger::ThirtyDay, tx_id);
-
-        put_block_header(&db, &h0)?;
-        put_block_header(&db, &h1)?;
-        mark_migrated(&db, 0, h0.block_hash)?;
-        mark_migrated(&db, 1, h1.block_hash)?;
-        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
-
-        let guard = empty_block_tree_guard();
-        let result = find_canonical_ledger_range(
-            &tx_id,
-            /* max_height */ 5,
-            ConsensusConfig::testing().block_migration_depth,
-            &guard,
-            &db,
-        )?;
-        assert!(
-            result.is_none(),
-            "ThirtyDay-only tx must not produce a Submit range"
+            "{ledger:?}-only tx must not produce a Submit range"
         );
         Ok(())
     }

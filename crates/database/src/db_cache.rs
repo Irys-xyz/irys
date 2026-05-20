@@ -93,22 +93,23 @@ pub struct CachedDataRoot {
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
 
-    /// Block hashes for canonical blocks that have included a tx referencing
-    /// this `data_root`.  Maintained authoritatively by
-    /// `BlockMigrationService::persist_metadata` inside the same DB
-    /// transaction as the tip change: it appends the new tip's block hash
-    /// for any existing entry and scrubs hashes for `blocks_to_clear`, so
-    /// orphan entries do not survive past the reorg that produced them.
-    /// `cache_data_root` (called later from mempool's `on_block_confirmed`)
-    /// idempotently re-adds the same hash; it does not introduce orphans
-    /// because the migration write that precedes it has already established
-    /// the canonical contents for the tip.
+    /// Block hashes for blocks whose **Submit ledger** has included a tx
+    /// referencing this `data_root`.  Maintained by two writers:
+    ///   - **Mempool `BlockConfirmed`** writes the confirming block hash on
+    ///     each newly confirmed tip (pre-migration forward-fill).  This is
+    ///     what lets chunks arriving *after* block confirmation find a
+    ///     populated `block_set`.
+    ///   - **`BlockMigrationService::persist_metadata`** scrubs orphaned
+    ///     block hashes during reorgs and idempotently appends the
+    ///     canonical hash for any tx whose CDR exists at migration time
+    ///     (update-only — never fabricates).
     ///
-    /// Use as a cheap "has this data_root been confirmed in any block?"
-    /// gate.  Range / slot lookups still belong to
+    /// Treat as a hint, not consensus state.  A stale `BlockConfirmed`
+    /// processed after a reorg can leave an orphan hash here; range / slot
+    /// lookups belong to
     /// `irys_actors::tx_inclusion::find_canonical_ledger_range`, which
     /// derives canonical truth from `IrysDataTxMetadata` +
-    /// `MigratedBlockHashes` rather than this set.
+    /// `MigratedBlockHashes` instead of trusting this set.
     pub block_set: Vec<H256>,
 
     /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used

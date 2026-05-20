@@ -75,7 +75,12 @@ pub struct BlockTree {
     // Track max cumulative difficulty
     max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)
 
-    // Height -> Hash mapping
+    // Height -> Hash mapping.  The inner container is intentionally
+    // `HashSet`: the only reader (`get_hashes_for_height`) is API-server
+    // observability and does not feed consensus.  If a consensus-path
+    // caller is ever added, switch to `BTreeSet<BlockHash>` — mirroring
+    // the `solutions` field — to keep iteration deterministic across
+    // nodes.
     height_index: BTreeMap<u64, HashSet<BlockHash>>,
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
