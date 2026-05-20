@@ -77,11 +77,11 @@ fn lookup_via_migrated_metadata(
                 block_hash
             )
         })?;
-        // Defense-in-depth: after P0-1, `included_height` for OneYear/ThirtyDay
-        // txs points at their own term-ledger block, not a Submit block.  If any
-        // future caller passes such a tx_id here, `compute_submit_range` would
-        // return a wrong, unrelated Submit delta.  Mirror the same guard that
-        // `lookup_via_block_tree` already applies (see line ~124).
+        // `included_height` for OneYear/ThirtyDay txs points at their own
+        // term-ledger block, not a Submit block.  Without this guard,
+        // `compute_submit_range` would return a wrong, unrelated Submit
+        // delta for any such tx_id passed in.  Mirrors the same Submit-
+        // membership check the tree path applies.
         let submit_txs = &block.data_ledgers[DataLedger::Submit].tx_ids.0;
         if !submit_txs.iter().any(|t| t == tx_id) {
             return Ok(None);
@@ -158,8 +158,7 @@ fn lookup_via_block_tree(
             continue;
         }
 
-        let prev_in_tree = tree.get_block(&block.previous_block_hash).cloned();
-        let prev = if let Some(p) = prev_in_tree {
+        let prev = if let Some(p) = tree.get_block(&block.previous_block_hash).cloned() {
             Some(p)
         } else if block.height == 0 {
             None
@@ -659,7 +658,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // P1-1 tests
+    // Tree-vs-migrated-DB precedence + Submit-membership guard
     // -----------------------------------------------------------------------
 
     /// Helper: build a block header whose tx_id appears in the given non-Submit
@@ -696,9 +695,9 @@ mod tests {
         header
     }
 
-    /// P1-1: when the DB has a corrupt entry but the block_tree has the
-    /// correct block, `find_canonical_ledger_range` must return the tree's
-    /// value, proving the tree path wins.
+    /// When the DB has a corrupt entry but the block_tree has the correct
+    /// block, `find_canonical_ledger_range` must return the tree's value,
+    /// proving the tree path wins.
     ///
     /// Corruption: h1 in the DB has a wrong `total_chunks` for the Submit
     /// ledger (999 instead of 25).  The block_tree holds the correct h1 with
@@ -752,12 +751,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // P1-2 tests
+    // Submit-membership guard on the migrated path
     // -----------------------------------------------------------------------
 
-    /// P1-2: a tx whose `included_height` points at a block where the tx is
-    /// in the OneYear ledger (not Submit) must return `Ok(None)` — the Submit
-    /// guard must fire.
+    /// A tx whose `included_height` points at a block where the tx is in the
+    /// OneYear ledger (not Submit) must return `Ok(None)` — the Submit guard
+    /// must fire.
     #[test_log::test(tokio::test)]
     async fn migrated_oneyear_only_tx_returns_none() -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;
@@ -790,8 +789,8 @@ mod tests {
         Ok(())
     }
 
-    /// P1-2: a tx whose `included_height` points at a block where the tx is
-    /// in the ThirtyDay ledger (not Submit) must return `Ok(None)`.
+    /// A tx whose `included_height` points at a block where the tx is in the
+    /// ThirtyDay ledger (not Submit) must return `Ok(None)`.
     #[test_log::test(tokio::test)]
     async fn migrated_thirtyday_only_tx_returns_none() -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;
@@ -823,8 +822,9 @@ mod tests {
         Ok(())
     }
 
-    /// P1-2 happy path: a Submit tx (Publish-promoted, tx in Submit ledger)
-    /// must still return the correct range after the guard is introduced.
+    /// Happy path: a Submit tx (Publish-promoted, tx in Submit ledger) must
+    /// still return the correct range — the Submit-membership guard must not
+    /// block a legitimate Submit inclusion.
     #[test_log::test(tokio::test)]
     async fn migrated_submit_tx_returns_correct_range_after_guard() -> eyre::Result<()> {
         let (db, _tmp) = open_db()?;

@@ -4555,14 +4555,14 @@ mod tests {
     /// the function looks up the Submit-ledger range via
     /// `tx_inclusion::find_canonical_ledger_range` and returns successfully.
     ///
-    /// Regression coverage for the 2026-05-15 self-fork: the previous
-    /// implementation walked `CachedDataRoots.block_set`, which retained
-    /// orphaned hashes after reorgs and caused `BlockBoundsLookupError`
-    /// once those blocks were purged.  Validation now consults
-    /// `tx_inclusion::find_canonical_ledger_range` directly; `block_set`
-    /// remains on `CachedDataRoot` as a cheap "ever-confirmed?" hint kept
-    /// in sync atomically with tip changes by
-    /// `BlockMigrationService::persist_metadata`.
+    /// Locks in the canonical-trust-root lookup: validation must derive
+    /// Submit ranges from `IrysDataTxMetadata` + `MigratedBlockHashes` (which
+    /// only retain canonical state) rather than from
+    /// `CachedDataRoots.block_set` (which historically retained orphaned
+    /// hashes across reorgs and could surface a stale `BlockBoundsLookupError`
+    /// once the block_tree purged those blocks).  `block_set` is now only a
+    /// cheap "ever-confirmed?" hint maintained atomically with tip changes
+    /// by `BlockMigrationService::persist_metadata`.
     #[test_log::test(tokio::test)]
     async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
         use crate::tx_inclusion;
