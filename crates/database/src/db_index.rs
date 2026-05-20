@@ -134,13 +134,19 @@ pub fn clear_data_tx_metadata(
 }
 
 /// Clear the promoted_height for a data transaction (used during re-orgs)
+///
+/// If `included_height` is still set, the row is kept with only `promoted_height` cleared.
+/// If neither field would remain set after the clear, the row is deleted entirely.
 pub fn clear_data_tx_promoted_height(
     tx: &(impl DbTxMut + DbTx),
     tx_id: &H256,
 ) -> Result<(), reth_db::DatabaseError> {
-    let mut metadata = get_data_tx_metadata(tx, tx_id)?.unwrap_or_default();
+    let Some(mut metadata) = get_data_tx_metadata(tx, tx_id)? else {
+        // Row absent — no-op; delete is safe but unnecessary.
+        return Ok(());
+    };
     metadata.promoted_height = None;
-    // Only store if included_height is set, otherwise delete entirely
+    // Only keep the row if included_height is still meaningful.
     if metadata.is_included() {
         put_data_tx_metadata(tx, tx_id, metadata)
     } else {
@@ -191,6 +197,39 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_data_tx_promoted_height(tx, tx_id)?;
+    }
+    Ok(())
+}
+
+/// Clear the included_height for a data transaction (used during re-orgs of term-ledger blocks).
+///
+/// If `promoted_height` is still set, the row is kept with only `included_height` cleared.
+/// If neither field would remain set after the clear, the row is deleted entirely.
+pub fn clear_data_tx_included_height(
+    tx: &(impl DbTxMut + DbTx),
+    tx_id: &H256,
+) -> Result<(), reth_db::DatabaseError> {
+    let Some(mut metadata) = get_data_tx_metadata(tx, tx_id)? else {
+        // Row absent — no-op; delete is safe but unnecessary.
+        return Ok(());
+    };
+    metadata.included_height = None;
+    // Only keep the row if promoted_height is still meaningful.
+    if metadata.promoted_height.is_some() {
+        tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())
+    } else {
+        tx.delete::<IrysDataTxMetadata>(*tx_id, None)?;
+        Ok(())
+    }
+}
+
+/// Batch operation: Clear included_height for multiple data transactions (re-org handling).
+pub fn batch_clear_data_tx_included_height<'a>(
+    tx: &(impl DbTxMut + DbTx),
+    tx_ids: impl IntoIterator<Item = &'a H256>,
+) -> Result<(), reth_db::DatabaseError> {
+    for tx_id in tx_ids {
+        clear_data_tx_included_height(tx, tx_id)?;
     }
     Ok(())
 }
@@ -343,6 +382,149 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(metadata.is_none());
+        }
+    }
+
+    // ---- clear_data_tx_included_height tests ----
+
+    /// When only `included_height` is set, clearing it should delete the row entirely
+    /// (since a row with neither field set cannot be stored).
+    #[test]
+    fn clear_included_height_only_set_deletes_row() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        db.update(|tx| set_data_tx_included_height(tx, &tx_id, 42))
+            .unwrap()
+            .unwrap();
+
+        // Verify it's there
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.included_height, Some(42));
+        assert_eq!(meta.promoted_height, None);
+
+        // Clear it
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Row should be gone
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(
+            meta.is_none(),
+            "row should be deleted when no fields remain"
+        );
+    }
+
+    /// When both `included_height` and `promoted_height` are set, clearing
+    /// `included_height` should keep the row with only `promoted_height`.
+    #[test]
+    fn clear_included_height_preserves_promoted_height() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        db.update(|tx| set_data_tx_included_height(tx, &tx_id, 10))
+            .unwrap()
+            .unwrap();
+        db.update(|tx| set_data_tx_promoted_height(tx, &tx_id, 20))
+            .unwrap()
+            .unwrap();
+
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.included_height, None,
+            "included_height must be cleared"
+        );
+        assert_eq!(
+            meta.promoted_height,
+            Some(20),
+            "promoted_height must be preserved"
+        );
+    }
+
+    /// Calling `clear_data_tx_included_height` on a missing row is a no-op and
+    /// must not return an error.
+    #[test]
+    fn clear_included_height_missing_row_is_noop() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        // No setup — row doesn't exist.
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Still absent, no panic/error.
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(meta.is_none());
+    }
+
+    /// `batch_clear_data_tx_included_height` clears all supplied tx_ids.
+    #[test]
+    fn batch_clear_included_height_happy_path() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_ids: Vec<H256> = (0..3).map(|_| H256::random()).collect();
+
+        // Set included height for all
+        db.update(|tx| batch_set_data_tx_included_height(tx, &tx_ids, 55))
+            .unwrap()
+            .unwrap();
+
+        // Batch-clear
+        db.update(|tx| batch_clear_data_tx_included_height(tx, &tx_ids))
+            .unwrap()
+            .unwrap();
+
+        // All rows should be gone (only included_height was set)
+        for tx_id in &tx_ids {
+            let meta = db
+                .view(|tx| get_data_tx_metadata(tx, tx_id))
+                .unwrap()
+                .unwrap();
+            assert!(meta.is_none(), "row for {tx_id:?} should be deleted");
         }
     }
 
