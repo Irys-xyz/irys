@@ -1740,6 +1740,10 @@ mod tests {
     struct DiscardHarness {
         inner: BlockTreeServiceInner,
         block_state_rx: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+        /// Hash of the synthetic genesis seeded into the cache by `new()`.
+        /// Use as `previous_block_hash` when inserting test blocks via
+        /// `insert_block_in_cache`.
+        genesis_hash: H256,
         /// MDBX env is mmap-backed: dropping the temp dir before the inner
         /// service would unlink the underlying files. Hold both.
         _tempdir: irys_testing_utils::tempfile::TempDir,
@@ -1747,9 +1751,7 @@ mod tests {
 
     impl DiscardHarness {
         fn new() -> Self {
-            use irys_database::{
-                IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables,
-            };
+            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
             use irys_types::{ConsensusConfig, NodeConfig};
@@ -1770,13 +1772,13 @@ mod tests {
             let mut genesis = IrysBlockHeader::new_mock_header();
             genesis.height = 0;
             genesis.test_sign();
+            let genesis_hash = genesis.block_hash;
             let cache = Arc::new(RwLock::new(BlockTree::new(
                 &genesis,
                 ConsensusConfig::testing(),
             )));
 
-            let (service_senders, service_rx) =
-                crate::test_helpers::build_test_service_senders();
+            let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
             // Subscribe BEFORE the discard path runs so the broadcast event
             // is observable. The receivers struct is dropped — we only need
             // the broadcast receiver.
@@ -1821,8 +1823,48 @@ mod tests {
             Self {
                 inner,
                 block_state_rx,
+                genesis_hash,
                 _tempdir: tmp,
             }
+        }
+
+        /// Seed a block into the BlockTree cache so cache-presence-gated
+        /// production paths (e.g., `on_block_validation_finished`'s
+        /// recovery-LRU pop, ordered after the cache check post-`ca192a999`)
+        /// can observe the hash. The block chains directly off the genesis
+        /// the harness was constructed with.
+        fn insert_block_in_cache(&mut self, block_hash: H256, height: u64) {
+            use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = height;
+            header.previous_block_hash = self.genesis_hash;
+            // `test_sign()` derives `block_hash` from the signature, so the
+            // explicit override must come AFTER signing. The signature is
+            // therefore not consistent with the stored hash — the cache
+            // doesn't validate signatures, only the recovery-pop path
+            // exercised here cares about the lookup key.
+            header.test_sign();
+            header.block_hash = block_hash;
+
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header),
+                BlockTransactions::default(),
+            ));
+            let ema = EmaSnapshot::genesis(sealed.header());
+
+            self.inner
+                .cache
+                .write()
+                .expect("cache lock for seed")
+                .add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    ema,
+                )
+                .expect("seed cache with test block");
         }
 
         /// Drain pending broadcast events into a Vec. Used to assert the
@@ -1873,50 +1915,90 @@ mod tests {
         assert_eq!(event.block_hash, block_hash);
         assert!(event.discarded);
         assert!(
-            matches!(event.validation_result, ValidationResult::InternalFailure(_)),
+            matches!(
+                event.validation_result,
+                ValidationResult::InternalFailure(_)
+            ),
             "discard broadcast must carry the InternalFailure verdict"
         );
     }
 
-    /// A Valid result for a previously-discarded block_hash must pop the
-    /// entry from the LRU (so a second Valid wouldn't double-count) and
-    /// fire `metrics::record_soft_internal_recovered` against the original
-    /// reason tag. Drives `on_block_validation_finished` directly.
-    ///
-    /// The block is intentionally absent from the cache: the recovery pop
-    /// runs BEFORE the cache height lookup (production lines ~563 vs ~573),
-    /// so the early-return on missing height does not mask the pop.
+    /// Post-`ca192a999` invariant: a Valid result for a hash that is NOT in
+    /// the cache must early-return via the warn-and-return path WITHOUT
+    /// popping the recovery LRU. Otherwise a spurious cache-miss arrival
+    /// would lose the recovery marker that a later legitimate re-delivery
+    /// would have matched. Drives the real `on_block_validation_finished`.
     #[tokio::test]
-    async fn valid_result_pops_from_lru_and_returns_reason() {
+    async fn valid_result_with_cache_miss_preserves_lru() {
         let mut h = DiscardHarness::new();
         let block_hash = H256([0xCD; 32]);
 
-        // Seed the LRU as if a prior SoftInternal discard ran for this
-        // block_hash.
+        // Seed the LRU as if a prior SoftInternal discard ran for this hash.
+        // Deliberately do NOT seed the cache — this is the spurious-arrival
+        // path the reorder is guarding.
         h.inner
             .recent_soft_internal_discards
             .put(block_hash, "execution_payload_cache_evicted");
 
-        // First Valid arrival: production pops the LRU and (no-op in tests)
-        // increments the recovered counter, then returns early because the
-        // block isn't in the cache. Both happen before the cache lookup.
         h.inner
             .on_block_validation_finished(block_hash, ValidationResult::Valid)
             .await
-            .expect("Valid on missing block returns early without error");
+            .expect("Valid on cache-miss returns early via warn path");
+
+        assert_eq!(
+            h.inner
+                .recent_soft_internal_discards
+                .get(&block_hash)
+                .copied(),
+            Some("execution_payload_cache_evicted"),
+            "cache-miss Valid must preserve the LRU entry — a later legitimate \
+             arrival still needs to be counted as a recovery"
+        );
+    }
+
+    /// Companion to `valid_result_with_cache_miss_preserves_lru`: when the
+    /// block IS in the cache, a Valid result must pop the LRU (so a second
+    /// Valid for the same hash wouldn't double-count) and call
+    /// `metrics::record_soft_internal_recovered` against the original
+    /// reason tag. Drives `on_block_validation_finished` against a cache
+    /// seeded via the harness helper.
+    #[tokio::test]
+    async fn valid_result_with_cache_hit_pops_lru_and_records_recovery() {
+        let mut h = DiscardHarness::new();
+        let block_hash = H256([0xCE; 32]);
+
+        // Seed cache + LRU. Both must be present for the recovery path to
+        // fire — the post-`ca192a999` order is cache-check → LRU-pop.
+        h.insert_block_in_cache(block_hash, /*height=*/ 1);
+        h.inner
+            .recent_soft_internal_discards
+            .put(block_hash, "parent_block_missing");
+
+        h.inner
+            .on_block_validation_finished(block_hash, ValidationResult::Valid)
+            .await
+            .expect("Valid on cache-hit recovery completes without error");
+
         assert!(
-            h.inner.recent_soft_internal_discards.get(&block_hash).is_none(),
-            "Valid arrival for a tracked hash must pop the LRU entry"
+            h.inner
+                .recent_soft_internal_discards
+                .get(&block_hash)
+                .is_none(),
+            "cache-hit Valid must pop the LRU entry to prevent double-count"
         );
 
-        // Second Valid arrival: no-op — guarantees no double-count on
-        // metric retries or duplicate Valid messages for the same hash.
+        // Second Valid for the same hash is a no-op for the LRU (already
+        // empty); it must remain empty so duplicate Valid arrivals don't
+        // re-arm the recovery counter.
         h.inner
             .on_block_validation_finished(block_hash, ValidationResult::Valid)
             .await
             .expect("idempotent second Valid call must not error");
         assert!(
-            h.inner.recent_soft_internal_discards.get(&block_hash).is_none(),
+            h.inner
+                .recent_soft_internal_discards
+                .get(&block_hash)
+                .is_none(),
             "second Valid arrival must remain a no-op for the LRU"
         );
     }
@@ -1947,7 +2029,9 @@ mod tests {
         // path (not an early-return that skipped the LRU by accident).
         let events = h.collect_broadcasts();
         assert!(
-            events.iter().any(|e| e.block_hash == invalid_hash && e.discarded),
+            events
+                .iter()
+                .any(|e| e.block_hash == invalid_hash && e.discarded),
             "Invalid arm must still broadcast the discard event"
         );
 
@@ -2034,7 +2118,9 @@ mod tests {
         // the wrong reason).
         let events = h.collect_broadcasts();
         assert!(
-            events.iter().any(|e| e.block_hash == block_hash && e.discarded),
+            events
+                .iter()
+                .any(|e| e.block_hash == block_hash && e.discarded),
             "ValidationCancelled discard must still broadcast a discard event"
         );
     }
@@ -2306,10 +2392,7 @@ mod tests {
                 tag, "internal_error_other",
                 "variant {err:?} must have a real label, not the legacy catch-all",
             );
-            assert!(
-                !tag.is_empty(),
-                "variant {err:?} mapped to an empty tag",
-            );
+            assert!(!tag.is_empty(), "variant {err:?} mapped to an empty tag",);
         }
     }
 
