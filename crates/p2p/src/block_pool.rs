@@ -27,13 +27,60 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 const RECENTLY_PROCESSED_CACHE_SIZE: usize = 20;
 const BACKFILL_DEPTH: u64 = 100;
+
+/// Minimum interval between successive `AttemptReprocessingBlock`
+/// re-emissions for the same parked block. Without a cooldown a gossip
+/// storm against a parked-tip block becomes a reprocessing storm,
+/// re-spawning `process_block` faster than each attempt can finish.
+///
+/// The window is sized to comfortably exceed the typical SoftInternal
+/// recovery time. `wait_for_payload` defaults to 60 s in production
+/// (`SyncConfig::execution_payload_wait_timeout_millis`), so attempts
+/// blocking on payload availability finish at most ~1 minute after they
+/// started. A 10 s cooldown is long enough to absorb a gossip burst (the
+/// in-flight reprocess will still be running, but the inner
+/// `process_block` `is_processing=true` check already deduplicates
+/// concurrent reprocesses), short enough to redrive promptly once the
+/// previous attempt has failed and parked the block again.
+const REPROCESSING_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Outcome of the gossip-dedup check used by gossip and periodic-sync
+/// pull paths. Separates "fresh — proceed with `process_block`" from
+/// three distinct "skip" reasons so callers can react appropriately:
+/// in particular, [`Self::ParkedReadyForRetry`] is the H2 recovery
+/// hook — a parked SoftInternal block whose cooldown has elapsed must
+/// have `AttemptReprocessingBlock` re-emitted, not be silently skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockDedupStatus {
+    /// Block is unknown locally. Proceed into `process_block`.
+    Fresh,
+    /// Block is actively being processed, already in the tree (pending
+    /// validation, validated-reorgable, finalized), or known to belong
+    /// to a pruned fork. No action required.
+    KnownInFlight,
+    /// Block is parked in `blocks_cache` after a SoftInternal failure
+    /// (`is_processing = false`) and its per-block cooldown has elapsed
+    /// (or never fired). The caller should emit
+    /// `AttemptReprocessingBlock(hash)` to re-drive `process_block`.
+    /// The cooldown timestamp is updated by the dedup check itself so a
+    /// concurrent caller observing the same parked entry will see
+    /// `ParkedCoolingDown` until the window elapses again — preventing
+    /// a gossip storm from amplifying into a reprocessing storm.
+    ParkedReadyForRetry,
+    /// Block is parked but the cooldown window has not yet elapsed.
+    /// Skip; a prior caller has already requested reprocessing, or the
+    /// previous attempt has not had time to finish.
+    ParkedCoolingDown,
+}
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum CriticalBlockPoolError {
@@ -156,6 +203,12 @@ pub(crate) struct CachedBlock {
     pub(crate) block: Arc<SealedBlock>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
+    /// Timestamp of the most recent `AttemptReprocessingBlock` emission
+    /// for this block while parked (`is_processing = false`). `None`
+    /// means no reprocessing attempt has been requested yet — the next
+    /// dedup check that observes the entry parked will mark it ready
+    /// for retry. See [`BlockDedupStatus`] and `REPROCESSING_COOLDOWN`.
+    pub(crate) last_reprocess_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -291,6 +344,14 @@ impl BlockCacheGuard {
             .change_block_processing_status(block_hash, is_processing);
     }
 
+    async fn cache_dedup_status(
+        &self,
+        block_hash: &BlockHash,
+        now: Instant,
+    ) -> Option<BlockDedupStatus> {
+        self.inner.write().await.cache_dedup_status(block_hash, now)
+    }
+
     async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
         self.inner.write().await.take_txs_for_block(block_hash)
     }
@@ -329,6 +390,7 @@ impl BlockCacheInner {
                 block: Arc::clone(&block),
                 is_processing: true,
                 is_fast_tracking: fast_track,
+                last_reprocess_at: None,
             },
         );
 
@@ -353,6 +415,35 @@ impl BlockCacheInner {
     fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
         if let Some(block) = self.blocks.get_mut(&block_hash) {
             block.is_processing = is_processing
+        }
+    }
+
+    /// Cache-side half of the gossip dedup check. Classifies the block's
+    /// presence and, when it returns [`BlockDedupStatus::ParkedReadyForRetry`],
+    /// stamps `last_reprocess_at = now` atomically so a concurrent caller
+    /// observing the same entry sees [`BlockDedupStatus::ParkedCoolingDown`]
+    /// until the window elapses again. Returns `None` when the block is
+    /// not in `blocks`; the surrounding [`BlockPool::dedup_status_for_gossip`]
+    /// then falls through to the `block_status_provider` lookup for
+    /// in-tree / pruned-fork classification.
+    fn cache_dedup_status(
+        &mut self,
+        block_hash: &BlockHash,
+        now: Instant,
+    ) -> Option<BlockDedupStatus> {
+        let cached = self.blocks.get_mut(block_hash)?;
+        if cached.is_processing {
+            return Some(BlockDedupStatus::KnownInFlight);
+        }
+        let ready = match cached.last_reprocess_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= REPROCESSING_COOLDOWN,
+        };
+        if ready {
+            cached.last_reprocess_at = Some(now);
+            Some(BlockDedupStatus::ParkedReadyForRetry)
+        } else {
+            Some(BlockDedupStatus::ParkedCoolingDown)
         }
     }
 
@@ -1234,26 +1325,38 @@ where
         self.blocks_cache.is_block_requested(block_hash).await
     }
 
-    pub(crate) async fn is_block_processing_or_processed(
+    /// Classify a gossip-arrived (or periodic-sync-pulled) block for
+    /// dedup purposes. Splits the prior boolean predicate into an
+    /// explicit state machine — see [`BlockDedupStatus`] — so callers
+    /// can act on the parked-but-out-of-cooldown case rather than
+    /// silently skipping a parked tip block whose only recovery path
+    /// would otherwise be LRU eviction (the H2 tip-stall).
+    ///
+    /// Returning [`BlockDedupStatus::ParkedReadyForRetry`] has the side
+    /// effect of stamping the entry's `last_reprocess_at` to the
+    /// current monotonic time; a concurrent caller observing the same
+    /// entry will therefore see [`BlockDedupStatus::ParkedCoolingDown`]
+    /// for `REPROCESSING_COOLDOWN` before another retry is allowed.
+    /// This is what prevents a gossip storm from amplifying into a
+    /// reprocessing storm (the inner `process_block` `is_processing`
+    /// check also dedups concurrent reprocesses, but only after the
+    /// expensive send + spawn round-trip).
+    pub(crate) async fn dedup_status_for_gossip(
         &self,
         block_hash: &BlockHash,
         block_height: u64,
-    ) -> bool {
-        // Any presence in `blocks_cache` — actively processing
-        // (`is_processing = true`) OR parked after a SoftInternal failure
-        // (`is_processing = false`, awaiting orphan-cascade or
-        // `AttemptReprocessingBlock` re-entry) — is "known locally" for
-        // dedup purposes. Without the parked-block short-circuit, every
-        // gossip arrival during the `is_processing = false` window would
-        // re-spawn mempool ingestion, shadow-tx generation, and PoA
-        // validation from scratch; bounded but expensive amplification
-        // under high gossip rate against a chronically failing block.
-        // The cache is bounded (`BLOCK_POOL_CACHE_SIZE`), entries are
-        // LRU-evictable, and parked blocks are re-driven from children's
-        // orphan-resolve or sync-service retries — so parked blocks
-        // cannot shadow indefinitely.
-        if self.blocks_cache.contains_block(block_hash).await {
-            return true;
+    ) -> BlockDedupStatus {
+        // Cache-resident entries (actively processing or parked after
+        // SoftInternal failure) take priority over the block-status
+        // provider: the block has already started traversing
+        // `process_block`, regardless of whether it has reached the
+        // tree yet.
+        if let Some(status) = self
+            .blocks_cache
+            .cache_dedup_status(block_hash, Instant::now())
+            .await
+        {
+            return status;
         }
         let status = self
             .block_status_provider
@@ -1268,9 +1371,54 @@ where
         //     index at this height under a different canonical hash; would
         //     re-classify as pruned on every gossip cycle if not short-
         //     circuited here)
-        // Only `NotProcessed` returns false — the one variant where
+        // Only `NotProcessed` returns Fresh — the one variant where
         // `process_block` legitimately needs to run.
-        status.is_in_tree() || status.is_a_part_of_pruned_fork()
+        if status.is_in_tree() || status.is_a_part_of_pruned_fork() {
+            BlockDedupStatus::KnownInFlight
+        } else {
+            BlockDedupStatus::Fresh
+        }
+    }
+
+    /// Gossip-handler entry point that combines the dedup classification
+    /// with the side-effecting reprocess emit. Returns `true` when the
+    /// caller should skip the gossip arrival (already known) and `false`
+    /// only when the block is fresh and `process_block` should run.
+    ///
+    /// For [`BlockDedupStatus::ParkedReadyForRetry`] this sends an
+    /// `AttemptReprocessingBlock(hash)` to the chain-sync service —
+    /// the same recovery message used when a child arrives — so a
+    /// parked tip block (which has no child to trigger its
+    /// orphan-resolve) recovers from honest gossip re-arrivals or
+    /// periodic-sync re-pulls instead of waiting for LRU eviction.
+    pub(crate) async fn dedup_and_maybe_emit_reprocess(
+        &self,
+        block_hash: &BlockHash,
+        block_height: u64,
+    ) -> bool {
+        match self.dedup_status_for_gossip(block_hash, block_height).await {
+            BlockDedupStatus::Fresh => false,
+            BlockDedupStatus::KnownInFlight | BlockDedupStatus::ParkedCoolingDown => true,
+            BlockDedupStatus::ParkedReadyForRetry => {
+                debug!(
+                    block.hash = ?block_hash,
+                    block.height = block_height,
+                    "Block pool: re-emitting AttemptReprocessingBlock for parked SoftInternal block (gossip-driven recovery)"
+                );
+                if let Err(err) = self
+                    .sync_service_sender
+                    .send(SyncChainServiceMessage::AttemptReprocessingBlock(
+                        *block_hash,
+                    ))
+                {
+                    error!(
+                        "Block pool: failed to send AttemptReprocessingBlock for parked block {:?}: {:?}",
+                        block_hash, err
+                    );
+                }
+                true
+            }
+        }
     }
 
     /// Inserts an execution payload into the internal cache so that it can be

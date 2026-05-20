@@ -1056,56 +1056,57 @@ async fn process_block_rejects_block_already_in_tree_pending_validation() {
     );
 }
 
-/// `is_block_processing_or_processed` classifies every `BlockStatus` variant.
+/// `dedup_status_for_gossip` classifies every `BlockStatus` variant.
 /// Each case sets up the provider mock to land on a target variant, then
-/// asserts the predicate's expected truth value (gossip handlers skip "known"
-/// blocks; only `NotProcessed` re-enters `process_block`).
+/// asserts the dedup enum's expected value (gossip handlers skip
+/// `KnownInFlight`; only `Fresh` re-enters `process_block`).
 ///
 /// Variant rationale (mirrors `block_status_provider::BlockStatus` doc):
-/// - `InTreePendingValidation` (true): parent already locally known —
-///   gossip handlers must skip rather than re-drive `process_block`.
-/// - `ProcessedButCanBeReorganized` (true): in tree, validated, not yet
-///   migrated — already-known.
-/// - `Finalized` (true): migrated into the index, pruned from the tree —
-///   already-known.
-/// - `PartOfAPrunedFork` (true): regression case — master used
+/// - `InTreePendingValidation` (KnownInFlight): parent already locally
+///   known — gossip handlers must skip rather than re-drive
+///   `process_block`.
+/// - `ProcessedButCanBeReorganized` (KnownInFlight): in tree, validated,
+///   not yet migrated — already-known.
+/// - `Finalized` (KnownInFlight): migrated into the index, pruned from
+///   the tree — already-known.
+/// - `PartOfAPrunedFork` (KnownInFlight): regression case — master used
 ///   `is_processed()` which covered this; an `is_in_tree()`-only narrowing
 ///   briefly dropped it, causing stale-fork tips peers kept advertising to
 ///   re-enter `process_block` every gossip cycle. The fix is
 ///   `is_in_tree() || is_a_part_of_pruned_fork()`.
-/// - `NotProcessed` (false): unknown to both tree and index — gossip
+/// - `NotProcessed` (Fresh): unknown to both tree and index — gossip
 ///   handlers must proceed into `process_block`.
 #[rstest::rstest]
 #[case::in_tree_pending_validation(
     setup_in_tree_pending_validation,
     crate::block_status_provider::BlockStatus::InTreePendingValidation,
-    true
+    crate::block_pool::BlockDedupStatus::KnownInFlight
 )]
 #[case::processed_but_can_be_reorganized(
     setup_processed_but_can_be_reorganized,
     crate::block_status_provider::BlockStatus::ProcessedButCanBeReorganized,
-    true
+    crate::block_pool::BlockDedupStatus::KnownInFlight
 )]
 #[case::finalized(
     setup_finalized,
     crate::block_status_provider::BlockStatus::Finalized,
-    true
+    crate::block_pool::BlockDedupStatus::KnownInFlight
 )]
 #[case::part_of_a_pruned_fork(
     setup_part_of_a_pruned_fork,
     crate::block_status_provider::BlockStatus::PartOfAPrunedFork,
-    true
+    crate::block_pool::BlockDedupStatus::KnownInFlight
 )]
 #[case::not_processed(
     setup_not_processed,
     crate::block_status_provider::BlockStatus::NotProcessed,
-    false
+    crate::block_pool::BlockDedupStatus::Fresh
 )]
 #[tokio::test]
-async fn is_block_processing_or_processed_classifies_block_status(
+async fn dedup_status_for_gossip_classifies_block_status(
     #[case] setup: fn(&MockedServices, &Config) -> (irys_types::BlockHash, u64),
     #[case] expected_status: crate::block_status_provider::BlockStatus,
-    #[case] expected_predicate: bool,
+    #[case] expected_dedup: crate::block_pool::BlockDedupStatus,
 ) {
     let (_tmp_dir, config) = create_test_config();
     let (pool, services, _sync_receiver) = build_test_pool(&config);
@@ -1121,8 +1122,8 @@ async fn is_block_processing_or_processed_classifies_block_status(
     );
 
     assert_eq!(
-        pool.is_block_processing_or_processed(&hash, height).await,
-        expected_predicate,
+        pool.dedup_status_for_gossip(&hash, height).await,
+        expected_dedup,
     );
 }
 
@@ -1206,13 +1207,15 @@ fn setup_not_processed(
     (irys_types::BlockHash::repeat_byte(0x42), 7)
 }
 
-/// M4 regression: a block parked in `blocks_cache` with `is_processing =
-/// false` (SoftInternal failure path leaving it for retry) must dedup as
-/// "known locally". Without this short-circuit, every gossip arrival in
-/// the parked window re-spawns mempool ingestion, shadow-tx generation,
-/// and PoA validation from scratch.
-#[tokio::test]
-async fn is_block_processing_or_processed_dedups_parked_soft_internal_block() {
+/// H2 regression: a block parked in `blocks_cache` with `is_processing =
+/// false` (SoftInternal failure path leaving it for retry) must classify
+/// as `ParkedReadyForRetry` on first observation. Without this the
+/// parked-tip-block recovery path is limited to child-arrival
+/// orphan-resolve (a tip has no child) and LRU eviction at
+/// `BLOCK_POOL_CACHE_SIZE` — unbounded in wall-clock time under low
+/// tip-traffic.
+#[tokio::test(start_paused = true)]
+async fn dedup_status_for_gossip_marks_parked_block_ready_for_retry() {
     let (_tmp_dir, config) = create_test_config();
     let (pool, services, _sync_receiver) = build_test_pool(&config);
 
@@ -1223,21 +1226,23 @@ async fn is_block_processing_or_processed_dedups_parked_soft_internal_block() {
 
     // Park the block: present in cache with is_processing = false. Status
     // provider has no record of it (NotProcessed), so without the cache
-    // short-circuit the predicate would fall through to `false` and gossip
+    // short-circuit the predicate would fall through to Fresh and gossip
     // would re-enter `process_block`.
     pool.test_insert_block_into_cache(sealed, false).await;
 
-    assert!(
-        pool.is_block_processing_or_processed(&block.block_hash, block.height)
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
             .await,
-        "parked SoftInternal block in blocks_cache must dedup as already-known"
+        crate::block_pool::BlockDedupStatus::ParkedReadyForRetry,
+        "first dedup check on a freshly-parked block must mark it ready for retry"
     );
 }
 
 /// Regression for the original `is_processing = true` semantics: a block
-/// actively being processed must still dedup.
-#[tokio::test]
-async fn is_block_processing_or_processed_dedups_actively_processing_block() {
+/// actively being processed must still classify as `KnownInFlight`
+/// (skip without scheduling a retry).
+#[tokio::test(start_paused = true)]
+async fn dedup_status_for_gossip_marks_actively_processing_block_known_in_flight() {
     let (_tmp_dir, config) = create_test_config();
     let (pool, services, _sync_receiver) = build_test_pool(&config);
 
@@ -1248,8 +1253,169 @@ async fn is_block_processing_or_processed_dedups_actively_processing_block() {
 
     pool.test_insert_block_into_cache(sealed, true).await;
 
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::KnownInFlight
+    );
+}
+
+/// H2 cooldown state machine: a parked block must classify as
+/// `ParkedReadyForRetry` once, then `ParkedCoolingDown` for the duration
+/// of `REPROCESSING_COOLDOWN`, then `ParkedReadyForRetry` again after
+/// the window elapses. Uses `tokio::time::pause()` for deterministic
+/// timing (no wall-clock dependency).
+#[tokio::test(start_paused = true)]
+async fn dedup_status_for_gossip_parked_cooldown_state_machine() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, _sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+    pool.test_insert_block_into_cache(sealed, false).await;
+
+    // First observation arms the cooldown.
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::ParkedReadyForRetry,
+    );
+
+    // Subsequent observation inside the window: cooling down.
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::ParkedCoolingDown,
+    );
+
+    // Advance to just before the boundary — still cooling down.
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::ParkedCoolingDown,
+        "still inside the 10s cooldown window"
+    );
+
+    // Cross the boundary — ready for retry again.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::ParkedReadyForRetry,
+        "cooldown window has elapsed; new retry must be allowed"
+    );
+
+    // And the timestamp got re-armed, so we're back to cooling down
+    // immediately after.
+    assert_eq!(
+        pool.dedup_status_for_gossip(&block.block_hash, block.height)
+            .await,
+        crate::block_pool::BlockDedupStatus::ParkedCoolingDown,
+    );
+}
+
+/// H2 recovery hook: `dedup_and_maybe_emit_reprocess` must emit an
+/// `AttemptReprocessingBlock` message exactly once on the first call
+/// (parked block, fresh cooldown), then no further emissions until the
+/// cooldown elapses, then exactly one more emission. Mirrors the
+/// gossip-storm protection guarantee.
+#[tokio::test(start_paused = true)]
+async fn dedup_and_maybe_emit_reprocess_emits_with_cooldown() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, mut sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+    pool.test_insert_block_into_cache(sealed, false).await;
+
+    // First call: must emit, must return "skip gossip".
     assert!(
-        pool.is_block_processing_or_processed(&block.block_hash, block.height)
+        pool.dedup_and_maybe_emit_reprocess(&block.block_hash, block.height)
             .await
+    );
+    let first = sync_receiver
+        .try_recv()
+        .expect("first call must emit AttemptReprocessingBlock");
+    assert!(
+        matches!(
+            first,
+            crate::chain_sync::SyncChainServiceMessage::AttemptReprocessingBlock(h) if h == block.block_hash
+        ),
+        "expected AttemptReprocessingBlock for parked block, got: {first:?}"
+    );
+
+    // Second call inside the cooldown window: skip gossip, no emission.
+    assert!(
+        pool.dedup_and_maybe_emit_reprocess(&block.block_hash, block.height)
+            .await
+    );
+    assert!(
+        sync_receiver.try_recv().is_err(),
+        "no AttemptReprocessingBlock should be re-emitted within the cooldown window"
+    );
+
+    // Advance past the cooldown — next call emits again.
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert!(
+        pool.dedup_and_maybe_emit_reprocess(&block.block_hash, block.height)
+            .await
+    );
+    let second = sync_receiver
+        .try_recv()
+        .expect("emission must repeat after the cooldown elapses");
+    assert!(matches!(
+        second,
+        crate::chain_sync::SyncChainServiceMessage::AttemptReprocessingBlock(h) if h == block.block_hash
+    ));
+}
+
+/// Regression: an actively-processing block (`is_processing = true`)
+/// must NOT trigger an `AttemptReprocessingBlock` emission, only skip
+/// the gossip arrival. The reprocess hook is exclusively for parked
+/// SoftInternal blocks.
+#[tokio::test(start_paused = true)]
+async fn dedup_and_maybe_emit_reprocess_does_not_emit_for_in_flight_block() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, mut sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
+    let block = &chain[0];
+    let sealed = create_test_sealed_block(block.clone(), create_test_block_body(block.block_hash));
+    pool.test_insert_block_into_cache(sealed, true).await;
+
+    assert!(
+        pool.dedup_and_maybe_emit_reprocess(&block.block_hash, block.height)
+            .await
+    );
+    assert!(
+        sync_receiver.try_recv().is_err(),
+        "AttemptReprocessingBlock must not be emitted for an actively-processing block"
+    );
+}
+
+/// Regression: a `Fresh` block (no cache entry, no tree presence) must
+/// return `false` so the caller proceeds into `process_block`, and must
+/// not emit any sync-service message.
+#[tokio::test(start_paused = true)]
+async fn dedup_and_maybe_emit_reprocess_does_not_emit_for_fresh_block() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, _services, mut sync_receiver) = build_test_pool(&config);
+
+    let unknown_hash = irys_types::BlockHash::repeat_byte(0xDE);
+    assert!(
+        !pool
+            .dedup_and_maybe_emit_reprocess(&unknown_hash, 12345)
+            .await,
+        "fresh block must return false so the caller runs process_block"
+    );
+    assert!(
+        sync_receiver.try_recv().is_err(),
+        "no sync-service message expected for a fresh block"
     );
 }
