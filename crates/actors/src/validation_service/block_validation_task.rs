@@ -1958,7 +1958,10 @@ mod cancel_outcome_to_result_tests {
                 "expected ValidationCancelled, got {:?}",
                 inner.err()
             ),
-            other => panic!("expected InternalFailure(ValidationCancelled), got {:?}", other),
+            other => panic!(
+                "expected InternalFailure(ValidationCancelled), got {:?}",
+                other
+            ),
         }
     }
 
@@ -2097,7 +2100,10 @@ mod stage_fault_captures_tests {
                 "NodeFault must outrank Invalid: {:?}",
                 inner.err()
             ),
-            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+            other => panic!(
+                "expected Some(InternalFailure(node-fault)), got {:?}",
+                other
+            ),
         }
     }
 
@@ -2114,7 +2120,10 @@ mod stage_fault_captures_tests {
                 "first NodeFault must persist when Invalid arrives later: {:?}",
                 inner.err()
             ),
-            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+            other => panic!(
+                "expected Some(InternalFailure(node-fault)), got {:?}",
+                other
+            ),
         }
     }
 
@@ -2148,7 +2157,10 @@ mod stage_fault_captures_tests {
                     inner.err()
                 );
             }
-            other => panic!("expected Some(InternalFailure(node-fault)), got {:?}", other),
+            other => panic!(
+                "expected Some(InternalFailure(node-fault)), got {:?}",
+                other
+            ),
         }
     }
 
@@ -2247,7 +2259,8 @@ mod side_channel_cancel_race_tests {
         // future is always `Pending` at the cancel-arm fire moment.
         let [s0, s1, s2, s3, s4, s5] = stage_results;
         let captures_for = |c: &Arc<Mutex<StageFaultCaptures>>| Arc::clone(c);
-        let mk_stage = |result: Option<ValidationResult>, captures: Arc<Mutex<StageFaultCaptures>>| async move {
+        let mk_stage = |result: Option<ValidationResult>,
+                        captures: Arc<Mutex<StageFaultCaptures>>| async move {
             match result {
                 Some(r) => {
                     capture_stage_result(&captures, &r);
@@ -2264,8 +2277,7 @@ mod side_channel_cancel_race_tests {
         let stage4 = mk_stage(s4, captures_for(&captures));
         let stage5 = mk_stage(s5, captures_for(&captures));
 
-        let stages_join =
-            async { tokio::join!(stage0, stage1, stage2, stage3, stage4, stage5) };
+        let stages_join = async { tokio::join!(stage0, stage1, stage2, stage3, stage4, stage5) };
 
         // Immediate cancel — production uses `exit_if_block_is_too_old`
         // which returns `Cancelled(HeightDifference)` when the block

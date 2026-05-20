@@ -1405,12 +1405,9 @@ where
                     block.height = block_height,
                     "Block pool: re-emitting AttemptReprocessingBlock for parked SoftInternal block (gossip-driven recovery)"
                 );
-                if let Err(err) = self
-                    .sync_service_sender
-                    .send(SyncChainServiceMessage::AttemptReprocessingBlock(
-                        *block_hash,
-                    ))
-                {
+                if let Err(err) = self.sync_service_sender.send(
+                    SyncChainServiceMessage::AttemptReprocessingBlock(*block_hash),
+                ) {
                     error!(
                         "Block pool: failed to send AttemptReprocessingBlock for parked block {:?}: {:?}",
                         block_hash, err
