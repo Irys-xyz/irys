@@ -496,6 +496,25 @@ impl ExecutionPayloadCache {
             .is_none()
         {
             let mut receiver = self.block_receiver(evm_block_hash).await;
+
+            // Close the lost-notify window — mirrors `wait_for_sealed_block`
+            // (see the comment block there for the full rationale): a
+            // payload may have arrived between the initial cache check
+            // above and `block_receiver` subscribing to the notifier. If
+            // it did, the wake-side already popped + dropped the sender;
+            // this freshly-subscribed `Receiver` would otherwise block on
+            // `changed().await` until the timeout fires even though the
+            // payload is already sitting in `cache.payloads`. Re-checking
+            // the cache here turns that timeout into an immediate hit.
+            if self
+                .get_sealed_block_from_cache(&evm_block_hash)
+                .await
+                .is_some()
+            {
+                drop(receiver);
+                return Ok(());
+            }
+
             tokio::time::timeout(timeout, async {
                 loop {
                     receiver.changed().await.map_err(|err| {
