@@ -797,6 +797,38 @@ impl BlockTreeServiceInner {
                     block.height = height,
                     "Ignoring validation result for block already pruned from cache"
                 );
+                // Bug 2 fix (symmetric with Bug 1 and `1f85702fc` on the discard path):
+                // a concurrent prune raced the write lock, but mark_block_as_valid
+                // already succeeded — emit BlockStateUpdated so downstream waiters
+                // don't hang. height is known; state falls back to NotOnchain(Unknown)
+                // because the entry is gone.
+                //
+                // NOTE: We do NOT pop the recovery LRU here. A concurrent prune is not
+                // a confirmed gossip-driven recovery — the block never reached a stable
+                // onchain state. Leaving the LRU entry intact means a later re-delivery
+                // can still be counted correctly.
+                //
+                // DEFERRED TEST: directly reproducing this concurrent-prune race in a
+                // unit test requires a test seam (e.g. a post-mark_block_as_valid hook
+                // that removes the entry before the second get) that the current harness
+                // doesn't support. The correct shape is verified by code review and the
+                // Bug 1 + discard-path tests that exercise the analogous emit-before-
+                // return pattern.
+                drop(cache);
+                let event = BlockStateUpdated {
+                    block_hash,
+                    height,
+                    state: ChainState::NotOnchain(BlockState::Unknown),
+                    discarded: false,
+                    validation_result: ValidationResult::Valid,
+                };
+                if let Err(e) = self.service_senders.block_state_events.send(event) {
+                    tracing::trace!(
+                        block.hash = ?block_hash,
+                        block.height = height,
+                        "Failed to broadcast block state update event on concurrent-prune: {}", e
+                    );
+                }
                 return Ok(());
             };
             let arc_block = block_entry.block.header().clone();
@@ -1140,6 +1172,18 @@ impl BlockTreeServiceInner {
         if parent_diff_changed {
             self.service_senders
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
+        }
+
+        // Bug 3 fix (success boundary 2 of 2): mark_block_as_valid succeeded
+        // and the second cache check passed — this is a confirmed valid arrival
+        // that reached a stable onchain state. Pop the recovery LRU here.
+        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
+            metrics::record_soft_internal_recovered(reason);
+            info!(
+                block.hash = %block_hash,
+                reason,
+                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
+            );
         }
 
         let event = BlockStateUpdated {
@@ -1713,6 +1757,12 @@ mod tests {
         },
         "execution_payload_cache_evicted",
     )]
+    #[case::recall_range_steps_unavailable(
+        crate::block_validation::ValidationError::RecallRangeStepsUnavailable(
+            "steps unavailable".into(),
+        ),
+        "recall_range_steps_unavailable",
+    )]
     #[case::parent_missing(
         crate::block_validation::ValidationError::ParentBlockMissing { block_hash: H256::zero() },
         "parent_block_missing",
@@ -1966,11 +2016,12 @@ mod tests {
         );
     }
 
-    /// Post-`ca192a999` invariant: a Valid result for a hash that is NOT in
-    /// the cache must early-return via the warn-and-return path WITHOUT
-    /// popping the recovery LRU. Otherwise a spurious cache-miss arrival
-    /// would lose the recovery marker that a later legitimate re-delivery
-    /// would have matched. Drives the real `on_block_validation_finished`.
+    /// Bug 1 fix invariant: a Valid result for a hash that is NOT in the cache
+    /// must (a) preserve the recovery LRU entry so a later legitimate re-delivery
+    /// can still be counted as a recovery, AND (b) emit a `BlockStateUpdated`
+    /// broadcast so downstream waiters (read_block_from_state,
+    /// wait_for_parent_validation) don't hang. Drives the real
+    /// `on_block_validation_finished`.
     #[tokio::test]
     async fn valid_result_with_cache_miss_preserves_lru() {
         let mut h = DiscardHarness::new();
@@ -1988,6 +2039,9 @@ mod tests {
             .await
             .expect("Valid on cache-miss returns early via warn path");
 
+        // (a) LRU entry must be preserved — the cache-miss is spurious, not a
+        // confirmed recovery. A later legitimate re-delivery still needs to be
+        // counted.
         assert_eq!(
             h.inner
                 .recent_soft_internal_discards
@@ -1996,6 +2050,24 @@ mod tests {
             Some("execution_payload_cache_evicted"),
             "cache-miss Valid must preserve the LRU entry — a later legitimate \
              arrival still needs to be counted as a recovery"
+        );
+
+        // (b) Bug 1 fix: BlockStateUpdated must still fire so downstream
+        // waiters don't hang. height = 0 and discarded = false are the
+        // sentinel values emitted on the cache-miss path.
+        let events = h.collect_broadcasts();
+        assert_eq!(
+            events.len(),
+            1,
+            "cache-miss Valid must emit exactly one BlockStateUpdated (Bug 1 fix)"
+        );
+        let event = &events[0];
+        assert_eq!(event.block_hash, block_hash);
+        assert!(!event.discarded, "cache-miss Valid must not set discarded");
+        assert_eq!(event.height, 0, "cache-miss Valid uses sentinel height = 0");
+        assert!(
+            matches!(event.validation_result, ValidationResult::Valid),
+            "cache-miss Valid must carry ValidationResult::Valid"
         );
     }
 
@@ -2502,6 +2574,9 @@ mod tests {
             crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
                 evm_block_hash: irys_types::EvmBlockHash::ZERO,
             },
+            crate::block_validation::ValidationError::RecallRangeStepsUnavailable(
+                "steps unavailable".into(),
+            ),
             crate::block_validation::ValidationError::ParentBlockMissing {
                 block_hash: H256::zero(),
             },
