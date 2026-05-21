@@ -24,36 +24,51 @@ pub struct BlockMigrationService {
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
 }
 
-/// Asserts the block's body carries exactly the Submit-ledger tx_ids its
-/// header advertises.  `transactions().get_ledger_txs(DataLedger::Submit)`
-/// returns `&[]` for a SealedBlock whose body has been stripped, even if
-/// `header.data_ledgers[Submit].tx_ids` is populated — every downstream loop
-/// that iterates body txs (block_set mutation, tx-header insertion, etc.)
-/// would silently no-op.  Compare as sorted lists — same-length-different-ids
-/// must also fail loudly.
-fn ensure_submit_header_body_consistent(block: &SealedBlock) -> eyre::Result<()> {
-    let mut header_ids: Vec<H256> = block
-        .header()
-        .data_ledgers
-        .iter()
-        .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
-        .map(|dl| dl.tx_ids.0.clone())
-        .unwrap_or_default();
-    let mut body_ids: Vec<H256> = block
-        .transactions()
-        .get_ledger_txs(DataLedger::Submit)
-        .iter()
-        .map(|tx| tx.id)
-        .collect();
-    header_ids.sort();
-    body_ids.sort();
-    ensure!(
-        header_ids == body_ids,
-        "SealedBlock {} has header/body Submit-tx mismatch; transactions appear stripped or diverged — header={:?} body={:?}",
-        block.header().block_hash,
-        header_ids,
-        body_ids,
-    );
+/// Asserts the block's body carries exactly the tx_ids its header advertises,
+/// for every data ledger (Submit / Publish / OneYear / ThirtyDay).
+///
+/// `transactions().get_ledger_txs(ledger)` returns `&[]` for a SealedBlock
+/// whose body has been stripped, even if `header.data_ledgers[ledger].tx_ids`
+/// is populated — every downstream loop that iterates body txs (block_set
+/// mutation, `insert_tx_header`, etc.) silently no-ops, while
+/// `write_data_ledger_metadata` reads from `header.data_ledgers` and writes
+/// `included_height` / `promoted_height` anyway.  The result is metadata rows
+/// for tx_ids that `IrysDataTxHeaders` has no entry for —
+/// `tx_header_by_txid_canonical` then returns `Ok(None)` for those tx_ids
+/// (see `database.rs:207-209`), silently masking the divergence.
+///
+/// Compare as sorted lists — same-length-different-ids must also fail loudly.
+fn ensure_header_body_consistent(block: &SealedBlock) -> eyre::Result<()> {
+    for ledger in [
+        DataLedger::Submit,
+        DataLedger::Publish,
+        DataLedger::OneYear,
+        DataLedger::ThirtyDay,
+    ] {
+        let mut header_ids: Vec<H256> = block
+            .header()
+            .data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == ledger as u32)
+            .map(|dl| dl.tx_ids.0.clone())
+            .unwrap_or_default();
+        let mut body_ids: Vec<H256> = block
+            .transactions()
+            .get_ledger_txs(ledger)
+            .iter()
+            .map(|tx| tx.id)
+            .collect();
+        header_ids.sort();
+        body_ids.sort();
+        ensure!(
+            header_ids == body_ids,
+            "SealedBlock {} has header/body {:?} tx mismatch; transactions appear stripped or diverged — header={:?} body={:?}",
+            block.header().block_hash,
+            ledger,
+            header_ids,
+            body_ids,
+        );
+    }
     Ok(())
 }
 
@@ -164,14 +179,16 @@ impl BlockMigrationService {
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
         // Phase 1 scrub and Phase 3 append both iterate
-        // `block.transactions().get_ledger_txs(DataLedger::Submit)`.  The
-        // in-memory block-tree path always carries full transactions, but
-        // future code paths (e.g. blocks hydrated from disk without their
-        // body) could regress this without any error.  Surface the divergence
-        // in every build so the caller fails loudly rather than committing
-        // partial state.
+        // `block.transactions().get_ledger_txs(...)`.  The in-memory
+        // block-tree path always carries full transactions, but future code
+        // paths (e.g. blocks hydrated from disk without their body) could
+        // regress this without any error.  Surface the divergence in every
+        // build so the caller fails loudly rather than committing partial
+        // state.  Checked across all data ledgers because Phase 2's
+        // `write_data_ledger_metadata` writes from `header.data_ledgers` for
+        // every ledger, not just Submit.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
-            ensure_submit_header_body_consistent(block)?;
+            ensure_header_body_consistent(block)?;
         }
 
         // Defense-in-depth structural check on the reorg invariant documented
@@ -433,8 +450,10 @@ impl BlockMigrationService {
         // inserting zero tx-header rows from `transactions().get_ledger_txs`,
         // leaving canonical metadata pointing at txs `IrysDataTxHeaders` has
         // no entry for.  `tx_inclusion::find_canonical_ledger_range` and the
-        // prior-Submit fallback both depend on those rows existing.
-        ensure_submit_header_body_consistent(sealed_block)?;
+        // prior-Submit fallback both depend on those rows existing.  Checked
+        // for every data ledger since `write_data_ledger_metadata` below
+        // touches all of them.
+        ensure_header_body_consistent(sealed_block)?;
 
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
@@ -1353,6 +1372,56 @@ mod tests {
             Some(20),
             "CDR B expiry_height must remain untouched — Phase 3 doesn't run \
              when the tx is absent from `blocks_to_confirm`"
+        );
+
+        Ok(())
+    }
+
+    /// Regression for the broadened `ensure_header_body_consistent` check:
+    /// every data ledger (Submit / Publish / OneYear / ThirtyDay) must
+    /// trigger the guard when its header advertises a tx_id its body lacks.
+    /// Prior to broadening, only Submit was checked, so a stripped
+    /// OneYear/ThirtyDay/Publish body would silently write `included_height` /
+    /// `promoted_height` rows for tx_ids `IrysDataTxHeaders` has no entry
+    /// for — `tx_header_by_txid_canonical` then returns `Ok(None)` for them.
+    #[rstest::rstest]
+    #[case::submit(DataLedger::Submit)]
+    #[case::publish(DataLedger::Publish)]
+    #[case::oneyear(DataLedger::OneYear)]
+    #[case::thirtyday(DataLedger::ThirtyDay)]
+    #[tokio::test]
+    async fn persist_metadata_rejects_stripped_body_for_any_ledger(
+        #[case] ledger: DataLedger,
+    ) -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db);
+
+        let tx_id = H256::random();
+        let header = make_block_header_with_ledger(1, H256::random(), ledger, tx_id);
+        // Stripped body: header advertises `tx_id` in `ledger`, but the
+        // BlockTransactions map has no entry for that ledger at all.
+        let stripped = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(header),
+            BlockTransactions::default(),
+        ));
+
+        let err = svc
+            .persist_metadata(&[], std::slice::from_ref(&stripped))
+            .expect_err("stripped body must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("header/body") && msg.contains(&format!("{ledger:?}")),
+            "error must call out the offending ledger; got: {msg}"
+        );
+
+        // And the same for `persist_block`, which mirrors the guard.
+        let err = svc
+            .persist_block(&stripped)
+            .expect_err("persist_block stripped body must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("header/body") && msg.contains(&format!("{ledger:?}")),
+            "persist_block error must call out the offending ledger; got: {msg}"
         );
 
         Ok(())
