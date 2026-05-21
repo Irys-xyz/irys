@@ -224,6 +224,44 @@ impl Config {
             );
         }
 
+        // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
+        // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
+        // (block_validation.rs) where the per-proof intersection loop picks
+        // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
+        // consensus-fork vector when `block_range` straddles multiple Submit
+        // slots.  The determinism fix lives on `fix/assigned-miners-determinism`
+        // and is a consensus rule change that must be coordinated with a
+        // network upgrade.  Under all currently-deployed configs the value is
+        // 0 and the non-deterministic path is vacuous; raising it without the
+        // determinism fix risks divergence between nodes.
+        //
+        // When the determinism fix lands and gets activated, REMOVE this guard
+        // (and the matching test in this file).  Until then this assert errs
+        // loudly at startup so a config bump can't silently activate the bug.
+        ensure!(
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees
+                == 0,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
+             until fix/assigned-miners-determinism lands — the current `get_assigned_ingress_proofs` \
+             impl picks `assigned_miners` via non-deterministic HashMap iteration when \
+             block_range intersects multiple Submit slots",
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees,
+        );
+        if let Some(ref fork) = self.consensus.hardforks.next_name_tbd {
+            ensure!(
+                fork.number_of_ingress_proofs_from_assignees == 0,
+                "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
+                 must be 0 until fix/assigned-miners-determinism lands — see frontier guard above",
+                fork.number_of_ingress_proofs_from_assignees,
+            );
+        }
+
         Ok(())
     }
 }
