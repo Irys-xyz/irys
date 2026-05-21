@@ -904,6 +904,20 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                     Err(e) => {
+                        // TODO(block-producer-errors): the analogous lookup in
+                        // `data_txs_are_valid` (block_validation.rs:2783) treats
+                        // this Err as `BlockBoundsLookupError` — an internal
+                        // failure that the validation taxonomy promotes to
+                        // node-fault under `fix/validation-error-disamb`.  Here
+                        // we silently drop the publish candidate, which causes
+                        // quiet liveness loss for affected txs while the local
+                        // DB is inconsistent.  Re-evaluate as part of the
+                        // block-producer error-handling pass: should we abort
+                        // the round (Irrecoverable) so the producer's stance
+                        // matches validation's?
+                        crate::metrics::record_block_production_lookup_failed(
+                            "publish_prior_submit",
+                        );
                         warn!(
                             tx.id = ?tx_header.id,
                             tx.data_root = ?tx_header.data_root,

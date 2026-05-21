@@ -29,6 +29,7 @@ irys_utils::define_metrics! {
     counter BLOCK_PRE_VALIDATION_FAILED("irys.block.pre_validation_failed_total", "Block pre-validation failures by reason (labelled)");
     counter BLOCK_VALIDATION_FAILED("irys.block.validation_failed_total", "Block full-validation failures (post pre-validation) by reason (labelled)");
     counter CHAIN_SYNC_BLOCK_REJECTED("irys.chain_sync.block_rejected_total", "Chain-sync block rejections by reason (labelled)");
+    counter BLOCK_PRODUCTION_LOOKUP_FAILED("irys.block_production.lookup_failed_total", "Block-production canonical DB lookup failures by site (labelled). Currently observed: tx_selector silently skips affected publish candidates.");
 
     histogram PREVALIDATION_DURATION_MS(
         "irys.validation.prevalidation_duration_ms",
@@ -254,4 +255,8 @@ pub(crate) fn record_block_validation_failed(reason: &'static str) {
 
 pub fn record_chain_sync_block_rejected(reason: &'static str) {
     CHAIN_SYNC_BLOCK_REJECTED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_block_production_lookup_failed(site: &'static str) {
+    BLOCK_PRODUCTION_LOOKUP_FAILED.add(1, &[KeyValue::new("site", site)]);
 }
