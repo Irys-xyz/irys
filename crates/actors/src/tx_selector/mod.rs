@@ -973,7 +973,9 @@ async fn get_publish_txs_and_proofs(
             let proofs_only: Vec<IngressProof> =
                 all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
 
-            // Get assigned and unassigned proofs using the existing utility function
+            // Get assigned and unassigned proofs using the existing utility function.
+            // Block-production path: no cache sender — stale-hash pruning is
+            // validation-only; tx_selector does not have ServiceSenders.
             let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                 &proofs_only,
                 tx_header,
@@ -981,6 +983,7 @@ async fn get_publish_txs_and_proofs(
                 ctx.db,
                 ctx.config,
                 epoch_snapshot,
+                None,
             ) {
                 Ok(result) => result,
                 Err(e) => {
