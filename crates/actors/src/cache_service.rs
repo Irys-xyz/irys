@@ -630,7 +630,15 @@ impl InnerCacheTask {
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let result = clone.db.update_eyre(|db_tx| {
+            // catch_unwind so a panic inside the body still drives a
+            // `PruneTxidsCompleted` back to the actor; without it the
+            // `txid_prune_running` flag stays `true` forever and the queue
+            // jams permanently.  `AssertUnwindSafe` is sound here — the
+            // captured `clone` is `Send + Clone`, and on the panic path we
+            // immediately stop using it after the catch.
+            let result: eyre::Result<()> = match std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| {
+                    clone.db.update_eyre(|db_tx| {
                 for (data_root, txids_to_remove) in &by_data_root {
                     let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
                         continue;
@@ -689,7 +697,16 @@ impl InnerCacheTask {
                     }
                 }
                 Ok(())
-            });
+            })
+                }),
+            ) {
+                Ok(r) => r,
+                Err(payload) => {
+                    let msg = panic_payload_string(payload);
+                    error!(custom.panic = %msg, "spawn_prune_txids_task body panicked");
+                    Err(eyre::eyre!("spawn_prune_txids_task panicked: {msg}"))
+                }
+            };
 
             let completion = match &result {
                 Ok(_) => Ok(()),
@@ -893,7 +910,21 @@ impl InnerCacheTask {
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let res = clone.prune_cache(migration_height);
+            // Same panic-survival rationale as `spawn_prune_txids_task`:
+            // without `catch_unwind`, a panic anywhere in `prune_cache`
+            // leaves `pruning_running = true` forever and waiters of
+            // `response_sender` hang.
+            let res: eyre::Result<()> =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    clone.prune_cache(migration_height)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_string(payload);
+                        error!(custom.panic = %msg, "spawn_pruning_task body panicked");
+                        Err(eyre::eyre!("spawn_pruning_task panicked: {msg}"))
+                    }
+                };
             let completion = match &res {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
@@ -920,7 +951,19 @@ impl InnerCacheTask {
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let res = clone.on_epoch_processed(epoch_snapshot);
+            // Mirror of `spawn_pruning_task`: panic survival so the
+            // `epoch_running` flag is cleared and waiters resolve.
+            let res: eyre::Result<()> =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    clone.on_epoch_processed(epoch_snapshot)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_string(payload);
+                        error!(custom.panic = %msg, "spawn_epoch_processing body panicked");
+                        Err(eyre::eyre!("spawn_epoch_processing panicked: {msg}"))
+                    }
+                };
             let completion = match &res {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
@@ -938,6 +981,20 @@ impl InnerCacheTask {
                 warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
             }
         });
+    }
+}
+
+/// Extract a human-readable message from a `catch_unwind` payload.
+/// `Box<dyn Any + Send>` panic payloads in practice carry either `&'static
+/// str` or `String`; fall back to a generic label otherwise so the
+/// resulting `eyre` chain is never empty.
+fn panic_payload_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
     }
 }
 
