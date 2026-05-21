@@ -22,25 +22,26 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 /// - `SnapshotInvariant` → local snapshot/state inconsistency. Retry won't
 ///   heal. Validator-side: node fault (panic + supervisor restart).
 ///   Producer-side: code bug or corrupt local state.
-/// - `TreasuryArithmetic` → treasury under/overflow during peer-derived fee
-///   accumulation. INVARIANT: constructed only when the operation's operand
-///   is purely peer-supplied (e.g. `tx.term_fee`, `tx.perm_fee`,
-///   `block.reward_amount`) AND the running `treasury_balance` at the point
-///   of operation has NOT been mutated by snapshot-derived amounts earlier
-///   in the iterator. Under these conditions an over/underflow reflects a
-///   peer's block with structurally bad fee values and is safely
-///   peer-attributable. Validator-side: consensus rejection. Producer-side:
-///   indicates a code bug in our own fee calc.
-/// - `SnapshotTreasuryUnderflow` → treasury underflow attributable (in part
-///   or in whole) to local snapshot state. INVARIANT: constructed when
-///   either (a) the operand is itself derived from a local snapshot
-///   (expired-ledger payout, commitment-refund) OR (b) the running
-///   `treasury_balance` has already been mutated by snapshot-derived amounts
-///   earlier in the iterator, so an underflow could be caused by local
-///   snapshot disagreement even if the immediate operand is peer-supplied.
-///   Two honest nodes cannot disagree on treasury balance, so silent
-///   canonical-fork is strictly worse than a loud restart. Validator-side:
-///   node fault. Producer-side: code bug or corrupt local state.
+/// - `TreasuryArithmetic` → treasury under/overflow whose operand is
+///   peer-supplied (e.g. `tx.term_fee`, `tx.perm_fee`, `block.reward_amount`,
+///   or the aggregated ingress-proof reward derived from publish-ledger tx
+///   fees). The running `treasury_balance` at the point of operation MAY
+///   have been mutated earlier in the iterator by snapshot-derived
+///   deductions, but those inputs are deterministic from canonical state,
+///   so every honest validator with the same parent reaches the same
+///   running balance — an over/underflow here means the peer's block is
+///   structurally bad on every validator, not that our state diverged.
+///   Validator-side: consensus rejection. Producer-side: code bug in our
+///   own fee calc.
+/// - `SnapshotTreasuryUnderflow` → treasury underflow where the deduction
+///   amount is itself derived from a local snapshot (expired-ledger payout
+///   or commitment-refund). INVARIANT: constructed only by
+///   `deduct_from_treasury_for_payout`, never on a peer-supplied operand.
+///   Two honest nodes cannot disagree on treasury balance, so an underflow
+///   on a snapshot-derived amount means our snapshot disagrees with the
+///   inherited treasury balance. Validator-side: node fault (loud restart
+///   beats silent canonical-fork). Producer-side: code bug or corrupt
+///   local state.
 /// - `Structural` → per-tx structural error (e.g. publish-ledger tx missing
 ///   `perm_fee`, or fee-distribution constructors rejecting peer-supplied
 ///   values). Always peer-attributable → consensus rejection.
@@ -52,26 +53,24 @@ pub enum ShadowTxGenError {
     #[error("snapshot invariant violation: {0}")]
     SnapshotInvariant(String),
 
-    /// Treasury arithmetic under/overflow during peer-derived fee calc.
-    /// INVARIANT: constructed only when the operand is purely peer-supplied
-    /// AND the running treasury value has not been mutated by snapshot-
-    /// derived amounts at this point in the iterator. Under those
-    /// conditions a fault is safely peer-attributable.
-    /// Validator-side: peer's block has structurally bad fees → consensus rejection.
-    /// Producer-side: indicates a code bug in our fee calc.
+    /// Treasury arithmetic under/overflow on a peer-supplied operand
+    /// (publish-ledger ingress-proof reward, term/perm-fee accumulation,
+    /// block reward). The running balance at this site is deterministic
+    /// from canonical, so an underflow means the peer's block is
+    /// structurally bad on every honest validator.
+    /// Validator-side: consensus rejection.
+    /// Producer-side: code bug in our fee calc.
     #[error("treasury arithmetic: {0}")]
     TreasuryArithmetic(String),
 
-    /// Treasury underflow in a payout helper or post-snapshot phase whose
-    /// result depends on local snapshot state.
-    /// INVARIANT: constructed when either (a) the deduction amount is
-    /// derived from a local snapshot (expired-ledger payout or
-    /// commitment-refund) OR (b) the running treasury value has already
-    /// been mutated by snapshot-derived amounts before this point in the
-    /// iterator (so the underflow cannot be cleanly peer-attributed).
-    /// Validator-side: node fault — our local snapshot disagrees with the
-    /// inherited treasury balance, which two honest nodes cannot reach.
-    /// Producer-side: code bug or corrupt local state.
+    /// Treasury underflow where the deduction amount is itself derived
+    /// from a local snapshot (expired-ledger payout or commitment-refund).
+    /// INVARIANT: constructed only by `deduct_from_treasury_for_payout`;
+    /// never on a peer-supplied operand. Two honest nodes cannot disagree
+    /// on treasury balance, so an underflow on a snapshot-derived amount
+    /// means our local snapshot disagrees with the inherited treasury.
+    /// Validator-side: node fault (loud restart over silent
+    /// canonical-fork). Producer-side: code bug or corrupt local state.
     #[error("snapshot treasury underflow: {0}")]
     SnapshotTreasuryUnderflow(String),
 
@@ -120,14 +119,6 @@ pub struct ShadowTxGenerator<'a> {
 
     // Iterator state
     treasury_balance: U256,
-    /// Set to `true` once any snapshot-derived mutation has been applied
-    /// to `treasury_balance` (expired-ledger payouts, commitment refunds).
-    /// While `false`, an underflow against a peer-supplied amount is
-    /// safely peer-attributable (`TreasuryArithmetic`); once `true`, the
-    /// underflow could be caused by local snapshot disagreement and must
-    /// be classified as `SnapshotTreasuryUnderflow` (node fault). See
-    /// the variant docstring on `SnapshotTreasuryUnderflow`.
-    snapshot_tainted: bool,
     phase: Phase,
     index: usize,
     // Current publish ledger iterator
@@ -295,7 +286,6 @@ impl<'a> ShadowTxGenerator<'a> {
             one_year_txs,
             thirty_day_txs,
             treasury_balance: initial_treasury_balance,
-            snapshot_tainted: false,
             phase: Phase::Header,
             index: 0,
             current_publish_iter: Vec::new().into_iter(),
@@ -360,7 +350,6 @@ impl<'a> ShadowTxGenerator<'a> {
             one_year_txs,
             thirty_day_txs,
             treasury_balance: initial_treasury_balance,
-            snapshot_tainted: false,
             phase: Phase::Header,
             index: 0,
             current_publish_iter,
@@ -513,10 +502,6 @@ impl<'a> ShadowTxGenerator<'a> {
                 amount, self.treasury_balance
             ))
         })?;
-        // Any successful snapshot-derived deduction taints the running
-        // treasury value for subsequent peer-derived operations (e.g. the
-        // publish-ledger ingress-reward deduction). See `snapshot_tainted`.
-        self.snapshot_tainted = true;
         Ok(())
     }
 
@@ -812,49 +797,33 @@ impl<'a> ShadowTxGenerator<'a> {
                     } => {
                         // Deduct ingress proof reward from treasury.
                         //
-                        // The deduction `amount` itself is peer-derived
-                        // (aggregated from `tx.perm_fee` / `tx.term_fee` of
-                        // publish-ledger txs). This phase runs AFTER
-                        // `try_process_expired_ledger` and may run after
-                        // `try_process_commitment_refunds`, both of which
-                        // mutate `treasury_balance` by snapshot-derived
-                        // amounts (and set `snapshot_tainted = true`).
-                        //
-                        // Disambiguate on the actual taint state, not the
-                        // worst-case possibility:
-                        //   - `snapshot_tainted = false`: no snapshot-
-                        //     derived mutation happened on this block, so
-                        //     an underflow is purely peer's fault →
-                        //     `TreasuryArithmetic` (peer-attributable
-                        //     consensus rejection).
-                        //   - `snapshot_tainted = true`: prior snapshot-
-                        //     derived deductions could have driven the
-                        //     balance below where a peer with a correct
-                        //     snapshot computed → `SnapshotTreasuryUnderflow`
-                        //     (node fault, conservative loud restart).
-                        //
-                        // The conservative variant matches the documented
-                        // invariant on `SnapshotTreasuryUnderflow` (the
-                        // OR-clause "treasury_balance has already been
-                        // mutated by snapshot-derived amounts"). Two
-                        // honest nodes cannot disagree on treasury
-                        // balance, so silent canonical-fork is strictly
-                        // worse than a loud restart in the tainted case.
+                        // The deduction `amount` is peer-derived (aggregated
+                        // from `tx.perm_fee` / `tx.term_fee` of publish-ledger
+                        // txs). Prior phases (`try_process_expired_ledger`,
+                        // `try_process_commitment_refunds`) may have mutated
+                        // `treasury_balance` from local snapshot state, but
+                        // those inputs are deterministic from canonical:
+                        // every honest validator with the same parent
+                        // computes the same running balance at this point.
+                        // So if WE underflow, every honest validator with
+                        // the same snapshot underflows the same way — the
+                        // block is invalid, not our state. Classify as
+                        // `TreasuryArithmetic` (peer-attributable consensus
+                        // rejection); never as a node fault. Misclassifying
+                        // would let one crafted epoch block crash every
+                        // validator simultaneously (network-wide DoS).
+                        // Genuine snapshot drift surfaces via the per-block
+                        // `block.treasury != expected_treasury` comparison
+                        // downstream, so the loud-restart signal is not lost.
                         let amount = U256::from(increment.amount);
                         let prior_balance = self.treasury_balance;
-                        let tainted = self.snapshot_tainted;
                         self.treasury_balance =
                             self.treasury_balance.checked_sub(amount).ok_or_else(|| {
-                                let msg = format!(
+                                ShadowTxGenError::TreasuryArithmetic(format!(
                                     "ingress proof reward underflow at block_height {}: \
                                      cannot pay {} from balance {} (irys_ref {})",
                                     self.block_height, amount, prior_balance, increment.irys_ref,
-                                );
-                                if tainted {
-                                    ShadowTxGenError::SnapshotTreasuryUnderflow(msg)
-                                } else {
-                                    ShadowTxGenError::TreasuryArithmetic(msg)
-                                }
+                                ))
                             })?;
                     }
                     _ => {
@@ -1861,22 +1830,25 @@ mod tests {
         assert_eq!(generator.treasury_balance(), initial_treasury);
     }
 
-    /// H6 regression: when a prior snapshot-derived expired-ledger payout
-    /// drains the treasury below the level required for the next
-    /// ingress-proof reward deduction, the underflow must surface as
-    /// `SnapshotTreasuryUnderflow` (node fault — local snapshot may
-    /// disagree with the inherited treasury), NOT `TreasuryArithmetic`
-    /// (which would peer-attribute the fault and silently canonical-fork
-    /// the network).
+    /// DoS-vector regression: when a prior snapshot-derived expired-ledger
+    /// payout drains the treasury below the level required for the next
+    /// ingress-proof reward deduction, the underflow MUST surface as
+    /// `TreasuryArithmetic` (peer-attributable, consensus rejection) —
+    /// NOT `SnapshotTreasuryUnderflow` (node fault, panic+restart).
     ///
-    /// The deduction `amount` at the ingress-proof site is peer-derived,
-    /// but the running `treasury_balance` at that point in the iterator
-    /// has already been mutated by snapshot-derived expired-ledger
-    /// payouts. Per the audited invariant on `ShadowTxGenError`, that
-    /// mutation makes the underflow non-cleanly-peer-attributable, so we
-    /// must classify it as a node fault.
+    /// Rationale: every honest validator with the same canonical parent
+    /// computes the same `expired_ledger_fees` and `treasury_balance` at
+    /// the publish-ledger site (those inputs are deterministic from
+    /// canonical state). So if WE underflow on this peer's block, every
+    /// honest validator with the same snapshot underflows the same way —
+    /// the block IS invalid, not our state. Classifying as node fault
+    /// would let a single crafted epoch block crash every honest
+    /// validator simultaneously, a network-wide DoS. Snapshot drift, if
+    /// it exists, is caught by the final `block.treasury != expected`
+    /// comparison on every block (not just rare underflowing ones), so
+    /// the loud-restart signal is not lost by reclassifying this path.
     #[test]
-    fn publish_ingress_underflow_after_expired_ledger_payout_is_snapshot_underflow() {
+    fn publish_ingress_underflow_after_expired_ledger_payout_is_peer_attributable() {
         let mut config = ConsensusConfig::testing();
         // Pin to 1 proof for arithmetic simplicity.
         config.hardforks.frontier.number_of_ingress_proofs_total = 1;
@@ -1960,8 +1932,9 @@ mod tests {
 
         // Drive the iterator until either an error surfaces or we run
         // out of items. The expected outcome is the publish-ledger
-        // ingress-reward subtraction surfacing as
-        // `SnapshotTreasuryUnderflow`.
+        // ingress-reward subtraction surfacing as `TreasuryArithmetic`
+        // (peer-attributable consensus rejection) — even though
+        // expired-ledger payouts ran first and drained the treasury.
         let mut last_err: Option<ShadowTxGenError> = None;
         for item in generator.by_ref() {
             match item {
@@ -1975,11 +1948,12 @@ mod tests {
 
         let err = last_err.expect("publish-ledger phase must surface the underflow");
         assert!(
-            matches!(err, ShadowTxGenError::SnapshotTreasuryUnderflow(_)),
+            matches!(err, ShadowTxGenError::TreasuryArithmetic(_)),
             "underflow at publish-ledger ingress-proof site must classify as \
-             SnapshotTreasuryUnderflow (node fault) because the running \
-             treasury at this point has been mutated by snapshot-derived \
-             expired-ledger payouts; got: {err:?}",
+             TreasuryArithmetic (peer-attributable) regardless of whether \
+             prior snapshot-derived payouts mutated the treasury — \
+             misclassifying as node fault enables a network-wide \
+             panic+restart DoS via a single crafted epoch block; got: {err:?}",
         );
         // The error message must carry diagnostic context — block height
         // and the irys_ref (rolling hash) — so operator logs distinguish
@@ -1995,15 +1969,15 @@ mod tests {
         );
     }
 
-    /// Companion to `publish_ingress_underflow_after_expired_ledger_payout_is_snapshot_underflow`:
-    /// when NO snapshot-derived mutation has touched the treasury (no
-    /// expired-ledger payouts, no commitment refunds), a publish-ledger
-    /// ingress-reward underflow is caused purely by peer-supplied fee
-    /// values being too large for the inherited treasury. That is safely
-    /// peer-attributable, so it must surface as `TreasuryArithmetic`
-    /// (consensus rejection) — NOT `SnapshotTreasuryUnderflow` (node
-    /// fault). Otherwise a malicious peer could crash honest nodes with
-    /// a structurally bad block.
+    /// Companion to `publish_ingress_underflow_after_expired_ledger_payout_is_peer_attributable`:
+    /// covers the same classification on the non-epoch-block path. No
+    /// expired-ledger payouts and no commitment refunds have run, so the
+    /// publish-ledger ingress-reward underflow fires against a treasury
+    /// balance untouched by snapshot-derived deductions. Must still
+    /// surface as `TreasuryArithmetic` (consensus rejection); a uniform
+    /// classification across epoch- and non-epoch-block paths is the
+    /// load-bearing invariant — the bug this regression-guards was a
+    /// path-dependent split that promoted the epoch case to node fault.
     #[test]
     fn publish_ingress_underflow_with_no_snapshot_taint_is_peer_attributable() {
         let mut config = ConsensusConfig::testing();
@@ -2031,8 +2005,12 @@ mod tests {
         };
 
         // Initial treasury is below the ingress reward. No expired-ledger
-        // payouts and no commitment refunds — so `snapshot_tainted`
-        // remains `false` when the publish-ledger underflow fires.
+        // payouts and no commitment refunds — the publish-ledger underflow
+        // fires against a treasury balance untouched by snapshot-derived
+        // deductions. Covers the non-epoch-block path; the
+        // `..._after_expired_ledger_payout_is_peer_attributable` test
+        // covers the epoch-block path (where prior snapshot-derived
+        // payouts have run first).
         let initial_treasury = U256::from(1_u64);
         let expired_fees = LedgerExpiryBalanceDelta {
             reward_balance_increment: BTreeMap::new(),
