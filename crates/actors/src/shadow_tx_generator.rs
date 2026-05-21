@@ -814,7 +814,14 @@ impl<'a> ShadowTxGenerator<'a> {
                         // validator simultaneously (network-wide DoS).
                         // Genuine snapshot drift surfaces via the per-block
                         // `block.treasury != expected_treasury` comparison
-                        // downstream, so the loud-restart signal is not lost.
+                        // downstream — but only when iteration completes
+                        // far enough to reach it. A snapshot-drifted balance
+                        // below the peer-supplied operand will underflow mid-
+                        // iteration and mis-discard the block as Invalid on
+                        // this node alone. That single-node self-DoS is
+                        // strictly preferable to network-wide loud-restart on
+                        // a crafted block, which is why the classification
+                        // stays peer-attributable here.
                         let amount = U256::from(increment.amount);
                         let prior_balance = self.treasury_balance;
                         self.treasury_balance =
