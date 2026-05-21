@@ -91,7 +91,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     )
     .unwrap();
     let db = DatabaseProvider(Arc::new(db_env));
-    let block_index = BlockIndex::new_for_testing(db);
+    let block_index = BlockIndex::new_for_testing(db.clone());
     for (height, item) in block_index_items.iter().enumerate() {
         block_index.push_item(item, height as u64).unwrap();
     }
@@ -137,6 +137,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &poa,
         &block_index_guard,
         &block_tree_guard,
+        &db,
         H256::zero(),
         2,
         &epoch_snapshot,

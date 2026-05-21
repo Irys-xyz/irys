@@ -102,21 +102,13 @@ pub enum PreValidationError {
     /// search. Construction sites in `get_block_bounds` /
     /// `get_block_bounds_at_height` pre-check peer-supplied offsets against
     /// the chain max and reject out-of-range / inactive-ledger cases first
-    /// (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`); by the time
-    /// this variant is constructed the failure is a local-index inconsistency
-    /// (empty index, MDBX I/O, missing predecessor that should be present).
-    /// Classified as `is_node_fault` — retry will hit the same broken state.
-    ///
-    /// MERGE-PAIR(C1): the `is_node_fault` classification is contingent on
-    /// every construction site genuinely being a local-index inconsistency.
-    /// The `get_block_bounds` walk-off-tree fallback (see the
-    /// `MERGE-BLOCKER(C1)` marker in `get_block_bounds`) currently
-    /// constructs this variant from a peer-controllable side-fork lookup —
-    /// which means a remote peer can drive a `NodeFault` panic. When the
-    /// `fix-cdr-block-set` merge replaces that fallback with a canonical
-    /// lookup that returns `Ok(None)` for off-lineage, re-audit ALL
-    /// remaining construction sites here: if any are still peer-
-    /// controllable, demote the classification or split the variant.
+    /// (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`), and the
+    /// walk-off-tree fallback returns `PoAOffCanonicalAncestor` when a
+    /// side-fork ancestor falls below the migration boundary; by the time
+    /// this variant is constructed the failure is a local-index
+    /// inconsistency (empty index, MDBX I/O, missing predecessor that
+    /// should be present). Classified as `is_node_fault` — retry will hit
+    /// the same broken state.
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
 
@@ -219,6 +211,20 @@ pub enum PreValidationError {
     /// genuine local lookup failures.
     #[error("PoA ledger {ledger_id} inactive in local chain")]
     PoALedgerInactive { ledger_id: u32 },
+    /// Peer-supplied block's ancestor chain references `ancestor_hash` at
+    /// `height` that is not the canonical block at that height. The
+    /// canonical-index PoA-bounds walk in
+    /// `get_data_poa_bounds_with_block_tree_fallback` falls off the
+    /// bottom of `block_tree`'s window and consults `MigratedBlockHashes`
+    /// to gate trust in the height-keyed canonical index; a mismatch here
+    /// means the peer's parent lineage branched below the migration
+    /// boundary (a side-fork the local node has long abandoned). Peer-
+    /// attributable Consensus: the local chain has nothing to validate
+    /// against.
+    #[error(
+        "PoA ancestor {ancestor_hash} at height {height} is off the local canonical chain"
+    )]
+    PoAOffCanonicalAncestor { ancestor_hash: H256, height: u64 },
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
     #[error("Missing partition assignment for partition hash {partition_hash}")]
@@ -556,6 +562,7 @@ impl PreValidationError {
             | Self::PoAChunkOffsetOutOfTxBounds
             | Self::PoADataPartitionExpired { .. }
             | Self::PoALedgerInactive { .. }
+            | Self::PoAOffCanonicalAncestor { .. }
             | Self::PreviousCumulativeDifficultyMismatch { .. }
             | Self::PreviousSolutionHashMismatch { .. }
             | Self::PublishLedgerProofCountMismatch { .. }
@@ -625,6 +632,7 @@ impl PreValidationError {
             Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
             Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
             Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
+            Self::PoAOffCanonicalAncestor { .. } => "poa_off_canonical_ancestor",
             Self::PoAChunkOffsetOutOfTxBounds => "poa_chunk_offset_out_of_tx_bounds",
             Self::PartitionAssignmentMissing { .. } => "partition_assignment_missing",
             Self::PartitionAssignmentSlotIndexMissing { .. } => "partition_slot_index_missing",
@@ -2442,6 +2450,30 @@ mod prevalidation_error_classification_tests {
         assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_node_fault());
     }
 
+    /// `PoAOffCanonicalAncestor` is raised when the PoA-bounds walk falls off
+    /// the bottom of `block_tree` to a `prev_hash` that does not match the
+    /// canonical block at that height (per `MigratedBlockHashes`). The peer's
+    /// parent lineage branched below the migration boundary — peer-
+    /// attributable Consensus, never a node fault.
+    #[test]
+    fn poa_off_canonical_ancestor_is_consensus_not_node_fault() {
+        let err = PreValidationError::PoAOffCanonicalAncestor {
+            ancestor_hash: H256::zero(),
+            height: 7,
+        };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(
+            !err.is_node_fault(),
+            "PoAOffCanonicalAncestor must not be a node fault — peer's side-fork below \
+             migration boundary is a consensus rejection, not local state"
+        );
+        assert!(
+            !err.is_internal_failure(),
+            "PoAOffCanonicalAncestor is a peer-attributable Consensus rejection",
+        );
+        assert_eq!(err.metric_reason(), "poa_off_canonical_ancestor");
+    }
+
     /// `ValidationError::TaskPanicked` is a node fault (verifier thread
     /// crashed); cancellations and parent-missing races are not.
     #[test]
@@ -2759,16 +2791,17 @@ mod height_tests {
     }
 }
 
-/// MERGE-BLOCKER(C1) REGRESSION TEST MODULE
+/// C1 REGRESSION TEST MODULE
 ///
-/// Captures the C1 vulnerability documented at `MERGE-BLOCKER(C1)` inside
+/// Pins the fix for the C1 vulnerability in
 /// `get_data_poa_bounds_with_block_tree_fallback`: for a non-canonical
 /// lineage whose ancestry descends below `block_tree`'s window, the
-/// height-only canonical-index fallback either returns wrong-fork bounds
-/// or escalates to `BlockBoundsLookupError` → `NodeFault` → remote-triggerable
-/// panic. The test below is `#[ignore]`d until the merge agent fixes C1
-/// per the production marker — at which point the `#[ignore]` is removed
-/// and the test must pass.
+/// previous height-only canonical-index fallback either returned wrong-fork
+/// bounds or escalated to `BlockBoundsLookupError` → `NodeFault` →
+/// remote-triggerable panic. After the fix, the walk gates the canonical-
+/// index fallback on `MigratedBlockHashes[prev_height] == prev_hash` and
+/// returns `PoAOffCanonicalAncestor` (peer-attributable Consensus) when the
+/// predecessor is off-canonical.
 #[cfg(test)]
 mod c1_side_fork_regression_tests {
     use super::*;
@@ -2852,35 +2885,24 @@ mod c1_side_fork_regression_tests {
         tree.blocks.insert(block_hash, entry);
     }
 
-    /// MERGE-BLOCKER(C1) REGRESSION TEST
+    /// C1 REGRESSION TEST
     ///
-    /// This test must pass before the `fix-cdr-block-set` merge ships. It
-    /// is currently ignored because the C1 vulnerability is unfixed — the
-    /// production code at `get_data_poa_bounds_with_block_tree_fallback`'s
-    /// `None =>` arm still uses a height-only canonical-index fallback
-    /// that produces wrong-fork bounds or escalates to NodeFault on
-    /// out-of-range.
-    ///
-    /// When the merge agent fixes C1 (per the `MERGE-BLOCKER(C1)` comment
-    /// in `block_validation.rs`), REMOVE the `#[ignore]` and verify this
-    /// test passes. The expected outcome is documented in the assertions
-    /// below — the side-fork PoA must NEVER produce `BlockBoundsLookupError`
+    /// The side-fork PoA must NEVER produce `BlockBoundsLookupError`
     /// (NodeFault) and must NEVER produce a successful return rooted on
-    /// canonical-chain bounds at the anchor height.
+    /// canonical-chain bounds at the anchor height. After the fix, the
+    /// expected outcome is `PoAOffCanonicalAncestor` (peer-attributable
+    /// Consensus) because `MigratedBlockHashes[prev_height]` does not
+    /// match the side fork's `phantom_parent_hash`.
     ///
-    /// Failure mode under current (buggy) code: returns
+    /// Pre-fix failure mode (for reference): returned
     /// `Ok(BlockBounds { start_chunk_offset: 20, end_chunk_offset: 30,
     /// tx_root: <side_fork's> })` — the height-only fallback at
-    /// `curr_height - 1 = 1` (canonical height 1) sources `prev_total = 20`
-    /// from the *canonical* chain, then combines that canonical-derived
-    /// start with the side fork's own (curr_total, tx_root) from S to
-    /// produce silently wrong-fork bounds. The PoA then validates against
-    /// the side-fork's tx_root for an offset whose start is anchored on
-    /// canonical history — a fork-deterministic violation. The other
-    /// failure shape (when the chosen offset exceeds the canonical
-    /// anchor's `anchor_max`) is `BlockBoundsLookupError` → NodeFault →
-    /// remote-triggerable panic.
-    #[ignore = "C1 not yet fixed — see MERGE-BLOCKER(C1) in block_validation.rs"]
+    /// `curr_height - 1 = 1` sourced `prev_total = 20` from the canonical
+    /// chain, then combined that canonical-derived start with the side
+    /// fork's own `(curr_total, tx_root)` to produce silently wrong-fork
+    /// bounds. The other failure shape (when the chosen offset exceeded
+    /// the canonical anchor's `anchor_max`) was `BlockBoundsLookupError`
+    /// → NodeFault → remote-triggerable panic.
     #[test]
     fn c1_side_fork_below_block_tree_window_must_not_node_fault() {
         // --- Build a 2-block canonical chain in block_index ----------------
@@ -2896,7 +2918,7 @@ mod c1_side_fork_regression_tests {
         )
         .expect("open db");
         let db = irys_types::DatabaseProvider(Arc::new(db_env));
-        let block_index = BlockIndex::new_for_testing(db);
+        let block_index = BlockIndex::new_for_testing(db.clone());
 
         let canonical_genesis_hash = BlockHash::random();
         let canonical_h1_hash = BlockHash::random();
@@ -2967,13 +2989,17 @@ mod c1_side_fork_regression_tests {
         // Pick an offset in the gap between canonical height-1's Submit
         // total (20) and the side fork's claimed total (30). The walk-back
         // from S → phantom_parent_hash is None, so the fallback fires at
-        // `curr_height - 1 = 1`. At canonical height 1 the Submit total
-        // is 20, so offset 25 fails `ensure!(25 < 20)` →
-        // BlockBoundsLookupError (NodeFault → panic).
+        // `curr_height - 1 = 1`. With MigratedBlockHashes empty (no canonical
+        // entry written), the canonicality gate observes
+        // `MigratedBlockHashes[1] = None != Some(phantom_parent_hash)` and
+        // returns `PoAOffCanonicalAncestor` (peer-attributable Consensus).
+        // Pre-fix code returned `BlockBoundsLookupError` (NodeFault → panic)
+        // because canonical height 1's Submit total was 20 < 25.
         let ledger_chunk_offset: u64 = 25;
         let result = get_data_poa_bounds_with_block_tree_fallback(
             &block_index_guard,
             &block_tree_guard,
+            &db,
             side_fork_hash,
             2,
             DataLedger::Submit,
@@ -3022,14 +3048,36 @@ mod c1_side_fork_regression_tests {
                 );
             }
             Err(other) => {
-                // Acceptable outcomes after the C1 fix: any non-NodeFault
-                // error. PoAChunkOffsetOutOfBlockBounds is the cleanest,
-                // but a new "off canonical lineage" variant is also OK.
+                // Expected outcome after the C1 fix: `PoAOffCanonicalAncestor`
+                // carrying the phantom parent hash + its height. Any other
+                // non-NodeFault variant is also acceptable in principle (e.g.
+                // `PoAChunkOffsetOutOfBlockBounds`), but the canonicality-gate
+                // path returns `PoAOffCanonicalAncestor` deterministically.
                 assert!(
                     !other.is_node_fault(),
                     "C1: side-fork PoA produced a node-fault error {other:?}. \
                      After the fix this must be a non-node-fault outcome.",
                 );
+                match &other {
+                    PreValidationError::PoAOffCanonicalAncestor {
+                        ancestor_hash,
+                        height,
+                    } => {
+                        assert_eq!(
+                            *ancestor_hash, phantom_parent_hash,
+                            "PoAOffCanonicalAncestor must carry the side fork's \
+                             phantom parent hash (the off-canonical ancestor)",
+                        );
+                        assert_eq!(
+                            *height, 1,
+                            "PoAOffCanonicalAncestor must carry prev_height = 1 \
+                             (the height at which the canonical gate failed)",
+                        );
+                    }
+                    _ => panic!(
+                        "C1: expected PoAOffCanonicalAncestor after the fix, got {other:?}",
+                    ),
+                }
             }
         }
     }
@@ -3237,6 +3285,7 @@ fn ledger_entry_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<(u64,
 fn get_data_poa_bounds_with_block_tree_fallback(
     block_index_guard: &BlockIndexReadGuard,
     block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
     parent_block_hash: BlockHash,
     parent_height: u64,
     ledger: DataLedger,
@@ -3335,12 +3384,39 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 .map(|(total, _)| total)
                 .unwrap_or(0)
         } else {
-            // Inline `Result` block so `None` from `get_item` propagates as
-            // `BlockBoundsLookupError` (node fault) rather than silently
-            // collapsing to `prev_total = 0` like a missing ledger entry.
+            // Predecessor is below block_tree's window. The height-keyed
+            // `block_index` is canonical-only, so consulting it for `prev_hash`'s
+            // ledger totals is safe ONLY when `prev_hash` is the canonical block
+            // at this height; otherwise the walk has descended onto a side-fork
+            // ancestor and the canonical totals would attribute the WRONG
+            // block's chunks (the original C1 vulnerability). Gate the lookup
+            // via `MigratedBlockHashes[prev_height]`.
+            let prev_height = curr_height - 1;
+            let canonical_at_height = db
+                .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
+                .map_err(|e| {
+                    PreValidationError::BlockBoundsLookupError(format!(
+                        "MigratedBlockHashes view failed at height {prev_height}: {e}"
+                    ))
+                })?
+                .map_err(|e| {
+                    PreValidationError::BlockBoundsLookupError(format!(
+                        "MigratedBlockHashes read failed at height {prev_height}: {e}"
+                    ))
+                })?;
+            if canonical_at_height != Some(prev_hash) {
+                return Err(PreValidationError::PoAOffCanonicalAncestor {
+                    ancestor_hash: prev_hash,
+                    height: prev_height,
+                });
+            }
+            // `prev_hash` is canonical at `prev_height`. Inline `Result` block
+            // so `None` from `get_item` propagates as `BlockBoundsLookupError`
+            // (node fault) rather than silently collapsing to `prev_total = 0`
+            // like a missing ledger entry.
             let lookup: Result<u64, PreValidationError> = {
                 let index = block_index_guard.read();
-                match index.get_item(curr_height - 1) {
+                match index.get_item(prev_height) {
                     // `None` here violates the invariant documented above:
                     // `block_tree_depth > block_migration_depth` guarantees
                     // predecessors below `block_tree`'s window are always
@@ -3348,11 +3424,9 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                     // a consensus-valid `BlockBounds` rooted at offset 0 on
                     // a corrupted node.
                     None => Err(PreValidationError::BlockBoundsLookupError(format!(
-                        "block_index missing item at height {} (invariant violated: \
+                        "block_index missing item at height {prev_height} (invariant violated: \
                          block_tree_depth > block_migration_depth guarantees this is \
-                         always indexed; predecessor of block at height {} unreachable)",
-                        curr_height - 1,
-                        curr_height
+                         always indexed; predecessor of block at height {curr_height} unreachable)",
                     ))),
                     // `Some(item)` but no matching ledger entry is legitimate:
                     // the ledger had not yet been introduced at that height.
@@ -3412,48 +3486,41 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 curr = prev_header;
             }
             None => {
-                // MERGE-BLOCKER(C1): this fallback is NOT fork-deterministic.
-                // Confirmed Critical by multi-reviewer audit (CodeRabbit +
-                // Codex, independent agreement):
-                //   - For a non-canonical lineage whose ancestry descends
-                //     below block_tree's window, this height-only canonical-
-                //     index lookup returns bounds for the WRONG block
-                //     (canonical hash at that height ≠ walk's `prev_hash`).
-                //   - The out-of-range case escalates to
-                //     `BlockBoundsLookupError` → `NodeFault` → panic, i.e.
-                //     a peer can craft a side-fork block that remote-
-                //     triggers a node restart.
-                //
-                // When merging with branch `fix-cdr-block-set` (4e21e25a),
-                // REPLACE this `None =>` arm with a canonical lookup
-                // mirroring `tx_inclusion::find_canonical_ledger_range`:
-                //   1. Use `curr_height - 1` as the `max_height` anchor.
-                //   2. Walk `block_tree` filtered to
-                //      `ChainState::Onchain`, fall through to
-                //      `MigratedBlockHashes` + `IrysBlockHeaders` for
-                //      older history.
-                //   3. Return `Ok(None)` on "off canonical lineage" —
-                //      caller routes this as a `Consensus` outcome,
-                //      NEVER as `BlockBoundsLookupError` / `NodeFault`.
-                //   4. Re-evaluate whether `BlockBoundsLookupError`'s
-                //      `NodeFault` classification still applies once this
-                //      site is the only construction path (paired marker
-                //      lives on the variant doc).
-                //
-                // Until that replacement lands, this arm is the C1
-                // vulnerability — DO NOT remove this comment without the
-                // replacement.
-                //
                 // Predecessor is below block_tree's window — delegate the
                 // remainder of the search to block_index's binary search,
-                // anchored at (curr_height - 1).
+                // anchored at (curr_height - 1). The binary search is HEIGHT-
+                // keyed and resolves through the canonical chain, so it is
+                // only safe to trust when `prev_hash` is the canonical block
+                // at that height. Otherwise the walk has descended onto an
+                // abandoned side-fork ancestor and the canonical bounds would
+                // be for the WRONG block (the C1 vulnerability prior to this
+                // fix). Gate via `MigratedBlockHashes[prev_height]`.
+                let prev_height = curr_height - 1;
+                let canonical_at_height = db
+                    .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "MigratedBlockHashes view failed at height {prev_height}: {e}"
+                        ))
+                    })?
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "MigratedBlockHashes read failed at height {prev_height}: {e}"
+                        ))
+                    })?;
+                if canonical_at_height != Some(prev_hash) {
+                    return Err(PreValidationError::PoAOffCanonicalAncestor {
+                        ancestor_hash: prev_hash,
+                        height: prev_height,
+                    });
+                }
                 drop(tree);
                 let index = block_index_guard.read();
                 return index
                     .get_block_bounds_at_height(
                         ledger,
                         LedgerChunkOffset::from(ledger_chunk_offset),
-                        curr_height - 1,
+                        prev_height,
                     )
                     .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
             }
@@ -3473,6 +3540,7 @@ pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
     block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
     parent_block_hash: BlockHash,
     parent_height: u64,
     epoch_snapshot: &EpochSnapshot,
@@ -3540,6 +3608,7 @@ pub fn poa_is_valid(
         let bb = get_data_poa_bounds_with_block_tree_fallback(
             block_index_guard,
             block_tree_guard,
+            db,
             parent_block_hash,
             parent_height,
             ledger,
@@ -6438,6 +6507,7 @@ mod tests {
             &poa,
             &block_index_guard,
             &block_tree_guard,
+            context.block_index.db(),
             H256::zero(),
             height,
             &context.epoch_snapshot,
@@ -6690,6 +6760,7 @@ mod tests {
             &poa,
             &block_index_guard,
             &block_tree_guard,
+            context.block_index.db(),
             H256::zero(),
             height,
             &context.epoch_snapshot,

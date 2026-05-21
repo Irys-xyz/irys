@@ -122,6 +122,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
     // Setup some working variables
     let block_index_guard = &genesis_node.node_ctx.block_index_guard.clone();
     let block_tree_guard = &genesis_node.node_ctx.block_tree_guard.clone();
+    let db = &genesis_node.node_ctx.db.clone();
     let num_chunks_in_partition = node_config.consensus_config().num_chunks_in_partition;
     let entropy_packing_iterations = node_config.consensus_config().entropy_packing_iterations;
     let chain_id = node_config.consensus_config().chain_id;
@@ -190,6 +191,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &entropy_poa,
                 block_index_guard,
                 block_tree_guard,
+                db,
                 new_block.block_hash,
                 new_block.height,
                 &epoch_snapshot,
@@ -214,6 +216,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 &data_poa,
                 block_index_guard,
                 block_tree_guard,
+                db,
                 new_block.block_hash,
                 new_block.height,
                 &epoch_snapshot,
@@ -400,6 +403,7 @@ async fn data_poa_at_tip_validates_via_block_tree_fallback() -> eyre::Result<()>
         &data_poa,
         &block_index_guard,
         &block_tree,
+        &genesis_node.node_ctx.db,
         data_block.block_hash,
         data_block.height,
         &epoch_snapshot,

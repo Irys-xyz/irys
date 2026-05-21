@@ -563,6 +563,7 @@ impl BlockValidationTask {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
             let block_tree_guard = self.block_tree_guard.clone();
+            let db = self.service_inner.db.clone();
             let block_hash = self.sealed_block.header().block_hash;
             let block_height = self.sealed_block.header().height;
             let parent_block_hash = self.sealed_block.header().previous_block_hash;
@@ -585,6 +586,7 @@ impl BlockValidationTask {
                         &poa,
                         &block_index_guard,
                         &block_tree_guard,
+                        &db,
                         parent_block_hash,
                         block_height.saturating_sub(1),
                         &poa_epoch_snapshot,
