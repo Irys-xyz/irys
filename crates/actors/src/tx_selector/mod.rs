@@ -1013,6 +1013,18 @@ async fn get_publish_txs_and_proofs(
             ) {
                 Ok(result) => result,
                 Err(e) => {
+                    // TODO(block-producer-errors): same asymmetry as the
+                    // `tx_header_by_txid_canonical` call above — the
+                    // validator-side invocation of `get_assigned_ingress_proofs`
+                    // (block_validation.rs:2969) uses `?` to surface this
+                    // `Err` as `BlockBoundsLookupError` → internal failure
+                    // under the disamb taxonomy.  Here we silently drop the
+                    // publish candidate.  Resolve in the block-producer
+                    // error-handling pass; for now, surface the drop via the
+                    // same counter so the asymmetry is operationally visible.
+                    crate::metrics::record_block_production_lookup_failed(
+                        "assigned_ingress_proofs",
+                    );
                     warn!(
                         tx.id = %tx_header.id,
                         data_root = %tx_header.data_root,
