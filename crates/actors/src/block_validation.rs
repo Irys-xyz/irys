@@ -353,27 +353,35 @@ impl PreValidationError {
     }
 
     /// Returns true for variants representing local/runtime failures (verifier
-    /// panics, transient task-join errors, local DB inconsistencies surfaced
-    /// by `find_canonical_ledger_range`, etc.) that must NEVER be attributed
+    /// panics, transient task-join errors, etc.) that must NEVER be attributed
     /// to the peer or used to mark a block as consensus-invalid. See the enum
     /// safety-critical doc for the full invariant. Grow this method as new
     /// non-consensus variants are added.
-    ///
-    /// `BlockBoundsLookupError` is included because it now also surfaces
-    /// local DB/header inconsistencies (e.g. `MigratedBlockHashes[H]` exists
-    /// but `IrysBlockHeaders[hash]` is missing) — a missing local row must
-    /// not cause us to reject a valid peer-provided block.
     ///
     /// `ValidationServiceUnreachable` and `DatabaseError` are transient
     /// local-only failures called out explicitly in the enum safety doc as
     /// the kind of error that MUST NEVER be mapped to a consensus-level
     /// rejection — a momentary local DB I/O blip or service-unavailability
     /// would otherwise cause a valid peer block to be attributed as invalid.
+    ///
+    /// **`BlockBoundsLookupError` is intentionally NOT in this set on this
+    /// branch.**  Its producer at `poa_is_valid` (`block_validation.rs`
+    /// `get_block_bounds` call) still funnels peer-attributable bad-offset
+    /// cases through the same variant — classifying the variant as internal
+    /// would misroute an invalid PoA block to the parking/retry bucket.
+    /// `fix/validation-error-disamb` pre-filters the peer cases at the PoA
+    /// source (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`) and
+    /// then promotes `BlockBoundsLookupError` to `NodeFault` by
+    /// construction.  After that branch merges, the canonical-lookup paths
+    /// added here (Publish-fallback at L2798/2804/2826,
+    /// `find_canonical_ledger_range` at L3586) inherit the correct
+    /// classification automatically.  Until then a local DB blip on those
+    /// paths is peer-attributed — the same gap the pre-this-branch code
+    /// carried via `PublishTxMissingPriorSubmit`.
     pub fn is_internal_failure(&self) -> bool {
         matches!(
             self,
             Self::InternalTaskJoin(_)
-                | Self::BlockBoundsLookupError(_)
                 | Self::ValidationServiceUnreachable
                 | Self::DatabaseError { .. }
         )
@@ -1392,20 +1400,6 @@ mod prevalidation_error_classification_tests {
         );
     }
 
-    /// `BlockBoundsLookupError` is produced by `find_canonical_ledger_range`
-    /// when local DB/header storage is inconsistent (e.g. orphan
-    /// `MigratedBlockHashes` row with no `IrysBlockHeaders` entry). A local
-    /// corruption must not be attributed to the peer that delivered an
-    /// otherwise-valid block; classify as internal so the block pool keeps
-    /// the block in cache for retry rather than removing it as
-    /// consensus-invalid.
-    #[test]
-    fn block_bounds_lookup_error_is_internal_failure() {
-        let err = PreValidationError::BlockBoundsLookupError("local DB row missing".to_string());
-        assert!(err.is_internal_failure());
-        assert!(!err.is_fatal_corruption());
-    }
-
     /// `ValidationServiceUnreachable` surfaces transient local service
     /// unavailability — exactly the case the enum's safety doc calls out as
     /// MUST NEVER be mapped to a consensus-level rejection.
@@ -1431,11 +1425,16 @@ mod prevalidation_error_classification_tests {
     /// `PublishTxMissingPriorSubmit` is a consensus-invalidity verdict: a peer
     /// gave us a block whose Publish-ledger txs lack a prior Submit confirmation.
     /// It must classify as a peer-attributable failure so the block-pool removes
-    /// the offending block.  This is the counterpart of
-    /// `BlockBoundsLookupError`: the two arms of the Publish prior-Submit fallback
-    /// in `data_txs_are_valid` (`Ok(None)` and `Err(_)` respectively) must remain
-    /// on opposite sides of `is_internal_failure()` so a local DB inconsistency is
-    /// never confused with a peer-supplied invalid block.
+    /// the offending block.
+    ///
+    /// Companion to the `Err(_)` arm of the same `tx_header_by_txid_canonical`
+    /// fallback in `data_txs_are_valid`: that arm currently surfaces as
+    /// `BlockBoundsLookupError` (peer-attributable by default on this
+    /// branch, see the doc on `is_internal_failure`).  Both arms therefore
+    /// classify as peer-attributable today.  The asymmetry — making the
+    /// `Err(_)` arm internal — lands on `fix/validation-error-disamb` once
+    /// its PoA source-disambiguation prevents `BlockBoundsLookupError` from
+    /// carrying peer-attributable cases.
     #[test]
     fn publish_tx_missing_prior_submit_is_peer_attributable() {
         let err = PreValidationError::PublishTxMissingPriorSubmit {
@@ -2763,10 +2762,18 @@ pub async fn data_txs_are_valid(
                         // Publish`, and term ledgers reject `ledger_id ==
                         // Publish`, so the only term ledger that could have
                         // produced this `included_height` is Submit.  An
-                        // `Err` is a local DB/header inconsistency and must
-                        // be classified as internal, matching the
-                        // `BlockBoundsLookupError` treatment elsewhere — not
-                        // peer-attributed as `PublishTxMissingPriorSubmit`.
+                        // `Err` is a local DB/header inconsistency that we
+                        // surface as `BlockBoundsLookupError` for diagnostic
+                        // accuracy.  Classification follow-up:
+                        // `BlockBoundsLookupError` is intentionally NOT in
+                        // `is_internal_failure` on this branch (its PoA-side
+                        // producer still funnels peer cases through the same
+                        // variant); the disamb branch promotes it to
+                        // NodeFault after pre-filtering the peer cases.
+                        // Until then the `Err(_)` arm here remains
+                        // peer-attributable, the same effective behavior as
+                        // the pre-this-branch `PublishTxMissingPriorSubmit`
+                        // collapse.
                         //
                         // We must *also* reject when this tx has already been
                         // canonically promoted past the in-window walk: the
@@ -3575,6 +3582,13 @@ pub fn get_assigned_ingress_proofs(
     //     before `parent_height`.  This replaces the historical
     //     CachedDataRoots.block_set lookup, which retained reorg'd-out hashes
     //     and could produce stale BlockBoundsLookupError.
+    //
+    //     Classification follow-up: an `Err` here is a genuine local
+    //     canonical-metadata inconsistency, but we surface it via
+    //     `BlockBoundsLookupError` which is peer-attributable on this
+    //     branch in isolation (see `is_internal_failure` doc).  The
+    //     disamb branch's PoA source-disambiguation closes this gap by
+    //     promoting `BlockBoundsLookupError` to NodeFault by construction.
     let block_range = crate::tx_inclusion::find_canonical_ledger_range(
         &tx_header.id,
         parent_height,
