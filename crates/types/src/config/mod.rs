@@ -1166,6 +1166,62 @@ mod validate_tests {
         );
     }
 
+    /// Guard for `number_of_ingress_proofs_from_assignees`: the consensus
+    /// rule that consumes this value (`get_assigned_ingress_proofs`) only
+    /// became deterministic once `slot_ranges` switched to a `BTreeMap`.
+    /// Until that fix is gated behind a hardfork activation, the value MUST
+    /// stay `0` everywhere (no nondeterministic path is exercised because
+    /// the caller's clamp zeroes the requirement when the input is 0).
+    /// These tests pin both ensure! arms.
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 1;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("frontier.number_of_ingress_proofs_from_assignees"),
+            "expected frontier guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_next_name_tbd() {
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 1,
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("next_name_tbd.number_of_ingress_proofs_from_assignees"),
+            "expected next_name_tbd guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_assignee_proofs_zero_on_both_arms() {
+        // Default `NodeConfig::testing()` already pins both arms to 0; this
+        // asserts that the guard does NOT spuriously reject the happy path
+        // (e.g. by mishandling the `Option` arm when next_name_tbd is set).
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 0,
+            });
+        });
+        cfg.validate()
+            .expect("both arms set to 0 should pass the assignee-proofs guard");
+    }
+
     #[rstest]
     #[case::zero_percent(0.0, "too low")]
     #[case::negative_percent(-1.0, "too low")]
