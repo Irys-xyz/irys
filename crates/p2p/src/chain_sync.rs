@@ -317,13 +317,18 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .await;
 
         if let Some(orphaned_blocks) = maybe_orphaned_blocks {
-            // Dispatch order is intentionally arrival-order (FCFS), not sorted: when multiple
-            // orphans share a parent and tie on cumulative_diff, the block pool's first-insert
-            // tiebreaker rewards whichever orphan was gossiped to us first — a soft signal of
-            // honest, well-connected behavior. Sorting by block_hash here would replace that
-            // signal with a network-wide arbitrary order an attacker could bias via hash
-            // grinding. The per-node nondeterminism is bounded: the next canonical block
-            // resolves the tip across the network, so any transient disagreement is self-healing.
+            // Dispatch order is deliberately *not* sorted by `block_hash`.  The
+            // orphans come out of `get_orphaned_blocks_by_parent`'s HashSet
+            // (so iteration order is arbitrary per-node-per-run, not arrival
+            // order) and we hand them to `join_all` below for concurrent
+            // processing — there's no real "first-gossiped wins" semantics
+            // here, only "no canonical order".  That property is the point:
+            // a deterministic hash-sort would replace per-node randomization
+            // with a network-wide order an attacker could bias via hash
+            // grinding for fork-tiebreak influence.  Local nondeterminism is
+            // bounded because the next canonical block resolves the tip
+            // across the network and makes any transient disagreement
+            // self-healing.
             let mut futures = Vec::new();
             for orphaned_block in orphaned_blocks {
                 info!(
