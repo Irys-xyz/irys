@@ -44,7 +44,6 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 /// - `Structural` → per-tx structural error (e.g. publish-ledger tx missing
 ///   `perm_fee`, or fee-distribution constructors rejecting peer-supplied
 ///   values). Always peer-attributable → consensus rejection.
-/// - `Soft` → unclassified soft local failure (retry plausible).
 #[derive(Debug, thiserror::Error)]
 pub enum ShadowTxGenError {
     /// Local snapshot/state invariant violation. Retry won't heal.
@@ -81,9 +80,6 @@ pub enum ShadowTxGenError {
     #[error("structural: {0}")]
     Structural(String),
 
-    /// Unclassified soft local failure (retry plausible).
-    #[error("{0}")]
-    Soft(String),
 }
 
 // Producer-side call sites return `eyre::Result` / `BlockProductionError`
@@ -2111,7 +2107,6 @@ mod tests {
                 ShadowTxGenError::Structural("missing perm_fee".into()),
                 "structural: missing perm_fee",
             ),
-            (ShadowTxGenError::Soft("retry me".into()), "retry me"),
         ];
         for (err, expected_msg) in cases {
             let s = err.to_string();

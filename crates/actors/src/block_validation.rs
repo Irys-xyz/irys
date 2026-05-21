@@ -836,26 +836,13 @@ pub enum ValidationError {
     /// invalid structure, or carries a treasury mismatch). Construction
     /// is reserved for genuine consensus mismatches — local DB/mempool/
     /// snapshot failures during shadow-tx *generation* route through
-    /// [`Self::ShadowTxGenerationFailed`] instead.
+    /// `ShadowTxNodeFault` (hard faults) or early-return typed errors.
     #[error("Shadow transaction validation failed: {0}")]
     ShadowTransactionInvalid(String),
 
-    /// A local computation or lookup inside the shadow-tx generation
-    /// pipeline failed (DB read, mempool tx absent, snapshot derivation,
-    /// ledger-expiry walk, etc.). Classified as `is_internal_failure()`
-    /// so the block stays in cache for retry rather than being
-    /// peer-attributed; NOT a node fault by default — promote to a typed
-    /// node-fault variant once specific deep call sites are audited.
-    #[error("Shadow transaction generation failed: {0}")]
-    ShadowTxGenerationFailed(String),
-
     /// A hard local I/O failure inside the shadow-tx generation pipeline
     /// (block-header DB read, MDBX corruption, lock poisoning, etc.).
-    /// Distinct from [`Self::ShadowTxGenerationFailed`]: that variant
-    /// covers soft, retry-plausible local failures (mempool absence,
-    /// snapshot arithmetic) where the block legitimately sits in cache
-    /// awaiting re-attempt. This variant covers failures where retry
-    /// cannot help — the DB itself is broken on this node, not the
+    /// Retry cannot help — the DB itself is broken on this node, not the
     /// peer's block — so it is classified as `is_node_fault()` to abort
     /// + supervisor-restart rather than accumulating known-bad blocks
     /// in cache.
@@ -1046,8 +1033,6 @@ impl ValidationError {
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
             | Self::ParentBlockMissing { .. } => ErrorClass::SoftInternal,
-            // Soft local failure inside shadow-tx generation.
-            Self::ShadowTxGenerationFailed(_) => ErrorClass::SoftInternal,
             // Local `ExecutionPayloadCache` tore down the wait receiver
             // (LRU eviction under sync load, or explicit cache removal).
             // The node is healthy and the EL is fine — cache is just
@@ -1112,7 +1097,6 @@ impl ValidationError {
             Self::ShadowTxNodeFault(_) | Self::ExecutionLayerTransportFailed(_) => "node_fault",
             // soft-internal — block parks for retry, not a peer fault.
             Self::ExecutionPayloadCacheEvicted { .. }
-            | Self::ShadowTxGenerationFailed(_)
             | Self::ParentBlockMissing { .. }
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
@@ -1190,8 +1174,6 @@ mod metric_label_tests {
         assert_eq!(err.metric_label(), "node_fault");
 
         // internal_error — soft-internal: block parks for retry.
-        let err = ValidationError::ShadowTxGenerationFailed("mempool absent".into());
-        assert_eq!(err.metric_label(), "internal_error");
         let err = ValidationError::ParentBlockMissing {
             block_hash: H256::zero(),
         };
@@ -2507,24 +2489,13 @@ mod prevalidation_error_classification_tests {
         let result: ValidationResult = shadow_node_fault.into();
         assert!(matches!(result, ValidationResult::InternalFailure(_)));
 
-        // Soft local failure inside shadow-tx generation — internal
-        // but NOT a node fault (retry is plausible: mempool absence,
-        // snapshot arithmetic, etc.).
-        let shadow_soft =
-            ValidationError::ShadowTxGenerationFailed("mempool tx absent".to_string());
-        assert!(
-            !shadow_soft.is_node_fault(),
-            "ShadowTxGenerationFailed is soft local failure, not a node fault",
-        );
-        assert!(shadow_soft.is_internal_failure());
     }
 
-    /// `ShadowTxNodeFault` is the hard-fault sibling of `ShadowTxGenerationFailed`.
-    /// Both route to `InternalFailure` (validity unknown), but only the node-fault
-    /// variant must preserve `is_node_fault() == true` on the wrapped inner error
+    /// `ShadowTxNodeFault` routes to `InternalFailure` (validity unknown) and
+    /// must preserve `is_node_fault() == true` on the wrapped inner error
     /// so the `InternalFailureError::is_node_fault()` accessor — used by the
     /// validation-result handler to trigger panic+restart — fires for genuine
-    /// local DB corruption and does NOT fire for soft retryable failures.
+    /// local DB corruption.
     #[test]
     fn shadow_tx_node_fault_roundtrip_preserves_classification() {
         // Hard local fault: round-trip must land in InternalFailure AND the
@@ -2558,35 +2529,6 @@ mod prevalidation_error_classification_tests {
             ),
         }
 
-        // Soft local failure: round-trip must land in InternalFailure but the
-        // wrapped error must NOT classify as a node fault — this is the
-        // distinction that prevents soft retryable failures (missing mempool
-        // tx, snapshot arithmetic) from triggering the node-restart path.
-        let soft = ValidationError::ShadowTxGenerationFailed("mempool tx absent".to_string());
-        assert!(
-            !soft.is_node_fault(),
-            "ShadowTxGenerationFailed must NOT be a node fault",
-        );
-        assert!(soft.is_internal_failure());
-        let soft_result: ValidationResult = soft.into();
-        match soft_result {
-            ValidationResult::InternalFailure(inner) => {
-                assert!(
-                    !inner.is_node_fault(),
-                    "inner InternalFailureError must report is_node_fault() = false \
-                     so a soft shadow-tx generation failure does not trigger restart",
-                );
-                assert!(
-                    matches!(inner.err(), ValidationError::ShadowTxGenerationFailed(_)),
-                    "wrapped variant must remain ShadowTxGenerationFailed, got {:?}",
-                    inner.err(),
-                );
-            }
-            other => panic!(
-                "ShadowTxGenerationFailed must round-trip to InternalFailure, got {:?}",
-                other
-            ),
-        }
     }
 }
 
@@ -2700,22 +2642,6 @@ mod shadow_tx_gen_error_dispatch_tests {
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
 
-    /// `Soft` → existing soft-internal fallback (`ShadowTxGenerationFailed`)
-    /// → `InternalFailure` (validity unknown, block parks in cache).
-    #[test]
-    fn soft_maps_to_internal_failure() {
-        let err = classify_shadow_tx_gen_err(ShadowTxGenError::Soft("retry plausible".into()));
-        assert!(matches!(err, ValidationError::ShadowTxGenerationFailed(_)));
-        assert!(!err.is_node_fault());
-        assert!(err.is_internal_failure());
-        let result: ValidationResult = err.into();
-        match result {
-            ValidationResult::InternalFailure(inner) => {
-                assert!(!inner.is_node_fault(), "soft must NOT be a node fault");
-            }
-            other => panic!("Soft must route to InternalFailure, got {other:?}"),
-        }
-    }
 
     /// `CommitmentRefundError::SnapshotInvariant` → `ShadowTxNodeFault` →
     /// node-fault `InternalFailure`. A snapshot whose unpledge has
@@ -3991,7 +3917,6 @@ pub(crate) fn classify_shadow_tx_gen_err(
             ValidationError::ShadowTransactionInvalid(format!("treasury arithmetic: {s}"))
         }
         ShadowTxGenError::Structural(s) => ValidationError::ShadowTransactionInvalid(s),
-        ShadowTxGenError::Soft(s) => ValidationError::ShadowTxGenerationFailed(s),
     }
 }
 
@@ -4028,7 +3953,7 @@ pub(crate) fn classify_commitment_refund_err(
 /// - hard local I/O failures (DB reads, MDBX corruption) surface as
 ///   `ShadowTxNodeFault` (internal + node-fault → abort+restart);
 /// - other local computation / mempool / snapshot-arithmetic failures
-///   surface as `ShadowTxGenerationFailed` (internal, retry-plausible).
+///   surface as `ShadowTxNodeFault` (hard fault, abort+restart).
 ///
 /// The caller's existing `.into()` dispatch handles routing each variant
 /// to the correct `ValidationResult`.
@@ -4193,7 +4118,7 @@ async fn generate_expected_shadow_transactions(
     // peer's block (promoted txs must not receive refunds). Routed here
     // (rather than only inside `ShadowTxGenerator::new`) so violations
     // surface as consensus rejection rather than soft-internal
-    // `ShadowTxGenerationFailed`. The constructor keeps an identical guard
+    // `ShadowTxNodeFault` for invariant violations. The constructor keeps an identical guard
     // as defence-in-depth for non-validation callers.
     for tx in &publish_ledger_with_txs.txs {
         for (refund_tx_id, _, _) in &expired_ledger_fees.user_perm_fee_refunds {

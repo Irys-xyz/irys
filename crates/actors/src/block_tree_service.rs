@@ -195,7 +195,6 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
     match err {
         // === SoftInternal variants (per `ValidationError::classify`) ===
         VE::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
-        VE::ShadowTxGenerationFailed(_) => "shadow_tx_generation_failed",
         VE::ParentBlockMissing { .. } => "parent_block_missing",
         VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
@@ -1724,10 +1723,6 @@ mod tests {
         },
         "execution_payload_cache_evicted",
     )]
-    #[case::shadow_gen(
-        crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
-        "shadow_tx_generation_failed",
-    )]
     #[case::parent_missing(
         crate::block_validation::ValidationError::ParentBlockMissing { block_hash: H256::zero() },
         "parent_block_missing",
@@ -2467,7 +2462,6 @@ mod tests {
             crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
                 evm_block_hash: irys_types::EvmBlockHash::ZERO,
             },
-            crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
             crate::block_validation::ValidationError::ParentBlockMissing {
                 block_hash: H256::zero(),
             },
@@ -2518,7 +2512,6 @@ mod tests {
             crate::block_validation::ValidationError::ExecutionPayloadCacheEvicted {
                 evm_block_hash: irys_types::EvmBlockHash::ZERO,
             },
-            crate::block_validation::ValidationError::ShadowTxGenerationFailed("x".into()),
             crate::block_validation::ValidationError::ParentBlockMissing {
                 block_hash: H256::zero(),
             },
