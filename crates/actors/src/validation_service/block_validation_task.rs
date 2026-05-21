@@ -1238,11 +1238,15 @@ enum StageOutcome<J> {
 /// `is_panic()` → `TaskPanicked` (NodeFault → abort + restart);
 /// otherwise → `ValidationCancelled` (SoftInternal → park-and-retry).
 ///
-/// The `ChannelClosed` reason is reused for the "stage handle was aborted
-/// externally" semantics — it is already the local-side outcome for shutdown
-/// and aborts, and per commit `c3fd8963a` all `ValidationCancelReason` variants
-/// classify as `SoftInternal`, so routing is correct without introducing a new
-/// variant.
+/// `JoinError::Cancelled` here means the PoA `spawn_blocking` handle was
+/// externally aborted — the outer-stage cancel arm of `validate_block` tore
+/// down the PoA stage because a sibling produced a verdict first, or the
+/// runtime is shutting down. Routes through the dedicated `PoAAborted`
+/// cancel reason rather than `ChannelClosed` so operator logs and the
+/// `validation_cancelled` metric can distinguish "broadcast channel closed at
+/// shutdown" from "PoA blocking task aborted mid-flight". Both are
+/// `SoftInternal` per `ValidationCancelReason::IS_INTERNAL`, so dispatch is
+/// identical; this is a diagnostic split, not a routing change.
 fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
     if err.is_panic() {
         ValidationError::TaskPanicked {
@@ -1250,12 +1254,9 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
             details: format!("{:?}", err),
         }
     } else {
-        // `is_cancelled()` is the only other producer of `JoinError`. The
-        // cancel arm in `execute_concurrent` aborted the PoA blocking handle
-        // — a local, peer-innocent event. `ChannelClosed` carries the same
-        // "we deliberately tore down this stage" semantics.
+        // `is_cancelled()` is the only other producer of `JoinError`.
         ValidationError::ValidationCancelled {
-            reason: ValidationCancelReason::ChannelClosed,
+            reason: ValidationCancelReason::PoAAborted,
         }
     }
 }
@@ -1977,8 +1978,10 @@ mod classify_poa_join_error_tests {
             ValidationError::ValidationCancelled { reason } => {
                 assert_eq!(
                     *reason,
-                    ValidationCancelReason::ChannelClosed,
-                    "cancellation must reuse ChannelClosed per the H1 fix"
+                    ValidationCancelReason::PoAAborted,
+                    "cancellation must route through the dedicated PoAAborted reason \
+                     (split from ChannelClosed for diagnostic clarity — same SoftInternal \
+                     routing, distinct operator log/metric label)"
                 );
             }
             other => panic!("expected ValidationCancelled, got {:?}", other),

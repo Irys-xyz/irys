@@ -735,12 +735,21 @@ pub enum ValidationCancelReason {
     /// about it. Recovery is fresh gossip re-entry (same lane as other
     /// SoftInternal parks) once the local condition clears.
     RepeatedCancellation,
+    /// PoA `spawn_blocking` handle was externally aborted (typically by the
+    /// outer-stage cancel arm of `validate_block` tearing down the PoA stage
+    /// because a sibling stage produced a verdict first, or by the runtime
+    /// during shutdown). Local, peer-innocent. Distinct from `ChannelClosed`
+    /// so operator logs and the `validation_cancelled` metric can tell the
+    /// two apart instead of conflating "broadcast channel closed at shutdown"
+    /// with "PoA blocking task aborted mid-flight".
+    PoAAborted,
 }
 
 impl ValidationCancelReason {
     /// All variants are local-side outcomes (M2 audit 2026-05-20, H4 fix).
     /// `HeightDifference`, `ParentMissing`, `ChannelClosed`,
-    /// `RepeatedCancellation` — none are statements about the peer's block.
+    /// `RepeatedCancellation`, `PoAAborted` — none are statements about the
+    /// peer's block.
     ///
     /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
     /// REQUIRES changing this constant to a method and re-auditing every
@@ -758,7 +767,8 @@ const _: fn() = || {
             ValidationCancelReason::HeightDifference => {}
             ValidationCancelReason::ParentMissing => {}
             ValidationCancelReason::ChannelClosed => {}
-            ValidationCancelReason::RepeatedCancellation => {} // New variant? Update IS_INTERNAL above before adding an arm here.
+            ValidationCancelReason::RepeatedCancellation => {}
+            ValidationCancelReason::PoAAborted => {} // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
 };
@@ -770,6 +780,7 @@ impl std::fmt::Display for ValidationCancelReason {
             Self::ParentMissing => write!(f, "parent missing"),
             Self::ChannelClosed => write!(f, "channel closed"),
             Self::RepeatedCancellation => write!(f, "repeated cancellation"),
+            Self::PoAAborted => write!(f, "poa aborted"),
         }
     }
 }
@@ -1148,6 +1159,7 @@ mod metric_label_tests {
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
+            ValidationCancelReason::PoAAborted,
         ] {
             let err = ValidationError::ValidationCancelled { reason };
             assert_eq!(
@@ -2080,6 +2092,7 @@ mod prevalidation_error_classification_tests {
     #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
     #[case::parent_missing(ValidationCancelReason::ParentMissing)]
     #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
+    #[case::poa_aborted(ValidationCancelReason::PoAAborted)]
     fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
         // IS_INTERNAL is a const — verified at compile time by the tripwire below.
         // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
@@ -2127,6 +2140,10 @@ mod prevalidation_error_classification_tests {
     )]
     #[case::repeated_cancellation(
         ValidationCancelReason::RepeatedCancellation,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::poa_aborted(
+        ValidationCancelReason::PoAAborted,
         ExpectedRoundtripShape::InternalFailureSoft
     )]
     fn validation_cancel_reason_roundtrip_through_dispatcher(
@@ -2388,6 +2405,7 @@ mod prevalidation_error_classification_tests {
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::RepeatedCancellation,
+            ValidationCancelReason::PoAAborted,
         ] {
             assert!(
                 !ValidationError::ValidationCancelled { reason }.is_node_fault(),
