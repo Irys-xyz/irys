@@ -54,23 +54,31 @@ fn lookup_via_migrated_metadata(
     max_height: u64,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
-    // `tx_header_by_txid_canonical` already enforces:
+    // `tx_header_by_txid_canonical` already enforces, inside this same MDBX
+    // snapshot:
     //   - tx exists
     //   - included_height is set
     //   - included_height ≤ max_height
-    //   - MigratedBlockHashes[included_height] is canonical
+    //   - `MigratedBlockHashes[included_height]` is `Some` (canonical)
     db.view(|tx| -> eyre::Result<Option<LedgerChunkRange>> {
         let Some(header) = tx_header_by_txid_canonical(tx, tx_id, max_height)? else {
             return Ok(None);
         };
-        // `tx_header_by_txid_canonical` guarantees included_height is Some.
+        // Both `included_height` and `MigratedBlockHashes[included_height]`
+        // are guaranteed `Some` by the canonical-lookup contract above.  A
+        // missing row here would mean MDBX returned a different value for
+        // the same key within one snapshot — treat as corruption, matching
+        // the IrysBlockHeaders / prev-header arms below.
         let included_height = header
             .metadata()
             .included_height
             .expect("tx_header_by_txid_canonical guarantees included_height is Some");
-        let Some(block_hash) = tx.get::<MigratedBlockHashes>(included_height)? else {
-            return Ok(None);
-        };
+        let block_hash = tx.get::<MigratedBlockHashes>(included_height)?.ok_or_else(|| {
+            eyre::eyre!(
+                "canonical metadata inconsistent: tx_header_by_txid_canonical attested MigratedBlockHashes[{}] was Some, but a re-read in the same snapshot returned None",
+                included_height,
+            )
+        })?;
         // MigratedBlockHashes attested this hash is canonical at this height;
         // a missing IrysBlockHeaders entry means the two tables disagree.
         let block = block_header_by_hash(tx, &block_hash, false)?.ok_or_else(|| {
