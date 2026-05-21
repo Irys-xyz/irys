@@ -224,10 +224,11 @@ impl BlockValidationTask {
         // "node faults must always win and panic" invariant of this branch.
         // See the doc on `validate_block` for the inner-select shape.
         //
-        // The `poa_abort_slot` is still threaded through so the PoA
-        // blocking task's `JoinHandle` is aborted on cancel rather than
-        // detached (preserves the panic→`TaskPanicked` path and stops a
-        // blocking-pool thread from leaking).
+        // The `poa_abort_slot` is still threaded through so the cancel arm
+        // inside `validate_block` can mark the PoA JoinHandle aborted.
+        // Note: `AbortHandle::abort()` on a `spawn_blocking` task does NOT
+        // free the thread early — see the `poa_abort_slot.set(...)` site for
+        // the full design rationale.
         let poa_abort_slot: Arc<OnceLock<AbortHandle>> = Arc::new(OnceLock::new());
         let validation_result = self.validate_block(Arc::clone(&poa_abort_slot)).await;
 
@@ -1050,10 +1051,13 @@ impl BlockValidationTask {
             biased;
             joined = stages_join => StageOutcome::Joined(joined),
             cancel = cancel_future => {
-                // Cancel won. Fire the PoA abort so the blocking-pool
-                // thread doesn't continue and so any panic surfaces via
-                // the `JoinError` path (rather than being detached and
-                // silently swallowed).
+                // Cancel won. Mark the PoA JoinHandle aborted as a
+                // signalling gesture. The blocking-pool thread continues
+                // to completion regardless — `AbortHandle::abort()` on a
+                // `spawn_blocking` task does not stop the thread, and the
+                // result is intentionally discarded once `stages_join` is
+                // dropped. See the `poa_abort_slot.set(...)` site for the
+                // full design rationale.
                 if let Some(handle) = poa_abort_slot.get() {
                     handle.abort();
                 }

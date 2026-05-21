@@ -1347,6 +1347,11 @@ impl BlockTreeServiceInner {
         {
             let reason = soft_internal_reason_tag(inner.err());
             metrics::record_soft_internal_discard(reason);
+            // Note: the LRU + metric are set only for `block_hash`, not for
+            // children that `remove_block` sweeps recursively. Children were
+            // never independently classified as SoftInternal — they're
+            // co-discarded with the parent — so a later Valid arrival for a
+            // child counts as fresh delivery rather than recovery. Intentional.
             self.recent_soft_internal_discards.put(block_hash, reason);
         }
 

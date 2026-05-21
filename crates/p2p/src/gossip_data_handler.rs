@@ -620,7 +620,7 @@ where
         }
 
         // Same dedup-and-recover hook as the header gossip path; see the
-        // comment on the equivalent call in `handle_block`.
+        // comment on the equivalent call in `handle_block_header`.
         let has_block_already_been_processed = self
             .block_pool
             .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)

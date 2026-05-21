@@ -581,7 +581,7 @@ pub(super) enum ConcurrentCancelDecision {
 /// Rationale for `3`: one cancel is plausibly a transient Tokio hiccup
 /// (worker panic, runtime tear-down race) that genuinely benefits from a
 /// retry. Two is the safety margin for a brief window of distress that
-/// clears between attempts. Past three the local condition is structural —
+/// clears between attempts. At three the local condition is structural —
 /// continuing to requeue tight-loops between the VDF queue and the
 /// concurrent JoinSet, burning cycles while starving other blocks of
 /// validation slots. The existing `MAX_RETRY_ATTEMPTS = 5` in

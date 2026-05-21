@@ -1553,4 +1553,13 @@ mod run_mode_tests {
         assert_eq!(cfg.min_active_peers, 3, "production default expected");
         assert_eq!(cfg.peer_wait_timeout_millis, 20_000);
     }
+
+    #[test]
+    fn test_config_uses_short_payload_wait_timeout() {
+        let cfg = super::NodeConfig::testing();
+        assert_eq!(
+            cfg.sync.execution_payload_wait_timeout_millis, 5_000,
+            "test config must use the short 5s payload wait so integration tests don't hang 60s on the prod default"
+        );
+    }
 }
