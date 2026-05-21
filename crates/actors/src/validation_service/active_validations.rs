@@ -2251,11 +2251,7 @@ mod tests {
         use crate::block_validation::{ValidationCancelReason, ValidationError};
 
         let reason = ValidationCancelReason::RepeatedCancellation;
-        assert!(
-            ValidationCancelReason::IS_INTERNAL,
-            "RepeatedCancellation must be classified as internal so the wrapping \
-             ValidationCancelled routes to SoftInternal"
-        );
+        // IS_INTERNAL is a const — verified at compile time by the tripwire in block_validation.rs.
 
         let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
         let ValidationResult::InternalFailure(inner) = &result else {

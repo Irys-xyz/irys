@@ -2083,11 +2083,7 @@ mod prevalidation_error_classification_tests {
     #[case::parent_missing(ValidationCancelReason::ParentMissing)]
     #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
     fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
-        assert!(
-            ValidationCancelReason::IS_INTERNAL,
-            "{:?}: IS_INTERNAL must be true — all cancel reasons are local-side outcomes",
-            reason
-        );
+        // IS_INTERNAL is a const — verified at compile time by the tripwire below.
         // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
         assert!(
             ValidationError::ValidationCancelled { reason }.is_internal_failure(),
@@ -5045,6 +5041,7 @@ pub async fn data_txs_are_valid(
                 db,
                 config,
                 &parent_epoch_snapshot,
+                Some(&service_senders.chunk_cache),
             )?;
 
             let timestamp_secs = block.timestamp_secs();
@@ -5639,6 +5636,7 @@ pub fn get_assigned_ingress_proofs(
     db: &DatabaseProvider,
     config: &Config,
     epoch_snapshot: &EpochSnapshot,
+    cache_sender: Option<&crate::cache_service::CacheServiceSender>,
 ) -> Result<(Vec<IngressProof>, usize), PreValidationError> {
     // Returns (assigned_proofs, assigned_miners)
     let mut assigned_proofs = Vec::new();
@@ -5685,7 +5683,9 @@ pub fn get_assigned_ingress_proofs(
     //  `get_ledger_range` are NOT the same root cause:
     //   - `Ok(None)` → the hash is no longer resolvable (predecessor missing,
     //     pruned side-fork block). Soft `AssignedProofBlockMissing` so the
-    //     caller parks the block for retry.
+    //     caller parks the block for retry.  We also send
+    //     `PruneBlockHashFromBlockSet` to the cache service so the dead hash is
+    //     removed and subsequent re-deliveries do not hit the same soft-fail loop.
     //   - `Err(_)` → local DB I/O failure or an explicit data-corruption
     //     assertion inside `get_ledger_range`. A real local fault, not a
     //     fork-determinism artifact. Routes through the node-fault
@@ -5696,6 +5696,23 @@ pub fn get_assigned_ingress_proofs(
         match get_ledger_range(block_hash, block_tree, db) {
             Ok(Some(block_range)) => block_ranges.push(block_range),
             Ok(None) => {
+                if let Some(sender) = cache_sender {
+                    let _ = sender
+                        .send_traced(
+                            crate::cache_service::CacheServiceAction::PruneBlockHashFromBlockSet {
+                                data_root: tx_header.data_root,
+                                block_hash: *block_hash,
+                            },
+                        )
+                        .inspect_err(|e| {
+                            warn!(
+                                custom.error = ?e,
+                                data_root = %tx_header.data_root,
+                                block_hash = %block_hash,
+                                "Failed to send PruneBlockHashFromBlockSet"
+                            );
+                        });
+                }
                 return Err(PreValidationError::AssignedProofBlockMissing {
                     block_hash: *block_hash,
                     tx_id: tx_header.id,
@@ -6832,6 +6849,27 @@ mod tests {
         } else {
             panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
         }
+    }
+
+    /// `DatabaseError` must classify as `NodeFault`, not `Consensus`.
+    /// Regression guard: if the arm ever reverts to collapsing DB errors into a
+    /// peer-attributed variant, `classify()` will return `Consensus` and this
+    /// test will catch it.
+    #[test]
+    fn database_error_is_node_fault() {
+        let err = PreValidationError::DatabaseError {
+            error: "MDBX: I/O error".to_string(),
+        };
+        assert_eq!(
+            err.classify(),
+            ErrorClass::NodeFault,
+            "DatabaseError must be NodeFault"
+        );
+        assert!(err.is_node_fault(), "is_node_fault() must return true");
+        assert!(
+            !matches!(err.classify(), ErrorClass::Consensus),
+            "DatabaseError must not be Consensus"
+        );
     }
 }
 
