@@ -1204,9 +1204,23 @@ impl ChunkCacheService {
                     self.cache_task.spawn_prune_txids_task(work);
                 }
             }
-            CacheServiceAction::PruneTxidsCompleted(_res) => {
+            CacheServiceAction::PruneTxidsCompleted(res) => {
                 // Mark txid pruning idle and kick next if queued
                 self.txid_prune_running = false;
+                // Surface batch failure so the silent drop is observable.
+                // The worker already `warn!`s on Err (see
+                // `spawn_prune_txids_task`); we only want a stable counter
+                // here so dashboards can alert on it.  Stale tombstones
+                // self-heal on the next scrub trigger for that data_root
+                // (mempool TTL eviction or another failed reorg
+                // re-ingress), so we don't requeue.
+                if let Err(e) = res {
+                    debug!(
+                        error = %e,
+                        "PruneTxidsCompleted reported worker Err — recording metric and continuing"
+                    );
+                    metrics::record_cache_txid_scrub_failed();
+                }
                 if let Some(work) = self.txid_prune_queue.pop_front() {
                     self.txid_prune_running = true;
                     self.cache_task.spawn_prune_txids_task(work);
