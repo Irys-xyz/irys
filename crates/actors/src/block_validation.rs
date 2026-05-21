@@ -752,7 +752,6 @@ impl ValidationCancelReason {
 
 // Compile-time tripwire: if anyone adds a new variant they must update
 // this match (and re-evaluate IS_INTERNAL above).
-#[expect(dead_code, reason = "compile-time exhaustiveness check for IS_INTERNAL safety")]
 const _: fn() = || {
     fn _exhaustive_check(reason: ValidationCancelReason) {
         match reason {
