@@ -112,45 +112,6 @@ pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
 
-    /// Soft sibling of `BlockBoundsLookupError` for the
-    /// `get_assigned_ingress_proofs` walk over `CachedDataRoots.block_set`.
-    /// That set is explicitly fork-spanning (see the doc on
-    /// `get_assigned_ingress_proofs`), accumulating every block hash —
-    /// across all observed forks — that referenced a given `data_root`. If a
-    /// side-fork block referenced in the set is later pruned from both
-    /// `block_tree` and the database, `get_ledger_range` returns `Ok(None)`
-    /// and this variant is surfaced. The peer's block is innocent — this is
-    /// a fork-determinism gap in `block_set`, not a node fault. Classified
-    /// as `is_internal_failure` (block parks in cache, retry plausible) and
-    /// explicitly NOT a node fault.
-    ///
-    /// `Err(_)` from `get_ledger_range` is a local DB fault, NOT this
-    /// variant — it routes through `BlockBoundsLookupError` (node fault).
-    ///
-    /// MERGE-NOTE(C2): this variant exists to soften the fork-spanning
-    /// `CachedDataRoots.block_set` walk. Branch `fix-cdr-block-set`
-    /// (4e21e25a) replaces that walk with
-    /// `tx_inclusion::find_canonical_ledger_range`, which is
-    /// parent-anchored + `ChainState::Onchain`-filtered and cannot
-    /// surface a "pruned side-fork hash" outcome. Additional commits
-    /// in that branch (7479e10e, ed27fada, c8e79e48, 9b64d7ab) demote
-    /// `block_set` to a non-trusted hint with authoritative migration
-    /// writes. When merging:
-    ///   1. Verify this variant has no remaining construction site
-    ///      (the only caller — `get_assigned_ingress_proofs` —
-    ///      should now use `find_canonical_ledger_range` instead).
-    ///   2. If no construction sites remain, DELETE this variant
-    ///      along with its classification entry in
-    ///      `PreValidationError::classify()` and the
-    ///      `metric_label`/`metric_reason` tags.
-    ///   3. The companion livelock concern (parked block re-emitting
-    ///      `AssignedProofBlockMissing` indefinitely if `block_set`
-    ///      keeps surfacing the dead hash) is closed by the same merge
-    ///      because `block_set` no longer drives consensus.
-    #[error(
-        "Assigned-proof block {block_hash} for tx {tx_id} no longer resolvable in block_tree or DB (likely pruned side fork)"
-    )]
-    AssignedProofBlockMissing { block_hash: H256, tx_id: H256 },
     #[error("block signature is not valid")]
     BlockSignatureInvalid,
     #[error("Cascade hardfork not configured but term ledger tx {tx_id} was found")]
@@ -504,13 +465,9 @@ impl PreValidationError {
             | Self::CachePoisoned { .. } => ErrorClass::NodeFault,
 
             // === Soft internal (peer innocent, retry via passive prune+re-gossip) ===
-            // Assigned-proof walk over `CachedDataRoots.block_set` hit a hash
-            // no longer resolvable — `block_set` is fork-spanning, so a hash
-            // for a now-pruned side-fork block is the expected cause.
-            Self::AssignedProofBlockMissing { .. }
             // Parent missing from the in-memory block-tree cache due to a
             // local prune/reorg race. Peer is innocent.
-            | Self::ParentNotInCache { .. }
+            Self::ParentNotInCache { .. }
             // Local snapshot store missing the requested block's EMA / parent's
             // epoch snapshot — eviction-race against a parent depth-prune.
             // Peer-innocent; fresh gossip re-entry resolves once the snapshot
@@ -611,7 +568,6 @@ impl PreValidationError {
     pub fn metric_reason(&self) -> &'static str {
         match self {
             Self::BlockBoundsLookupError(_) => "block_bounds_lookup",
-            Self::AssignedProofBlockMissing { .. } => "assigned_proof_block_missing",
             Self::BlockSignatureInvalid => "block_signature_invalid",
             Self::CascadeNotConfigured { .. } => "cascade_not_configured",
             Self::CumulativeDifficultyMismatch { .. } => "cumulative_difficulty_mismatch",
@@ -1275,14 +1231,6 @@ mod metric_label_tests {
         let err = PreValidationError::InternalTaskJoin("panicked".into());
         assert_eq!(err.classify(), ErrorClass::NodeFault);
         assert_eq!(err.metric_reason(), "internal_task_join");
-
-        // SoftInternal — fork-spanning `block_set` walk surfaced a pruned hash.
-        let err = PreValidationError::AssignedProofBlockMissing {
-            block_hash: H256::zero(),
-            tx_id: H256::zero(),
-        };
-        assert_eq!(err.classify(), ErrorClass::SoftInternal);
-        assert_eq!(err.metric_reason(), "assigned_proof_block_missing");
 
         // SoftInternal — parent missing from in-memory cache due to prune/reorg race.
         let err = PreValidationError::ParentNotInCache {
@@ -2338,19 +2286,10 @@ mod prevalidation_error_classification_tests {
     /// and aborting the node on every race would defeat the recovery path.
     #[test]
     fn eviction_race_variants_are_not_node_faults() {
-        let cases: &[PreValidationError] = &[
-            PreValidationError::ParentNotInCache {
-                parent_hash: H256::zero(),
-                expected_height: 0,
-            },
-            // `block_set` is fork-spanning — a hash that resolved at observe
-            // time can be pruned with its side fork by validation time.
-            // Innocent peer; not a node fault.
-            PreValidationError::AssignedProofBlockMissing {
-                block_hash: H256::zero(),
-                tx_id: H256::zero(),
-            },
-        ];
+        let cases: &[PreValidationError] = &[PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        }];
         for err in cases {
             assert!(
                 !err.is_node_fault(),
@@ -2366,13 +2305,12 @@ mod prevalidation_error_classification_tests {
     }
 
     /// The PoA-anchored `BlockBoundsLookupError` retains `is_node_fault =
-    /// true` after the split: caller pre-checks at
+    /// true`: caller pre-checks at
     /// `get_data_poa_bounds_with_block_tree_fallback` rule out the
     /// peer-attributable cases (`PoAChunkOffsetOutOfBlockBounds`,
-    /// `PoALedgerInactive`) before this variant is constructible, so the
-    /// remaining failure modes are genuine local-index breakage. Guard
-    /// against an accidental "soften everything" reclassification when the
-    /// new soft sibling is added.
+    /// `PoALedgerInactive`, `PoAOffCanonicalAncestor`) before this variant
+    /// is constructible, so the remaining failure modes are genuine
+    /// local-index breakage.
     #[test]
     fn block_bounds_lookup_error_retains_node_fault_classification() {
         let err = PreValidationError::BlockBoundsLookupError("local index broken".to_string());
@@ -2385,59 +2323,6 @@ mod prevalidation_error_classification_tests {
             err.is_internal_failure(),
             "BlockBoundsLookupError node-fault must also be internal-failure (strict subset)",
         );
-    }
-
-    /// `AssignedProofBlockMissing` is the soft sibling of
-    /// `BlockBoundsLookupError`, emitted from the
-    /// `CachedDataRoots.block_set` walk in `get_assigned_ingress_proofs`.
-    /// That set is fork-spanning, so a missing hash there means a side fork
-    /// was pruned — not a local-index inconsistency. Must classify as
-    /// internal-failure (block parks in cache) but explicitly NOT a node
-    /// fault (no restart; peer is innocent).
-    #[test]
-    fn assigned_proof_block_missing_is_internal_but_not_node_fault() {
-        let err = PreValidationError::AssignedProofBlockMissing {
-            block_hash: H256::zero(),
-            tx_id: H256::zero(),
-        };
-        assert!(
-            err.is_internal_failure(),
-            "AssignedProofBlockMissing must classify as internal so the block parks in cache",
-        );
-        assert!(
-            !err.is_node_fault(),
-            "AssignedProofBlockMissing is a fork-determinism gap in block_set, NOT a node fault — \
-             aborting the node here would self-DoS on every pruned side-fork data_root",
-        );
-    }
-
-    /// Round-trip the new soft variant through the
-    /// `From<PreValidationError> for ValidationResult` dispatcher: it must
-    /// land on `ValidationResult::InternalFailure`, never `Invalid` or a
-    /// panic. The wrapped `InternalFailureError::is_node_fault()` must also
-    /// report `false` so the `send_validation_result` panic-guard does not
-    /// fire on this path.
-    #[test]
-    fn assigned_proof_block_missing_routes_to_internal_failure() {
-        use crate::block_tree_service::ValidationResult;
-
-        let err = PreValidationError::AssignedProofBlockMissing {
-            block_hash: H256::zero(),
-            tx_id: H256::zero(),
-        };
-        let result: ValidationResult = err.into();
-        match result {
-            ValidationResult::InternalFailure(inner) => {
-                assert!(
-                    !inner.is_node_fault(),
-                    "AssignedProofBlockMissing must round-trip as a non-node-fault InternalFailure",
-                );
-            }
-            other => panic!(
-                "AssignedProofBlockMissing must route to InternalFailure, got {:?}",
-                other
-            ),
-        }
     }
 
     /// Consensus-validation variants must NOT classify as node faults — they

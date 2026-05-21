@@ -201,10 +201,10 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
         VE::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
         // PreValidation has a sub-classifier — only its SoftInternal inner
-        // variants (`AssignedProofBlockMissing`, `ParentNotInCache`) reach
-        // here. We delegate to the inner's `metric_reason()` so each one
-        // gets a distinct, grep-stable snake_case tag rather than collapsing
-        // to a single "pre_validation" bucket.
+        // variants (`ParentNotInCache`) reach here. We delegate to the
+        // inner's `metric_reason()` so each one gets a distinct,
+        // grep-stable snake_case tag rather than collapsing to a single
+        // "pre_validation" bucket.
         VE::PreValidation(inner) => inner.metric_reason(),
         // Should never be observed in the metric — the discard-site gate
         // in `discard_and_broadcast` skips both the LRU put and the
@@ -2538,20 +2538,11 @@ mod tests {
     }
 
     /// `PreValidation` reaches `soft_internal_reason_tag` whenever its
-    /// inner variant classifies as `SoftInternal`
-    /// (`AssignedProofBlockMissing`, `ParentNotInCache`). The tag must come
-    /// from the inner's `metric_reason()` so each one gets a distinct,
-    /// grep-stable label instead of collapsing into a generic catch-all.
+    /// inner variant classifies as `SoftInternal` (`ParentNotInCache`).
+    /// The tag must come from the inner's `metric_reason()` so each one
+    /// gets a distinct, grep-stable label instead of collapsing into a
+    /// generic catch-all.
     #[rstest]
-    #[case::preval_assigned_proof_missing(
-        crate::block_validation::ValidationError::PreValidation(
-            crate::block_validation::PreValidationError::AssignedProofBlockMissing {
-                block_hash: H256::zero(),
-                tx_id: H256::zero(),
-            },
-        ),
-        "assigned_proof_block_missing",
-    )]
     #[case::preval_parent_not_in_cache(
         crate::block_validation::ValidationError::PreValidation(
             crate::block_validation::PreValidationError::ParentNotInCache {
@@ -2598,12 +2589,6 @@ mod tests {
             crate::block_validation::ValidationError::ParentEmaSnapshotMissing {
                 block_hash: H256::zero(),
             },
-            crate::block_validation::ValidationError::PreValidation(
-                crate::block_validation::PreValidationError::AssignedProofBlockMissing {
-                    block_hash: H256::zero(),
-                    tx_id: H256::zero(),
-                },
-            ),
             crate::block_validation::ValidationError::PreValidation(
                 crate::block_validation::PreValidationError::ParentNotInCache {
                     parent_hash: H256::zero(),
@@ -2652,12 +2637,6 @@ mod tests {
             crate::block_validation::ValidationError::ParentEmaSnapshotMissing {
                 block_hash: H256::zero(),
             },
-            crate::block_validation::ValidationError::PreValidation(
-                crate::block_validation::PreValidationError::AssignedProofBlockMissing {
-                    block_hash: H256::zero(),
-                    tx_id: H256::zero(),
-                },
-            ),
             crate::block_validation::ValidationError::PreValidation(
                 crate::block_validation::PreValidationError::ParentNotInCache {
                     parent_hash: H256::zero(),

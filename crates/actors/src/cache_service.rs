@@ -70,10 +70,10 @@ pub enum CacheServiceAction {
     /// txid references from blocking publish candidate selection.
     PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
     /// Remove a specific block hash from `CachedDataRoot.block_set`.
-    /// Sent by validation when `get_ledger_range` returns `Ok(None)` — the block
-    /// is no longer resolvable (pruned side-fork or predecessor missing).  Without
-    /// this prune the same dead hash would re-trigger `AssignedProofBlockMissing`
-    /// on every re-delivery, parking the block forever.
+    /// `block_set` is a non-trusted hint (consensus now uses
+    /// `tx_inclusion::find_canonical_ledger_range`); this action exists so
+    /// observers that detect stale entries can scrub them without waiting
+    /// for the next confirmation to overwrite the hint.
     PruneBlockHashFromBlockSet {
         data_root: DataRoot,
         block_hash: H256,
