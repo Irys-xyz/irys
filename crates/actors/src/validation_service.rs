@@ -1312,13 +1312,16 @@ mod tests {
         drop(rx);
 
         let block_hash = H256::from_low_u64_be(2);
-        // ShadowTxGenerationFailed is `is_internal_failure() = true` but
+        // ValidationCancelled(HeightDifference) is `is_internal_failure() = true` but
         // `is_node_fault() = false` — a soft local failure.
         let soft_internal: ValidationResult =
-            ValidationError::ShadowTxGenerationFailed("snapshot evicted".to_string()).into();
+            ValidationError::ValidationCancelled {
+                reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+            }
+            .into();
         assert!(
             matches!(&soft_internal, ValidationResult::InternalFailure(inner) if !inner.is_node_fault()),
-            "precondition: ShadowTxGenerationFailed must classify as non-node-fault InternalFailure"
+            "precondition: ValidationCancelled(HeightDifference) must classify as non-node-fault InternalFailure"
         );
 
         let result = super::send_validation_result_via(&tx, block_hash, soft_internal);

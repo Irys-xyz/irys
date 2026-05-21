@@ -260,7 +260,7 @@ impl<'a> ShadowTxGenerator<'a> {
         // (`generate_expected_shadow_transactions` in `block_validation.rs`)
         // so violations surface as `ValidationError::ShadowTransactionInvalid`
         // (peer-attributable consensus rejection) rather than soft
-        // `ShadowTxGenerationFailed`. This in-constructor guard covers any
+        // `ShadowTxNodeFault`. This in-constructor guard covers any
         // other construction path (tests, future callers) so the invariant
         // can't be silently bypassed. If this arm ever fires from production
         // validation, the call-site check failed to run — fix the call site,

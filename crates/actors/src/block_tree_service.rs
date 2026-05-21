@@ -199,6 +199,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+        VE::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
         // PreValidation has a sub-classifier — only its SoftInternal inner
         // variants (`AssignedProofBlockMissing`, `ParentNotInCache`) reach
         // here. We delegate to the inner's `metric_reason()` so each one
@@ -661,42 +662,31 @@ impl BlockTreeServiceInner {
             tracing::warn!(
                 "block validation returned a result for a block that's no longer in block cache"
             );
-            // LATENT: this early-return suppresses `BlockStateUpdated` on a
-            // cache-miss Valid arrival — the same shape as the bug fixed in
-            // commit `1f85702fc` on the discard path. Pre-exists on master,
-            // so it's not a regression introduced by this branch, and no
-            // current test exercises it (the only direct-submission-to-
-            // validation_service test path expects a Cancelled outcome,
-            // not Valid). It becomes a real bug the moment any caller
-            // submits validation outside block_tree (e.g. a future test
-            // via `send_block_to_block_validation`, or a non-test code
-            // path bypassing block_tree) AND waits for the Valid event:
-            // `read_block_from_state` would return `HarnessTimeout` for
-            // the same reason `heavy_block_validation_discards_a_block_if_its_too_old`
-            // did before `1f85702fc`. If that flake appears, mirror the
-            // discard fix here — emit `BlockStateUpdated{discarded:false,
-            // validation_result: Valid}` with `height = 0` and
-            // `state = NotOnchain(Unknown)` before the early-return.
+            // Bug 1 fix (symmetric with `1f85702fc` on the discard path):
+            // emit BlockStateUpdated so downstream waiters (read_block_from_state,
+            // wait_for_parent_validation) don't hang on a cache-miss Valid arrival.
+            // height = 0 and state = NotOnchain(Unknown) are sentinel values; the
+            // block is gone from the cache so we have no better information.
+            let event = BlockStateUpdated {
+                block_hash,
+                height: 0,
+                state: ChainState::NotOnchain(BlockState::Unknown),
+                discarded: false,
+                validation_result: ValidationResult::Valid,
+            };
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::trace!(
+                    block.hash = ?block_hash,
+                    "Failed to broadcast block state update event on cache-miss Valid: {}", e
+                );
+            }
             return Ok(());
         };
 
-        // Phase A (H3) instrumentation: a Valid result is arriving for a block
-        // we previously discarded as soft-internal — gossip-driven recovery
-        // worked for this hash. Increment the recovered counter (tagged with
-        // the original discard reason) and forget it from the LRU. An info!
-        // log makes the path operator-visible without polluting the steady-
-        // state log volume — soft-internal discards are rare.
-        //
-        // Pop only on confirmed cache hit; spurious Valid arrivals must not
-        // clear the recovery LRU.
-        if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
-            metrics::record_soft_internal_recovered(reason);
-            info!(
-                block.hash = %block_hash,
-                reason,
-                "block previously discarded as soft-internal reached Valid via gossip re-delivery"
-            );
-        }
+        // Phase A (H3) instrumentation: pop + metric are deferred to the two
+        // confirmed-success boundaries below (after mark_block_as_valid +
+        // second cache check) so that early-returns from either failure path do
+        // not pop the LRU or increment the recovery counter spuriously.
         debug!(
             "On validation complete: result {} {:?} at height: {}",
             block_hash, validation_result, height

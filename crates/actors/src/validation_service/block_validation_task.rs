@@ -814,7 +814,7 @@ impl BlockValidationTask {
                     // Use the variant-specific label so `ShadowTxNodeFault`,
                     // `ParentCommitmentSnapshotMissing`,
                     // `ExecutionPayloadCacheEvicted`,
-                    // `ShadowTxGenerationFailed`, etc. don't inflate the
+                    // `ShadowTxNodeFault`, etc. don't inflate the
                     // peer-attributable "invalid" counter. The overall
                     // metric still maps these back to the dashboard label
                     // set via `label_for`.
@@ -829,7 +829,7 @@ impl BlockValidationTask {
             // `ValidationError`. Propagate it unchanged so the outer
             // dispatcher (`err.into()`) routes each variant correctly:
             // internal-failure variants (`ParentBlockMissing`,
-            // `ShadowTxGenerationFailed`, `ShadowTxNodeFault`,
+            // `ShadowTxNodeFault`,
             // `ParentEpochSnapshotMissing`, etc.) reach `InternalFailure`
             // (and node-fault variants trigger abort+restart), while
             // genuine consensus mismatches (`ShadowTransactionInvalid`)
