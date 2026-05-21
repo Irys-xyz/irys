@@ -47,7 +47,7 @@ use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -3570,8 +3570,18 @@ pub fn get_assigned_ingress_proofs(
         //  c) Get the slots the proof address is assigned to store
         let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
 
-        // d) Get the ledger ranges of the slot indexes
-        let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
+        // d) Get the ledger ranges of the slot indexes.
+        //
+        // `BTreeMap` (not `HashMap`) so iteration order in (f) is deterministic
+        // across nodes.  When `block_range` intersects multiple Submit slots,
+        // the `break`-on-first-intersection picks `assigned_miners` from
+        // whichever slot iterates first; HashMap order would let two honest
+        // nodes pick different `assigned_miners` and produce divergent
+        // ingress-proof acceptance decisions.  Currently vacuous because
+        // `Config::validate` pins `number_of_ingress_proofs_from_assignees == 0`
+        // (see `crates/types/src/config/mod.rs`), but switching the container
+        // here removes the fork landmine the guard masks.
+        let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
             .iter()
             .map(|index| {
                 let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
