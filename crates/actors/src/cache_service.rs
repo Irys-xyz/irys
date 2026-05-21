@@ -1848,8 +1848,7 @@ mod tests {
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
             // Manually add two hashes to block_set.
-            let mut cached = cached_data_root_by_data_root(wtx, data_root)?
-                .expect("just inserted");
+            let mut cached = cached_data_root_by_data_root(wtx, data_root)?.expect("just inserted");
             cached.block_set.push(stale_hash);
             cached.block_set.push(good_hash);
             wtx.put::<CachedDataRoots>(data_root, cached)?;
