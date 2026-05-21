@@ -569,11 +569,17 @@ impl BlockValidationTask {
                     )
                     .map(|()| ValidationResult::Valid)
                 });
-                // Publish the abort handle so the outer `execute_concurrent`
-                // select-cancel arm can `.abort()` this blocking task
-                // instead of detaching it (panics would otherwise be
-                // swallowed and the blocking-pool thread would keep running
-                // until the PoA work finished naturally).
+                // Publish the abort handle so the cancel arm can mark the
+                // JoinHandle aborted. NOTE: `AbortHandle::abort()` on a
+                // `spawn_blocking` task does NOT stop the thread — the
+                // blocking work runs to completion, but its result (success,
+                // Invalid, or panic) is intentionally discarded once the
+                // validation is cancelled. Rationale: a cancelled validation
+                // has already been classified as throwaway; if its outcome
+                // was load-bearing, the block will be re-gossiped and
+                // re-validated freshly, where any persistent fault will
+                // reproduce. Observing cancelled-stage outcomes would also
+                // turn transient panics into false NodeFault crashes.
                 let _ = poa_abort_slot.set(handle.abort_handle());
                 handle
             }
