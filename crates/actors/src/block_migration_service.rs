@@ -1236,4 +1236,102 @@ mod tests {
 
         Ok(())
     }
+
+    /// Multi-block reorg where one cleared tx is permanently orphaned —
+    /// present in `blocks_to_clear` but NOT re-confirmed in
+    /// `blocks_to_confirm`.  Companion to
+    /// `persist_metadata_multi_block_reorg_handles_both_slices`, which only
+    /// asserts the re-confirmation case.
+    ///
+    /// Expected post-state for the permanently-orphaned tx:
+    ///   - Metadata row fully deleted (Phase 1 term-ledger unconditional
+    ///     delete; no Phase 2 recreation).
+    ///   - CDR has the orphan block hash scrubbed (Phase 1) but no new hash
+    ///     appended (Phase 3 only touches CDRs whose tx is in
+    ///     `blocks_to_confirm`).
+    ///   - CDR `expiry_height` is left untouched — the mempool reorg
+    ///     re-anchor path (`handle_confirmed_data_tx_reorg`) is responsible
+    ///     for refreshing it once the orphaned tx is re-ingested.
+    #[tokio::test]
+    async fn persist_metadata_multi_block_reorg_permanent_orphan() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let tx_id_a = H256::random();
+        let data_root_a = H256::random();
+        let tx_id_b = H256::random();
+        let data_root_b = H256::random();
+
+        // Orphan fork: orphan1 carries tx_a, orphan2 carries tx_b.
+        let orphan1 = make_block_header(1, H256::random(), 50, vec![tx_id_a]);
+        let orphan1_hash = orphan1.block_hash;
+        let orphan2 = make_block_header(2, orphan1.block_hash, 50, vec![tx_id_b]);
+        let orphan2_hash = orphan2.block_hash;
+
+        // Seed CDRs and pre-write included_height as if both txs were once
+        // confirmed on the orphan fork.
+        seed_cdr(&db, data_root_a, tx_id_a, vec![orphan1_hash], Some(10));
+        seed_cdr(&db, data_root_b, tx_id_b, vec![orphan2_hash], Some(20));
+        db.update_eyre(|tx| {
+            irys_database::batch_set_data_tx_included_height(tx, &[tx_id_a], 1)?;
+            irys_database::batch_set_data_tx_included_height(tx, &[tx_id_b], 2)?;
+            Ok(())
+        })?;
+
+        // New canonical fork re-confirms ONLY tx_a.  tx_b is permanently orphaned.
+        let new1 = make_block_header(10, H256::random(), 50, vec![tx_id_a]);
+        let new1_hash = new1.block_hash;
+
+        let orphan1_sealed = make_sealed_with_submit_txs(orphan1, &[(tx_id_a, data_root_a)]);
+        let orphan2_sealed = make_sealed_with_submit_txs(orphan2, &[(tx_id_b, data_root_b)]);
+        let new1_sealed = make_sealed_with_submit_txs(new1, &[(tx_id_a, data_root_a)]);
+
+        svc.persist_metadata(&[orphan1_sealed, orphan2_sealed], &[new1_sealed])?;
+
+        // tx_a: re-confirmed on the new fork.
+        let meta_a = read_data_tx_metadata(&db, &tx_id_a)
+            .expect("tx_a metadata must exist after re-confirmation");
+        assert_eq!(
+            meta_a.included_height,
+            Some(10),
+            "tx_a included_height updated to new canonical height"
+        );
+
+        // tx_b: row fully deleted — term-ledger Phase 1 unconditional delete,
+        // no Phase 2 recreation because tx_b is not in `blocks_to_confirm`.
+        assert!(
+            read_data_tx_metadata(&db, &tx_id_b).is_none(),
+            "permanently-orphaned tx_b metadata row must be fully deleted"
+        );
+
+        // CDR A: re-confirmation path — orphan scrubbed, new canonical hash
+        // appended, expiry cleared by Phase 3.
+        let cdr_a = read_cdr(&db, data_root_a).expect("CDR A present");
+        assert!(!cdr_a.block_set.contains(&orphan1_hash));
+        assert!(cdr_a.block_set.contains(&new1_hash));
+        assert!(cdr_a.expiry_height.is_none());
+
+        // CDR B: permanent-orphan path — orphan hash scrubbed, no new hash
+        // appended (Phase 3 doesn't run for un-re-confirmed txs).  Block_set
+        // is now empty, but expiry_height stays at the pre-reorg value
+        // because Phase 3 never executed for this CDR.
+        let cdr_b = read_cdr(&db, data_root_b).expect("CDR B present");
+        assert!(
+            !cdr_b.block_set.contains(&orphan2_hash),
+            "orphan2 hash must be scrubbed from CDR B"
+        );
+        assert!(
+            cdr_b.block_set.is_empty(),
+            "CDR B block_set must be empty after permanent-orphan scrub \
+             (no Phase 3 append for un-re-confirmed tx)"
+        );
+        assert_eq!(
+            cdr_b.expiry_height,
+            Some(20),
+            "CDR B expiry_height must remain untouched — Phase 3 doesn't run \
+             when the tx is absent from `blocks_to_confirm`"
+        );
+
+        Ok(())
+    }
 }

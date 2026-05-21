@@ -825,4 +825,70 @@ mod tests {
         assert_eq!(u64::from(range.end()), 24);
         Ok(())
     }
+
+    /// `find_canonical_ledger_range` derives canonical truth from
+    /// `IrysDataTxMetadata` + `MigratedBlockHashes` + block headers — it
+    /// never reads `CachedDataRoots`.  Pin this contract: even if the CDR
+    /// for the query's `data_root` carries garbage in `block_set` and
+    /// `txid_set`, the returned range is identical to the no-CDR case.
+    ///
+    /// Companion to `corrupt_cdr_does_not_affect_assigned_ingress_proofs`
+    /// in `block_validation.rs`, which exercises the same contract at the
+    /// validation entry point.  Both tests guard against a future refactor
+    /// accidentally re-introducing a CDR read into a canonical-truth path.
+    #[test_log::test(tokio::test)]
+    async fn corrupt_cdr_does_not_affect_canonical_range_lookup() -> eyre::Result<()> {
+        use irys_database::db_cache::CachedDataRoot;
+        use irys_database::tables::CachedDataRoots;
+        use irys_types::UnixTimestamp;
+
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        // Identical setup to `migrated_tx_returns_canonical_range` — yields
+        // a canonical range of [10, 24].
+        let h0 = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h1 = make_signed_header(1, h0.block_hash, 1, 25, vec![tx_id]);
+        put_block_header(&db, &h0)?;
+        put_block_header(&db, &h1)?;
+        mark_migrated(&db, 0, h0.block_hash)?;
+        mark_migrated(&db, 1, h1.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, data_root, 1)?;
+
+        // Inject a deliberately-corrupt CachedDataRoot for the same
+        // data_root.  If the helper were to consult `block_set`, the random
+        // hashes resolve to nothing; if it consulted `txid_set`, the stale
+        // entries would foul the lookup; if it consulted `data_size`, the
+        // u64::MAX value would alias an absurd chunk range.  Any read would
+        // produce a different (or Err) result than the baseline.
+        db.update(|tx| -> eyre::Result<()> {
+            let cdr = CachedDataRoot {
+                data_size: u64::MAX,
+                data_size_confirmed: true,
+                txid_set: vec![H256::random(), tx_id, H256::random()],
+                block_set: vec![H256::random(), H256::random(), H256::random()],
+                expiry_height: Some(0),
+                cached_at: UnixTimestamp::from_secs(0),
+            };
+            tx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        let guard = empty_block_tree_guard();
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("expected Some(range) — corrupt CDR must not interfere"))?;
+
+        // Identical to the baseline `migrated_tx_returns_canonical_range`.
+        assert_eq!(range.start(), LedgerChunkOffset::from(10_u64));
+        assert_eq!(range.end(), LedgerChunkOffset::from(24_u64));
+        Ok(())
+    }
 }
