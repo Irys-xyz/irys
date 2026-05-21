@@ -24,6 +24,39 @@ pub struct BlockMigrationService {
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
 }
 
+/// Asserts the block's body carries exactly the Submit-ledger tx_ids its
+/// header advertises.  `transactions().get_ledger_txs(DataLedger::Submit)`
+/// returns `&[]` for a SealedBlock whose body has been stripped, even if
+/// `header.data_ledgers[Submit].tx_ids` is populated — every downstream loop
+/// that iterates body txs (block_set mutation, tx-header insertion, etc.)
+/// would silently no-op.  Compare as sorted lists — same-length-different-ids
+/// must also fail loudly.
+fn ensure_submit_header_body_consistent(block: &SealedBlock) -> eyre::Result<()> {
+    let mut header_ids: Vec<H256> = block
+        .header()
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
+        .map(|dl| dl.tx_ids.0.clone())
+        .unwrap_or_default();
+    let mut body_ids: Vec<H256> = block
+        .transactions()
+        .get_ledger_txs(DataLedger::Submit)
+        .iter()
+        .map(|tx| tx.id)
+        .collect();
+    header_ids.sort();
+    body_ids.sort();
+    ensure!(
+        header_ids == body_ids,
+        "SealedBlock {} has header/body Submit-tx mismatch; transactions appear stripped or diverged — header={:?} body={:?}",
+        block.header().block_hash,
+        header_ids,
+        body_ids,
+    );
+    Ok(())
+}
+
 /// Write `included_height` for term ledgers and `promoted_height` for the
 /// Publish ledger from a single block's `data_ledgers` slice.
 ///
@@ -131,32 +164,14 @@ impl BlockMigrationService {
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
         // Phase 1 scrub and Phase 3 append both iterate
-        // `block.transactions().get_ledger_txs(DataLedger::Submit)`. That call
-        // returns `&[]` for a SealedBlock whose body has been stripped, even
-        // if `header.data_ledgers[Submit].tx_ids` is populated — silently
-        // skipping every `block_set` mutation.  The in-memory block-tree path
-        // always carries full transactions, but future code paths (e.g.
-        // blocks hydrated from disk without their body) could regress this
-        // without any error.  Surface the divergence in every build so the
-        // caller fails loudly rather than committing partial state.
+        // `block.transactions().get_ledger_txs(DataLedger::Submit)`.  The
+        // in-memory block-tree path always carries full transactions, but
+        // future code paths (e.g. blocks hydrated from disk without their
+        // body) could regress this without any error.  Surface the divergence
+        // in every build so the caller fails loudly rather than committing
+        // partial state.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
-            let header_submit_count = block
-                .header()
-                .data_ledgers
-                .iter()
-                .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
-                .map_or(0, |dl| dl.tx_ids.0.len());
-            let body_submit_count = block
-                .transactions()
-                .get_ledger_txs(DataLedger::Submit)
-                .len();
-            ensure!(
-                header_submit_count == body_submit_count,
-                "SealedBlock {} has header/body Submit-tx count mismatch ({} vs {}); transactions appear stripped — block_set mutations would silently no-op",
-                block.header().block_hash,
-                header_submit_count,
-                body_submit_count,
-            );
+            ensure_submit_header_body_consistent(block)?;
         }
 
         // Defense-in-depth structural check on the reorg invariant documented
@@ -413,6 +428,14 @@ impl BlockMigrationService {
     /// Persists block data and block index in a single atomic DB transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
     fn persist_block(&self, sealed_block: &SealedBlock) -> eyre::Result<()> {
+        // Mirror of the `persist_metadata` guard: a stripped body would write
+        // ledger metadata + block index from `header.data_ledgers` while
+        // inserting zero tx-header rows from `transactions().get_ledger_txs`,
+        // leaving canonical metadata pointing at txs `IrysDataTxHeaders` has
+        // no entry for.  `tx_inclusion::find_canonical_ledger_range` and the
+        // prior-Submit fallback both depend on those rows existing.
+        ensure_submit_header_body_consistent(sealed_block)?;
+
         let header = sealed_block.header();
         let transactions = sealed_block.transactions();
 
