@@ -1894,7 +1894,7 @@ mod merge_stage_results_tests {
 mod classify_poa_join_error_tests {
     //! Tests for the panic-vs-cancellation split in `classify_poa_join_error`:
     //! a PoA `JoinError` must NOT unconditionally classify as `TaskPanicked`.
-    //! The mis-classification bug is dormant in the current call site (the
+    //! The misclassification bug is dormant in the current call site (the
     //! cancel arm drops the stages-join future after a synchronous
     //! `futures::poll!`), but a future refactor that ever `.await`s the
     //! aborted PoA handle would turn every legitimate height-diff cancel into

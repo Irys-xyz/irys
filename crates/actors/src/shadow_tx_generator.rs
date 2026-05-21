@@ -817,8 +817,8 @@ impl<'a> ShadowTxGenerator<'a> {
                         // downstream — but only when iteration completes
                         // far enough to reach it. A snapshot-drifted balance
                         // below the peer-supplied operand will underflow mid-
-                        // iteration and mis-discard the block as Invalid on
-                        // this node alone. That single-node self-DoS is
+                        // iteration and incorrectly discard the block as
+                        // Invalid on this node alone. That single-node self-DoS is
                         // strictly preferable to network-wide loud-restart on
                         // a crafted block, which is why the classification
                         // stays peer-attributable here.
