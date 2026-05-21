@@ -182,9 +182,7 @@ pub enum PreValidationError {
     /// boundary (a side-fork the local node has long abandoned). Peer-
     /// attributable Consensus: the local chain has nothing to validate
     /// against.
-    #[error(
-        "PoA ancestor {ancestor_hash} at height {height} is off the local canonical chain"
-    )]
+    #[error("PoA ancestor {ancestor_hash} at height {height} is off the local canonical chain")]
     PoAOffCanonicalAncestor { ancestor_hash: H256, height: u64 },
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
@@ -2959,9 +2957,9 @@ mod c1_side_fork_regression_tests {
                              (the height at which the canonical gate failed)",
                         );
                     }
-                    _ => panic!(
-                        "C1: expected PoAOffCanonicalAncestor after the fix, got {other:?}",
-                    ),
+                    _ => {
+                        panic!("C1: expected PoAOffCanonicalAncestor after the fix, got {other:?}",)
+                    }
                 }
             }
         }
@@ -5730,21 +5728,13 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
-/// FORK-DETERMINISM GAP (TODO, out of scope for this branch):
-/// The `block_tree`/`db` lookups inside `get_block_header` are themselves
-/// fork-deterministic (content-addressed by `block_hash`), but the SET of
-/// hashes we feed into them comes from `CachedDataRoots.block_set`, a global
-/// index keyed by `data_root` that records every block — across ALL forks —
-/// the local node has ever observed a given data_root in. As a result, the
-/// `block_ranges` computed below can include ranges from blocks on a fork
-/// the block-being-validated is NOT on, biasing the
-/// "any-intersection-with-slot-range" check that drives `assigned_miners`.
-///
-/// Validation should be parent-deterministic: given `(block, parent
-/// snapshots)`, two honest peers on the same fork must produce identical
-/// outcomes regardless of which other forks they've witnessed. Walking the
-/// parent's submit-ledger lineage instead of indexing globally by data_root
-/// is the fix, but it's a larger design pass — tracked separately.
+/// Resolves the canonical Submit-ledger range a tx contributed to at or
+/// before `parent_height` via `tx_inclusion::find_canonical_ledger_range`
+/// (parent-anchored + `ChainState::Onchain`-filtered), then intersects it
+/// against each ingress proof author's Submit-ledger slot assignments.
+/// Parent-deterministic: two honest peers on the same fork produce
+/// identical `(assigned_proofs, assigned_miners)` regardless of which
+/// other forks they've witnessed.
 pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
@@ -5759,12 +5749,12 @@ pub fn get_assigned_ingress_proofs(
     let mut assigned_miners = 0;
 
     //  a) Get the canonical Submit-ledger range this tx contributed to at or
-    //     before `parent_height`.  This replaces the historical
-    //     CachedDataRoots.block_set lookup, which retained reorg'd-out hashes
-    //     and could produce stale BlockBoundsLookupError. The disamb merge
-    //     pre-filters peer-attributable PoA cases at source and routes
-    //     `BlockBoundsLookupError` as `NodeFault`, so a local
-    //     canonical-metadata Err here panics + restarts rather than
+    //     before `parent_height`. Replaces the historical
+    //     `CachedDataRoots.block_set` lookup, which retained reorg'd-out
+    //     hashes and could produce stale `BlockBoundsLookupError`.
+    //     Peer-attributable PoA cases are pre-filtered at source;
+    //     `BlockBoundsLookupError` is routed as `NodeFault`, so a local
+    //     canonical-metadata `Err` here panics + restarts rather than
     //     peer-attributing.
     let block_range = crate::tx_inclusion::find_canonical_ledger_range(
         &tx_header.id,
