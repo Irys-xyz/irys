@@ -734,20 +734,46 @@ impl Inner {
 
         // 2. Re-post any reorged term ledger transactions through handle_tx_ingress_message so account balances and anchors are checked
         // 3. Filter out any invalidated transactions
+        //
+        // If re-ingress fails (other than Skipped), the tx is NOT in the mempool.
+        // BlockMigrationService already deleted its IrysDataTxMetadata row, so the
+        // CDR's txid_set still holds a tombstone entry.  The prune-loop pending-tx
+        // guard treats "txid_set entry with no metadata row" as "still pending", so
+        // the CDR + cached chunks + ingress proofs would be pinned indefinitely.
+        // Scrubbing the txid here closes that leak.  If the tx later becomes valid,
+        // fresh gossip naturally recreates the CDR entry.
+        let mut dropped_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx_id in orphaned_term_txs.iter() {
             if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
-                // TODO: handle errors better
-                // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
-                if let Err(e) = self
-                    .handle_data_tx_ingress_message_gossip(tx)
-                    .await
-                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", tx_id, &e))
-                {
-                    error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
+                let data_root = tx.data_root;
+                match self.handle_data_tx_ingress_message_gossip(tx).await {
+                    Ok(_) => {}
+                    Err(TxIngressError::Skipped) => {
+                        debug!("Orphaned tx {} already in mempool (Skipped)", tx_id);
+                    }
+                    Err(e) => {
+                        error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
+                        dropped_by_data_root
+                            .entry(data_root)
+                            .or_default()
+                            .push(*tx_id);
+                    }
                 }
             } else {
                 warn!("Unable to get orphaned tx {:?} from sealed blocks", tx_id)
             }
+        }
+        if !dropped_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    dropped_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots after reorg re-ingress: {}",
+                e
+            );
         }
 
         // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, clear promotion state in mempool (promoted_height = None)

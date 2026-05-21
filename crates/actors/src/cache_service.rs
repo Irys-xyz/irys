@@ -4,7 +4,8 @@ use crate::chunk_ingress_service::ingress_proofs::{
 };
 use crate::metrics;
 use irys_database::{
-    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
+    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than,
+    get_data_tx_metadata, tx_header_by_txid,
 };
 use irys_database::{
     db::IrysDatabaseExt as _,
@@ -577,12 +578,31 @@ impl InnerCacheTask {
 
     /// Spawns a background thread to remove specific txids from `CachedDataRoot.txid_set` entries.
     ///
-    /// Called when the mempool prunes expired txs. If a tx was never included in a
-    /// block, its txid becomes a dangling reference in `CachedDataRoot.txid_set`.
-    /// Cleaning it here prevents stale txids from blocking publish candidate selection.
+    /// Called when the mempool prunes expired txs or the reorg handler observes
+    /// a failed orphan re-ingress.  In both cases the *decision to scrub* is
+    /// made on stale state (either pre-TTL or pre-reorg-cleanup); by the time
+    /// this task runs the world may have moved on — most importantly, the tx
+    /// may have been re-confirmed by a new block that arrived in the gap.
     ///
-    /// Uses a background thread (matching `spawn_pruning_task`) to avoid blocking the actor loop.
-    /// Sends `PruneTxidsCompleted` when done so the service can drive the queue.
+    /// `txid_set` is **authoritative state** (see [`CachedDataRoot::txid_set`]
+    /// docs).  Removing an entry whose tx has since been (re-)confirmed
+    /// would make the prune loop miss that confirmation's chunk-retention
+    /// constraint and evict the CDR before chunk migration completes,
+    /// destroying chunks that are still needed.  Per-txid metadata recheck
+    /// inside the write tx closes that race: if `IrysDataTxMetadata[tx_id]`
+    /// is `Some` now, the tx is confirmed and the txid_set entry must stay.
+    ///
+    /// Residual race the recheck does not close: a peer gossips the tx back
+    /// in during the scrub window and `cache_data_root` re-adds it to
+    /// `txid_set`, but the tx has not yet confirmed (no metadata row).  The
+    /// scrub would drop it.  Bounded by mempool TTL re-population and
+    /// `cache_data_root` idempotency on the next ingress.  Acceptable for
+    /// the current architecture; revisit if the mempool grows a strong
+    /// "currently-pending" signal that can be consulted from MDBX context.
+    ///
+    /// Uses a background thread (matching `spawn_pruning_task`) to avoid
+    /// blocking the actor loop.  Sends `PruneTxidsCompleted` when done so
+    /// the service can drive the queue.
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
@@ -592,7 +612,30 @@ impl InnerCacheTask {
                         continue;
                     };
 
-                    let removal_set: HashSet<H256> = txids_to_remove.iter().copied().collect();
+                    // Build the actually-safe-to-remove set: any tx_id whose
+                    // metadata row exists now was (re-)confirmed since the
+                    // scrub was queued and must stay in txid_set — see the
+                    // race rationale in the function docs above.
+                    let mut removal_set: HashSet<H256> = HashSet::new();
+                    let mut raced_confirmed: usize = 0;
+                    for tx_id in txids_to_remove {
+                        if get_data_tx_metadata(db_tx, tx_id)?.is_some() {
+                            raced_confirmed += 1;
+                            continue;
+                        }
+                        removal_set.insert(*tx_id);
+                    }
+                    if raced_confirmed > 0 {
+                        debug!(
+                            data_root = %data_root,
+                            raced_confirmed,
+                            "Skipped txid scrub for tx(es) (re-)confirmed during scrub window"
+                        );
+                    }
+                    if removal_set.is_empty() {
+                        continue;
+                    }
+
                     let before_len = cached.txid_set.len();
                     cached.txid_set.retain(|id| !removal_set.contains(id));
 
