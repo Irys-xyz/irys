@@ -3862,13 +3862,52 @@ pub async fn read_block_from_state(
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
-                    // The discard event for `block_hash` may have been
-                    // among the missed messages — there's no way to
-                    // recover it. Surface this distinct outcome so the
-                    // test can diagnose the lag instead of falling
-                    // through to NoDiscardEventObserved or HarnessTimeout
-                    // and chasing a phantom validation failure.
-                    return BlockValidationOutcome::ReceiverLagged { missed };
+                    // Re-poll block state BEFORE surfacing `ReceiverLagged`.
+                    // Under concurrent test load the broadcast channel can
+                    // overflow for reasons completely unrelated to
+                    // `block_hash` (a different block produced a burst of
+                    // events); returning eagerly here would turn a
+                    // successful validation into a phantom `ReceiverLagged`
+                    // failure. So we consult `block_tree_guard`: if it
+                    // already shows a terminal state for our block, the
+                    // discard event we "missed" was for someone else and
+                    // the validation outcome is recoverable. Only fall
+                    // through to `ReceiverLagged` when re-poll cannot
+                    // produce a definitive outcome either.
+                    let polled = {
+                        let read = node_ctx.block_tree_guard.read();
+                        read.get_block_and_status(block_hash)
+                            .into_iter()
+                            .map(|(_, state)| *state)
+                            .next()
+                    };
+                    match polled {
+                        // Terminal in-tree state — block survived
+                        // validation. The lag was unrelated to us.
+                        Some(chain_state)
+                            if !matches!(
+                                chain_state,
+                                ChainState::NotOnchain(BlockState::ValidationScheduled)
+                                    | ChainState::Validated(BlockState::ValidationScheduled)
+                            ) =>
+                        {
+                            return BlockValidationOutcome::StoredOnNode(chain_state);
+                        }
+                        // Block missing AND we'd previously seen it
+                        // scheduled — same recovery shape as the outer
+                        // poll's `NoDiscardEventObserved` path: we know it
+                        // was discarded, just can't recover the error.
+                        None if was_validation_scheduled => {
+                            return BlockValidationOutcome::NoDiscardEventObserved;
+                        }
+                        // Re-poll is non-definitive (still scheduled, or
+                        // unknown without prior scheduled sighting). The
+                        // discard event for `block_hash` truly may have
+                        // been among the missed messages — surface as
+                        // distinct so the test can diagnose the lag
+                        // instead of chasing a phantom failure.
+                        _ => return BlockValidationOutcome::ReceiverLagged { missed },
+                    }
                 }
             }
         }
