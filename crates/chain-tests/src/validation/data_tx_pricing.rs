@@ -134,10 +134,193 @@ async fn heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<()> {
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    // Two paths can surface the insufficient perm_fee, both valid consensus
+    // rejections of the same defect:
+    //   1. `data_txs_are_valid` → typed `PreValidation(InsufficientPermFee)`.
+    //   2. `shadow_tx_generator::ShadowTxGenerator::new` →
+    //      `PublishFeeCharges::new` rejects the underfunded perm_fee →
+    //      classified as `ShadowTxGenError::Structural` →
+    //      `ShadowTransactionInvalid`.
+    // Both stages run concurrently and either may win the merge race;
+    // accept either shape so the test pins the consensus rejection rather
+    // than an incidental stage-ordering tiebreak.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+                    | ValidationError::ShadowTransactionInvalid(_)
+            )
+        },
         "block with insufficient perm_fee should be rejected",
+    );
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+/// Deterministic companion to `heavy_block_insufficient_perm_fee_gets_rejected`.
+///
+/// The race-tolerant sibling test accepts either
+/// `PreValidation(InsufficientPermFee)` or `ShadowTransactionInvalid` because
+/// both `data_txs_are_valid` and the shadow-tx generator can reject the same
+/// underfunded `perm_fee` and either may win the `tokio::join!` merge.
+/// That tolerance also means the test no longer pins the pre-validation
+/// `InsufficientPermFee` call site: a future refactor that silently disables
+/// or bypasses the pre-validation check would still see the test pass via
+/// the shadow-tx path.
+///
+/// This test closes that gap by configuring the **validator's** consensus
+/// with `immediate_tx_inclusion_reward_percent = 0`. That zeroes the
+/// ingress-proof reward branch inside `PublishFeeCharges::new`, so:
+///   - `per_ingress_reward = 0`, `ingress_proof_reward = 0`
+///   - `perm_fee_amount >= ingress_proof_reward` is trivially satisfied for
+///     any non-zero perm_fee.
+///   - `perm_fee_treasury = perm_fee_amount` remains > 0.
+/// so the shadow-tx path CANNOT reject a non-zero-but-insufficient perm_fee.
+/// At the same time, `expected_perm_fee` still equals the (non-zero) base
+/// network fee, so the pre-validation `check_perm_fee_sufficient` threshold
+/// IS still violated. The only stage that can fail this block is
+/// `data_txs_are_valid` — making the assertion deterministic.
+///
+/// When this test fails, the pre-validation `InsufficientPermFee` check has
+/// regressed in either its logic (the threshold comparison) or its call-site
+/// reachability (the stage no longer runs / no longer covers Submit txs).
+#[test_log::test(tokio::test)]
+async fn heavy_block_insufficient_perm_fee_pre_validation_only() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub malicious_tx: DataTransactionHeader,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.malicious_tx.clone()],
+                one_year_txs: vec![],
+                thirty_day_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
+            })
+        }
+    }
+
+    // Configure a test network where BOTH the producer and the validator
+    // see `immediate_tx_inclusion_reward_percent = 0`. This is what makes
+    // the shadow-tx side accept the malicious block (see doc above) and
+    // therefore makes pre-validation the sole rejection path.
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config
+        .consensus
+        .get_mut()
+        .immediate_tx_inclusion_reward_percent = Amount::new(U256::from(0));
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    // Create a data transaction with insufficient perm_fee
+    let data = vec![42_u8; 1024]; // 1KB of data
+    let data_size = data.len() as u64;
+
+    // Get the expected price from the API
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data_size)
+        .await?;
+
+    // Create transaction with INSUFFICIENT perm_fee (50% of expected).
+    // With reward_percent=0, expected_perm_fee == base_network_fee > 0,
+    // so half of it is still strictly less than the threshold.
+    let insufficient_perm_fee = price_info.perm_fee / U256::from(2);
+    let malicious_tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        price_info.term_fee.into(),
+        Some(insufficient_perm_fee.into()), // Insufficient perm_fee
+    )?;
+    let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
+
+    // Build the evil block. The producer reuses the validator's already-
+    // zeroed reward_percent (cloning from `node_ctx.config.node_config`),
+    // so both sides agree on `reward_percent = 0`.
+    let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
+    let evil_config = genesis_node.node_ctx.config.node_config.clone();
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        malicious_tx: malicious_tx.header.clone(),
+        prod: ProductionStrategy {
+            inner: Arc::new(BlockProducerInner {
+                config: Config::new_with_random_peer_id(evil_config),
+                db: genesis_block_prod.db.clone(),
+                block_discovery: genesis_block_prod.block_discovery.clone(),
+                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
+                service_senders: genesis_block_prod.service_senders.clone(),
+                reward_curve: genesis_block_prod.reward_curve.clone(),
+                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
+                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                mempool_guard: genesis_block_prod.mempool_guard.clone(),
+                price_oracle: genesis_block_prod.price_oracle.clone(),
+                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
+                reth_provider: genesis_block_prod.reth_provider.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
+                block_index: genesis_block_prod.block_index.clone(),
+                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
+                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+            }),
+        },
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    // Deterministic assertion: only `PreValidation(InsufficientPermFee)` is
+    // accepted here. `ShadowTransactionInvalid` would mean shadow-tx won
+    // the race — which can't happen with reward_percent=0 on the validator,
+    // so its presence indicates the validator's shadow-tx setup deviates
+    // from the doc above (e.g. configuration ignored, non-zero reward_percent
+    // resurrected).
+    assert_validation_error(
+        outcome,
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+            )
+        },
+        "block with insufficient perm_fee should be rejected by pre-validation only",
     );
 
     genesis_node.stop().await;
@@ -620,8 +803,12 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
         .await?
         .unwrap();
 
-    // Validate by sending block directly to the block tree
-    // Expect the block to be rejected for insufficient perm_fee during prevalidation
+    // Validate by sending block directly to the block tree.
+    // Expect the block to be rejected for insufficient perm_fee — either via
+    // `data_txs_are_valid` (`PreValidation(InsufficientPermFee)`) or via
+    // `ShadowTxGenerator::new` (`ShadowTransactionInvalid` from the typed
+    // `Structural` classification of `PublishFeeCharges::new`'s rejection).
+    // Both are valid consensus rejections; accept either.
     let outcome =
         send_block_and_read_state(&genesis_node.node_ctx, promote_block.clone(), false).await?;
     assert_validation_error(
@@ -630,6 +817,7 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
             matches!(
                 e,
                 ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+                    | ValidationError::ShadowTransactionInvalid(_)
             )
         },
         "block with insufficient perm_fee should be rejected",

@@ -1001,7 +1001,7 @@ async fn get_publish_txs_and_proofs(
             let proofs_only: Vec<IngressProof> =
                 all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
 
-            // Get assigned and unassigned proofs using the existing utility function
+            // Get assigned and unassigned proofs using the existing utility function.
             let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                 &proofs_only,
                 tx_header,

@@ -1593,8 +1593,16 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        let execution_payload_cache =
-            ExecutionPayloadCache::new(peer_list_guard.clone(), reth_node_adapter.clone().into());
+        let execution_payload_cache = ExecutionPayloadCache::new(
+            peer_list_guard.clone(),
+            reth_node_adapter.clone().into(),
+            std::time::Duration::from_millis(
+                config
+                    .node_config
+                    .sync
+                    .execution_payload_wait_timeout_millis,
+            ),
+        );
 
         // Spawn chunk ingress service
         let (chunk_ingress_handle, chunk_ingress_state) =

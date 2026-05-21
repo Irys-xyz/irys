@@ -1433,10 +1433,17 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade>(
             reported_height,
             peers.len()
         );
-        // Filter out blocks that are already processed or currently being processed
+        // Filter out blocks that are already processed or currently
+        // being processed. The dedup helper also re-emits
+        // `AttemptReprocessingBlock` for parked-after-SoftInternal
+        // blocks whose per-block cooldown has elapsed, so periodic-sync
+        // re-pulls can recover a parked tip block whose child has not
+        // arrived (the orphan-resolve recovery path is otherwise the
+        // only non-LRU way out of the parked state — see the
+        // `BlockDedupStatus::ParkedReadyForRetry` path in block_pool).
         if gossip_data_handler
             .block_pool
-            .is_block_processing_or_processed(&block_hash, reported_height)
+            .dedup_and_maybe_emit_reprocess(&block_hash, reported_height)
             .await
         {
             debug!(
