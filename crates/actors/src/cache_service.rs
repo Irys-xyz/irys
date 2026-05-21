@@ -603,6 +603,21 @@ impl InnerCacheTask {
                             remaining = cached.txid_set.len(),
                             "Pruned stale txids from CachedDataRoot.txid_set"
                         );
+                        // Mirrors the `(None, None)` warn in
+                        // `remove_data_root_block_set_entry`: draining the
+                        // last txid while `expiry_height` is already None
+                        // leaves the CDR vacuously eviction-eligible (only
+                        // the local-proof exemption keeps it alive).
+                        // Surface this transition so observability is
+                        // symmetric across the two paths that produce it.
+                        if cached.txid_set.is_empty() && cached.expiry_height.is_none() {
+                            warn!(
+                                data_root = %data_root,
+                                "CachedDataRoot left in anomalous (no expiry, empty txid_set) state \
+                                 after stale-txid prune; entry now eviction-eligible unless held by \
+                                 a local ingress proof"
+                            );
+                        }
                         db_tx.put::<CachedDataRoots>(*data_root, cached)?;
                     }
                 }

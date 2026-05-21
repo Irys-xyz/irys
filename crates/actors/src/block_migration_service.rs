@@ -3,11 +3,11 @@ use eyre::{OptionExt as _, ensure};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
 use irys_domain::{BlockIndex, BlockTree, SupplyState, block_index_guard::BlockIndexReadGuard};
 use irys_types::{
-    DataLedger, DataTransactionHeader, IrysBlockHeader, SealedBlock, SendTraced as _, SystemLedger,
-    Traced, app_state::DatabaseProvider,
+    DataLedger, DataTransactionHeader, H256, IrysBlockHeader, SealedBlock, SendTraced as _,
+    SystemLedger, Traced, app_state::DatabaseProvider,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -157,6 +157,45 @@ impl BlockMigrationService {
                 header_submit_count,
                 body_submit_count,
             );
+        }
+
+        // Defense-in-depth structural check on the reorg invariant documented
+        // above: a Publish-ledger tx_id appearing in `blocks_to_confirm` while
+        // its Submit row is being orphaned by `blocks_to_clear` (and NOT
+        // re-confirmed in this same batch) would leave the DB in the illegal
+        // `{None, Some}` state — promoted_height set, included_height
+        // missing.  `batch_set_data_tx_promoted_height` already errs on this,
+        // so production behavior is to fail the transaction; this assert
+        // surfaces the caller-side construction bug earlier and more loudly
+        // in debug builds, before any DB I/O.
+        #[cfg(debug_assertions)]
+        {
+            let confirmed_submit: HashSet<H256> = blocks_to_confirm
+                .iter()
+                .flat_map(|b| b.transactions().get_ledger_txs(DataLedger::Submit))
+                .map(|tx| tx.id)
+                .collect();
+            let cleared_submit: HashSet<H256> = blocks_to_clear
+                .iter()
+                .flat_map(|b| b.transactions().get_ledger_txs(DataLedger::Submit))
+                .map(|tx| tx.id)
+                .collect();
+            for block in blocks_to_confirm {
+                for dl in &block.header().data_ledgers {
+                    if dl.ledger_id != DataLedger::Publish as u32 {
+                        continue;
+                    }
+                    for tx_id in &dl.tx_ids.0 {
+                        debug_assert!(
+                            !cleared_submit.contains(tx_id) || confirmed_submit.contains(tx_id),
+                            "Publish-ledger tx {tx_id} in blocks_to_confirm has its Submit \
+                             orphaned in blocks_to_clear with no re-confirmation in the same \
+                             batch — caller would promote a tx whose included_height is about \
+                             to be deleted",
+                        );
+                    }
+                }
+            }
         }
 
         self.db.update_eyre(|tx| {
