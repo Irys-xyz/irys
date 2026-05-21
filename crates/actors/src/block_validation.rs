@@ -8,7 +8,7 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::tx_header_by_txid_canonical;
+use irys_database::{tables::MigratedBlockHashes, tx_header_by_txid_canonical};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -45,6 +45,7 @@ use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -2766,9 +2767,50 @@ pub async fn data_txs_are_valid(
                         // be classified as internal, matching the
                         // `BlockBoundsLookupError` treatment elsewhere — not
                         // peer-attributed as `PublishTxMissingPriorSubmit`.
+                        //
+                        // We must *also* reject when this tx has already been
+                        // canonically promoted past the in-window walk: the
+                        // walk's `Found { historical: Publish, current:
+                        // Publish }` arm correctly emits
+                        // `PublishTxAlreadyIncluded`, but that arm is
+                        // unreachable when the prior Publish block sits
+                        // outside `anchor_expiry_depth`.  Without a
+                        // `promoted_height` check here a peer can re-publish
+                        // a tx at `h_publish + anchor_expiry_depth + N` and
+                        // get a `warn!`+accept instead of the consensus-level
+                        // double-include rejection.
                         let parent_height = block.height.saturating_sub(1);
                         match tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height) {
-                            Ok(Some(_header)) => {
+                            Ok(Some(header)) => {
+                                if let Some(promoted_height) = header.metadata().promoted_height
+                                    && promoted_height <= parent_height
+                                {
+                                    // `promoted_height` is written by
+                                    // `persist_metadata` Phase 2 atomically
+                                    // with `MigratedBlockHashes[h]`, so a
+                                    // missing row here is cross-table
+                                    // corruption — surface as internal,
+                                    // matching the IrysBlockHeaders /
+                                    // prev-header arms.
+                                    let promoted_block_hash = ro_tx
+                                        .get::<MigratedBlockHashes>(promoted_height)
+                                        .map_err(|e| {
+                                            PreValidationError::BlockBoundsLookupError(format!(
+                                                "MigratedBlockHashes read failed for promoted_height {} of tx {}: {}",
+                                                promoted_height, tx.id, e
+                                            ))
+                                        })?
+                                        .ok_or_else(|| {
+                                            PreValidationError::BlockBoundsLookupError(format!(
+                                                "canonical metadata inconsistent: tx {} has promoted_height {} but MigratedBlockHashes has no row at that height",
+                                                tx.id, promoted_height
+                                            ))
+                                        })?;
+                                    return Err(PreValidationError::PublishTxAlreadyIncluded {
+                                        tx_id: tx.id,
+                                        block_hash: promoted_block_hash,
+                                    });
+                                }
                                 warn!(
                                     tx.id = %tx.id,
                                     parent_height,
