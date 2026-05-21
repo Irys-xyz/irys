@@ -21,9 +21,9 @@
 
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
-    SubmitPayloadError, ValidationCancelReason, ValidationError, commitment_txs_are_valid,
-    data_txs_are_valid, is_seed_data_valid, poa_is_valid, recall_recall_range_is_valid,
-    shadow_transactions_are_valid, submit_payload_to_reth,
+    RecallRangeError, SubmitPayloadError, ValidationCancelReason, ValidationError,
+    commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
+    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
 };
 use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
@@ -54,8 +54,8 @@ impl ParentValidationResult {
     /// cancel-arm paths where the caller invariant guarantees `Cancelled(_)`.
     fn into_cancel_reason(self) -> ValidationCancelReason {
         match self {
-            ParentValidationResult::Cancelled(reason) => reason,
-            ParentValidationResult::Ready => panic!(
+            Self::Cancelled(reason) => reason,
+            Self::Ready => panic!(
                 "into_cancel_reason called on ParentValidationResult::Ready — \
                  cancel_outcome_to_result is only valid in cancel-arm paths"
             ),
@@ -482,7 +482,14 @@ impl BlockValidationTask {
             );
             let result: ValidationResult = match outcome {
                 Ok(()) => ValidationResult::Valid,
-                Err(err) => {
+                Err(RecallRangeError::StepsUnavailable(err)) => {
+                    tracing::warn!(
+                        custom.error = ?err,
+                        "recall range validation: local VDF steps unavailable (soft internal)"
+                    );
+                    ValidationError::RecallRangeStepsUnavailable(err.to_string()).into()
+                }
+                Err(RecallRangeError::Mismatch(err)) => {
                     tracing::error!(
                         custom.error = ?err,
                         "recall range validation failed"
