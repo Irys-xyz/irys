@@ -504,8 +504,10 @@ impl ChunkIngressServiceInner {
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
     /// - data_size is confirmed (rightmost chunk merkle validation)
-    /// - `block_set` is non-empty (cheap "has this data_root been confirmed
-    ///   in some block?" hint maintained by `cache_data_root`)
+    /// - `block_set` is non-empty (cheap presence hint — see the field doc on
+    ///   `CachedDataRoot.block_set`; treat as best-effort, not authoritative
+    ///   proof of canonical inclusion).  Canonical range / slot lookups go
+    ///   through `tx_inclusion::find_canonical_ledger_range`.
     /// - no local proof already exists
     /// - all expected chunks are present
     pub(crate) fn try_generate_ingress_proof_for_root(
@@ -527,13 +529,19 @@ impl ChunkIngressServiceInner {
             return Ok(());
         }
 
-        // Cheap "has this data_root been confirmed in any canonical block?"
-        // gate.  `block_set` is maintained atomically with tip changes by
-        // `BlockMigrationService::persist_metadata` (scrub + add in one DB
-        // tx), so a non-empty set means at least one canonical block has
-        // included a referencing tx.  Range / slot lookups still go through
+        // Cheap "has this data_root been seen in any block yet?" gate.
+        // `block_set` is a best-effort hint with two writers (mempool
+        // `BlockConfirmed` pre-migration forward-fill + `persist_metadata`
+        // canonical writer); a stale BlockConfirmed processed after a reorg
+        // can leave an orphan hash here, so non-empty does NOT prove canonical
+        // inclusion.  An over-permissive gate is correctness-safe: ingress
+        // proofs are keyed on `data_root` (see the `IngressProofs` table), so
+        // a proof generated for an orphan-tx data_root remains valid if any
+        // future canonical tx references the same data_root — i.e. the work
+        // is speculative, not wasted.  Canonical truth is re-derived by
         // `tx_inclusion::find_canonical_ledger_range` at validation /
-        // promotion time.
+        // promotion time.  An empty set, by contrast, means no writer has
+        // ever attached this data_root to a block, so we short-circuit.
         if cdr.block_set.is_empty() {
             return Ok(());
         }

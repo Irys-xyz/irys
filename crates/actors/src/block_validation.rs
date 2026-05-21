@@ -362,10 +362,19 @@ impl PreValidationError {
     /// local DB/header inconsistencies (e.g. `MigratedBlockHashes[H]` exists
     /// but `IrysBlockHeaders[hash]` is missing) — a missing local row must
     /// not cause us to reject a valid peer-provided block.
+    ///
+    /// `ValidationServiceUnreachable` and `DatabaseError` are transient
+    /// local-only failures called out explicitly in the enum safety doc as
+    /// the kind of error that MUST NEVER be mapped to a consensus-level
+    /// rejection — a momentary local DB I/O blip or service-unavailability
+    /// would otherwise cause a valid peer block to be attributed as invalid.
     pub fn is_internal_failure(&self) -> bool {
         matches!(
             self,
-            Self::InternalTaskJoin(_) | Self::BlockBoundsLookupError(_)
+            Self::InternalTaskJoin(_)
+                | Self::BlockBoundsLookupError(_)
+                | Self::ValidationServiceUnreachable
+                | Self::DatabaseError { .. }
         )
     }
 
@@ -1392,6 +1401,28 @@ mod prevalidation_error_classification_tests {
     #[test]
     fn block_bounds_lookup_error_is_internal_failure() {
         let err = PreValidationError::BlockBoundsLookupError("local DB row missing".to_string());
+        assert!(err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
+    }
+
+    /// `ValidationServiceUnreachable` surfaces transient local service
+    /// unavailability — exactly the case the enum's safety doc calls out as
+    /// MUST NEVER be mapped to a consensus-level rejection.
+    #[test]
+    fn validation_service_unreachable_is_internal_failure() {
+        let err = PreValidationError::ValidationServiceUnreachable;
+        assert!(err.is_internal_failure());
+        assert!(!err.is_fatal_corruption());
+    }
+
+    /// `DatabaseError` surfaces local DB I/O failures. Attributing a transient
+    /// MDBX hiccup to the peer would mark a valid block invalid; classify as
+    /// internal so the caller keeps the block for retry.
+    #[test]
+    fn database_error_is_internal_failure() {
+        let err = PreValidationError::DatabaseError {
+            error: "mdbx io".to_string(),
+        };
         assert!(err.is_internal_failure());
         assert!(!err.is_fatal_corruption());
     }
