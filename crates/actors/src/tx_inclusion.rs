@@ -41,10 +41,25 @@ pub fn find_canonical_ledger_range(
     // the long-term backstop.  Preferring the tree here avoids any timing
     // edge case at the migration boundary and is more defensive against a
     // future bug in migrated-path metadata.
-    if let Some(range) =
-        lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db)?
-    {
-        return Ok(Some(range));
+    //
+    // Tree-path errors (storage inconsistencies surfaced by
+    // `lookup_via_block_tree`) MUST NOT block the migrated-metadata
+    // fallback: a narrow race can evict the parent from both tree and DB
+    // briefly while migration is in flight, and the migrated path may
+    // resolve correctly once the row appears.  Log + try DB; if the DB
+    // path also fails, propagate that error (it has the more actionable
+    // diagnostic).
+    match lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db) {
+        Ok(Some(range)) => return Ok(Some(range)),
+        Ok(None) => {}
+        Err(tree_err) => {
+            tracing::debug!(
+                %tx_id,
+                max_height,
+                error = %tree_err,
+                "tx_inclusion: tree-path lookup errored; falling through to migrated-metadata"
+            );
+        }
     }
     lookup_via_migrated_metadata(tx_id, max_height, db)
 }
@@ -980,6 +995,85 @@ mod tests {
 
         assert_eq!(range.start(), LedgerChunkOffset::from(5_u64));
         assert_eq!(range.end(), LedgerChunkOffset::from(11_u64));
+        Ok(())
+    }
+
+    /// Tree-path returns Err (parent unresolvable in tree AND DB), but the
+    /// migrated path resolves the tx via `IrysDataTxMetadata` +
+    /// `MigratedBlockHashes` pointing at a different, fully-stored canonical
+    /// chain.  Without the orchestrator's fall-through, the tree-path Err
+    /// would short-circuit the lookup and the caller would see a
+    /// `BlockBoundsLookupError` even though authoritative migrated metadata
+    /// can answer the query.
+    ///
+    /// Construction:
+    ///   - Tree contains genesis_tree → h_parent_tree → h_tx_tree with
+    ///     `tx_id`; h_parent_tree is then deleted from the tree and is NOT
+    ///     persisted to the DB, so walking back from h_tx_tree can't resolve
+    ///     its parent in either tier → `lookup_via_block_tree` errors.
+    ///   - DB independently contains genesis_db → h_tx_db (with `tx_id`) +
+    ///     matching `MigratedBlockHashes` entries + tx metadata
+    ///     `included_height = 1` pointing at h_tx_db.  The migrated path
+    ///     answers from these.
+    #[test_log::test(tokio::test)]
+    async fn tree_path_err_falls_through_to_migrated_metadata() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+
+        // ---- Tree side: tree-path Err setup ----
+        // Note: tree-side block hashes are unrelated to DB-side block hashes —
+        // they live in different stores.  The tree's parent lookup fails
+        // because h_parent_tree never enters the DB.
+        let genesis_tree = make_signed_header(0, H256::zero(), 0, 0, vec![]);
+        let h_parent_tree = make_signed_header(1, genesis_tree.block_hash, 1, 5, vec![]);
+        let h_tx_tree = make_signed_header(2, h_parent_tree.block_hash, 2, 8, vec![tx_id]);
+
+        let mut tree = BlockTree::new(&genesis_tree, ConsensusConfig::testing());
+        for header in [&h_parent_tree, &h_tx_tree] {
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+                ChainState::Onchain,
+            )
+            .expect("add_common succeeds");
+        }
+        tree.test_delete(&h_parent_tree.block_hash)
+            .expect("test_delete of intermediate block succeeds");
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        // ---- DB side: migrated-path success setup ----
+        let genesis_db = make_signed_header(0, H256::zero(), 0, 10, vec![]);
+        let h_tx_db = make_signed_header(1, genesis_db.block_hash, 1, 25, vec![tx_id]);
+        put_block_header(&db, &genesis_db)?;
+        put_block_header(&db, &h_tx_db)?;
+        mark_migrated(&db, 0, genesis_db.block_hash)?;
+        mark_migrated(&db, 1, h_tx_db.block_hash)?;
+        write_tx_with_included_height(&db, tx_id, H256::random(), 1)?;
+
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 5,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| {
+            eyre::eyre!("expected Some(range) via migrated-path fall-through after tree Err")
+        })?;
+
+        // Range is derived from the DB chain (genesis_db total = 10,
+        // h_tx_db total = 25), so [10, 24].  The tree's [5, 8] would have
+        // surfaced only if the orchestrator returned the tree-path result.
+        assert_eq!(u64::from(range.start()), 10);
+        assert_eq!(u64::from(range.end()), 24);
         Ok(())
     }
 }
