@@ -30,6 +30,7 @@ irys_utils::define_metrics! {
     counter BLOCK_VALIDATION_FAILED("irys.block.validation_failed_total", "Block full-validation failures (post pre-validation) by reason (labelled)");
     counter CHAIN_SYNC_BLOCK_REJECTED("irys.chain_sync.block_rejected_total", "Chain-sync block rejections by reason (labelled)");
     counter BLOCK_PRODUCTION_LOOKUP_FAILED("irys.block_production.lookup_failed_total", "Block-production canonical DB lookup failures by site (labelled). Currently observed: tx_selector silently skips affected publish candidates.");
+    counter CACHE_TXID_SCRUB_FAILED("irys.cache.txid_scrub_failed_total", "CachedDataRoot.txid_set scrub batches that returned Err. Visible signal that stale tombstones may pin CDRs until the next scrub trigger.");
 
     histogram PREVALIDATION_DURATION_MS(
         "irys.validation.prevalidation_duration_ms",
@@ -259,4 +260,8 @@ pub fn record_chain_sync_block_rejected(reason: &'static str) {
 
 pub(crate) fn record_block_production_lookup_failed(site: &'static str) {
     BLOCK_PRODUCTION_LOOKUP_FAILED.add(1, &[KeyValue::new("site", site)]);
+}
+
+pub(crate) fn record_cache_txid_scrub_failed() {
+    CACHE_TXID_SCRUB_FAILED.add(1, &[]);
 }
