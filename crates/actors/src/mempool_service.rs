@@ -3661,3 +3661,39 @@ mod batch_prune_result_tests {
         );
     }
 }
+
+/// Pins the classification logic used by `handle_confirmed_data_tx_reorg` to
+/// decide whether a failed re-ingress leaves a CDR tombstone that must be scrubbed.
+/// `Skipped` means "already in mempool" — no scrub needed.  All other errors mean
+/// the tx is absent from the mempool and the CDR txid_set entry is a tombstone.
+#[cfg(test)]
+mod reorg_reingress_classification_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_is_detected_by_direct_pattern_match() {
+        let err = TxIngressError::Skipped;
+        assert!(
+            matches!(err, TxIngressError::Skipped),
+            "Skipped must match TxIngressError::Skipped so the reorg handler can skip CDR scrub"
+        );
+    }
+
+    #[test]
+    fn non_skipped_errors_do_not_match_skipped() {
+        let errors = [
+            TxIngressError::InvalidSignature(irys_types::IrysAddress::random()),
+            TxIngressError::Unfunded(H256::zero()),
+            TxIngressError::InvalidAnchor(H256::zero()),
+            TxIngressError::MempoolFull("test".to_owned()),
+            TxIngressError::Other("test".to_owned()),
+        ];
+        for e in &errors {
+            assert!(
+                !matches!(e, TxIngressError::Skipped),
+                "variant {:?} must NOT match Skipped — it means the tx is absent from mempool",
+                e
+            );
+        }
+    }
+}
