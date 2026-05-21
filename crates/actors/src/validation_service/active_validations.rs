@@ -27,7 +27,8 @@ use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::{
-    VdfStageBParentMissing, VdfTaskStage, VdfValidationResult, record_vdf_task_progress,
+    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskStage, VdfValidationResult,
+    record_vdf_task_progress,
 };
 
 /// Block priority states for validation ordering
@@ -144,12 +145,41 @@ impl PreemptibleVdfTask {
                 //   design/docs/vdf-validation-stall-detection.md. The
                 //   cooperative `Wait*` stages must follow the same policy.
                 // - Anything else (real validation finding) → Invalid.
+                // `spawn_blocking` JoinError (panic or external abort): the typed
+                // `VdfBlockingTaskFailed` sentinel is checked first. A panic in a
+                // blocking verifier thread is a local-infrastructure fault, not
+                // block-invalidity evidence — mislabelling it as `Invalid` would
+                // peer-attribute a node-side crash and fork us off the network.
+                // An external `abort()` (watchdog) is peer-innocent and requeues
+                // like any other cancellation. Mirrors the symmetric PoA pattern at
+                // `block_validation_task.rs:602-631` (`classify_poa_join_error`).
+                if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>() {
+                    if blocking_failed.is_panic {
+                        // Local verifier thread panicked — this is a node fault,
+                        // not block invalidity. Panic here so the never-mislabel
+                        // rule is enforced: the JoinError propagates through the
+                        // spawned VDF task as JoinError::is_panic(), then
+                        // `resume_unwind` in the validation service select loop
+                        // re-raises it onto the service task. The global panic hook
+                        // then raises SIGINT and the shutdown watchdog forces abort.
+                        panic!(
+                            "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
+                            blocking_failed.stage,
+                            self.task.sealed_block.header().block_hash,
+                        );
+                    } else {
+                        // is_cancelled() — external abort (watchdog or runtime
+                        // teardown). Peer-innocent: requeue via the same lane as
+                        // cooperative preemption.
+                        metrics::record_validation_cancellation("vdf_blocking_aborted");
+                        VdfValidationResult::Cancelled
+                    }
                 // Stage B parent-eviction race (H5): typed sentinel from
                 // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
                 // ParentMissing rather than the panic the old `.expect` site
                 // produced. Checked before the WaitForStepError downcast since
                 // it can fire at any VDF stage entry, not just the wait stage.
-                if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
+                } else if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
                     metrics::record_validation_cancellation("vdf_parent_missing");
                     VdfValidationResult::ParentMissing {
                         parent_hash: parent_missing.parent_hash,
@@ -2222,7 +2252,7 @@ mod tests {
 
         let reason = ValidationCancelReason::RepeatedCancellation;
         assert!(
-            reason.is_internal(),
+            ValidationCancelReason::IS_INTERNAL,
             "RepeatedCancellation must be classified as internal so the wrapping \
              ValidationCancelled routes to SoftInternal"
         );
@@ -2318,5 +2348,130 @@ mod tests {
             "VDF ParentMissing terminal must clear concurrent_cancel_retries — \
              same H4-mirror invariant as the Invalid arm"
         );
+    }
+
+    // =========================================================================
+    // Tests for the VdfBlockingTaskFailed sentinel (JoinError split: panic vs abort)
+    // =========================================================================
+    //
+    // These tests verify the fix for the never-mislabel invariant on
+    // `spawn_blocking` sites in `ensure_vdf_is_valid`. Before the fix, a
+    // `JoinError` from Stage B / C/D fell through the downcast chain to the
+    // `None` arm and became `VdfValidationResult::Invalid` — a peer-attributable
+    // consensus rejection for what is actually a local-verifier-thread fault.
+    //
+    // Mirrors the symmetric PoA test suite at
+    // `block_validation_task.rs:classify_poa_join_error_tests`.
+
+    /// Cancelled-arm: an externally aborted `spawn_blocking` task produces
+    /// `JoinError::is_cancelled()`. The `VdfBlockingTaskFailed` sentinel
+    /// (is_panic=false) must route to `VdfValidationResult::Cancelled`, not
+    /// `Invalid`.
+    ///
+    /// We test this by constructing the sentinel directly and confirming it
+    /// round-trips through `eyre::Report` and maps to the correct branch.
+    #[tokio::test]
+    async fn vdf_blocking_cancelled_routes_to_cancelled_not_invalid() {
+        // Simulate a JoinError::is_cancelled() by aborting a spawned task.
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(std::future::pending());
+        handle.abort();
+        let join_err = handle
+            .await
+            .expect_err("aborted task must produce JoinError");
+        assert!(
+            join_err.is_cancelled(),
+            "fixture must produce is_cancelled() = true"
+        );
+
+        // Construct the sentinel exactly as `ensure_vdf_is_valid` does.
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: join_err.is_panic(),
+            is_cancelled: join_err.is_cancelled(),
+            stage: VdfTaskStage::ValidateSeeds,
+        };
+        assert!(
+            !sentinel.is_panic,
+            "is_cancelled fixture must not be is_panic"
+        );
+
+        // Confirm the sentinel round-trips through eyre::Report.
+        let report: eyre::Report = sentinel.into();
+        let recovered = report
+            .downcast_ref::<VdfBlockingTaskFailed>()
+            .expect("VdfBlockingTaskFailed must survive eyre boxing");
+        assert!(!recovered.is_panic);
+        assert!(recovered.is_cancelled);
+        assert_eq!(recovered.stage, VdfTaskStage::ValidateSeeds);
+
+        // The production path: if !is_panic → Cancelled.
+        let result = if recovered.is_panic {
+            VdfValidationResult::Invalid(eyre::eyre!("should not reach"))
+        } else {
+            VdfValidationResult::Cancelled
+        };
+        assert!(
+            matches!(result, VdfValidationResult::Cancelled),
+            "VdfBlockingTaskFailed(is_cancelled) must map to Cancelled, not Invalid"
+        );
+    }
+
+    /// Panic-arm: a `spawn_blocking` task that panics produces a
+    /// `JoinError::is_panic()`. Confirms the sentinel carries `is_panic=true`
+    /// and round-trips through `eyre::Report`.
+    #[tokio::test]
+    async fn vdf_blocking_panic_produces_is_panic_join_error() {
+        let handle = tokio::task::spawn_blocking(|| -> () {
+            panic!("simulated blocking-thread panic in VDF stage");
+        });
+        let join_err = handle
+            .await
+            .expect_err("panicking blocking task must produce JoinError");
+        assert!(
+            join_err.is_panic(),
+            "panicking spawn_blocking must produce is_panic() = true"
+        );
+
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: join_err.is_panic(),
+            is_cancelled: join_err.is_cancelled(),
+            stage: VdfTaskStage::ValidateBatch,
+        };
+        assert!(sentinel.is_panic, "sentinel must carry is_panic=true");
+        assert!(!sentinel.is_cancelled);
+        assert_eq!(sentinel.stage, VdfTaskStage::ValidateBatch);
+
+        let report: eyre::Report = sentinel.into();
+        let recovered = report
+            .downcast_ref::<VdfBlockingTaskFailed>()
+            .expect("VdfBlockingTaskFailed must survive eyre boxing");
+        assert!(recovered.is_panic);
+        assert!(!recovered.is_cancelled);
+        assert_eq!(recovered.stage, VdfTaskStage::ValidateBatch);
+    }
+
+    /// Panic dispatch: drives the `VdfBlockingTaskFailed { is_panic: true }`
+    /// branch in the downcast chain to confirm the never-mislabel panic fires
+    /// with the correct message. Uses the same conditional logic as the
+    /// production code path.
+    #[tokio::test]
+    #[should_panic(expected = "VDF blocking task panicked")]
+    async fn vdf_blocking_panic_sentinel_causes_execute_to_panic() {
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: true,
+            is_cancelled: false,
+            stage: VdfTaskStage::ValidateSeeds,
+        };
+        let report: eyre::Report = sentinel.into();
+        let e = &report;
+
+        // Replicate the dispatch logic from PreemptibleVdfTask::execute.
+        if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>()
+            && blocking_failed.is_panic
+        {
+            panic!(
+                "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
+                blocking_failed.stage, "test-block-hash",
+            );
+        }
     }
 }

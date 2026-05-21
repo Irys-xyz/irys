@@ -686,15 +686,13 @@ impl PreValidationError {
 
 /// Why a block validation task was cancelled before producing a verdict.
 ///
-/// Sub-classifications drive [`ValidationCancelReason::is_internal`], which
-/// in turn dictates whether the wrapping `ValidationError::ValidationCancelled`
-/// routes through `ValidationResult::InternalFailure` (validity unknown,
-/// retry plausible) or `ValidationResult::Invalid` (peer-attributable
-/// consensus rejection — block is bad on its merits).
+/// The [`ValidationCancelReason::IS_INTERNAL`] constant is `true` for all
+/// variants; `ValidationError::ValidationCancelled` always routes through
+/// `ValidationResult::InternalFailure` (validity unknown, retry plausible).
 ///
-/// All three reasons are local-side outcomes that say nothing about the
+/// All reasons are local-side outcomes that say nothing about the
 /// peer's block. Per the M2 audit (2026-05-20), every variant routes through
-/// `is_internal() = true` → `InternalFailure` so the peer is never blamed
+/// `IS_INTERNAL = true` → `InternalFailure` so the peer is never blamed
 /// for a "we moved on" event. Historically `HeightDifference` and
 /// `ChannelClosed` returned `false` here under the older rationale that
 /// "the block can never become canonical, so discard rather than retry" —
@@ -707,7 +705,7 @@ pub enum ValidationCancelReason {
     /// Canonical tip moved past this block by more than `block_tree_depth`.
     /// The block can never become canonical, but its validity is unknown —
     /// our tip simply advanced past it while validation was in flight.
-    /// Routes through `is_internal() = true` so the block discards as a
+    /// Routes through `IS_INTERNAL = true` so the block discards as a
     /// soft local outcome rather than peer-attributed Invalid.
     HeightDifference,
     /// Parent block absent from the in-memory block tree during the
@@ -715,14 +713,14 @@ pub enum ValidationCancelReason {
     /// either the block_pool failed to gate the child on its parent, the
     /// parent was depth-pruned past `block_tree_depth`, or the parent was
     /// proactively removed by the soft-`InternalFailure` handler. In every
-    /// case the cause is local, so this routes through `is_internal() = true`
+    /// case the cause is local, so this routes through `IS_INTERNAL = true`
     /// → `ValidationResult::InternalFailure` (child removed on the soft path
     /// alongside its parent; fresh gossip can re-enter if/when the parent
     /// returns).
     ParentMissing,
     /// Block-state broadcast channel closed (typically during node shutdown).
     /// A shutdown is a local event, not a statement about the peer's block.
-    /// Routes through `is_internal() = true` so shutdown-induced discards
+    /// Routes through `IS_INTERNAL = true` so shutdown-induced discards
     /// never poison consensus-rejection metrics.
     ChannelClosed,
     /// Concurrent-stage `JoinError::Cancelled` recurred for the same block
@@ -731,7 +729,7 @@ pub enum ValidationCancelReason {
     /// transparently requeue; sustained recurrence for the same block means
     /// something local keeps tearing the task down (poisoned runtime, a
     /// sibling-worker panic loop, a watchdog edge case) and re-running it
-    /// will likely just burn cycles. Routes through `is_internal() = true`
+    /// will likely just burn cycles. Routes through `IS_INTERNAL = true`
     /// so the block parks rather than being peer-attributed — the validity
     /// of the child block is still unknown, the cancellation said nothing
     /// about it. Recovery is fresh gossip re-entry (same lane as other
@@ -740,29 +738,32 @@ pub enum ValidationCancelReason {
 }
 
 impl ValidationCancelReason {
-    /// Returns true when the cancellation reflects a local node-side
-    /// condition rather than a peer-attributable defect in the child block.
+    /// All variants are local-side outcomes (M2 audit 2026-05-20, H4 fix).
+    /// `HeightDifference`, `ParentMissing`, `ChannelClosed`,
+    /// `RepeatedCancellation` — none are statements about the peer's block.
     ///
-    /// All variants are local-side outcomes (M2 audit 2026-05-20, H4 fix
-    /// 2026-05-20): `HeightDifference` says "our tip advanced past this block
-    /// while validation was in flight", `ParentMissing` says "the parent is
-    /// missing from our cache", `ChannelClosed` says "we're shutting down",
-    /// `RepeatedCancellation` says "the concurrent stage keeps getting
-    /// torn down for this block past the retry cap". None of these are
-    /// statements about the peer's block, so all route to `InternalFailure`
-    /// rather than `Invalid`. The H3 LRU recording site in
-    /// `block_tree_service` separately filters cancellations out of the
-    /// soft-internal discard counter (cancellations are not gossip-
-    /// recoverable retries, so they don't belong in that bookkeeping).
-    pub fn is_internal(&self) -> bool {
-        match self {
-            Self::HeightDifference
-            | Self::ParentMissing
-            | Self::ChannelClosed
-            | Self::RepeatedCancellation => true,
+    /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
+    /// REQUIRES changing this constant to a method and re-auditing every
+    /// caller. The compile-time tripwire below (`_exhaustive_check`) catches
+    /// accidental new variants — a new variant must add an arm there, which
+    /// forces the author to re-evaluate `IS_INTERNAL`.
+    pub const IS_INTERNAL: bool = true;
+}
+
+// Compile-time tripwire: if anyone adds a new variant they must update
+// this match (and re-evaluate IS_INTERNAL above).
+#[allow(dead_code)]
+const _: fn() = || {
+    fn _exhaustive_check(reason: ValidationCancelReason) {
+        match reason {
+            ValidationCancelReason::HeightDifference => {}
+            ValidationCancelReason::ParentMissing => {}
+            ValidationCancelReason::ChannelClosed => {}
+            ValidationCancelReason::RepeatedCancellation => {}
+            // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
-}
+};
 
 impl std::fmt::Display for ValidationCancelReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -787,7 +788,7 @@ pub enum ValidationError {
     /// The `reason` sub-variant determines whether the cancellation is
     /// treated as an internal/runtime failure (validity unknown, retry
     /// plausible) or as a "give up and discard" outcome — see
-    /// [`ValidationCancelReason::is_internal`].
+    /// [`ValidationCancelReason::IS_INTERNAL`].
     #[error("Validation cancelled: {reason}")]
     ValidationCancelled { reason: ValidationCancelReason },
 
@@ -819,9 +820,16 @@ pub enum ValidationError {
     #[error("Execution layer transport failure: {0}")]
     ExecutionLayerTransportFailed(String),
 
-    /// Recall range validation failed
+    /// Recall range validation failed (consensus mismatch — peer-attributable).
     #[error("Recall range validation failed: {0}")]
     RecallRangeInvalid(String),
+
+    /// Local VDF state did not yet contain the steps required for recall-range
+    /// validation. The block's validity is unknown — the node simply hasn't
+    /// caught up to the block's VDF position yet. Classified as SoftInternal
+    /// (block parks in cache; re-validate once VDF state advances).
+    #[error("Recall range VDF steps unavailable: {0}")]
+    RecallRangeStepsUnavailable(String),
 
     /// Shadow transaction validation failed (consensus rejection — the
     /// peer's payload doesn't match the expected shadow transactions, has
@@ -1019,8 +1027,11 @@ impl ValidationError {
             // `ParentMissing`, `HeightDifference`, `ChannelClosed` — are
             // local-side outcomes and route to `SoftInternal`. No
             // cancellation reason ever peer-attributes the child block.)
-            Self::ValidationCancelled { reason } => {
-                if reason.is_internal() {
+            // All cancellation reasons are local-side outcomes (IS_INTERNAL
+            // const documents + compile-time tripwire enforces). No
+            // cancellation reason ever peer-attributes the child block.
+            Self::ValidationCancelled { .. } => {
+                if ValidationCancelReason::IS_INTERNAL {
                     ErrorClass::SoftInternal
                 } else {
                     ErrorClass::Consensus
@@ -1043,6 +1054,10 @@ impl ValidationError {
             // saturated. Block parks in cache for retry. See the variant
             // doc for the full rationale.
             Self::ExecutionPayloadCacheEvicted { .. } => ErrorClass::SoftInternal,
+            // Local VDF state hasn't caught up to the block's step position.
+            // Not peer-attributable — the block may be valid once VDF catches
+            // up. Block parks in cache for passive retry.
+            Self::RecallRangeStepsUnavailable(_) => ErrorClass::SoftInternal,
 
             // Consensus rejections — peer's block is genuinely bad.
             Self::VdfValidationFailed(_)
@@ -1101,7 +1116,8 @@ impl ValidationError {
             | Self::ParentBlockMissing { .. }
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
-            | Self::ParentEmaSnapshotMissing { .. } => "internal_error",
+            | Self::ParentEmaSnapshotMissing { .. }
+            | Self::RecallRangeStepsUnavailable(_) => "internal_error",
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
             // the generic `"invalid"` would undercount local-state corruption
@@ -1195,6 +1211,8 @@ mod metric_label_tests {
         let err = ValidationError::ExecutionPayloadCacheEvicted {
             evm_block_hash: Default::default(),
         };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::RecallRangeStepsUnavailable("steps unavailable".into());
         assert_eq!(err.metric_label(), "internal_error");
 
         // invalid — consensus-rejection variants (peer-attributable).
@@ -2039,33 +2057,26 @@ mod prevalidation_error_classification_tests {
 
     /// Post-M2 audit (2026-05-20): every `ValidationCancelReason` is a
     /// local-side outcome and routes through `InternalFailure`. None are
-    /// peer-attributable, so `is_internal()` is `true` for every variant
-    /// and the wrapping `ValidationError::ValidationCancelled` is an
-    /// `is_internal_failure()`.
+    /// peer-attributable, so `IS_INTERNAL` is `true` and the wrapping
+    /// `ValidationError::ValidationCancelled` is an `is_internal_failure()`.
     ///
     /// One case per `ValidationCancelReason` variant so per-variant failures
     /// surface as distinct nextest reports (matches the repo convention used
     /// by `is_parent_ready_chain_state_dispatch` / `block_status_returns_in_tree_pending_validation`).
     #[rstest]
-    #[case::height_difference(ValidationCancelReason::HeightDifference, true)]
-    #[case::channel_closed(ValidationCancelReason::ChannelClosed, true)]
-    #[case::parent_missing(ValidationCancelReason::ParentMissing, true)]
-    #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation, true)]
-    fn validation_cancel_reason_classifier_dispatch(
-        #[case] reason: ValidationCancelReason,
-        #[case] expected_internal: bool,
-    ) {
-        assert_eq!(
-            reason.is_internal(),
-            expected_internal,
-            "{:?}.is_internal()",
+    #[case::height_difference(ValidationCancelReason::HeightDifference)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
+    #[case::parent_missing(ValidationCancelReason::ParentMissing)]
+    #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
+    fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
+        assert!(
+            ValidationCancelReason::IS_INTERNAL,
+            "{:?}: IS_INTERNAL must be true — all cancel reasons are local-side outcomes",
             reason
         );
-        // `ValidationError::is_internal_failure` must delegate to the reason
-        // sub-classification.
-        assert_eq!(
+        // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
+        assert!(
             ValidationError::ValidationCancelled { reason }.is_internal_failure(),
-            expected_internal,
             "ValidationError::ValidationCancelled {{ reason: {:?} }}.is_internal_failure()",
             reason,
         );
