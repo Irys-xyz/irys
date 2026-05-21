@@ -1327,6 +1327,38 @@ mod metric_label_tests {
     }
 }
 
+#[cfg(test)]
+mod recall_range_error_tests {
+    use super::*;
+
+    #[test]
+    fn recall_range_error_is_internal() {
+        let steps_err = RecallRangeError::StepsUnavailable(eyre::eyre!("steps missing"));
+        assert!(steps_err.is_internal(), "StepsUnavailable must be internal");
+
+        let mismatch_err = RecallRangeError::Mismatch(eyre::eyre!("range mismatch"));
+        assert!(!mismatch_err.is_internal(), "Mismatch must not be internal");
+    }
+
+    #[test]
+    fn validation_error_recall_range_steps_unavailable_is_soft_internal() {
+        let err = ValidationError::RecallRangeStepsUnavailable("no steps".into());
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert!(err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "internal_error");
+    }
+
+    #[test]
+    fn validation_error_recall_range_invalid_is_consensus() {
+        let err = ValidationError::RecallRangeInvalid("mismatch".into());
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(!err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "invalid");
+    }
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -3112,12 +3144,34 @@ mod perm_fee_threshold_tests {
     }
 }
 
+/// Inner error type for [`recall_recall_range_is_valid`], distinguishing a
+/// local VDF-state gap from a genuine consensus mismatch.
+#[derive(Debug, Error)]
+pub enum RecallRangeError {
+    /// Local VDF state doesn't yet contain the requested steps.
+    /// Local-state issue — re-validate after VDF catches up.
+    #[error("local VDF steps unavailable: {0}")]
+    StepsUnavailable(eyre::Report),
+    /// Recall range in the block does not match the computed range.
+    /// Consensus mismatch — peer-attributable.
+    #[error("recall range mismatch: {0}")]
+    Mismatch(eyre::Report),
+}
+
+impl RecallRangeError {
+    /// Returns `true` when the error reflects a local node-side condition
+    /// (VDF state hasn't caught up) rather than a peer-attributable defect.
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::StepsUnavailable(_))
+    }
+}
+
 /// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
-) -> eyre::Result<()> {
+) -> Result<(), RecallRangeError> {
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
     let reset_step_number = irys_efficient_sampling::reset_step_number(
@@ -3128,16 +3182,20 @@ pub async fn recall_recall_range_is_valid(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, block.vdf_limiter_info.global_step_number
     );
-    let steps = steps_guard.read().get_steps(ii(
-        reset_step_number,
-        block.vdf_limiter_info.global_step_number,
-    ))?;
+    let steps = steps_guard
+        .read()
+        .get_steps(ii(
+            reset_step_number,
+            block.vdf_limiter_info.global_step_number,
+        ))
+        .map_err(RecallRangeError::StepsUnavailable)?;
     irys_efficient_sampling::recall_range_is_valid(
         (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
         num_recall_ranges_in_partition as usize,
         &steps,
         &block.poa.partition_hash,
     )
+    .map_err(RecallRangeError::Mismatch)
 }
 
 pub fn get_recall_range(
@@ -4892,18 +4950,31 @@ pub async fn data_txs_are_valid(
                     DataLedger::Publish => {
                         // check the db — constrained to canonical chain at or before the parent
                         let parent_height = block.height.saturating_sub(1);
-                        if let Ok(Some(_header)) =
-                            tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height)
-                        {
-                            warn!(
-                                "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
-                                &_header, &tx.id, &tx
-                            );
-                        } else {
-                            // Publish tx with no past inclusion - INVALID
-                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
-                                tx_id: tx.id,
-                            });
+                        match tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height) {
+                            Ok(Some(header)) => {
+                                warn!(
+                                    "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
+                                    &header, &tx.id, &tx
+                                );
+                            }
+                            Ok(None) => {
+                                // Publish tx with no past inclusion - INVALID
+                                return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                    tx_id: tx.id,
+                                });
+                            }
+                            Err(e) => {
+                                // Local MDBX I/O failure — not a statement about the peer's
+                                // block. Route as NodeFault so the caller aborts rather than
+                                // peer-attributing a local DB error as consensus rejection.
+                                error!(
+                                    "tx_header_by_txid_canonical DB error for tx {}: {}",
+                                    &tx.id, &e
+                                );
+                                return Err(PreValidationError::DatabaseError {
+                                    error: e.to_string(),
+                                });
+                            }
                         }
                     }
                     DataLedger::Submit => {
@@ -5533,24 +5604,12 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "database returned error fetching parent block header {}",
-                            &block.0
-                        )
-                    })
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "db view error while fetching parent block header {}",
-                            &block.0
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "to find the parent block header {} in the database",
-                            &block.0
-                        )
-                    });
+                    .map_err(|e| PreValidationError::BlockBoundsLookupError(
+                        format!("db.view failed fetching parent block {}: {e}", &block.0)))?
+                    .map_err(|e| PreValidationError::BlockBoundsLookupError(
+                        format!("block_header_by_hash failed for {}: {e}", &block.0)))?
+                    .ok_or_else(|| PreValidationError::BlockBoundsLookupError(
+                        format!("parent block {} not found in database", &block.0)))?;
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
             }
