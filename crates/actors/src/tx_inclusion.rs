@@ -157,14 +157,16 @@ fn lookup_via_block_tree(
         if !submit_txs.iter().any(|t| t == tx_id) {
             continue;
         }
-        // Canonical-chain entries should be Onchain, but check defensively.
+        // Canonical-chain entries are *almost* always `Onchain`, but during
+        // reorg replay an entry can briefly be `Validated` before the
+        // longest-chain walk promotes it.  Skip non-Onchain entries — both
+        // states are valid in transient windows and the next canonical block
+        // either confirms or evicts them.  (Originally a `debug_assert!`,
+        // but the heavy reorg tests exposed that the assumption doesn't
+        // hold under concurrent validation.)
         let Some((_, state)) = tree.get_block_and_status(&block.block_hash) else {
             continue;
         };
-        debug_assert!(
-            matches!(state, ChainState::Onchain),
-            "canonical chain entry must be Onchain"
-        );
         if !matches!(state, ChainState::Onchain) {
             continue;
         }
