@@ -1254,6 +1254,10 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
         }
     } else {
         // `is_cancelled()` is the only other producer of `JoinError`.
+        // Mirror the per-reason metric pattern used by the height-diff /
+        // parent-missing / channel-closed cancel sites so dashboards can
+        // attribute cancel volume to the PoA-abort lane specifically.
+        metrics::record_validation_cancellation("poa_aborted");
         ValidationError::ValidationCancelled {
             reason: ValidationCancelReason::PoAAborted,
         }
