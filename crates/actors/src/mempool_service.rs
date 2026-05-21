@@ -1478,6 +1478,7 @@ impl AtomicMempoolState {
     ) -> Result<(), MempoolError> {
         let mut state = self.write().await?;
 
+        // Callers must pass only term-ledger tx_ids in this slice; the function does not check the stored ledger_id.
         // 1. Set included_height for term-ledger txs (Submit / OneYear / ThirtyDay).
         //    Publish-ledger txs are excluded: they only receive promoted_height (phase 3
         //    below). Setting included_height on a Publish tx would overwrite the
@@ -1525,8 +1526,8 @@ impl AtomicMempoolState {
             if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(txid) {
                 if wrapped_header.metadata().promoted_height.is_none() {
                     wrapped_header.metadata_mut().promoted_height = Some(height);
+                    tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
                 }
-                tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
                 state.recent_valid_tx.put(*txid, ());
             }
         }

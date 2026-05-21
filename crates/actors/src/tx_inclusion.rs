@@ -63,9 +63,11 @@ fn lookup_via_migrated_metadata(
         let Some(header) = tx_header_by_txid_canonical(tx, tx_id, max_height)? else {
             return Ok(None);
         };
-        let Some(included_height) = header.metadata().included_height else {
-            return Ok(None);
-        };
+        // `tx_header_by_txid_canonical` guarantees included_height is Some.
+        let included_height = header
+            .metadata()
+            .included_height
+            .expect("tx_header_by_txid_canonical guarantees included_height is Some");
         let Some(block_hash) = tx.get::<MigratedBlockHashes>(included_height)? else {
             return Ok(None);
         };
@@ -115,8 +117,9 @@ fn lookup_via_block_tree(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
-    // Today's config validation ensures depth > 0, but the function silently
-    // degrades to a 1-block window if violated.
+    // With saturating math, depth = 0 yields a single-block window at max_height —
+    // not a useful default, but not catastrophic either. The debug_assert below
+    // catches the misconfiguration in tests.
     debug_assert!(
         block_migration_depth > 0,
         "block_migration_depth must be positive"
@@ -150,6 +153,10 @@ fn lookup_via_block_tree(
         let Some((_, state)) = tree.get_block_and_status(&block.block_hash) else {
             continue;
         };
+        debug_assert!(
+            matches!(state, ChainState::Onchain),
+            "canonical chain entry must be Onchain"
+        );
         if !matches!(state, ChainState::Onchain) {
             continue;
         }
