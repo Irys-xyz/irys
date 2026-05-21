@@ -74,6 +74,25 @@ pub(crate) struct VdfStageBParentMissing {
     pub parent_hash: BlockHash,
 }
 
+/// Sentinel error returned from `ensure_vdf_is_valid` when a `spawn_blocking`
+/// task in Stage B or Stage C/D resolves as a `JoinError` (thread panic or
+/// external `abort()`). Downcast in `PreemptibleVdfTask::execute` to split the
+/// two cases: panics route to a local-fault `panic!` (never-mislabel rule);
+/// external aborts route to `VdfValidationResult::Cancelled` (same requeue
+/// lane as watchdog-triggered aborts). Without this sentinel the `JoinError`
+/// falls through to the `None` arm and becomes `VdfValidationResult::Invalid`,
+/// mislabelling a local infrastructure failure as a peer-attributable consensus
+/// rejection.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "VDF blocking task failed (stage={stage:?}, is_panic={is_panic}, is_cancelled={is_cancelled})"
+)]
+pub(crate) struct VdfBlockingTaskFailed {
+    pub is_panic: bool,
+    pub is_cancelled: bool,
+    pub stage: VdfTaskStage,
+}
+
 /// Look up the parent for Stage B (seed-data validation) outside the blocking
 /// closure. Returns a cloned `IrysBlockHeader` on hit, or the typed
 /// `VdfStageBParentMissing` sentinel on miss. Factored out so the
@@ -137,14 +156,19 @@ impl VdfTaskStage {
 impl From<u8> for VdfTaskStage {
     fn from(raw: u8) -> Self {
         match raw {
-            // weird pattern for single source of discriminant truth
+            // weird pattern for single source of discriminant truth.
+            // Unknown discriminants panic loudly: a new variant must add an arm here.
+            x if x == Self::Starting as u8 => Self::Starting,
             x if x == Self::WaitPrevStep as u8 => Self::WaitPrevStep,
             x if x == Self::ValidateSeeds as u8 => Self::ValidateSeeds,
             x if x == Self::ValidateBatch as u8 => Self::ValidateBatch,
             x if x == Self::FastForwardBatch as u8 => Self::FastForwardBatch,
             x if x == Self::WaitFinalCatchUp as u8 => Self::WaitFinalCatchUp,
             x if x == Self::Completed as u8 => Self::Completed,
-            _ => Self::Starting,
+            other => panic!(
+                "VdfTaskStage::from(u8) unknown discriminant {other} — \
+                 a new VdfTaskStage variant needs an arm here"
+            ),
         }
     }
 }
@@ -1000,7 +1024,7 @@ impl ValidationServiceInner {
             // concurrent stage).
             let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
-            tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 ensure!(
                     matches!(
                         is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency),
@@ -1010,7 +1034,19 @@ impl ValidationServiceInner {
                 );
                 Ok::<(), eyre::Report>(())
             })
-            .await??;
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(join_err) => {
+                    return Err(VdfBlockingTaskFailed {
+                        is_panic: join_err.is_panic(),
+                        is_cancelled: join_err.is_cancelled(),
+                        stage: VdfTaskStage::ValidateSeeds,
+                    }
+                    .into());
+                }
+            }
         }
 
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
@@ -1050,7 +1086,7 @@ impl ValidationServiceInner {
                 let vdf_config_for_batch = vdf_config.clone();
                 let this_inner = Arc::clone(&self);
                 let cancel_for_blocking = Arc::clone(&cancel);
-                tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     vdf_step_batch_is_valid(
                         &this_inner.pool,
                         &vdf_info_for_batch,
@@ -1061,7 +1097,19 @@ impl ValidationServiceInner {
                         cancel_for_blocking,
                     )
                 })
-                .await??;
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(join_err) => {
+                        return Err(VdfBlockingTaskFailed {
+                            is_panic: join_err.is_panic(),
+                            is_cancelled: join_err.is_cancelled(),
+                            stage: VdfTaskStage::ValidateBatch,
+                        }
+                        .into());
+                    }
+                }
             }
 
             record_vdf_task_progress(
