@@ -1314,11 +1314,10 @@ mod tests {
         let block_hash = H256::from_low_u64_be(2);
         // ValidationCancelled(HeightDifference) is `is_internal_failure() = true` but
         // `is_node_fault() = false` — a soft local failure.
-        let soft_internal: ValidationResult =
-            ValidationError::ValidationCancelled {
-                reason: crate::block_validation::ValidationCancelReason::HeightDifference,
-            }
-            .into();
+        let soft_internal: ValidationResult = ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+        }
+        .into();
         assert!(
             matches!(&soft_internal, ValidationResult::InternalFailure(inner) if !inner.is_node_fault()),
             "precondition: ValidationCancelled(HeightDifference) must classify as non-node-fault InternalFailure"

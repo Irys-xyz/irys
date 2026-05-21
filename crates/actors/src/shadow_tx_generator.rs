@@ -79,7 +79,6 @@ pub enum ShadowTxGenError {
     /// Validator-side: consensus rejection. Producer-side: bad input.
     #[error("structural: {0}")]
     Structural(String),
-
 }
 
 // Producer-side call sites return `eyre::Result` / `BlockProductionError`

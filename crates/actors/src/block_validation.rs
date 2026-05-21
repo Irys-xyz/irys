@@ -758,8 +758,7 @@ const _: fn() = || {
             ValidationCancelReason::HeightDifference => {}
             ValidationCancelReason::ParentMissing => {}
             ValidationCancelReason::ChannelClosed => {}
-            ValidationCancelReason::RepeatedCancellation => {}
-            // New variant? Update IS_INTERNAL above before adding an arm here.
+            ValidationCancelReason::RepeatedCancellation => {} // New variant? Update IS_INTERNAL above before adding an arm here.
         }
     }
 };
@@ -2483,7 +2482,6 @@ mod prevalidation_error_classification_tests {
         );
         let result: ValidationResult = shadow_node_fault.into();
         assert!(matches!(result, ValidationResult::InternalFailure(_)));
-
     }
 
     /// `ShadowTxNodeFault` routes to `InternalFailure` (validity unknown) and
@@ -2523,7 +2521,6 @@ mod prevalidation_error_classification_tests {
                 other
             ),
         }
-
     }
 }
 
@@ -2636,7 +2633,6 @@ mod shadow_tx_gen_error_dispatch_tests {
         let result: ValidationResult = err.into();
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
-
 
     /// `CommitmentRefundError::SnapshotInvariant` → `ShadowTxNodeFault` →
     /// node-fault `InternalFailure`. A snapshot whose unpledge has
@@ -5525,12 +5521,24 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .map_err(|e| PreValidationError::BlockBoundsLookupError(
-                        format!("db.view failed fetching parent block {}: {e}", &block.0)))?
-                    .map_err(|e| PreValidationError::BlockBoundsLookupError(
-                        format!("block_header_by_hash failed for {}: {e}", &block.0)))?
-                    .ok_or_else(|| PreValidationError::BlockBoundsLookupError(
-                        format!("parent block {} not found in database", &block.0)))?;
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "db.view failed fetching parent block {}: {e}",
+                            &block.0
+                        ))
+                    })?
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "block_header_by_hash failed for {}: {e}",
+                            &block.0
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "parent block {} not found in database",
+                            &block.0
+                        ))
+                    })?;
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
             }
