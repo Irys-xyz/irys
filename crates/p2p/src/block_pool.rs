@@ -864,29 +864,15 @@ where
             let is_already_in_cache = self.blocks_cache.contains_block(&prev_block_hash).await;
 
             if is_already_in_cache {
-                let is_parent_processing = self
-                    .blocks_cache
-                    .is_block_processing(&prev_block_hash)
+                // Route through the shared dedup/cooldown helper so an orphan-child
+                // storm against one parked parent cannot bypass the per-block
+                // reprocess cooldown. Prior shape emitted `AttemptReprocessingBlock`
+                // raw on every child arrival until the parent's `is_processing`
+                // flag flipped, defeating the rate guard that `dedup_status_for_gossip`
+                // enforces for the gossip path.
+                let parent_height = current_block_height.saturating_sub(1);
+                self.dedup_and_maybe_emit_reprocess(&prev_block_hash, parent_height)
                     .await;
-                if is_parent_processing {
-                    debug!(
-                        "Parent block {:?} is already processing, skipping the request",
-                        prev_block_hash
-                    );
-                } else {
-                    debug!(
-                        "Parent block {:?} is already in the cache and not processing, triggering its processing",
-                        prev_block_hash
-                    );
-                    if let Err(err) = self.sync_service_sender.send(
-                        SyncChainServiceMessage::AttemptReprocessingBlock(prev_block_hash),
-                    ) {
-                        error!(
-                            "BlockPool: Failed to send AttemptReprocessingBlock message: {:?}",
-                            err
-                        );
-                    }
-                }
                 return Ok(ProcessBlockResult::ParentAlreadyInCache);
             } else {
                 debug!(

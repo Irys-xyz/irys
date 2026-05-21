@@ -1419,3 +1419,55 @@ async fn dedup_and_maybe_emit_reprocess_does_not_emit_for_fresh_block() {
         "no sync-service message expected for a fresh block"
     );
 }
+
+/// Regression (H1): a burst of orphan children for one parked parent must
+/// respect the per-block reprocessing cooldown. The orphan-resolve branch
+/// in `process_block` used to send `AttemptReprocessingBlock(parent)` raw
+/// whenever the parent was cached and not flagged `is_processing`, bypassing
+/// the cooldown that `dedup_and_maybe_emit_reprocess` enforces for the
+/// gossip path. Two children arriving in quick succession would each emit a
+/// reprocess message before the first flip; with the fix the second arrival
+/// observes `ParkedCoolingDown` and suppresses its emission.
+#[tokio::test(start_paused = true)]
+async fn process_block_orphan_resolve_respects_parent_cooldown() {
+    let (_tmp_dir, config) = create_test_config();
+    let (pool, services, mut sync_receiver) = build_test_pool(&config);
+
+    let genesis = services.block_status_provider_mock.genesis_header();
+    let chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
+    let parent = &chain[0];
+    let child = &chain[1];
+
+    // Park the parent in cache (not processing, not in tree) and stamp its
+    // cooldown by draining one ready-for-retry emission.
+    let parent_sealed =
+        create_test_sealed_block(parent.clone(), create_test_block_body(parent.block_hash));
+    pool.test_insert_block_into_cache(parent_sealed, false)
+        .await;
+    assert!(
+        pool.dedup_and_maybe_emit_reprocess(&parent.block_hash, parent.height)
+            .await,
+        "priming call must mark the parent as parked"
+    );
+    let primed = sync_receiver
+        .try_recv()
+        .expect("priming call must emit a single AttemptReprocessingBlock");
+    assert!(matches!(
+        primed,
+        crate::chain_sync::SyncChainServiceMessage::AttemptReprocessingBlock(h) if h == parent.block_hash
+    ));
+
+    // Orphan child arrives while the parent is still in the cooldown window.
+    let child_sealed =
+        create_test_sealed_block(child.clone(), create_test_block_body(child.block_hash));
+    pool.process_block(child_sealed, false)
+        .await
+        .expect("process_block must succeed for the orphan child");
+
+    // No further reprocess message must be emitted; the cooldown is what
+    // bounds the retry rate for parked SoftInternal parents.
+    assert!(
+        sync_receiver.try_recv().is_err(),
+        "orphan-resolve path must not re-emit AttemptReprocessingBlock inside the parent's cooldown window"
+    );
+}
