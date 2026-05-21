@@ -374,6 +374,13 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
 /// helper is intended for migration-time consistency and must not fabricate
 /// cache entries for data_roots whose chunks the node never tracked.
 ///
+/// **Append-before-clear ordering** (mirrors the `(empty, None)` warn in
+/// `remove_data_root_block_set_entry`): the `block_set.push` happens before
+/// `expiry_height` is cleared in the same write tx, so the
+/// `(block_set.is_empty(), expiry_height.is_none())` post-condition is
+/// unreachable here — the new block_hash anchors the lifetime bound before
+/// the pre-confirmation expiry is dropped.  No warn arm needed.
+///
 /// Returns `true` if the row was modified.
 pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
     tx: &T,
