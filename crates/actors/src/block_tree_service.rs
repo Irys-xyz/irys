@@ -763,6 +763,19 @@ impl BlockTreeServiceInner {
 
                 drop(cache);
 
+                // Bug 3 fix (success boundary 1 of 2): mark_block_as_valid
+                // succeeded above; this is a confirmed valid arrival, so pop
+                // the recovery LRU and record the metric now (not before the
+                // write lock, where the result is still unknown).
+                if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
+                    metrics::record_soft_internal_recovered(reason);
+                    info!(
+                        block.hash = %block_hash,
+                        reason,
+                        "block previously discarded as soft-internal reached Valid via gossip re-delivery"
+                    );
+                }
+
                 let event = BlockStateUpdated {
                     block_hash,
                     height,
@@ -1943,10 +1956,8 @@ mod tests {
             ));
             let ema = EmaSnapshot::genesis(sealed.header());
 
-            self.inner
-                .cache
-                .write()
-                .expect("cache lock for seed")
+            let mut cache = self.inner.cache.write().expect("cache lock for seed");
+            cache
                 .add_block(
                     &sealed,
                     Arc::new(CommitmentSnapshot::default()),
@@ -1954,6 +1965,13 @@ mod tests {
                     ema,
                 )
                 .expect("seed cache with test block");
+            // Advance the block to ValidationScheduled so that
+            // `mark_block_as_valid` succeeds in `on_block_validation_finished`.
+            // Production flow: add_block → mark_block_as_validation_scheduled →
+            // submit to validation service → mark_block_as_valid on success.
+            cache
+                .mark_block_as_validation_scheduled(&block_hash)
+                .expect("mark ValidationScheduled for test block");
         }
 
         /// Drain pending broadcast events into a Vec. Used to assert the
