@@ -751,6 +751,20 @@ mod tests {
         let waiter_a = cache.block_receiver(evm_block_hash).await;
         drop(waiter_a);
 
+        // Orphan invariant: dropping `waiter_a` must NOT evict the sender
+        // entry. This is the load-bearing assertion for the test's name —
+        // if a future regression makes `Receiver::drop` also drop the
+        // sender, `waiter_b` below would silently subscribe to a freshly
+        // created notifier (still passing the rest of this test, but
+        // racing the real `wait_for_sealed_block` path against a sender
+        // that may have already fired + been popped). Pin it explicitly
+        // so that class of regression surfaces here rather than as a
+        // flaky `ReceiverDisrupted` in production.
+        assert!(
+            cache.payload_senders.read().await.contains(&evm_block_hash),
+            "sender entry must persist after Receiver drop — future waiters depend on subscribing to the SAME notifier, not a fresh one",
+        );
+
         // Sender entry persists; a second waiter must be able to
         // subscribe to the same notifier (rather than racing a fresh
         // one against a sender that was prematurely dropped).
