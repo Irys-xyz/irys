@@ -662,6 +662,22 @@ impl BlockTreeServiceInner {
             tracing::warn!(
                 "block validation returned a result for a block that's no longer in block cache"
             );
+            // LATENT: this early-return suppresses `BlockStateUpdated` on a
+            // cache-miss Valid arrival — the same shape as the bug fixed in
+            // commit `1f85702fc` on the discard path. Pre-exists on master,
+            // so it's not a regression introduced by this branch, and no
+            // current test exercises it (the only direct-submission-to-
+            // validation_service test path expects a Cancelled outcome,
+            // not Valid). It becomes a real bug the moment any caller
+            // submits validation outside block_tree (e.g. a future test
+            // via `send_block_to_block_validation`, or a non-test code
+            // path bypassing block_tree) AND waits for the Valid event:
+            // `read_block_from_state` would return `HarnessTimeout` for
+            // the same reason `heavy_block_validation_discards_a_block_if_its_too_old`
+            // did before `1f85702fc`. If that flake appears, mirror the
+            // discard fix here — emit `BlockStateUpdated{discarded:false,
+            // validation_result: Valid}` with `height = 0` and
+            // `state = NotOnchain(Unknown)` before the early-return.
             return Ok(());
         };
 
