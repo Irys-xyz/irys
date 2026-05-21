@@ -906,4 +906,78 @@ mod tests {
         assert_eq!(range.end(), LedgerChunkOffset::from(24_u64));
         Ok(())
     }
+
+    /// Migration-boundary regression: the confirming block is still in
+    /// `block_tree` but its parent has aged out of the tree window and lives
+    /// only in `IrysBlockHeaders`.  This is the path at
+    /// `lookup_via_block_tree`'s L171-188 — Arc-clone the block, drop the
+    /// read guard, then read the parent from MDBX.  Without this test,
+    /// regressions in the `drop(tree)` / DB-fallback handoff would only
+    /// surface as silently-wrong chunk ranges during reorg replay.
+    ///
+    /// Construction: build a g → h_parent → h_tx chain in the tree (so the
+    /// chain's parent-pointer chain is intact at insertion time), then
+    /// `test_delete` h_parent and persist it to MDBX.  The canonical chain
+    /// cache truncates to `[h_tx]` once `delete_block` runs
+    /// `update_longest_chain_cache`, and `tree.get_block(h_parent_hash)`
+    /// now returns `None` — forcing the DB-fallback parent read.
+    #[test_log::test(tokio::test)]
+    async fn tree_hit_parent_in_db_returns_correct_range() -> eyre::Result<()> {
+        let (db, _tmp) = open_db()?;
+
+        let tx_id = H256::random();
+        // Empty genesis required by `BlockTree::new`'s seal check.
+        let genesis = make_signed_header(0, H256::zero(), 0, 0, vec![]);
+        // h_parent: built into the tree so `add_common` can verify the
+        // parent link, then surgically removed below.
+        let h_parent = make_signed_header(1, genesis.block_hash, 1, 5, vec![]);
+        // h_tx: tip block, contains tx_id, Submit grows 5 → 12 → range
+        // [5, 11].
+        let h_tx = make_signed_header(2, h_parent.block_hash, 2, 12, vec![tx_id]);
+
+        // The DB needs h_parent so the fallback finds it.
+        put_block_header(&db, &h_parent)?;
+
+        // Build the tree with the full chain so `add_common` can resolve
+        // each parent at insertion time.
+        let mut tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        for header in [&h_parent, &h_tx] {
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(header.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_common(
+                header.block_hash,
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+                ChainState::Onchain,
+            )
+            .expect("add_common succeeds");
+        }
+        // Surgically drop h_parent from the tree.  `delete_block` calls
+        // `update_longest_chain_cache`, which walks back from the tip and
+        // stops where the parent chain breaks — leaving canonical = [h_tx].
+        tree.test_delete(&h_parent.block_hash)
+            .expect("test_delete of intermediate block succeeds");
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let range = find_canonical_ledger_range(
+            &tx_id,
+            /* max_height */ 2,
+            ConsensusConfig::testing().block_migration_depth,
+            &guard,
+            &db,
+        )?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "expected Some(range) — tree-resident block must resolve its parent via the DB fallback"
+            )
+        })?;
+
+        assert_eq!(range.start(), LedgerChunkOffset::from(5_u64));
+        assert_eq!(range.end(), LedgerChunkOffset::from(11_u64));
+        Ok(())
+    }
 }
