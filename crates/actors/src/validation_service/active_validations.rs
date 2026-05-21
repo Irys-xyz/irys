@@ -94,6 +94,11 @@ pub(super) struct PreemptibleVdfTask {
     pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
     pub stage_u8: Arc<std::sync::atomic::AtomicU8>,
     pub progress_instant: Arc<Mutex<Instant>>,
+    /// Written to `Some(Instant::now())` just before the stage atomic is set
+    /// to `Completed`. Read by the watchdog at panic time to compute
+    /// `completed_ago`, distinguishing scheduler latency from a real lifecycle
+    /// wedge. `None` until the `Completed` transition fires.
+    pub completed_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl PreemptibleVdfTask {
@@ -127,6 +132,7 @@ impl PreemptibleVdfTask {
                 self.cancel_u8.clone(),
                 self.stage_u8.clone(),
                 self.progress_instant.clone(),
+                self.completed_at.clone(),
                 skip_vdf,
             )
             .await
@@ -230,6 +236,12 @@ pub(super) struct RunningVdfTask {
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub stage_signal: Arc<std::sync::atomic::AtomicU8>,
     pub last_progress_at: Arc<Mutex<Instant>>,
+    /// Timestamp recorded when the stage transitions to `Completed`, written
+    /// before the stage atomic (same ordering window as `last_progress_at`).
+    /// Read by the watchdog at panic time to compute `completed_ago`, allowing
+    /// CI failures to distinguish scheduler latency (handle already ready, but
+    /// `poll_vdf` wasn't polled) from a genuine lifecycle wedge.
+    pub completed_at: Arc<Mutex<Option<Instant>>>,
     pub started_at: Instant,
     pub sealed_block: Arc<SealedBlock>,
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
@@ -252,6 +264,7 @@ pub(super) trait VdfSpawnStrategy {
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         stage_u8: Arc<std::sync::atomic::AtomicU8>,
         progress_instant: Arc<Mutex<Instant>>,
+        completed_at: Arc<Mutex<Option<Instant>>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>;
@@ -268,6 +281,7 @@ impl VdfSpawnStrategy for ProductionVdfSpawn {
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         stage_u8: Arc<std::sync::atomic::AtomicU8>,
         progress_instant: Arc<Mutex<Instant>>,
+        completed_at: Arc<Mutex<Option<Instant>>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -278,6 +292,7 @@ impl VdfSpawnStrategy for ProductionVdfSpawn {
                     cancel_u8,
                     stage_u8,
                     progress_instant,
+                    completed_at,
                 }
                 .execute()
                 .await;
@@ -308,6 +323,7 @@ impl VdfSpawnStrategy for TestVdfSpawn {
         _cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         _stage_u8: Arc<std::sync::atomic::AtomicU8>,
         _progress_instant: Arc<Mutex<Instant>>,
+        _completed_at: Arc<Mutex<Option<Instant>>>,
         _hash: BlockHash,
         _priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -463,6 +479,8 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         let stage_signal = Arc::clone(&stage_u8);
         let progress_instant = Arc::new(Mutex::new(Instant::now()));
         let last_progress_at = Arc::clone(&progress_instant);
+        let completed_at_arc = Arc::new(Mutex::new(None::<Instant>));
+        let completed_at = Arc::clone(&completed_at_arc);
         let sealed_block = Arc::clone(&task.sealed_block);
         let requeue_task = task.clone();
 
@@ -472,6 +490,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             cancel_u8,
             stage_u8,
             progress_instant,
+            completed_at_arc,
             hash,
             priority,
         );
@@ -482,6 +501,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             cancel_signal,
             stage_signal,
             last_progress_at,
+            completed_at,
             started_at: Instant::now(),
             sealed_block,
             handle,
@@ -1349,6 +1369,7 @@ mod tests {
             cancel_signal: Arc::clone(&cancel),
             stage_signal: stage,
             last_progress_at: progress,
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: sealed,
             handle: tokio::spawn(std::future::pending()),
@@ -1874,6 +1895,7 @@ mod tests {
                 VdfTaskStage::Starting as u8,
             )),
             last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: ext_sealed,
             handle: tokio::spawn(std::future::pending()),
@@ -2072,6 +2094,7 @@ mod tests {
                 VdfTaskStage::Starting as u8,
             )),
             last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: Arc::new(
                 SealedBlock::new(

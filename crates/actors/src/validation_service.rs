@@ -749,13 +749,21 @@ impl ValidationService {
                             .current
                             .as_ref()
                             .expect("watchdog aborted a task; current must be Some");
+                        let completed_ago = current_vdf
+                            .completed_at
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .map(|t| t.elapsed());
+                        let handle_finished = current_vdf.handle.is_finished();
                         metrics::record_validation_task_force_aborted(stage.metric_label());
                         panic!(
-                            "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?})",
+                            "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?}, completed_ago={:?}, handle_finished={})",
                             current_vdf.hash,
                             current_vdf.sealed_block.header().height,
                             stage.as_str(),
                             stalled_for,
+                            completed_ago,
+                            handle_finished,
                         );
                     }
 
@@ -945,6 +953,7 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
         stage_signal: Arc<AtomicU8>,
         progress_signal: Arc<Mutex<Instant>>,
+        completed_at_signal: Arc<Mutex<Option<Instant>>>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
         let vdf_info = Arc::new(block.vdf_limiter_info.clone());
@@ -1158,6 +1167,14 @@ impl ValidationServiceInner {
         );
         final_wait_result?;
 
+        // Write completed_at before the stage atomic so a watchdog reading
+        // stage == Completed is guaranteed to find completed_at = Some(_).
+        // Mirrors the last_progress_at ordering invariant documented above
+        // record_vdf_task_progress: progress_signal is written before the
+        // stage atomic, and completed_at is written in that same window.
+        *completed_at_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::Completed);
         info!(
             vdf.global_step_number = vdf_info.global_step_number,
