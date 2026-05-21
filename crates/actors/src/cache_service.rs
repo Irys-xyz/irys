@@ -68,6 +68,15 @@ pub enum CacheServiceAction {
     /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
     /// txid references from blocking publish candidate selection.
     PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
+    /// Remove a specific block hash from `CachedDataRoot.block_set`.
+    /// Sent by validation when `get_ledger_range` returns `Ok(None)` — the block
+    /// is no longer resolvable (pruned side-fork or predecessor missing).  Without
+    /// this prune the same dead hash would re-trigger `AssignedProofBlockMissing`
+    /// on every re-delivery, parking the block forever.
+    PruneBlockHashFromBlockSet {
+        data_root: DataRoot,
+        block_hash: H256,
+    },
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -527,6 +536,42 @@ impl InnerCacheTask {
         });
     }
 
+    /// Removes a single stale block hash from `CachedDataRoot.block_set`.
+    ///
+    /// Called when validation finds `get_ledger_range` returning `Ok(None)` for a
+    /// hash stored in the set.  Runs on a background thread to avoid blocking the
+    /// actor loop (mirrors `spawn_prune_txids_task`).  No completion signal is
+    /// needed because block-hash pruning does not need to be serialised.
+    fn spawn_prune_block_hash_task(&self, data_root: DataRoot, block_hash: H256) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let result = clone.db.update_eyre(|db_tx| {
+                let Some(mut cached) = cached_data_root_by_data_root(db_tx, data_root)? else {
+                    return Ok(());
+                };
+                let before_len = cached.block_set.len();
+                cached.block_set.retain(|h| h != &block_hash);
+                if cached.block_set.len() < before_len {
+                    debug!(
+                        data_root = %data_root,
+                        block_hash = %block_hash,
+                        "Pruned stale block hash from CachedDataRoot.block_set"
+                    );
+                    db_tx.put::<CachedDataRoots>(data_root, cached)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                warn!(
+                    data_root = %data_root,
+                    block_hash = %block_hash,
+                    "Failed to prune stale block hash from CachedDataRoot.block_set: {}",
+                    e
+                );
+            }
+        });
+    }
+
     /// Scans ingress proofs with capacity-aware deletion and regeneration:
     /// - (a) Promoted + expired: delete
     /// - (b) Unpromoted + expired + at capacity: delete
@@ -974,6 +1019,13 @@ impl ChunkCacheService {
                     self.txid_prune_running = true;
                     self.cache_task.spawn_prune_txids_task(work);
                 }
+            }
+            CacheServiceAction::PruneBlockHashFromBlockSet {
+                data_root,
+                block_hash,
+            } => {
+                self.cache_task
+                    .spawn_prune_block_hash_task(data_root, block_hash);
             }
         }
     }
@@ -1759,6 +1811,87 @@ mod tests {
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots should NOT have been pruned due to local proof"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Verifies that `PruneBlockHashFromBlockSet` removes a stale block hash from
+    // `CachedDataRoot.block_set` and leaves other hashes untouched.
+    #[tokio::test]
+    async fn prune_block_hash_from_block_set_removes_stale_hash() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Build a transaction header so we have a real data_root to key on.
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = tx_header.data_root;
+
+        // Persist a CachedDataRoot with two block hashes.
+        let stale_hash = H256::random();
+        let good_hash = H256::random();
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            // Manually add two hashes to block_set.
+            let mut cached = cached_data_root_by_data_root(wtx, data_root)?
+                .expect("just inserted");
+            cached.block_set.push(stale_hash);
+            cached.block_set.push(good_hash);
+            wtx.put::<CachedDataRoots>(data_root, cached)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let inner = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Spawn the prune task and wait for the background thread to finish.
+        inner.spawn_prune_block_hash_task(data_root, stale_hash);
+
+        // Give the background thread time to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let cached = rtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("CachedDataRoot should still exist");
+            assert!(
+                !cached.block_set.contains(&stale_hash),
+                "stale block hash should have been removed"
+            );
+            assert!(
+                cached.block_set.contains(&good_hash),
+                "good block hash should remain"
             );
             Ok(())
         })??;
