@@ -4043,15 +4043,29 @@ async fn generate_expected_shadow_transactions(
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
 
-    // Calculate expired ledger fees for epoch blocks. The walk transitively
-    // performs MDBX reads (block-header lookups via `db.view_eyre` inside
-    // `process_boundary_block` / `process_middle_blocks`, plus
-    // `get_data_tx_in_parallel`), so a failure is dominantly DB-I/O —
-    // `eyre::Result` doesn't let us cleanly distinguish DB faults from
-    // pure-logic faults here, and retry can't heal a broken MDBX. Route
-    // through `node_fault` (`ShadowTxNodeFault`) rather than `internal`.
-    // TODO(P2 follow-up): differentiate DB I/O from logic errors here by
-    // converting the helpers' return types to a typed error.
+    // Calculate expired ledger fees for epoch blocks. Every input to
+    // `calculate_expired_ledger_fees` is locally derived (parent epoch
+    // snapshot, validator-computed block height, local block index, local
+    // mempool, local DB) — the peer supplies nothing that flows into this
+    // computation. The function produces what the validator EXPECTS the
+    // peer's shadow txs to look like; the peer-vs-expected comparison
+    // happens downstream in `generate_expected_shadow_transactions`.
+    //
+    // Consequence: every failure path here is a node-side fault.
+    //   - MDBX I/O failure (block-header / data-tx reads) → NodeFault.
+    //   - Local snapshot / index inconsistency (e.g. expired partition
+    //     hash with no matching assignment in `parent_epoch_snapshot`)
+    //     → still NodeFault: two honest nodes cannot disagree on local
+    //     snapshot state, and retry cannot heal it. Same rationale as
+    //     `ShadowTxGenError::SnapshotInvariant`.
+    //   - Internal arithmetic in `aggregate_balance_deltas` over local
+    //     data → NodeFault (a bug in our own code, not the peer's block).
+    //
+    // There is no peer-attributable failure mode here, so the blanket
+    // `node_fault` mapping is the correct classification — NOT something
+    // to "split into DB-vs-logic" later. (A prior `TODO(P2)` here
+    // suggested that split; on audit it was speculative — removed
+    // 2026-05-21.)
     let expired_ledger_fees = if is_epoch_block {
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
