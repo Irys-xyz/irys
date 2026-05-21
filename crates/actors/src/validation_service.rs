@@ -64,10 +64,11 @@ pub enum VdfValidationResult {
 }
 
 /// Sentinel error returned from `ensure_vdf_is_valid` when Stage B observes
-/// the parent absent from `block_tree`. Downcast in `PreemptibleVdfTask::execute`
-/// and converted to `VdfValidationResult::ParentMissing`. See `H5` audit note
-/// 2026-05-20: prior code `.expect`ed the parent, panicking and triggering
-/// supervisor restart on what is a recoverable race.
+/// the parent absent from `block_tree`. Downcast in
+/// `PreemptibleVdfTask::execute` and converted to
+/// `VdfValidationResult::ParentMissing`. The prior shape `.expect`ed the
+/// parent, panicking and triggering supervisor restart on what is a
+/// recoverable eviction race; this sentinel surfaces it as SoftInternal.
 #[derive(Debug, thiserror::Error)]
 #[error("VDF Stage B: parent block {parent_hash} not found in block tree")]
 pub(crate) struct VdfStageBParentMissing {
@@ -441,7 +442,7 @@ impl ValidationService {
                                 // block_tree (eviction race). Surface as
                                 // ParentBlockMissing → SoftInternal so the
                                 // block parks for retry and no peer attribution
-                                // occurs. See the H5 audit note and the
+                                // occurs. See `lookup_stage_b_parent` and the
                                 // `seeds_validation_task` mirror path.
                                 metrics::record_validation_result("vdf", "parent_missing");
                                 metrics::record_validation_full_duration_ms(
@@ -519,7 +520,7 @@ impl ValidationService {
                             // resubmission of the same hash starts fresh
                             // (no stale state from a prior burst of cancels
                             // that didn't reach the cap before the run
-                            // succeeded). See H4 fix.
+                            // succeeded).
                             coordinator.clear_concurrent_cancel_retries(&validation.block_hash);
                             metrics::record_validation_full_duration_ms(
                                 validation.enqueued_at.elapsed().as_secs_f64() * 1000.0,
@@ -553,12 +554,12 @@ impl ValidationService {
                                 // the JoinSet and starve other blocks. The
                                 // give-up path parks the block as
                                 // SoftInternal; fresh gossip is the recovery
-                                // lane. See branch review finding H4.
+                                // lane.
                                 //
-                                // R2 audit (M1): metric increments are now
-                                // routed by decision (requeued vs repeated) so
-                                // operator dashboards can distinguish self-
-                                // healing from terminal cap-hit park events.
+                                // Metric increments are routed by decision
+                                // (requeued vs repeated) so operator dashboards
+                                // can distinguish self-healing from terminal
+                                // cap-hit park events.
                                 if let Some((hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
                                     let decision = coordinator.record_concurrent_cancel(hash);
                                     match decision {
@@ -662,9 +663,9 @@ impl ValidationService {
                                     }
                                 } else {
                                     // No tuple in `concurrent_task_blocks` for
-                                    // this id — pre-H4 behaviour just silently
-                                    // logged the cancel. Preserve that since
-                                    // we have no hash to route on.
+                                    // this id — the prior behaviour just
+                                    // silently logged the cancel. Preserve
+                                    // that since we have no hash to route on.
                                     warn!(
                                         custom.error = %e,
                                         custom.metric = "validation_concurrent_cancel_requeued",
@@ -887,10 +888,10 @@ fn send_validation_result_via(
 /// from zero) and dispatch the validation result. Shared by the VDF
 /// `Invalid` and `ParentMissing` arms — both are terminal verdicts.
 ///
-/// Mirrors the H4 fix at the concurrent-stage Ok arm and the panic arm
-/// in the validation select loop. Without the counter clear, a prior
-/// attempt's cancel counter would silently shorten the retry budget for
-/// a future resubmission. See `concurrent_cancel_retries` and
+/// Mirrors the counter-clear at the concurrent-stage Ok arm and the
+/// panic arm in the validation select loop. Without the counter clear, a
+/// prior attempt's cancel counter would silently shorten the retry
+/// budget for a future resubmission. See `concurrent_cancel_retries` and
 /// `record_concurrent_cancel`.
 ///
 /// Returns the same `bool` as the underlying `send_validation_result_via`
@@ -1013,7 +1014,7 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: validating seed data against parent"
         );
         {
-            // Lift the parent lookup OUT of the spawn_blocking closure (H5).
+            // Lift the parent lookup OUT of the spawn_blocking closure.
             // If the parent has been evicted between VDF task queuing and now
             // (depth-prune / reorg eviction race), surface a typed sentinel
             // error rather than panicking inside the blocking task. The
@@ -1395,12 +1396,12 @@ mod tests {
         );
     }
 
-    /// H5 regression: when the parent is absent from `block_tree` at Stage B
-    /// entry, the lookup helper must return the typed `VdfStageBParentMissing`
-    /// sentinel instead of panicking. The wider pipeline maps this to
-    /// `VdfValidationResult::ParentMissing` →
-    /// `ValidationError::ParentBlockMissing` → `SoftInternal`. Before the fix,
-    /// the lookup ran inside `spawn_blocking` with `.expect("previous block
+    /// Stage B parent-missing regression: when the parent is absent from
+    /// `block_tree` at Stage B entry, the lookup helper must return the
+    /// typed `VdfStageBParentMissing` sentinel instead of panicking. The
+    /// wider pipeline maps this to `VdfValidationResult::ParentMissing` →
+    /// `ValidationError::ParentBlockMissing` → `SoftInternal`. Before the
+    /// fix, the lookup ran inside `spawn_blocking` with `.expect("previous block
     /// should exist")` and panicked the node on a recoverable eviction race.
     mod stage_b_parent_lookup {
         use super::*;

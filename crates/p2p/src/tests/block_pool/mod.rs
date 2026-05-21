@@ -1207,11 +1207,11 @@ fn setup_not_processed(
     (irys_types::BlockHash::repeat_byte(0x42), 7)
 }
 
-/// H2 regression: a block parked in `blocks_cache` with `is_processing =
-/// false` (SoftInternal failure path leaving it for retry) must classify
-/// as `ParkedReadyForRetry` on first observation. Without this the
-/// parked-tip-block recovery path is limited to child-arrival
-/// orphan-resolve (a tip has no child) and LRU eviction at
+/// Parked-tip-block recovery regression: a block parked in `blocks_cache`
+/// with `is_processing = false` (SoftInternal failure path leaving it for
+/// retry) must classify as `ParkedReadyForRetry` on first observation.
+/// Without this the parked-tip-block recovery path is limited to
+/// child-arrival orphan-resolve (a tip has no child) and LRU eviction at
 /// `BLOCK_POOL_CACHE_SIZE` — unbounded in wall-clock time under low
 /// tip-traffic.
 #[tokio::test(start_paused = true)]
@@ -1260,7 +1260,7 @@ async fn dedup_status_for_gossip_marks_actively_processing_block_known_in_flight
     );
 }
 
-/// H2 cooldown state machine: a parked block must classify as
+/// Cooldown state machine: a parked block must classify as
 /// `ParkedReadyForRetry` once, then `ParkedCoolingDown` for the duration
 /// of `REPROCESSING_COOLDOWN`, then `ParkedReadyForRetry` again after
 /// the window elapses. Uses `tokio::time::pause()` for deterministic
@@ -1317,7 +1317,7 @@ async fn dedup_status_for_gossip_parked_cooldown_state_machine() {
     );
 }
 
-/// H2 recovery hook: `dedup_and_maybe_emit_reprocess` must emit an
+/// Recovery-hook regression: `dedup_and_maybe_emit_reprocess` must emit an
 /// `AttemptReprocessingBlock` message exactly once on the first call
 /// (parked block, fresh cooldown), then no further emissions until the
 /// cooldown elapses, then exactly one more emission. Mirrors the

@@ -150,9 +150,10 @@ pub enum PreValidationError {
     ///      along with its classification entry in
     ///      `PreValidationError::classify()` and the
     ///      `metric_label`/`metric_reason` tags.
-    ///   3. Also re-evaluate the `H1` livelock concern (audit
-    ///      2026-05-20): closed by the same merge because `block_set`
-    ///      no longer drives consensus.
+    ///   3. The companion livelock concern (parked block re-emitting
+    ///      `AssignedProofBlockMissing` indefinitely if `block_set`
+    ///      keeps surfacing the dead hash) is closed by the same merge
+    ///      because `block_set` no longer drives consensus.
     #[error(
         "Assigned-proof block {block_hash} for tx {tx_id} no longer resolvable in block_tree or DB (likely pruned side fork)"
     )]
@@ -587,15 +588,14 @@ impl PreValidationError {
     /// SAFETY: every variant MUST appear explicitly in the match below — no
     /// `_` wildcard. Adding a new variant without labelling it here is a
     /// compile error by design: silently routing through a generic
-    /// `"invalid"` would mask per-stage node-fault rates (M1 audit
-    /// 2026-05-20). Mirrors the SAFETY pattern documented on
-    /// [`PreValidationError::classify`].
+    /// `"invalid"` would mask per-stage node-fault rates. Mirrors the
+    /// SAFETY pattern documented on [`PreValidationError::classify`].
     ///
     /// MERGE-NOTE: tag values for variants shared with branch
-    /// `fix-cdr-block-set` (commit 4e21e25a) match identically so the
-    /// cross-branch merge is mechanically clean and dashboards see
-    /// continuity. Tags for variants only in this branch
-    /// (`AssignedProofBlockMissing`, `PoALedgerInactive`) follow the same
+    /// `fix-cdr-block-set` match identically so the cross-branch merge is
+    /// mechanically clean and dashboards see continuity. Tags for variants
+    /// only in this branch (`AssignedProofBlockMissing`, `PoALedgerInactive`)
+    /// follow the same
     /// snake_case style.
     pub fn metric_reason(&self) -> &'static str {
         match self {
@@ -690,16 +690,16 @@ impl PreValidationError {
 /// variants; `ValidationError::ValidationCancelled` always routes through
 /// `ValidationResult::InternalFailure` (validity unknown, retry plausible).
 ///
-/// All reasons are local-side outcomes that say nothing about the
-/// peer's block. Per the M2 audit (2026-05-20), every variant routes through
-/// `IS_INTERNAL = true` → `InternalFailure` so the peer is never blamed
-/// for a "we moved on" event. Historically `HeightDifference` and
-/// `ChannelClosed` returned `false` here under the older rationale that
-/// "the block can never become canonical, so discard rather than retry" —
-/// that rationale conflated "block is bad" with "we're not pursuing it any
-/// more". Discard still happens (the block is removed from cache), but it
-/// is no longer recorded as a consensus rejection in metrics / logs / any
-/// future peer-scoring code.
+/// All reasons are local-side outcomes that say nothing about the peer's
+/// block. Every variant routes through `IS_INTERNAL = true` →
+/// `InternalFailure` so the peer is never blamed for a "we moved on" event.
+/// Historically `HeightDifference` and `ChannelClosed` returned `false`
+/// here under the older rationale that "the block can never become
+/// canonical, so discard rather than retry" — that rationale conflated
+/// "block is bad" with "we're not pursuing it any more". Discard still
+/// happens (the block is removed from cache), but it is no longer recorded
+/// as a consensus rejection in metrics / logs / any future peer-scoring
+/// code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationCancelReason {
     /// Canonical tip moved past this block by more than `block_tree_depth`.
@@ -746,10 +746,9 @@ pub enum ValidationCancelReason {
 }
 
 impl ValidationCancelReason {
-    /// All variants are local-side outcomes (M2 audit 2026-05-20, H4 fix).
-    /// `HeightDifference`, `ParentMissing`, `ChannelClosed`,
-    /// `RepeatedCancellation`, `PoAAborted` — none are statements about the
-    /// peer's block.
+    /// All variants are local-side outcomes. `HeightDifference`,
+    /// `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
+    /// `PoAAborted` — none are statements about the peer's block.
     ///
     /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
     /// REQUIRES changing this constant to a method and re-auditing every
@@ -1019,12 +1018,11 @@ impl ValidationError {
             // Cancellation classification is sub-variant-dependent; delegate
             // so a future retry-plausible reason doesn't silently become a
             // node fault — that decision should be explicit at the reason
-            // site. (Today, post-M2 audit 2026-05-20: all three reasons —
-            // `ParentMissing`, `HeightDifference`, `ChannelClosed` — are
-            // local-side outcomes and route to `SoftInternal`. No
-            // cancellation reason ever peer-attributes the child block.)
-            // All cancellation reasons are local-side outcomes (IS_INTERNAL
-            // const documents + compile-time tripwire enforces). No
+            // site. All current cancellation reasons (`HeightDifference`,
+            // `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
+            // `PoAAborted`) are local-side outcomes and route to
+            // `SoftInternal` — the `IS_INTERNAL` const documents the
+            // invariant and the compile-time tripwire enforces it. No
             // cancellation reason ever peer-attributes the child block.
             Self::ValidationCancelled { .. } => {
                 if ValidationCancelReason::IS_INTERNAL {
@@ -1114,7 +1112,7 @@ impl ValidationError {
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
             // the generic `"invalid"` would undercount local-state corruption
-            // at this stage (M1 audit 2026-05-20).
+            // at this stage.
             Self::PreValidation(e) => e.metric_reason(),
             // consensus rejections — all remaining variants.
             Self::VdfValidationFailed(_)
@@ -1221,7 +1219,7 @@ mod metric_label_tests {
 
         // PreValidation — delegates to the inner variant's `metric_reason()`
         // so dashboards can isolate node-fault / soft-internal / consensus
-        // failures at the pre-validation stage (M1 audit 2026-05-20).
+        // failures at the pre-validation stage.
         // Spot-check one variant from each `ErrorClass`:
         //   * NodeFault — `DatabaseError` (local MDBX I/O failure).
         let err = ValidationError::PreValidation(PreValidationError::DatabaseError {
@@ -1291,11 +1289,11 @@ mod metric_label_tests {
         assert_eq!(err.metric_reason(), "poa_ledger_inactive");
     }
 
-    /// Regression coverage for the round-6 + R7 work: the
-    /// `SnapshotTreasuryUnderflow` sub-variant of `ShadowTxGenError` routes
-    /// through `ShadowTxNodeFault`, which must produce the `node_fault`
-    /// per-stage label so dashboards see local-snapshot corruption
-    /// separately from peer-attributable rejections.
+    /// Regression coverage for the snapshot-treasury-underflow routing:
+    /// the `SnapshotTreasuryUnderflow` sub-variant of `ShadowTxGenError`
+    /// routes through `ShadowTxNodeFault`, which must produce the
+    /// `node_fault` per-stage label so dashboards see local-snapshot
+    /// corruption separately from peer-attributable rejections.
     #[test]
     fn metric_label_for_snapshot_treasury_underflow_is_node_fault() {
         // Mirror the routing used inside
@@ -2079,14 +2077,16 @@ mod prevalidation_error_classification_tests {
         );
     }
 
-    /// Post-M2 audit (2026-05-20): every `ValidationCancelReason` is a
-    /// local-side outcome and routes through `InternalFailure`. None are
-    /// peer-attributable, so `IS_INTERNAL` is `true` and the wrapping
-    /// `ValidationError::ValidationCancelled` is an `is_internal_failure()`.
+    /// Every `ValidationCancelReason` is a local-side outcome and routes
+    /// through `InternalFailure`. None are peer-attributable, so
+    /// `IS_INTERNAL` is `true` and the wrapping
+    /// `ValidationError::ValidationCancelled` is an
+    /// `is_internal_failure()`.
     ///
     /// One case per `ValidationCancelReason` variant so per-variant failures
     /// surface as distinct nextest reports (matches the repo convention used
-    /// by `is_parent_ready_chain_state_dispatch` / `block_status_returns_in_tree_pending_validation`).
+    /// by `is_parent_ready_chain_state_dispatch` /
+    /// `block_status_returns_in_tree_pending_validation`).
     #[rstest]
     #[case::height_difference(ValidationCancelReason::HeightDifference)]
     #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
@@ -2106,11 +2106,11 @@ mod prevalidation_error_classification_tests {
     /// Expected `ValidationResult` shape for a given `ValidationCancelReason`
     /// after round-tripping through `From<ValidationError>`.
     ///
-    /// Post-M2 audit (2026-05-20): every cancel reason routes to
-    /// `InternalFailureSoft`. Retained as an enum (rather than a single
-    /// assertion) to preserve the per-variant rstest case structure — adding
-    /// a new variant that must land on a different shape stays mechanically
-    /// expressible without a churn.
+    /// Every cancel reason routes to `InternalFailureSoft`. Retained as
+    /// an enum (rather than a single assertion) to preserve the
+    /// per-variant rstest case structure — adding a new variant that must
+    /// land on a different shape stays mechanically expressible without a
+    /// churn.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ExpectedRoundtripShape {
         /// Soft internal failure (not a node fault). The block discards from
@@ -2120,8 +2120,8 @@ mod prevalidation_error_classification_tests {
 
     /// Round-trip: every `ValidationCancelReason` must land on
     /// `ValidationResult::InternalFailure(_)` via the
-    /// `From<ValidationError> for ValidationResult` dispatcher. Post-M2,
-    /// no cancel reason peer-attributes the block as `Invalid`.
+    /// `From<ValidationError> for ValidationResult` dispatcher. No cancel
+    /// reason peer-attributes the block as `Invalid`.
     ///
     /// One case per `ValidationCancelReason` variant so per-variant failures
     /// surface as distinct nextest reports.
@@ -3359,8 +3359,8 @@ fn get_data_poa_bounds_with_block_tree_fallback(
             }
             None => {
                 // MERGE-BLOCKER(C1): this fallback is NOT fork-deterministic.
-                // The 2026-05-20 multi-reviewer audit (CodeRabbit + Codex,
-                // both Critical, independent agreement) confirmed:
+                // Confirmed Critical by multi-reviewer audit (CodeRabbit +
+                // Codex, independent agreement):
                 //   - For a non-canonical lineage whose ancestry descends
                 //     below block_tree's window, this height-only canonical-
                 //     index lookup returns bounds for the WRONG block
@@ -3896,15 +3896,19 @@ pub async fn submit_payload_to_reth(
 /// `ShadowTxGenError` distinguishes failure classes so each lands on the
 /// correct `ValidationResult`. The audited invariant (see
 /// `ShadowTxGenError` doc) is:
-///   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault
-///     (local state is corrupt OR the running treasury at point of
-///     failure depends on local snapshot state; two honest nodes cannot
-///     reach this and we prefer a loud restart to silent canonical-fork).
-///   - `TreasuryArithmetic` / `Structural` → consensus rejection
-///     (operand is purely peer-supplied AND the running treasury at
-///     point of operation has not been mutated by snapshot-derived
-///     amounts, so a fault is safely peer-attributable — peer's tx set
-///     produced bad fee math or out-of-range fee values).
+///   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault.
+///     Snapshot invariant: local state is internally inconsistent.
+///     Snapshot treasury underflow: a snapshot-derived deduction amount
+///     itself underflows the inherited treasury — two honest nodes
+///     cannot reach this, so loud restart over silent canonical-fork.
+///   - `TreasuryArithmetic` / `Structural` → consensus rejection.
+///     Treasury arithmetic: a peer-supplied operand (fee, reward,
+///     ingress-proof reward) over/underflows the running balance. Even
+///     when prior snapshot-derived deductions ran first, those inputs
+///     are deterministic from canonical, so every honest validator with
+///     the same parent reaches the same running balance — the block is
+///     peer-attributably bad. Misclassifying this as node fault would
+///     let one crafted epoch block crash every validator simultaneously.
 ///   - `Soft` → soft internal (existing retry-plausible fallback).
 ///
 /// SAFETY: this mapping is the single point where producer-side typed
@@ -4063,9 +4067,8 @@ async fn generate_expected_shadow_transactions(
     //
     // There is no peer-attributable failure mode here, so the blanket
     // `node_fault` mapping is the correct classification — NOT something
-    // to "split into DB-vs-logic" later. (A prior `TODO(P2)` here
-    // suggested that split; on audit it was speculative — removed
-    // 2026-05-21.)
+    // to "split into DB-vs-logic" later. (A prior TODO here suggested
+    // that split; on audit it was speculative and the TODO was removed.)
     let expired_ledger_fees = if is_epoch_block {
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,

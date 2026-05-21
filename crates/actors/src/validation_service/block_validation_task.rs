@@ -253,14 +253,14 @@ impl BlockValidationTask {
             concurrent_started.elapsed().as_secs_f64() * 1000.0,
         );
         // Split "cancelled" / "panicked" out of the generic "invalid" /
-        // "internal_error" buckets for observability. Post-M2 audit
-        // (2026-05-20) every `ValidationCancelled` sub-reason routes
-        // through `InternalFailure` — none are peer-attributable — but the
-        // "cancelled" label is preserved on both wrappers so dashboards
-        // that historically tracked cancellations continue to work, and any
-        // legacy code path that still produces an `Invalid(cancelled)`
-        // labels consistently. `TaskPanicked` only routes through
-        // `InternalFailure` and labels as "panicked".
+        // "internal_error" buckets for observability. Every
+        // `ValidationCancelled` sub-reason routes through `InternalFailure`
+        // — none are peer-attributable — but the "cancelled" label is
+        // preserved on both wrappers so dashboards that historically
+        // tracked cancellations continue to work, and any legacy code path
+        // that still produces an `Invalid(cancelled)` labels consistently.
+        // `TaskPanicked` only routes through `InternalFailure` and labels
+        // as "panicked".
         //
         // Delegates to `ValidationError::metric_label()` (which is the
         // exhaustive match — adding a new variant there produces a compile
@@ -343,8 +343,7 @@ impl BlockValidationTask {
         // that happens between subscribe and read is buffered on the channel
         // and observed by the next `recv()`. The previous lost-update window
         // was historically closed by a `recent_validation_result` seed-store
-        // (removed in commit 10bb8c222 "drop dead recent_validation_result
-        // machinery"); the current safety net is structural: if the parent is
+        // (since removed); the current safety net is structural: if the parent is
         // absent from the tree at first-read, the `extra_checks` closure routes
         // through `ValidationCancelReason::ParentMissing` → `is_internal() =
         // true` → `InternalFailure` (SoftInternal). We do not need to observe
@@ -631,15 +630,15 @@ impl BlockValidationTask {
                     e.into()
                 }
                 Err(err) => {
-                    // H1 fix: split panic vs cancellation rather than unconditionally
-                    // classifying every `JoinError` as `TaskPanicked`. The cancel arm
-                    // in `execute_concurrent` calls `handle.abort()` on the PoA
-                    // blocking task; if a future refactor ever `.await`s the aborted
-                    // handle, the resulting `JoinError::is_cancelled()` must NOT
-                    // route through the NodeFault taxonomy and trigger a supervisor
-                    // restart. Mirrors the established pattern at
-                    // `validation_service.rs:438-479`. See `classify_poa_join_error`
-                    // for the panic/cancel split rationale.
+                    // Split panic vs cancellation rather than unconditionally
+                    // classifying every `JoinError` as `TaskPanicked`. The cancel
+                    // arm in `execute_concurrent` calls `handle.abort()` on the
+                    // PoA blocking task; if a future refactor ever `.await`s the
+                    // aborted handle, the resulting `JoinError::is_cancelled()`
+                    // must NOT route through the NodeFault taxonomy and trigger a
+                    // supervisor restart. Mirrors the established pattern in the
+                    // VDF dispatch loop; see `classify_poa_join_error` for the
+                    // panic/cancel split rationale.
                     if err.is_panic() {
                         tracing::error!(
                             block.hash = %block_hash_for_error_log,
@@ -690,13 +689,13 @@ impl BlockValidationTask {
         let shadow_tx_task = async move {
             let started = Instant::now();
 
-            // R2 audit (M3): both soft-internal early returns below record
-            // the shadow_tx stage duration + result before returning, and
-            // route through `capture_stage_result` so any future
-            // reclassification of these early-exit variants automatically
-            // participates in the cancel-arm recovery. Prior shape used `?`
-            // which bypassed both. Matches the pattern used by
-            // `seeds_validation_task` for its `ParentBlockMissing` exit.
+            // Both soft-internal early returns below record the shadow_tx
+            // stage duration + result before returning, and route through
+            // `capture_stage_result` so any future reclassification of these
+            // early-exit variants automatically participates in the
+            // cancel-arm recovery. Prior shape used `?` which bypassed both.
+            // Matches the pattern used by `seeds_validation_task` for its
+            // `ParentBlockMissing` exit.
 
             // Eviction-race: parent's commitment snapshot was present at
             // prevalidation but the in-memory window has since rotated.
@@ -855,8 +854,8 @@ impl BlockValidationTask {
             // The two soft-internal early returns above
             // (`ParentCommitmentSnapshotMissing`,
             // `ExecutionPayloadCacheEvicted`) also call
-            // `capture_stage_result` post-R2 (M3) — the capture is a no-op
-            // for soft-internal today but guards against future
+            // `capture_stage_result` — the capture is a no-op for
+            // soft-internal today but guards against future
             // reclassification.
             if let Err(ref err) = result {
                 // Side-channel write — capture return value intentionally
@@ -1016,10 +1015,10 @@ impl BlockValidationTask {
         // is invisible to the drain-poll: `poll!` returns `Pending`,
         // the join is abandoned, and the NodeFault is silently dropped.
         // Routing then proceeds through `cancel_outcome_to_result` →
-        // soft `InternalFailure` (post-M2), the supervisor-restart path
-        // that the central "node faults must always win" invariant
-        // demands is bypassed, and a broken node parks the block in
-        // cache instead of panicking.
+        // soft `InternalFailure`, the supervisor-restart path that the
+        // central "node faults must always win" invariant demands is
+        // bypassed, and a broken node parks the block in cache instead
+        // of panicking.
         //
         // The fix is the side channel: each stage's async body merges
         // its NodeFault / Invalid observation into `stage_captures`
@@ -1225,16 +1224,16 @@ enum StageOutcome<J> {
 /// cancellation (deliberate abort from the cancel arm).
 ///
 /// `JoinError` has exactly two producers: `is_panic()` and `is_cancelled()`.
-/// The H1 audit (2026-05-20) closed a latent landmine where every `JoinError`
-/// — including aborts triggered by the cancel arm's `poa_abort_slot.abort()`
-/// — was unconditionally classified as `TaskPanicked`. That misclassification
-/// routes through the `NodeFault` taxonomy and triggers a supervisor panic at
-/// `block_tree_service.rs:540-544`. The bug is dormant today because the
-/// cancel arm drops the stages-join future after a synchronous `futures::poll!`
-/// rather than awaiting the aborted handle, but any future refactor that ever
-/// `.await`s a possibly-aborted handle activates it.
+/// Closes a latent landmine where every `JoinError` — including aborts
+/// triggered by the cancel arm's `poa_abort_slot.abort()` — was
+/// unconditionally classified as `TaskPanicked`. That misclassification
+/// routes through the `NodeFault` taxonomy and triggers a supervisor panic
+/// at `on_block_validation_finished`. The bug is dormant today because the
+/// cancel arm drops the stages-join future after a synchronous
+/// `futures::poll!` rather than awaiting the aborted handle, but any future
+/// refactor that ever `.await`s a possibly-aborted handle activates it.
 ///
-/// Mirrors the established pattern at `validation_service.rs:438-479`:
+/// Mirrors the symmetric pattern in the VDF dispatch loop's JoinError arm:
 /// `is_panic()` → `TaskPanicked` (NodeFault → abort + restart);
 /// otherwise → `ValidationCancelled` (SoftInternal → park-and-retry).
 ///
@@ -1277,7 +1276,7 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
 /// arbitrary wall-clock time), the drain-poll returns `Pending` and the
 /// NodeFault from a stage that DID complete is silently dropped on the
 /// floor as the join future is abandoned. The block then routes through
-/// the cancellation outcome (post-M2 → soft `InternalFailure`) and the
+/// the cancellation outcome (→ soft `InternalFailure`) and the
 /// supervisor-restart path that NodeFault demands is bypassed.
 ///
 /// This side channel is the structural fix: each stage's async body
@@ -1287,14 +1286,6 @@ fn classify_poa_join_error(err: &tokio::task::JoinError) -> ValidationError {
 /// completed before the cancel arm fired has already written its
 /// observation here — independent of whether `tokio::join!`'s aggregate
 /// future was Ready when the cancel arm ran.
-///
-/// # Priority
-///
-/// First-write-wins within each tier (NodeFault, Invalid). Both halt the
-/// block, and we only need one representative per tier — there is no
-/// downstream consumer that benefits from seeing multiple NodeFaults or
-/// multiple Invalids. NodeFault always outranks Invalid (matches the
-/// `merge_stage_results` tier-1-over-tier-2 contract). Soft
 /// `InternalFailure` is deliberately NOT captured here — it does not
 /// outrank the cancellation outcome (per the merger's tier-3-over-tier-4
 /// ordering), and surfacing it from the cancel arm would peer-attribute
@@ -1716,21 +1707,19 @@ mod merge_stage_results_tests {
 
     // ---- merge_stage_results_with_cancel ----
     //
-    // The cancel-aware merger is what defends the H2 invariant: when the
-    // inner cancellation future fires while stages are still running, the
-    // drain-poll in `validate_block` captures any already-ready stage
-    // results and hands them here together with the cancel outcome.
-    // A NodeFault in any stage MUST still win over the cancel; otherwise
-    // the supervisor restart path is silently bypassed at exactly the
-    // case where it matters most.
+    // The cancel-aware merger defends the "NodeFault outranks cancel"
+    // invariant: when the inner cancellation future fires while stages
+    // are still running, the drain-poll in `validate_block` captures any
+    // already-ready stage results and hands them here together with the
+    // cancel outcome. A NodeFault in any stage MUST still win over the
+    // cancel; otherwise the supervisor restart path is silently bypassed
+    // at exactly the case where it matters most.
 
-    /// Cancellation outcome fixture for the
-    /// `HeightDifference` reason (the classic "outer select drops the
-    /// validate future" trigger before the H2 fix).
+    /// Cancellation outcome fixture for the `HeightDifference` reason (the
+    /// classic "outer select drops the validate future" trigger).
     ///
-    /// Post-M2 audit (2026-05-20): routes through `InternalFailure` (not
-    /// `Invalid`) — `HeightDifference` is a local-side event, not a
-    /// statement about the peer's block.
+    /// Routes through `InternalFailure` (not `Invalid`) — `HeightDifference`
+    /// is a local-side event, not a statement about the peer's block.
     fn cancel_height_diff() -> ValidationResult {
         ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::HeightDifference,
@@ -1739,10 +1728,10 @@ mod merge_stage_results_tests {
     }
 
     /// Cancellation outcome fixture for the `ChannelClosed` reason
-    /// (shutdown). Post-M2 audit (2026-05-20): routes through
-    /// `InternalFailure` per the updated `ValidationCancelReason::is_internal`
-    /// classification (shutdown is local, not a peer-attributable event) —
-    /// the OTHER half of the H2 hazard.
+    /// (shutdown). Routes through `InternalFailure` per
+    /// `ValidationCancelReason::IS_INTERNAL` (shutdown is local, not a
+    /// peer-attributable event) — the OTHER half of the cancel-vs-NodeFault
+    /// hazard the merger guards.
     fn cancel_channel_closed() -> ValidationResult {
         ValidationError::ValidationCancelled {
             reason: crate::block_validation::ValidationCancelReason::ChannelClosed,
@@ -1750,16 +1739,17 @@ mod merge_stage_results_tests {
         .into()
     }
 
-    /// H2 regression target: NodeFault stage produced while siblings were
+    /// Regression target: NodeFault stage produced while siblings were
     /// pending, and cancel fires before the join would complete. The
     /// drain-poll in `validate_block` captures the NodeFault and hands it
     /// here together with the cancel; the merger MUST surface the
     /// NodeFault (so the block_tree_service handler panics) rather than
-    /// returning the cancellation outcome (which post-M2 routes to a soft
-    /// `InternalFailure`, parking a broken node in cache forever; pre-M2
-    /// it routed to `Invalid`, peer-attributing a local fault). Either way,
-    /// the supervisor-restart path is silently bypassed if cancel outranks
-    /// NodeFault, which is exactly what this test guards against.
+    /// returning the cancellation outcome (which routes to a soft
+    /// `InternalFailure`, parking a broken node in cache forever — and in
+    /// a prior shape that routed cancel to `Invalid`, peer-attributing a
+    /// local fault). Either way, the supervisor-restart path is silently
+    /// bypassed if cancel outranks NodeFault, which is exactly what this
+    /// test guards against.
     #[rstest]
     #[case::node_fault_with_height_diff_cancel(cancel_height_diff())]
     #[case::node_fault_with_channel_closed_cancel(cancel_channel_closed())]
@@ -1777,13 +1767,10 @@ mod merge_stage_results_tests {
         match merge_stage_results_with_cancel(&results, Some(&cancel)) {
             ValidationResult::InternalFailure(inner) => assert!(
                 inner.is_node_fault(),
-                "H2 regression: cancel outranked NodeFault, got soft InternalFailure: {:?}",
+                "cancel outranked NodeFault, got soft InternalFailure: {:?}",
                 inner.err()
             ),
-            other => panic!(
-                "H2 regression: expected InternalFailure(node-fault), got {:?}",
-                other
-            ),
+            other => panic!("expected InternalFailure(node-fault), got {:?}", other),
         }
     }
 
@@ -1815,9 +1802,9 @@ mod merge_stage_results_tests {
     /// a snapshot-eviction observed during the cancel window adds no
     /// information and the caller already knows we gave up.
     ///
-    /// Post-M2 audit (2026-05-20): the cancel outcome is now an
-    /// `InternalFailure` (was `Invalid`), but the merger's tier-3 priority
-    /// is unchanged — cancel still outranks soft `InternalFailure`.
+    /// The cancel outcome is an `InternalFailure` (every cancel reason is
+    /// `is_internal() = true`), but the merger's tier-3 priority is
+    /// unchanged — cancel still outranks soft `InternalFailure`.
     #[test]
     fn cancellation_wins_over_soft_internal_failure() {
         let soft = soft_internal();
@@ -1844,7 +1831,7 @@ mod merge_stage_results_tests {
                 );
             }
             other => panic!(
-                "expected InternalFailure(ValidationCancelled) post-M2, got {:?}",
+                "expected InternalFailure(ValidationCancelled), got {:?}",
                 other
             ),
         }
@@ -1876,8 +1863,8 @@ mod merge_stage_results_tests {
     /// `Other(..)` fallback (which would obliterate the cancellation
     /// reason).
     ///
-    /// Post-M2 audit (2026-05-20): cancel routes through `InternalFailure`
-    /// (was `Invalid`). Sub-reason still surfaces unchanged.
+    /// Cancel routes through `InternalFailure` (every cancel reason is
+    /// `is_internal() = true`). Sub-reason still surfaces unchanged.
     #[test]
     fn all_valid_with_cancel_returns_cancellation() {
         let valid_r = ValidationResult::Valid;
@@ -1892,7 +1879,7 @@ mod merge_stage_results_tests {
                 );
             }
             other => panic!(
-                "expected InternalFailure(ValidationCancelled) post-M2, got {:?}",
+                "expected InternalFailure(ValidationCancelled), got {:?}",
                 other
             ),
         }
@@ -1901,16 +1888,17 @@ mod merge_stage_results_tests {
 
 #[cfg(test)]
 mod classify_poa_join_error_tests {
-    //! Tests for the H1 fix: PoA `JoinError` must split panic vs cancellation
-    //! rather than unconditionally classifying every `JoinError` as
-    //! `TaskPanicked`. The bug is dormant in the current call site (the cancel
-    //! arm drops the stages-join future after a synchronous `futures::poll!`),
-    //! but a future refactor that ever `.await`s the aborted PoA handle would
-    //! turn every legitimate height-diff cancel into a supervisor restart —
-    //! exactly the never-mislabel invariant this branch defends.
+    //! Tests for the panic-vs-cancellation split in `classify_poa_join_error`:
+    //! a PoA `JoinError` must NOT unconditionally classify as `TaskPanicked`.
+    //! The mis-classification bug is dormant in the current call site (the
+    //! cancel arm drops the stages-join future after a synchronous
+    //! `futures::poll!`), but a future refactor that ever `.await`s the
+    //! aborted PoA handle would turn every legitimate height-diff cancel into
+    //! a supervisor restart — exactly the never-mislabel invariant this
+    //! branch defends.
     //!
-    //! See the helper's doc for the mirror to `validation_service.rs:438-479`
-    //! and the SoftInternal routing guarantee from commit `c3fd8963a`.
+    //! See the helper's doc for the mirror to the VDF dispatch loop's
+    //! JoinError arm and the SoftInternal routing guarantee.
     use super::*;
     use crate::block_validation::{ErrorClass, ValidationCancelReason, ValidationError};
 
@@ -1951,7 +1939,8 @@ mod classify_poa_join_error_tests {
     /// Cancellation path: aborting a handle then awaiting it produces
     /// `JoinError::is_cancelled()`. Must classify as `ValidationCancelled`
     /// and route through `SoftInternal` so the block parks for retry rather
-    /// than triggering supervisor restart. This is the H1 regression target.
+    /// than triggering supervisor restart. This is the load-bearing
+    /// invariant for the panic/cancel split.
     #[tokio::test]
     async fn cancellation_classifies_as_validation_cancelled_soft_internal() {
         // Spawn a long-running task, abort it, then await — yields
@@ -1990,7 +1979,7 @@ mod classify_poa_join_error_tests {
             err.classify(),
             ErrorClass::SoftInternal,
             "cancellation must classify as SoftInternal (park-and-retry), \
-             NOT NodeFault (supervisor restart) — this is the H1 invariant"
+             NOT NodeFault (supervisor restart) — this is the panic/cancel-split invariant"
         );
         assert!(
             !err.is_node_fault(),
@@ -2049,10 +2038,10 @@ mod stage_fault_captures_tests {
     //! merger would have produced if it had been given the per-stage
     //! results.
     //!
-    //! See the C1-regression integration test in
-    //! `side_channel_cancel_race_tests` below for proof that the side
-    //! channel actually closes the `tokio::join!`-poll-drain hazard
-    //! when wired into a real `tokio::select!`.
+    //! See the integration tests in `side_channel_cancel_race_tests` below
+    //! for proof that the side channel actually closes the
+    //! `tokio::join!`-poll-drain hazard when wired into a real
+    //! `tokio::select!`.
     use super::*;
     use crate::block_validation::{PreValidationError, ValidationError};
     use irys_types::H256;
@@ -2142,10 +2131,10 @@ mod stage_fault_captures_tests {
     }
 
     /// NodeFault wins over Invalid REGARDLESS of merge order — matches
-    /// `merge_stage_results`' tier-1-over-tier-2 contract. This is the
-    /// C1 invariant in miniature: a NodeFault observed by any stage
-    /// must surface on cancel even if a sibling Invalid was observed
-    /// first.
+    /// `merge_stage_results`' tier-1-over-tier-2 contract. The
+    /// side-channel-cancel-race invariant in miniature: a NodeFault
+    /// observed by any stage must surface on cancel even if a sibling
+    /// Invalid was observed first.
     #[test]
     fn node_fault_wins_over_invalid_invalid_first() {
         let mut captures = StageFaultCaptures::default();
@@ -2250,11 +2239,11 @@ mod stage_fault_captures_tests {
 
 #[cfg(test)]
 mod side_channel_cancel_race_tests {
-    //! Integration-flavored tests for the C1 fix: exercise the real
-    //! `tokio::select!` race between `tokio::join!`-of-stages and a
-    //! cancel future, and confirm the side channel surfaces NodeFault
-    //! / Invalid observations that `futures::poll!(&mut stages_join)`
-    //! would have silently dropped.
+    //! Integration-flavored tests for the side-channel cancel-race fix:
+    //! exercise the real `tokio::select!` race between
+    //! `tokio::join!`-of-stages and a cancel future, and confirm the side
+    //! channel surfaces NodeFault / Invalid observations that
+    //! `futures::poll!(&mut stages_join)` would have silently dropped.
     //!
     //! These tests do NOT spin up a full `BlockValidationTask` — they
     //! reproduce ONLY the structural race: six stage-shaped async
@@ -2378,19 +2367,19 @@ mod side_channel_cancel_race_tests {
         }
     }
 
-    /// C1 regression target — the load-bearing test for the side
-    /// channel. Stage 1 (PoA-shaped) produces a `TaskPanicked`
-    /// NodeFault and writes it to the side channel BEFORE the cancel
-    /// arm fires. Stage 2 is permanently Pending so `tokio::join!`'s
-    /// combined future never reports Ready. With the broken
-    /// drain-poll, this case demotes the NodeFault to a cancellation
-    /// outcome. With the side channel, the NodeFault wins.
+    /// Load-bearing test for the side channel. Stage 1 (PoA-shaped)
+    /// produces a `TaskPanicked` NodeFault and writes it to the side
+    /// channel BEFORE the cancel arm fires. Stage 2 is permanently Pending
+    /// so `tokio::join!`'s combined future never reports Ready. Without
+    /// the side channel (drain-poll-only approach), this case demotes
+    /// the NodeFault to a cancellation outcome. With the side channel,
+    /// the NodeFault wins.
     #[tokio::test]
     async fn node_fault_with_pending_sibling_surfaces_through_side_channel() {
         let result = run_cancel_race([
             Some(ValidationResult::Valid),
             Some(node_fault_result()),
-            None, // permanently pending sibling — exhibits the C1 bug
+            None, // permanently pending sibling — exhibits the cancel-race bug
             Some(ValidationResult::Valid),
             Some(ValidationResult::Valid),
             Some(ValidationResult::Valid),
@@ -2400,11 +2389,11 @@ mod side_channel_cancel_race_tests {
         match result {
             ValidationResult::InternalFailure(inner) => assert!(
                 inner.is_node_fault(),
-                "C1 regression: side channel must surface NodeFault even when join is Pending, got soft: {:?}",
+                "side channel must surface NodeFault even when join is Pending, got soft: {:?}",
                 inner.err()
             ),
             other => panic!(
-                "C1 regression: expected InternalFailure(node-fault), got {:?}. The cancel arm dropped the NodeFault — the side channel is not working.",
+                "expected InternalFailure(node-fault), got {:?}. The cancel arm dropped the NodeFault — the side channel is not working.",
                 other
             ),
         }
@@ -2412,7 +2401,7 @@ mod side_channel_cancel_race_tests {
 
     /// Companion to `node_fault_with_pending_sibling_surfaces_through_side_channel`:
     /// the side channel must surface ANY NodeFault variant under cancel,
-    /// not only `TaskPanicked` (which the C1 regression test uses).
+    /// not only `TaskPanicked` (which the load-bearing test uses).
     /// Other production stages emit different NodeFault variants —
     /// shadow_tx produces `ShadowTxNodeFault` for snapshot underflow,
     /// the reth integration produces `ExecutionLayerTransportFailed`
@@ -2450,7 +2439,7 @@ mod side_channel_cancel_race_tests {
             "test precondition: {err:?} must classify as NodeFault for this test to be meaningful"
         );
 
-        // Drive the same cancel race as the C1 regression. Slot 2 is
+        // Drive the same cancel race as the side-channel regression. Slot 2 is
         // permanently pending so `tokio::join!`'s combined future stays
         // Pending and the cancel arm is the only escape.
         let result = run_cancel_race([
@@ -2492,13 +2481,14 @@ mod side_channel_cancel_race_tests {
         }
     }
 
-    /// R2 audit (L3) — end-to-end wiring test for the H1 + C1 fixes.
-    /// Exercises the real path: a `spawn_blocking` task panics, producing
-    /// `JoinError::is_panic() = true`, which `classify_poa_join_error`
-    /// translates into `TaskPanicked` (NodeFault), which `capture_stage_result`
-    /// writes to the side channel. A concurrent cancel fires before the
-    /// `tokio::join!` can naturally complete (sibling permanently Pending).
-    /// The cancel arm must surface the NodeFault, NOT demote to Cancelled.
+    /// End-to-end wiring test for the panic-classification + side-channel
+    /// path. Exercises the real chain: a `spawn_blocking` task panics,
+    /// producing `JoinError::is_panic() = true`, which
+    /// `classify_poa_join_error` translates into `TaskPanicked` (NodeFault),
+    /// which `capture_stage_result` writes to the side channel. A
+    /// concurrent cancel fires before the `tokio::join!` can naturally
+    /// complete (sibling permanently Pending). The cancel arm must
+    /// surface the NodeFault, NOT demote to Cancelled.
     ///
     /// This is the only test that exercises the FULL chain (real panic →
     /// real JoinError::is_panic → classify_poa_join_error → side channel →
@@ -2532,7 +2522,7 @@ mod side_channel_cancel_race_tests {
         // stage 2 is permanently parked.
         let poa_stage = async move {
             let handle = tokio::task::spawn_blocking(|| {
-                panic!("simulated poa verifier panic for L3 wiring test");
+                panic!("simulated poa verifier panic for end-to-end wiring test");
             });
             let result: ValidationResult = match handle.await {
                 Ok(()) => ValidationResult::Valid,
@@ -2556,7 +2546,7 @@ mod side_channel_cancel_race_tests {
         };
 
         // Cancel only after the PoA panic has been captured. This is the
-        // exact race the C1 fix defends: panic landed in side channel,
+        // exact race the side-channel fix defends: panic landed in side channel,
         // sibling permanently Pending blocks natural join completion,
         // cancel arm must surface the NodeFault from the side channel.
         let cancel_future = async move {
@@ -2599,13 +2589,13 @@ mod side_channel_cancel_race_tests {
                 );
             }
             other => panic!(
-                "L3 wiring regression: real PoA panic + cancel must yield InternalFailure(node-fault, TaskPanicked), got {:?}. classify_poa_join_error or capture_stage_result is broken.",
+                "wiring regression: real PoA panic + cancel must yield InternalFailure(node-fault, TaskPanicked), got {:?}. classify_poa_join_error or capture_stage_result is broken.",
                 other
             ),
         }
     }
 
-    /// Same shape as the C1 regression, but the early-completing stage
+    /// Same shape as the load-bearing side-channel regression, but the early-completing stage
     /// produces an `Invalid` (consensus rejection) instead of a
     /// NodeFault. The side channel must surface this on cancel —
     /// the block IS bad and we observed that fact; reporting it as a
@@ -2661,10 +2651,9 @@ mod side_channel_cancel_race_tests {
 
     /// No NodeFault, no Invalid — only soft InternalFailure (which the
     /// side channel ignores) plus Pending siblings. Cancel wins and
-    /// produces the cancellation outcome (post-M2: routed through
-    /// `InternalFailure` for the `HeightDifference` reason).
-    /// Regression target: the side channel must NOT promote soft
-    /// observations to cancel-arm overrides.
+    /// produces the cancellation outcome (routed through `InternalFailure`
+    /// for the `HeightDifference` reason). Regression target: the side
+    /// channel must NOT promote soft observations to cancel-arm overrides.
     #[tokio::test]
     async fn soft_internal_does_not_outrank_cancel() {
         let result = run_cancel_race([

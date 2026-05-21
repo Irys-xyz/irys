@@ -377,8 +377,8 @@ impl ExecutionPayloadCache {
         // evicted naturally — well below the cost of breaking sibling
         // waiters.
         //
-        // R2 NOTE (M2 deferred): wrapping `request_payload_from_the_network`
-        // inside this same timeout would bound the worst-case latency from
+        // DEFERRED: wrapping `request_payload_from_the_network` inside this
+        // same timeout would bound the worst-case latency from
         // `request_budget + wait_timeout` (50s+60s=110s in prod) to
         // `wait_timeout` (60s). It is deferred because (a) the larger
         // worst-case only fires in already-degraded peer-network states,
@@ -387,7 +387,7 @@ impl ExecutionPayloadCache {
         // budget gives them a ~55s window even with the 5s test
         // `wait_timeout`. A real fix needs to retune
         // `NodeConfig::testing()`'s `execution_payload_wait_timeout_millis`
-        // alongside the move (see audit BRANCH_REVIEW_R2.md).
+        // alongside the move.
         let started = std::time::Instant::now();
         match tokio::time::timeout(self.wait_timeout, async {
             loop {
@@ -702,11 +702,12 @@ mod tests {
         );
     }
 
-    /// H3 regression: two concurrent waiters subscribe to the same hash.
-    /// One waiter's `Receiver` is dropped (simulates per-waiter timeout
-    /// or outer-cancel of a `shadow_tx_task`). The surviving sibling
-    /// must remain valid — its wait must still resolve when the payload
-    /// arrives, NOT spuriously surface `ReceiverDisrupted`.
+    /// Sibling-waiter isolation regression: two concurrent waiters
+    /// subscribe to the same hash. One waiter's `Receiver` is dropped
+    /// (simulates per-waiter timeout or outer-cancel of a
+    /// `shadow_tx_task`). The surviving sibling must remain valid — its
+    /// wait must still resolve when the payload arrives, NOT spuriously
+    /// surface `ReceiverDisrupted`.
     ///
     /// Under the prior `Vec<oneshot::Sender>` design, any single
     /// waiter's cleanup path popped the whole Vec, dropping every
@@ -750,8 +751,8 @@ mod tests {
         );
     }
 
-    /// M3 regression: dropping a `Receiver` (outer-cancel of an
-    /// in-flight `shadow_tx_task` mid-`wait_for_payload`) leaves no
+    /// Sender-orphan invariant: dropping a `Receiver` (outer-cancel of
+    /// an in-flight `shadow_tx_task` mid-`wait_for_payload`) leaves no
     /// orphaned state that would invalidate a subsequently-spawned
     /// waiter on the same hash. The sender entry persists in the LRU
     /// (cleared by `add_payload_to_cache` on payload arrival), and a

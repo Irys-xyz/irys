@@ -80,14 +80,14 @@ pub struct BlockTreeServiceInner {
     /// `InternalFailure` (eviction race, payload-cache miss, parent snapshot
     /// pruned). Value is the reason tag captured at discard time.
     ///
-    /// Phase A of the 2026-05-20 audit H3 finding: lets us measure whether
-    /// gossip-driven recovery actually works — if a later `Valid` arrives for
-    /// a block_hash present here, we count it as a "recovered" discard.
+    /// Instrumentation only: lets us measure whether gossip-driven recovery
+    /// actually works — if a later `Valid` arrives for a block_hash present
+    /// here, we count it as a "recovered" discard via the
+    /// `soft_internal_recovered_total` counter.
     ///
-    /// PHASE-B(H3): if the ratio of `soft_internal_recovered_total` to
-    /// `soft_internal_discard_total` stays below operational tolerance
-    /// (TBD by team), implement explicit per-block-hash re-request with
-    /// exponential backoff here. See 2026-05-20 audit H3.
+    /// PHASE-B: if the recovered/discard ratio stays below operational
+    /// tolerance (TBD by team), implement explicit per-block-hash re-request
+    /// with exponential backoff here.
     ///
     /// Capacity: 4096 entries (~256 KB worst-case). Sized to be safe under
     /// any plausible discard rate without becoming an unbounded memory sink.
@@ -181,7 +181,7 @@ fn emit_discard_log(
 /// match) or a panic (via the `unreachable!` arms below).
 ///
 /// `ValidationCancelled` is additionally gated out of the LRU/counter
-/// recording site in `discard_and_broadcast` post-M2 (cancellations are not
+/// recording site in `discard_and_broadcast` (cancellations are not
 /// gossip-recoverable retries), so its tag is a defensive sentinel that
 /// should never actually appear in metrics; if it does, it indicates the
 /// gate drifted.
@@ -206,14 +206,15 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         // gets a distinct, grep-stable snake_case tag rather than collapsing
         // to a single "pre_validation" bucket.
         VE::PreValidation(inner) => inner.metric_reason(),
-        // Post-M2: should never be observed in the metric (the discard-site
-        // gate at `:1128-1133` skips both the LRU put and the counter
-        // increment for any ValidationCancelled variant — see commit
-        // c3fd8963a). Tag retained as a stable defensive sentinel so a
-        // future drift in that gate surfaces here as a distinct label
-        // rather than silently mislabelling. Inner reason is intentionally
-        // not pattern-matched — the `ValidationCancelled` discriminator is
-        // sufficient and inner-reason cardinality is a separate concern.
+        // Should never be observed in the metric — the discard-site gate
+        // in `discard_and_broadcast` skips both the LRU put and the
+        // counter increment for any ValidationCancelled variant (cancels
+        // are not gossip-recoverable retries). Tag retained as a stable
+        // defensive sentinel so a future drift in that gate surfaces here
+        // as a distinct label rather than silently mislabelling. Inner
+        // reason is intentionally not pattern-matched — the
+        // `ValidationCancelled` discriminator is sufficient and
+        // inner-reason cardinality is a separate concern.
         VE::ValidationCancelled { .. } => "validation_cancelled",
 
         // === NodeFault variants — filtered at `:532-543` (handler panics
@@ -662,11 +663,12 @@ impl BlockTreeServiceInner {
             tracing::warn!(
                 "block validation returned a result for a block that's no longer in block cache"
             );
-            // Bug 1 fix (symmetric with `1f85702fc` on the discard path):
-            // emit BlockStateUpdated so downstream waiters (read_block_from_state,
-            // wait_for_parent_validation) don't hang on a cache-miss Valid arrival.
-            // height = 0 and state = NotOnchain(Unknown) are sentinel values; the
-            // block is gone from the cache so we have no better information.
+            // Emit BlockStateUpdated even on cache-miss Valid (symmetric with
+            // the cache-miss discard path) so downstream waiters
+            // (read_block_from_state, wait_for_parent_validation) don't hang
+            // on a cache-miss Valid arrival. height = 0 and
+            // state = NotOnchain(Unknown) are sentinel values; the block is
+            // gone from the cache so we have no better information.
             let event = BlockStateUpdated {
                 block_hash,
                 height: 0,
@@ -683,9 +685,9 @@ impl BlockTreeServiceInner {
             return Ok(());
         };
 
-        // Phase A (H3) instrumentation: pop + metric are deferred to the two
-        // confirmed-success boundaries below (after mark_block_as_valid +
-        // second cache check) so that early-returns from either failure path do
+        // Soft-internal-recovery instrumentation: pop + metric are deferred to
+        // the two confirmed-success boundaries below (after mark_block_as_valid
+        // + second cache check) so that early-returns from either failure path do
         // not pop the LRU or increment the recovery counter spuriously.
         debug!(
             "On validation complete: result {} {:?} at height: {}",
@@ -763,7 +765,7 @@ impl BlockTreeServiceInner {
 
                 drop(cache);
 
-                // Bug 3 fix (success boundary 1 of 2): mark_block_as_valid
+                // Confirmed-success boundary 1 of 2: mark_block_as_valid
                 // succeeded above; this is a confirmed valid arrival, so pop
                 // the recovery LRU and record the metric now (not before the
                 // write lock, where the result is still unknown).
@@ -810,11 +812,12 @@ impl BlockTreeServiceInner {
                     block.height = height,
                     "Ignoring validation result for block already pruned from cache"
                 );
-                // Bug 2 fix (symmetric with Bug 1 and `1f85702fc` on the discard path):
-                // a concurrent prune raced the write lock, but mark_block_as_valid
-                // already succeeded — emit BlockStateUpdated so downstream waiters
-                // don't hang. height is known; state falls back to NotOnchain(Unknown)
-                // because the entry is gone.
+                // Concurrent-prune race (symmetric with the cache-miss Valid
+                // path above and the cache-miss discard path): a concurrent
+                // prune raced the write lock, but mark_block_as_valid already
+                // succeeded — emit BlockStateUpdated so downstream waiters
+                // don't hang. height is known; state falls back to
+                // NotOnchain(Unknown) because the entry is gone.
                 //
                 // NOTE: We do NOT pop the recovery LRU here. A concurrent prune is not
                 // a confirmed gossip-driven recovery — the block never reached a stable
@@ -825,8 +828,8 @@ impl BlockTreeServiceInner {
                 // unit test requires a test seam (e.g. a post-mark_block_as_valid hook
                 // that removes the entry before the second get) that the current harness
                 // doesn't support. The correct shape is verified by code review and the
-                // Bug 1 + discard-path tests that exercise the analogous emit-before-
-                // return pattern.
+                // cache-miss-Valid + discard-path tests that exercise the analogous
+                // emit-before-return pattern.
                 drop(cache);
                 let event = BlockStateUpdated {
                     block_hash,
@@ -1187,7 +1190,7 @@ impl BlockTreeServiceInner {
                 .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
         }
 
-        // Bug 3 fix (success boundary 2 of 2): mark_block_as_valid succeeded
+        // Confirmed-success boundary 2 of 2: mark_block_as_valid succeeded
         // and the second cache check passed — this is a confirmed valid arrival
         // that reached a stable onchain state. Pop the recovery LRU here.
         if let Some(reason) = self.recent_soft_internal_discards.pop(&block_hash) {
@@ -1261,24 +1264,24 @@ impl BlockTreeServiceInner {
         self.chain_sync_state
             .record_block_validation_error(diagnostic_record);
 
-        // Phase A (H3) instrumentation: on a SoftInternal discard, derive the
-        // reason tag from the wrapped `ValidationError`, increment the discard
-        // counter, and remember (block_hash -> reason) in the bounded LRU so a
-        // later Valid result can be counted as a recovery.
+        // Soft-internal-recovery instrumentation: on a SoftInternal discard,
+        // derive the reason tag from the wrapped `ValidationError`, increment
+        // the discard counter, and remember (block_hash -> reason) in the
+        // bounded LRU so a later Valid result can be counted as a recovery.
         //
-        // PHASE-B(H3): if the ratio of `soft_internal_recovered_total` to
+        // PHASE-B: if the ratio of `soft_internal_recovered_total` to
         // `soft_internal_discard_total` stays below operational tolerance
         // (TBD by team), implement explicit per-block-hash re-request with
-        // exponential backoff here. See 2026-05-20 audit H3.
+        // exponential backoff here.
         //
-        // M2-GATE (2026-05-20): `ValidationCancelled` reaches the SoftInternal
-        // arm post-M2 (HeightDifference / ChannelClosed flipped to
-        // `is_internal() = true`), but cancellations are NOT gossip-recoverable
-        // failures — the block's validation outcome is unknown ("we moved on"),
-        // not "failed and needing retry". Recording them in the H3 LRU would
-        // inflate `soft_internal_discard_total` with local "we moved on" events
-        // and the recovery counter would never match (fresh gossip rarely
-        // re-triggers the same cancellation race for the same hash).
+        // `ValidationCancelled` reaches the SoftInternal arm (every cancel
+        // reason is `is_internal() = true`), but cancellations are NOT
+        // gossip-recoverable failures — the block's validation outcome is
+        // unknown ("we moved on"), not "failed and needing retry". Recording
+        // them in the recovery LRU would inflate `soft_internal_discard_total`
+        // with local "we moved on" events and the recovery counter would never
+        // match (fresh gossip rarely re-triggers the same cancellation race
+        // for the same hash).
         let mut cache = self.cache.write().map_err(|_| {
             eyre::eyre!("block tree cache write lock poisoned in discard_and_broadcast")
         })?;
@@ -1311,12 +1314,12 @@ impl BlockTreeServiceInner {
         //     `heavy_block_validation_discards_a_block_if_its_too_old`
         //     that exercise the validation pipeline without going through
         //     block_tree.
-        //   - H3 metric + LRU put: ONLY when cache_write_succeeded. A
-        //     spurious LRU entry for a hash we didn't actually remove
-        //     would be popped by a later cache-hit Valid arrival,
-        //     spuriously ticking `soft_internal_recovered_total`. The
-        //     metric must mirror the LRU since both live in the same
-        //     gate.
+        //   - Soft-internal-recovery metric + LRU put: ONLY when
+        //     cache_write_succeeded. A spurious LRU entry for a hash we
+        //     didn't actually remove would be popped by a later cache-hit
+        //     Valid arrival, spuriously ticking
+        //     `soft_internal_recovered_total`. The metric must mirror the
+        //     LRU since both live in the same gate.
         let cache_write_succeeded = if maybe_height.is_some() {
             match cache.remove_block(&block_hash) {
                 Ok(()) => true,
@@ -1331,12 +1334,12 @@ impl BlockTreeServiceInner {
         };
         drop(cache);
 
-        // R2 audit (L1): record the soft-internal LRU entry *after* the
-        // cache write completes, AND only if it actually succeeded. If
-        // the lock is poisoned, the block was never in the cache, or the
-        // removal returned Err, no LRU entry is left dangling —
-        // otherwise a later Valid for the same hash would spuriously
-        // tick `soft_internal_recovered_total`.
+        // Record the soft-internal LRU entry *after* the cache write
+        // completes, AND only if it actually succeeded. If the lock is
+        // poisoned, the block was never in the cache, or the removal
+        // returned Err, no LRU entry is left dangling — otherwise a
+        // later Valid for the same hash would spuriously tick
+        // `soft_internal_recovered_total`.
         if cache_write_succeeded
             && matches!(kind, DiscardKind::SoftInternal)
             && let ValidationResult::InternalFailure(inner) = &validation_result
@@ -1716,13 +1719,13 @@ mod tests {
         assert!(matches!(result, ValidationResult::Invalid(_)));
     }
 
-    /// Post-M2 audit (2026-05-20): every `ValidationCancelled` sub-reason
-    /// routes to `InternalFailure`. `HeightDifference` and `ChannelClosed`
-    /// were historically `Invalid` under the older "we moved on" rationale,
-    /// but neither reflects the peer's block — both are local-side events.
-    /// They now route through `is_internal() = true` → `InternalFailure`
-    /// alongside `ParentMissing`. Discard still happens in the block_tree
-    /// service handler; the block is just no longer peer-attributed.
+    /// Every `ValidationCancelled` sub-reason routes to `InternalFailure`.
+    /// `HeightDifference` and `ChannelClosed` were historically `Invalid`
+    /// under the older "we moved on" rationale, but neither reflects the
+    /// peer's block — both are local-side events. They now route through
+    /// `is_internal() = true` → `InternalFailure` alongside `ParentMissing`.
+    /// Discard still happens in the block_tree service handler; the block
+    /// is just no longer peer-attributed.
     #[test]
     fn validation_cancelled_converts_per_reason() {
         use crate::block_validation::ValidationCancelReason;
@@ -1731,12 +1734,13 @@ mod tests {
             ValidationCancelReason::ChannelClosed,
             ValidationCancelReason::ParentMissing,
             ValidationCancelReason::RepeatedCancellation,
+            ValidationCancelReason::PoAAborted,
         ] {
             let result: ValidationResult =
                 crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
             assert!(
                 matches!(result, ValidationResult::InternalFailure(_)),
-                "reason {:?} should dispatch to InternalFailure post-M2",
+                "reason {:?} should dispatch to InternalFailure",
                 reason
             );
             // Per-stage label collapses cancellations to "cancelled"; the
@@ -1937,8 +1941,8 @@ mod tests {
 
         /// Seed a block into the BlockTree cache so cache-presence-gated
         /// production paths (e.g., `on_block_validation_finished`'s
-        /// recovery-LRU pop, ordered after the cache check post-`ca192a999`)
-        /// can observe the hash. The block chains directly off the genesis
+        /// recovery-LRU pop, which is ordered after the cache check) can
+        /// observe the hash. The block chains directly off the genesis
         /// the harness was constructed with.
         fn insert_block_in_cache(&mut self, block_hash: H256, height: u64) {
             use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
@@ -2020,7 +2024,7 @@ mod tests {
         assert_eq!(
             h.inner.recent_soft_internal_discards.get(&block_hash),
             Some(&"parent_block_missing"),
-            "SoftInternal discard must record the reason tag for H3 recovery accounting"
+            "SoftInternal discard must record the reason tag for soft-internal recovery accounting"
         );
 
         // Observable side effect 2: a discard broadcast carries the input
@@ -2039,12 +2043,12 @@ mod tests {
         );
     }
 
-    /// Bug 1 fix invariant: a Valid result for a hash that is NOT in the cache
-    /// must (a) preserve the recovery LRU entry so a later legitimate re-delivery
-    /// can still be counted as a recovery, AND (b) emit a `BlockStateUpdated`
-    /// broadcast so downstream waiters (read_block_from_state,
-    /// wait_for_parent_validation) don't hang. Drives the real
-    /// `on_block_validation_finished`.
+    /// Cache-miss Valid invariant: a Valid result for a hash that is NOT in
+    /// the cache must (a) preserve the recovery LRU entry so a later
+    /// legitimate re-delivery can still be counted as a recovery, AND (b)
+    /// emit a `BlockStateUpdated` broadcast so downstream waiters
+    /// (read_block_from_state, wait_for_parent_validation) don't hang.
+    /// Drives the real `on_block_validation_finished`.
     #[tokio::test]
     async fn valid_result_with_cache_miss_preserves_lru() {
         let mut h = DiscardHarness::new();
@@ -2075,14 +2079,14 @@ mod tests {
              arrival still needs to be counted as a recovery"
         );
 
-        // (b) Bug 1 fix: BlockStateUpdated must still fire so downstream
-        // waiters don't hang. height = 0 and discarded = false are the
-        // sentinel values emitted on the cache-miss path.
+        // (b) BlockStateUpdated must still fire so downstream waiters
+        // don't hang. height = 0 and discarded = false are the sentinel
+        // values emitted on the cache-miss path.
         let events = h.collect_broadcasts();
         assert_eq!(
             events.len(),
             1,
-            "cache-miss Valid must emit exactly one BlockStateUpdated (Bug 1 fix)"
+            "cache-miss Valid must emit exactly one BlockStateUpdated"
         );
         let event = &events[0];
         assert_eq!(event.block_hash, block_hash);
@@ -2106,7 +2110,8 @@ mod tests {
         let block_hash = H256([0xCE; 32]);
 
         // Seed cache + LRU. Both must be present for the recovery path to
-        // fire — the post-`ca192a999` order is cache-check → LRU-pop.
+        // fire — the order is cache-check → LRU-pop, so the LRU only
+        // releases its entry once the cache confirms the block is back.
         h.insert_block_in_cache(block_hash, /*height=*/ 1);
         h.inner
             .recent_soft_internal_discards
@@ -2200,8 +2205,8 @@ mod tests {
         );
     }
 
-    /// M2 audit (2026-05-20): a `ValidationCancelled` SoftInternal discard
-    /// MUST NOT insert into the H3 LRU and MUST NOT increment the
+    /// A `ValidationCancelled` SoftInternal discard MUST NOT insert into
+    /// the recovery LRU and MUST NOT increment the
     /// `soft_internal_discard_total` counter. Cancellations are local "we
     /// moved on" events, not gossip-recoverable failures — recording them
     /// would inflate the discard counter and leave the recovery counter
@@ -2221,6 +2226,7 @@ mod tests {
     #[case::repeated_cancellation(
         crate::block_validation::ValidationCancelReason::RepeatedCancellation
     )]
+    #[case::poa_aborted(crate::block_validation::ValidationCancelReason::PoAAborted)]
     fn validation_cancelled_softinternal_skips_lru_and_counter(
         #[case] reason: crate::block_validation::ValidationCancelReason,
     ) {
@@ -2230,11 +2236,11 @@ mod tests {
 
         let result: ValidationResult =
             crate::block_validation::ValidationError::ValidationCancelled { reason }.into();
-        // Sanity: post-M2 every cancel reason routes to InternalFailure and
-        // is NOT a node fault, so `discard_and_broadcast` is actually
-        // reachable from `on_block_validation_finished` for this variant.
+        // Sanity: every cancel reason routes to InternalFailure and is NOT
+        // a node fault, so `discard_and_broadcast` is actually reachable
+        // from `on_block_validation_finished` for this variant.
         let ValidationResult::InternalFailure(inner) = &result else {
-            panic!("post-M2 ValidationCancelled must dispatch to InternalFailure");
+            panic!("ValidationCancelled must dispatch to InternalFailure");
         };
         assert!(
             !inner.is_node_fault(),
@@ -2248,7 +2254,7 @@ mod tests {
         assert_eq!(
             h.inner.recent_soft_internal_discards.len(),
             0,
-            "ValidationCancelled (reason {:?}) must not touch the H3 LRU \
+            "ValidationCancelled (reason {:?}) must not touch the recovery LRU \
              (and transitively must not increment soft_internal_discard_total)",
             reason
         );
@@ -2265,11 +2271,11 @@ mod tests {
         );
     }
 
-    /// Finding-1 invariant: when the block is no longer in the cache (or
-    /// was never inserted — e.g. a direct submission to
-    /// `validation_service` via `send_block_to_block_validation`), the
-    /// H3 metric and LRU must NOT be touched (an entry would later be
-    /// popped by a spurious cache-hit Valid and tick
+    /// When the block is no longer in the cache (or was never inserted —
+    /// e.g. a direct submission to `validation_service` via
+    /// `send_block_to_block_validation`), the soft-internal-recovery
+    /// metric and LRU must NOT be touched (an entry would later be popped
+    /// by a spurious cache-hit Valid and tick
     /// `soft_internal_recovered_total` for a discard we didn't perform).
     ///
     /// The `BlockStateUpdated` broadcast, however, MUST still fire —
@@ -2296,7 +2302,7 @@ mod tests {
                 .recent_soft_internal_discards
                 .get(&block_hash)
                 .is_none(),
-            "cache-miss discard must not populate the H3 LRU"
+            "cache-miss discard must not populate the soft-internal-recovery LRU"
         );
         let events = h.collect_broadcasts();
         assert_eq!(
@@ -2498,7 +2504,7 @@ mod tests {
         assert!(err.to_string().contains("reorg depth"));
     }
 
-    /// M4: `PreValidation` reaches `soft_internal_reason_tag` whenever its
+    /// `PreValidation` reaches `soft_internal_reason_tag` whenever its
     /// inner variant classifies as `SoftInternal`
     /// (`AssignedProofBlockMissing`, `ParentNotInCache`). The tag must come
     /// from the inner's `metric_reason()` so each one gets a distinct,
@@ -2537,9 +2543,9 @@ mod tests {
         );
     }
 
-    /// M4: every `SoftInternal`-classified `ValidationError` variant must map
-    /// to a label distinct from the legacy `"internal_error_other"` sentinel
-    /// (which was the pre-M4 catch-all that absorbed unhandled variants and
+    /// Every `SoftInternal`-classified `ValidationError` variant must map
+    /// to a label distinct from the legacy `"internal_error_other"`
+    /// sentinel (a prior catch-all that absorbed unhandled variants and
     /// caused undercounting). Sanity-checks the exhaustive match.
     #[test]
     fn soft_internal_reason_tags_are_not_legacy_catch_all() {
@@ -2586,10 +2592,11 @@ mod tests {
         }
     }
 
-    /// M4: distinct `SoftInternal` variants (excluding the
+    /// Distinct `SoftInternal` variants (excluding the
     /// `ValidationCancelled` defensive sentinel, which is filtered upstream
-    /// per the M2 gate and intentionally collapses to a single tag) must map
-    /// to distinct labels so the discard metric can attribute root causes.
+    /// at the discard-site cancel gate and intentionally collapses to a
+    /// single tag) must map to distinct labels so the discard metric can
+    /// attribute root causes.
     #[test]
     fn soft_internal_reason_tags_are_unique_per_variant() {
         use std::collections::HashSet;
@@ -2636,7 +2643,7 @@ mod tests {
         }
     }
 
-    // --- M6 regression tests ------------------------------------------------
+    // --- Recovery-ordering regression tests ---------------------------------
     //
     // The recovery path in `on_block_validation_finished` previously popped
     // `recent_soft_internal_discards` and incremented
@@ -2702,9 +2709,9 @@ mod tests {
     /// Sequence: spurious cache-miss Valid arrives first (LRU must stay
     /// intact), then a legitimate Valid arrives with the block back in cache
     /// (LRU is finally consumed and the recovery is recorded). This
-    /// specifically guards against the M6 regression mode where the
-    /// pre-fix order would have dropped the recovery on the spurious arrival
-    /// and left the legitimate arrival un-counted.
+    /// specifically guards against the regression mode where a pre-fix
+    /// LRU-before-cache-check order would have dropped the recovery on the
+    /// spurious arrival and left the legitimate arrival un-counted.
     #[test]
     fn spurious_then_legitimate_valid_counts_recovery_exactly_once() {
         let mut lru: LruCache<BlockHash, &'static str> =
@@ -2745,14 +2752,13 @@ mod tests {
         );
     }
 
-    /// L8 regression coverage for the warn/error split landed in commit
-    /// `4a0d407cf` (chore(validation): close L2 + L5 — split discard log
-    /// levels). Before that change, every `discard_and_broadcast` arm logged
+    /// Regression coverage for the warn/error split in
+    /// `discard_and_broadcast`. Before the split, every discard arm logged
     /// at `error!`, inflating alert noise on healthy nodes that hit eviction
     /// races (SoftInternal is intentionally non-alarming — passive recovery
-    /// via the H3 LRU + re-gossip). Without these tests, a future refactor
-    /// that re-flattens both arms to a single level would silently re-trigger
-    /// the originally-flagged false-positive alert load.
+    /// via the soft-internal LRU + re-gossip). Without these tests, a future
+    /// refactor that re-flattens both arms to a single level would silently
+    /// re-trigger that false-positive alert load.
     ///
     /// Tests bind to the level emitted by `emit_discard_log` (the helper
     /// extracted from `discard_and_broadcast` so the split is unit-testable
@@ -2779,7 +2785,7 @@ mod tests {
             );
             assert!(
                 !logs_contain("ERROR"),
-                "SoftInternal discard must NOT emit at ERROR level — that would re-trigger the L2 false-positive alert load"
+                "SoftInternal discard must NOT emit at ERROR level — that would re-trigger the false-positive alert load that motivated the warn/error split"
             );
         }
 

@@ -79,7 +79,7 @@ irys_utils::define_metrics! {
     counter VALIDATION_CANCELLATIONS("irys.validation.cancellations_total", "Validation cancellations by reason (labelled)");
     counter REORG_PRIORITY_REEVALUATIONS("irys.validation.reorg_priority_reevaluations_total", "Validation priority re-evaluations triggered by reorg events");
     counter PRODUCER_PARENT_WAIT_TARGET_SWITCHES("irys.block_producer.parent_wait_target_switches_total", "Times block producer switched parent target while waiting for validation");
-    counter SOFT_INTERNAL_DISCARD("irys.block.soft_internal_discard_total", "Blocks discarded from block_tree due to soft-internal validation failure (labelled by reason). Phase A of H3 instrumentation: gauge whether gossip-driven recovery is sufficient.");
+    counter SOFT_INTERNAL_DISCARD("irys.block.soft_internal_discard_total", "Blocks discarded from block_tree due to soft-internal validation failure (labelled by reason). Pairs with soft_internal_recovered_total to gauge whether gossip-driven recovery is sufficient.");
     counter SOFT_INTERNAL_RECOVERED("irys.block.soft_internal_recovered_total", "Blocks previously discarded as soft-internal that later reached Valid (labelled by the original discard reason). Pair with soft_internal_discard_total to gauge gossip-driven recovery rate.");
 }
 

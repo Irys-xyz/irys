@@ -56,9 +56,10 @@ const REPROCESSING_COOLDOWN: Duration = Duration::from_secs(10);
 /// Outcome of the gossip-dedup check used by gossip and periodic-sync
 /// pull paths. Separates "fresh — proceed with `process_block`" from
 /// three distinct "skip" reasons so callers can react appropriately:
-/// in particular, [`Self::ParkedReadyForRetry`] is the H2 recovery
-/// hook — a parked SoftInternal block whose cooldown has elapsed must
-/// have `AttemptReprocessingBlock` re-emitted, not be silently skipped.
+/// in particular, [`Self::ParkedReadyForRetry`] is the tip-stall
+/// recovery hook — a parked SoftInternal block whose cooldown has
+/// elapsed must have `AttemptReprocessingBlock` re-emitted, not be
+/// silently skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockDedupStatus {
     /// Block is unknown locally. Proceed into `process_block`.
@@ -1342,7 +1343,7 @@ where
     /// explicit state machine — see [`BlockDedupStatus`] — so callers
     /// can act on the parked-but-out-of-cooldown case rather than
     /// silently skipping a parked tip block whose only recovery path
-    /// would otherwise be LRU eviction (the H2 tip-stall).
+    /// would otherwise be LRU eviction (the parked-tip-stall hazard).
     ///
     /// Returning [`BlockDedupStatus::ParkedReadyForRetry`] has the side
     /// effect of stamping the entry's `last_reprocess_at` to the
@@ -1715,7 +1716,7 @@ mod tests {
     /// survives across the retry: a concurrent gossip arrival during
     /// reprocess would observe `ParkedReadyForRetry` again (because the
     /// stamp is gone) and emit a SECOND reprocess message, reopening the
-    /// gossip-storm amplification path the H2 fix closed.
+    /// gossip-storm amplification path the per-block cooldown closed.
     ///
     /// This test pins the carry-forward behaviour. If a future
     /// refactor of `add_block` regresses to `last_reprocess_at: None`,
@@ -1775,7 +1776,7 @@ mod tests {
         assert_eq!(
             after_reinsert.last_reprocess_at,
             Some(stamp_time),
-            "add_block re-insert must preserve `last_reprocess_at` so the H2 \
+            "add_block re-insert must preserve `last_reprocess_at` so the \
              reprocess cooldown survives across retries — resetting to None would \
              reopen the gossip-storm amplification path"
         );

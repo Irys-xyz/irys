@@ -174,11 +174,12 @@ impl PreemptibleVdfTask {
                         metrics::record_validation_cancellation("vdf_blocking_aborted");
                         VdfValidationResult::Cancelled
                     }
-                // Stage B parent-eviction race (H5): typed sentinel from
+                // Stage B parent-eviction race: typed sentinel from
                 // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
-                // ParentMissing rather than the panic the old `.expect` site
-                // produced. Checked before the WaitForStepError downcast since
-                // it can fire at any VDF stage entry, not just the wait stage.
+                // ParentMissing rather than the panic the prior `.expect`
+                // site produced. Checked before the WaitForStepError downcast
+                // since it can fire at any VDF stage entry, not just the
+                // wait stage.
                 } else if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
                     metrics::record_validation_cancellation("vdf_parent_missing");
                     VdfValidationResult::ParentMissing {
@@ -590,7 +591,7 @@ pub(super) enum ConcurrentCancelDecision {
 /// this slot", whereas a validation retry pays the full VDF+concurrent
 /// pipeline cost on every loop and giving up just parks the block in cache
 /// for gossip recovery. The lower cap reflects the higher per-attempt cost
-/// and the cheaper give-up path. See branch review finding H4.
+/// and the cheaper give-up path.
 pub(super) const MAX_CONCURRENT_CANCEL_RETRIES: u8 = 3;
 
 /// Main validation coordinator
@@ -2104,7 +2105,7 @@ mod tests {
         );
     }
 
-    /// H4 — concurrent-stage cancel-retry cap.
+    /// Concurrent-stage cancel-retry cap.
     ///
     /// After `MAX_CONCURRENT_CANCEL_RETRIES` cancellations for the same
     /// block hash, the coordinator must stop returning `Requeue` and start
@@ -2159,7 +2160,7 @@ mod tests {
         );
     }
 
-    /// H4 — a Valid (Ok-arm) outcome clears the cancel-retry counter so a
+    /// A Valid (Ok-arm) outcome clears the cancel-retry counter so a
     /// subsequent burst of cancels doesn't immediately trip the cap from
     /// stale state.
     #[tokio::test]
@@ -2199,7 +2200,7 @@ mod tests {
         );
     }
 
-    /// H4 — distinct block hashes maintain independent cancel counters.
+    /// Distinct block hashes maintain independent cancel counters.
     /// A poisoned block burning through its retry budget must not push a
     /// different healthy block past its cap.
     #[tokio::test]
@@ -2237,14 +2238,14 @@ mod tests {
         );
     }
 
-    /// H4 — `RepeatedCancellation` classifies as `SoftInternal` (not
+    /// `RepeatedCancellation` classifies as `SoftInternal` (not
     /// `NodeFault`, not `Invalid`). This is the routing invariant: when
     /// the cap-hit path constructs the variant and routes it via
     /// `From<ValidationError>`, the block must park rather than be
     /// peer-attributed or trigger a node-fault abort. Pair with
     /// `validation_cancel_reason_classifier_dispatch` and
-    /// `validation_cancelled_converts_per_reason`, which also gain
-    /// `RepeatedCancellation` cases.
+    /// `validation_cancelled_converts_per_reason`, which also cover
+    /// `RepeatedCancellation`.
     #[test]
     fn repeated_cancellation_classifies_as_softinternal() {
         use crate::block_tree_service::ValidationResult;
@@ -2264,8 +2265,8 @@ mod tests {
         );
     }
 
-    /// H4 — the VDF terminal arms (`Invalid` and `ParentMissing`) MUST
-    /// clear the `concurrent_cancel_retries` counter for the hash before
+    /// The VDF terminal arms (`Invalid` and `ParentMissing`) MUST clear
+    /// the `concurrent_cancel_retries` counter for the hash before
     /// dispatching the result. Without the clear, a future fresh
     /// submission of the same hash would inherit a stale counter from
     /// the prior attempt and silently start with a shortened retry
@@ -2318,7 +2319,7 @@ mod tests {
         assert!(
             !coordinator.concurrent_cancel_retries.contains_key(&hash),
             "VDF Invalid terminal must clear concurrent_cancel_retries — without this, \
-             a future fresh submission's retry budget silently shortens (H4 landmine)"
+             a future fresh submission's retry budget silently shortens (poisoned-resubmission landmine)"
         );
 
         // Re-seed the counter and exercise the VDF ParentMissing arm
@@ -2342,7 +2343,7 @@ mod tests {
         assert!(
             !coordinator.concurrent_cancel_retries.contains_key(&hash),
             "VDF ParentMissing terminal must clear concurrent_cancel_retries — \
-             same H4-mirror invariant as the Invalid arm"
+             same counter-clear invariant as the Invalid arm"
         );
     }
 
