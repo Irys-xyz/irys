@@ -478,8 +478,7 @@ impl BlockValidationTask {
             // returning so the cancel arm in `validate_block` can recover
             // this observation even if other stages remain pending and
             // the combined `tokio::join!` future never reports Ready.
-            capture_stage_result(&recall_captures, &result);
-            result
+            capture_stage_result(&recall_captures, result)
         }
         .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.sealed_block.header().block_hash, block.height = %self.sealed_block.header().height));
 
@@ -637,8 +636,7 @@ impl BlockValidationTask {
             // `BlockBoundsLookupError`, etc.), and historically was the
             // exact stage whose Ready signal could be silently dropped
             // by the broken drain-poll. Recording here closes that hazard.
-            capture_stage_result(&poa_captures, &result);
-            result
+            capture_stage_result(&poa_captures, result)
         };
 
         // Shadow transaction validation (pure validation, no reth submission)
@@ -691,8 +689,13 @@ impl BlockValidationTask {
                         started.elapsed().as_secs_f64() * 1000.0,
                     );
                     metrics::record_validation_result("shadow_tx", err.metric_label());
-                    let classified: ValidationResult = err.clone().into();
-                    capture_stage_result(&shadow_tx_captures, &classified);
+                    // Side-channel write before propagating the original
+                    // `ValidationError`. The captured `ValidationResult`
+                    // is intentionally discarded — the surrounding
+                    // closure returns `Result<_, ValidationError>` and
+                    // the error is what propagates upward; the capture
+                    // is the side effect.
+                    let _ = capture_stage_result(&shadow_tx_captures, err.clone().into());
                     return Err(err);
                 }
             };
@@ -750,8 +753,12 @@ impl BlockValidationTask {
                         started.elapsed().as_secs_f64() * 1000.0,
                     );
                     metrics::record_validation_result("shadow_tx", validation_err.metric_label());
-                    let classified: ValidationResult = validation_err.clone().into();
-                    capture_stage_result(&shadow_tx_captures, &classified);
+                    // Side-channel write before propagating the original
+                    // `ValidationError` — capture return value
+                    // intentionally discarded (see the analogous arm
+                    // above on `ParentCommitmentSnapshotMissing`).
+                    let _ =
+                        capture_stage_result(&shadow_tx_captures, validation_err.clone().into());
                     return Err(validation_err);
                 }
             };
@@ -821,8 +828,10 @@ impl BlockValidationTask {
             // for soft-internal today but guards against future
             // reclassification.
             if let Err(ref err) = result {
-                let classified: ValidationResult = err.clone().into();
-                capture_stage_result(&shadow_tx_captures, &classified);
+                // Side-channel write — capture return value intentionally
+                // discarded; `result` (the `Result<(), ValidationError>`)
+                // is the propagation channel.
+                let _ = capture_stage_result(&shadow_tx_captures, err.clone().into());
             }
             result.map(|()| execution_data)
         };
@@ -857,8 +866,7 @@ impl BlockValidationTask {
                         // reclassification of this early-exit variant
                         // automatically participates in the cancel-arm
                         // recovery.
-                        capture_stage_result(&seeds_captures, &result);
-                        return result;
+                        return capture_stage_result(&seeds_captures, result);
                     }
                 };
             let outcome = is_seed_data_valid(
@@ -871,8 +879,7 @@ impl BlockValidationTask {
                 started.elapsed().as_secs_f64() * 1000.0,
             );
             metrics::record_validation_result("seeds", outcome.granular_metric_label());
-            capture_stage_result(&seeds_captures, &outcome);
-            outcome
+            capture_stage_result(&seeds_captures, outcome)
         }
         .instrument(tracing::info_span!(
             "seeds_validation",
@@ -913,8 +920,7 @@ impl BlockValidationTask {
                 "commitment_ordering",
                 result.granular_metric_label(),
             );
-            capture_stage_result(&commitment_captures, &result);
-            result
+            capture_stage_result(&commitment_captures, result)
         };
 
         // Data transaction fee validation. Snapshots were cloned up-front
@@ -955,8 +961,7 @@ impl BlockValidationTask {
                 }
             };
             metrics::record_validation_result("data_txs", result.granular_metric_label());
-            capture_stage_result(&data_txs_captures, &result);
-            result
+            capture_stage_result(&data_txs_captures, result)
         };
 
         // Race the six concurrent stages against the height-diff /
@@ -1322,7 +1327,23 @@ impl StageFaultCaptures {
 /// Convenience helper for inside stage bodies: record a side-channel
 /// observation under a single lock acquisition. Keeps the call sites
 /// terse and ensures we don't hold the lock across awaits.
-fn capture_stage_result(captures: &Mutex<StageFaultCaptures>, result: &ValidationResult) {
+///
+/// **Returns the captured `ValidationResult` by value, with `#[must_use]`.**
+/// In the common case the stage body uses it as a tail expression
+/// (`capture_stage_result(&caps, result)`) so the capture and the
+/// return are the same line. A few call sites side-channel before
+/// propagating a different error (e.g. shadow_tx soft-error arms) —
+/// those must explicitly `let _ = capture_stage_result(...)` to drop
+/// the return value, which makes the discipline visible at the call
+/// site. The lint is a partial defensive measure: it doesn't catch a
+/// stage that forgets to call the helper at all, only one that calls
+/// it and then accidentally discards the returned value without
+/// `let _`.
+#[must_use = "capture_stage_result returns the captured ValidationResult so the stage can forward it as a tail expression; if you intentionally discard it (e.g. you're propagating a different error), prefix the call with `let _ =` to make that explicit"]
+fn capture_stage_result(
+    captures: &Mutex<StageFaultCaptures>,
+    result: ValidationResult,
+) -> ValidationResult {
     // `expect` over `?` / silent fall-through: a poisoned lock here means
     // a stage body panicked while holding it (which we never do — the
     // critical section is just two `Option` writes). Propagating the
@@ -1331,7 +1352,8 @@ fn capture_stage_result(captures: &Mutex<StageFaultCaptures>, result: &Validatio
     captures
         .lock()
         .expect("StageFaultCaptures mutex poisoned")
-        .merge(result);
+        .merge(&result);
+    result
 }
 
 /// Convert a `ParentValidationResult` from the inner cancel future into a
@@ -2298,10 +2320,7 @@ mod side_channel_cancel_race_tests {
         let mk_stage = |result: Option<ValidationResult>,
                         captures: Arc<Mutex<StageFaultCaptures>>| async move {
             match result {
-                Some(r) => {
-                    capture_stage_result(&captures, &r);
-                    r
-                }
+                Some(r) => capture_stage_result(&captures, r),
                 None => pending::<ValidationResult>().await,
             }
         };
@@ -2392,6 +2411,88 @@ mod side_channel_cancel_race_tests {
         }
     }
 
+    /// Companion to `node_fault_with_pending_sibling_surfaces_through_side_channel`:
+    /// the side channel must surface ANY NodeFault variant under cancel,
+    /// not only `TaskPanicked` (which the C1 regression test uses).
+    /// Other production stages emit different NodeFault variants —
+    /// shadow_tx produces `ShadowTxNodeFault` for snapshot underflow,
+    /// the reth integration produces `ExecutionLayerTransportFailed`
+    /// for engine-RPC transport hiccups, etc. A regression where the
+    /// side channel only recognises `TaskPanicked` would silently
+    /// demote these to soft cancellation outcomes under load.
+    ///
+    /// Parameterised over the canonical non-TaskPanicked NodeFault
+    /// variants to assert the side-channel's NodeFault detection is
+    /// variant-agnostic (i.e. delegates to `is_node_fault()` rather
+    /// than matching specific variants).
+    #[rstest::rstest]
+    #[case::shadow_tx_node_fault(
+        ValidationError::ShadowTxNodeFault("treasury underflow".to_string())
+    )]
+    #[case::execution_layer_transport(
+        ValidationError::ExecutionLayerTransportFailed("engine rpc timeout".to_string())
+    )]
+    #[tokio::test]
+    async fn non_task_panicked_node_fault_surfaces_through_side_channel(
+        #[case] err: ValidationError,
+    ) {
+        // Sanity: the variant under test must actually be a NodeFault
+        // (otherwise the test would pass for the wrong reason — the
+        // side channel writes it but `into_cancel_result` filters by
+        // priority tier and would skip a soft variant).
+        let stage_result: ValidationResult = err.clone().into();
+        let ValidationResult::InternalFailure(ref inner) = stage_result else {
+            panic!(
+                "test precondition: {err:?} must dispatch to InternalFailure, got {stage_result:?}",
+            );
+        };
+        assert!(
+            inner.is_node_fault(),
+            "test precondition: {err:?} must classify as NodeFault for this test to be meaningful"
+        );
+
+        // Drive the same cancel race as the C1 regression. Slot 2 is
+        // permanently pending so `tokio::join!`'s combined future stays
+        // Pending and the cancel arm is the only escape.
+        let result = run_cancel_race([
+            Some(ValidationResult::Valid),
+            Some(stage_result),
+            None,
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+            Some(ValidationResult::Valid),
+        ])
+        .await;
+
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "side channel must surface {:?} as NodeFault under cancel, got soft: {:?}",
+                    err,
+                    inner.err()
+                );
+                // The captured variant must be the SAME one the stage
+                // emitted — the side channel's into_cancel_result must
+                // preserve identity, not just any-NodeFault.
+                assert_eq!(
+                    std::mem::discriminant(inner.err()),
+                    std::mem::discriminant(&err),
+                    "side channel must preserve the original NodeFault variant; \
+                     emitted {:?}, surfaced {:?}",
+                    err,
+                    inner.err()
+                );
+            }
+            other => panic!(
+                "non-TaskPanicked NodeFault wiring regression: expected \
+                 InternalFailure(node-fault) for {err:?}, got {other:?}. The side \
+                 channel's NodeFault detection is variant-specific instead of \
+                 delegating to `is_node_fault()`."
+            ),
+        }
+    }
+
     /// R2 audit (L3) — end-to-end wiring test for the H1 + C1 fixes.
     /// Exercises the real path: a `spawn_blocking` task panics, producing
     /// `JoinError::is_panic() = true`, which `classify_poa_join_error`
@@ -2438,9 +2539,9 @@ mod side_channel_cancel_race_tests {
                 Ok(()) => ValidationResult::Valid,
                 Err(join_err) => classify_poa_join_error(&join_err).into(),
             };
-            capture_stage_result(&poa_captures, &result);
+            let captured = capture_stage_result(&poa_captures, result);
             panic_captured_signal.notify_one();
-            result
+            captured
         };
 
         let mk_valid = || async { ValidationResult::Valid };

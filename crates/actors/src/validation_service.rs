@@ -397,19 +397,11 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
-                                // VDF Invalid is a terminal verdict for this
-                                // attempt — clear any stale concurrent-cancel
-                                // retry counter so a future fresh submission
-                                // of the same hash starts from zero. Mirrors
-                                // the H4 fix at the concurrent-stage Ok arm
-                                // (line ~496) and the panic arm (line ~657);
-                                // without it, a prior attempt's cancel
-                                // counter would silently shorten a fresh
-                                // attempt's retry budget.
-                                coordinator.clear_concurrent_cancel_retries(&hash);
-                                self.send_validation_result(
+                                vdf_terminal_finalize_via(
+                                    &mut coordinator,
+                                    &self.inner.service_senders.block_tree,
                                     hash,
-                                    ValidationError::VdfValidationFailed(vdf_error.to_string()).into(),
+                                    ValidationError::VdfValidationFailed(vdf_error.to_string()),
                                 );
                             }
                             VdfValidationResult::Cancelled => {
@@ -436,16 +428,13 @@ impl ValidationService {
                                     block.parent_hash = %parent_hash,
                                     "VDF Stage B: parent missing from block tree (eviction race); routing as SoftInternal"
                                 );
-                                // Terminal verdict — clear stale retry
-                                // budget. See the Invalid arm above for
-                                // the H4-mirror rationale.
-                                coordinator.clear_concurrent_cancel_retries(&hash);
-                                self.send_validation_result(
+                                vdf_terminal_finalize_via(
+                                    &mut coordinator,
+                                    &self.inner.service_senders.block_tree,
                                     hash,
                                     ValidationError::ParentBlockMissing {
                                         block_hash: parent_hash,
-                                    }
-                                    .into(),
+                                    },
                                 );
                             }
                         }
@@ -867,6 +856,30 @@ fn send_validation_result_via(
         return false;
     }
     true
+}
+
+/// VDF terminal-arm housekeeping: clear the per-hash concurrent-cancel
+/// retry counter (so a future fresh submission of the same hash starts
+/// from zero) and dispatch the validation result. Shared by the VDF
+/// `Invalid` and `ParentMissing` arms — both are terminal verdicts.
+///
+/// Mirrors the H4 fix at the concurrent-stage Ok arm and the panic arm
+/// in the validation select loop. Without the counter clear, a prior
+/// attempt's cancel counter would silently shorten the retry budget for
+/// a future resubmission. See `concurrent_cancel_retries` and
+/// `record_concurrent_cancel`.
+///
+/// Returns the same `bool` as the underlying `send_validation_result_via`
+/// (true on successful dispatch, false otherwise). Panics on node-fault
+/// delivery failure — see [`send_validation_result_via`].
+pub(in crate::validation_service) fn vdf_terminal_finalize_via(
+    coordinator: &mut active_validations::ValidationCoordinator,
+    block_tree_sender: &UnboundedSender<Traced<crate::block_tree_service::BlockTreeServiceMessage>>,
+    block_hash: BlockHash,
+    error: ValidationError,
+) -> bool {
+    coordinator.clear_concurrent_cancel_retries(&block_hash);
+    send_validation_result_via(block_tree_sender, block_hash, error.into())
 }
 
 impl ValidationServiceInner {

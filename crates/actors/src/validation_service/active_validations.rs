@@ -2237,4 +2237,86 @@ mod tests {
              the supervisor must NOT restart the node on this"
         );
     }
+
+    /// H4 — the VDF terminal arms (`Invalid` and `ParentMissing`) MUST
+    /// clear the `concurrent_cancel_retries` counter for the hash before
+    /// dispatching the result. Without the clear, a future fresh
+    /// submission of the same hash would inherit a stale counter from
+    /// the prior attempt and silently start with a shortened retry
+    /// budget — a poisoned-resubmission landmine.
+    ///
+    /// Drives the real `vdf_terminal_finalize_via` helper that the
+    /// production select-loop arms call. Mirrors
+    /// `cancel_retry_counter_cleared_on_verdict` (which covers the
+    /// Ok-arm path) for the terminal-VDF path.
+    #[tokio::test]
+    async fn vdf_terminal_finalize_clears_concurrent_cancel_retries() {
+        use crate::block_validation::ValidationError;
+        use crate::validation_service::vdf_terminal_finalize_via;
+
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // Seed the counter to cap-1 to simulate a prior burst of cancels
+        // on a previous attempt. Use the real production helper so the
+        // test is sensitive to any future refactor that changes the
+        // increment semantics.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+            "test precondition: counter must be at cap-1"
+        );
+
+        // Construct a real channel so the dispatch path actually fires
+        // (the helper returns true on success). We don't care about the
+        // dispatched payload here — the counter clear is the contract.
+        let (block_tree_sender, _block_tree_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // VDF Invalid arm: route a `VdfValidationFailed` (Consensus
+        // classification) through the helper. Counter must be cleared.
+        let dispatched = vdf_terminal_finalize_via(
+            &mut coordinator,
+            &block_tree_sender,
+            hash,
+            ValidationError::VdfValidationFailed("synthetic vdf failure".to_string()),
+        );
+        assert!(
+            dispatched,
+            "VDF Invalid terminal dispatch must succeed when the receiver is alive"
+        );
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "VDF Invalid terminal must clear concurrent_cancel_retries — without this, \
+             a future fresh submission's retry budget silently shortens (H4 landmine)"
+        );
+
+        // Re-seed the counter and exercise the VDF ParentMissing arm
+        // through the same helper. Same contract.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+        );
+        let dispatched = vdf_terminal_finalize_via(
+            &mut coordinator,
+            &block_tree_sender,
+            hash,
+            ValidationError::ParentBlockMissing {
+                block_hash: BlockHash::random(),
+            },
+        );
+        assert!(dispatched);
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "VDF ParentMissing terminal must clear concurrent_cancel_retries — \
+             same H4-mirror invariant as the Invalid arm"
+        );
+    }
 }

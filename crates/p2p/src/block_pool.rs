@@ -1705,6 +1705,86 @@ mod tests {
         assert!(!cached.is_fast_tracking);
     }
 
+    /// `add_block` must preserve `last_reprocess_at` across re-inserts
+    /// of the same block hash. The recovery flow for a SoftInternal
+    /// parked block is: gossip-driven retry → `dedup_status_for_gossip`
+    /// observes `ParkedReadyForRetry` and stamps `last_reprocess_at =
+    /// now` → `AttemptReprocessingBlock` fires → `process_block` calls
+    /// `add_block` again on the same hash. If `add_block` resets the
+    /// stamp to `None`, the 10s `REPROCESSING_COOLDOWN` no longer
+    /// survives across the retry: a concurrent gossip arrival during
+    /// reprocess would observe `ParkedReadyForRetry` again (because the
+    /// stamp is gone) and emit a SECOND reprocess message, reopening the
+    /// gossip-storm amplification path the H2 fix closed.
+    ///
+    /// This test pins the carry-forward behaviour. If a future
+    /// refactor of `add_block` regresses to `last_reprocess_at: None`,
+    /// the assertion fires.
+    #[test]
+    fn add_block_preserves_last_reprocess_at_across_reinsert() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xDA);
+        let block = make_sealed_block(parent, 5, Default::default());
+        let block_hash = block.header().block_hash;
+
+        // First insert: production path mints `last_reprocess_at = None`.
+        cache.add_block(Arc::clone(&block), false);
+        assert!(
+            cache.blocks.peek(&block_hash).is_some(),
+            "block must be in cache after add_block"
+        );
+        assert!(
+            cache
+                .blocks
+                .peek(&block_hash)
+                .expect("just-inserted")
+                .last_reprocess_at
+                .is_none(),
+            "fresh insert must have no reprocess stamp"
+        );
+
+        // Park the entry (is_processing = false) so `cache_dedup_status`
+        // takes the parked-block branch and stamps `last_reprocess_at`.
+        cache.change_block_processing_status(block_hash, false);
+
+        let stamp_time = Instant::now();
+        let status = cache.cache_dedup_status(&block_hash, stamp_time);
+        assert!(
+            matches!(status, Some(BlockDedupStatus::ParkedReadyForRetry)),
+            "parked entry with no prior stamp must classify ReadyForRetry, got {status:?}"
+        );
+        assert_eq!(
+            cache
+                .blocks
+                .peek(&block_hash)
+                .expect("entry must still be present")
+                .last_reprocess_at,
+            Some(stamp_time),
+            "cache_dedup_status must atomically stamp `last_reprocess_at` when returning ReadyForRetry"
+        );
+
+        // Re-insert the same block (mirrors `process_block` re-entering
+        // `add_block` after `AttemptReprocessingBlock` fires). The new
+        // entry must carry the prior stamp forward, NOT reset to None.
+        cache.add_block(Arc::clone(&block), false);
+
+        let after_reinsert = cache
+            .blocks
+            .peek(&block_hash)
+            .expect("re-insert must keep entry present");
+        assert_eq!(
+            after_reinsert.last_reprocess_at,
+            Some(stamp_time),
+            "add_block re-insert must preserve `last_reprocess_at` so the H2 \
+             reprocess cooldown survives across retries — resetting to None would \
+             reopen the gossip-storm amplification path"
+        );
+        assert!(
+            after_reinsert.is_processing,
+            "re-insert flips is_processing back to true (production semantics)"
+        );
+    }
+
     #[test]
     fn add_multiple_sibling_blocks_only_first_cached() {
         let mut cache = BlockCacheInner::new();
