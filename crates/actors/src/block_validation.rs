@@ -79,10 +79,18 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     pub fn is_node_fault(self) -> bool {
-        matches!(self, Self::NodeFault)
+        match self {
+            Self::NodeFault => true,
+            Self::SoftInternal => false,
+            Self::Consensus => false,
+        }
     }
     pub fn is_internal_failure(self) -> bool {
-        !matches!(self, Self::Consensus)
+        match self {
+            Self::NodeFault => true,
+            Self::SoftInternal => true,
+            Self::Consensus => false,
+        }
     }
 }
 
@@ -3165,6 +3173,36 @@ fn ledger_entry_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<(u64,
         .map(|l| (l.total_chunks, l.tx_root))
 }
 
+/// Gate a `block_index` lookup on `prev_hash` being the canonical block at
+/// `prev_height` according to `MigratedBlockHashes`.  Returns `Ok(())` when
+/// the hash matches; `Err(PoAOffCanonicalAncestor)` on mismatch;
+/// `Err(BlockBoundsLookupError)` on any MDBX failure.
+fn assert_canonical_via_migrated_hashes(
+    db: &DatabaseProvider,
+    prev_hash: BlockHash,
+    prev_height: u64,
+) -> Result<(), PreValidationError> {
+    let canonical_at_height = db
+        .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
+        .map_err(|e| {
+            PreValidationError::BlockBoundsLookupError(format!(
+                "MigratedBlockHashes view failed at height {prev_height}: {e}"
+            ))
+        })?
+        .map_err(|e| {
+            PreValidationError::BlockBoundsLookupError(format!(
+                "MigratedBlockHashes read failed at height {prev_height}: {e}"
+            ))
+        })?;
+    if canonical_at_height != Some(prev_hash) {
+        return Err(PreValidationError::PoAOffCanonicalAncestor {
+            ancestor_hash: prev_hash,
+            height: prev_height,
+        });
+    }
+    Ok(())
+}
+
 fn get_data_poa_bounds_with_block_tree_fallback(
     block_index_guard: &BlockIndexReadGuard,
     block_tree_guard: &BlockTreeReadGuard,
@@ -3275,24 +3313,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
             // block's chunks (the original C1 vulnerability). Gate the lookup
             // via `MigratedBlockHashes[prev_height]`.
             let prev_height = curr_height - 1;
-            let canonical_at_height = db
-                .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
-                .map_err(|e| {
-                    PreValidationError::BlockBoundsLookupError(format!(
-                        "MigratedBlockHashes view failed at height {prev_height}: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    PreValidationError::BlockBoundsLookupError(format!(
-                        "MigratedBlockHashes read failed at height {prev_height}: {e}"
-                    ))
-                })?;
-            if canonical_at_height != Some(prev_hash) {
-                return Err(PreValidationError::PoAOffCanonicalAncestor {
-                    ancestor_hash: prev_hash,
-                    height: prev_height,
-                });
-            }
+            assert_canonical_via_migrated_hashes(db, prev_hash, prev_height)?;
             // `prev_hash` is canonical at `prev_height`. Inline `Result` block
             // so `None` from `get_item` propagates as `BlockBoundsLookupError`
             // (node fault) rather than silently collapsing to `prev_total = 0`
@@ -3379,24 +3400,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 // be for the WRONG block (the C1 vulnerability prior to this
                 // fix). Gate via `MigratedBlockHashes[prev_height]`.
                 let prev_height = curr_height - 1;
-                let canonical_at_height = db
-                    .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "MigratedBlockHashes view failed at height {prev_height}: {e}"
-                        ))
-                    })?
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "MigratedBlockHashes read failed at height {prev_height}: {e}"
-                        ))
-                    })?;
-                if canonical_at_height != Some(prev_hash) {
-                    return Err(PreValidationError::PoAOffCanonicalAncestor {
-                        ancestor_hash: prev_hash,
-                        height: prev_height,
-                    });
-                }
+                assert_canonical_via_migrated_hashes(db, prev_hash, prev_height)?;
                 drop(tree);
                 let index = block_index_guard.read();
                 return index
@@ -4914,16 +4918,10 @@ pub async fn data_txs_are_valid(
                         // produced this `included_height` is Submit.  An
                         // `Err` is a local DB/header inconsistency that we
                         // surface as `BlockBoundsLookupError` for diagnostic
-                        // accuracy.  Classification follow-up:
-                        // `BlockBoundsLookupError` is intentionally NOT in
-                        // `is_internal_failure` on this branch (its PoA-side
-                        // producer still funnels peer cases through the same
-                        // variant); the disamb branch promotes it to
-                        // NodeFault after pre-filtering the peer cases.
-                        // Until then the `Err(_)` arm here remains
-                        // peer-attributable, the same effective behavior as
-                        // the pre-this-branch `PublishTxMissingPriorSubmit`
-                        // collapse.
+                        // accuracy.  `BlockBoundsLookupError` is classified as
+                        // `NodeFault` post-merge, so an `Err(_)` here panics +
+                        // restarts via `is_internal_failure`, matching the
+                        // `IrysBlockHeaders` and prev-header arms.
                         //
                         // We must *also* reject when this tx has already been
                         // canonically promoted past the in-window walk: the
@@ -4942,13 +4940,13 @@ pub async fn data_txs_are_valid(
                                 if let Some(promoted_height) = header.metadata().promoted_height
                                     && promoted_height <= parent_height
                                 {
-                                    // `promoted_height` is written by
-                                    // `persist_metadata` Phase 2 atomically
-                                    // with `MigratedBlockHashes[h]`, so a
-                                    // missing row here is cross-table
-                                    // corruption — surface as internal,
-                                    // matching the IrysBlockHeaders /
-                                    // prev-header arms.
+                                    // `MigratedBlockHashes[h]` is written by
+                                    // initial migration (`persist_block`) in the
+                                    // same MDBX tx as `promoted_height`, and rows
+                                    // in that table are never deleted — only
+                                    // overwritten on reorg. A missing row here is
+                                    // cross-table corruption — surface as internal,
+                                    // matching the IrysBlockHeaders / prev-header arms.
                                     let promoted_block_hash = ro_tx
                                         .get::<MigratedBlockHashes>(promoted_height)
                                         .map_err(|e| {

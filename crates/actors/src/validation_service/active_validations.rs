@@ -152,7 +152,7 @@ impl PreemptibleVdfTask {
                 // peer-attribute a node-side crash and fork us off the network.
                 // An external `abort()` (watchdog) is peer-innocent and requeues
                 // like any other cancellation. Mirrors the symmetric PoA pattern at
-                // `block_validation_task.rs:602-631` (`classify_poa_join_error`).
+                // `classify_poa_join_error` in `block_validation_task.rs`.
                 if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>() {
                     if blocking_failed.is_panic {
                         // Local verifier thread panicked — this is a node fault,

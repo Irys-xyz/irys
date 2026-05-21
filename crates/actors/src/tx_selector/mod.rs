@@ -904,17 +904,11 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                     Err(e) => {
-                        // TODO(block-producer-errors): the analogous lookup in
-                        // `data_txs_are_valid` (block_validation.rs:2783) treats
-                        // this Err as `BlockBoundsLookupError` — an internal
-                        // failure that the validation taxonomy promotes to
-                        // node-fault under `fix/validation-error-disamb`.  Here
-                        // we silently drop the publish candidate, which causes
-                        // quiet liveness loss for affected txs while the local
-                        // DB is inconsistent.  Re-evaluate as part of the
-                        // block-producer error-handling pass: should we abort
-                        // the round (Irrecoverable) so the producer's stance
-                        // matches validation's?
+                        // TODO(block-producer-errors): the validator path
+                        // (`data_txs_are_valid`) classifies this `Err` as a
+                        // node-fault and panics+restarts.  The producer here
+                        // still warn+continues.  Resolve via the block-producer
+                        // error-handling pass (tracked as a followup, F3).
                         crate::metrics::record_block_production_lookup_failed(
                             "publish_prior_submit",
                         );
@@ -1014,14 +1008,11 @@ async fn get_publish_txs_and_proofs(
                 Ok(result) => result,
                 Err(e) => {
                     // TODO(block-producer-errors): same asymmetry as the
-                    // `tx_header_by_txid_canonical` call above — the
-                    // validator-side invocation of `get_assigned_ingress_proofs`
-                    // (block_validation.rs:2969) uses `?` to surface this
-                    // `Err` as `BlockBoundsLookupError` → internal failure
-                    // under the disamb taxonomy.  Here we silently drop the
-                    // publish candidate.  Resolve in the block-producer
-                    // error-handling pass; for now, surface the drop via the
-                    // same counter so the asymmetry is operationally visible.
+                    // `tx_header_by_txid_canonical` call above — the validator
+                    // path (`get_assigned_ingress_proofs`) classifies this `Err`
+                    // as a node-fault and panics+restarts.  The producer here
+                    // still warn+continues.  Resolve via the block-producer
+                    // error-handling pass (tracked as a followup, F3).
                     crate::metrics::record_block_production_lookup_failed(
                         "assigned_ingress_proofs",
                     );

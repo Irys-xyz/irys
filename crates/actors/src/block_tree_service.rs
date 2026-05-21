@@ -173,10 +173,10 @@ fn emit_discard_log(
 /// Reachability invariant: only variants that
 /// [`ValidationError::classify`](crate::block_validation::ValidationError::classify)
 /// returns `ErrorClass::SoftInternal` for can reach this function.
-/// `on_block_validation_finished` (see `:532-549`) panics on node-fault
-/// `InternalFailure` before calling `discard_and_broadcast`, and routes
-/// `Consensus` outcomes to `DiscardKind::Invalid` (skipping the soft-internal
-/// recording site at `:1128-1138`). Anything else here is an upstream
+/// `on_block_validation_finished` panics on node-fault `InternalFailure`
+/// (the `is_node_fault()` branch) before calling `discard_and_broadcast`,
+/// and routes `Consensus` outcomes to `DiscardKind::Invalid` (skipping the
+/// soft-internal recording site in `discard_and_broadcast`). Anything else here is an upstream
 /// classification drift and surfaces as a compile error (via the exhaustive
 /// match) or a panic (via the `unreachable!` arms below).
 ///
@@ -217,8 +217,8 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         // inner-reason cardinality is a separate concern.
         VE::ValidationCancelled { .. } => "validation_cancelled",
 
-        // === NodeFault variants — filtered at `:532-543` (handler panics
-        // before reaching `discard_and_broadcast`). ===
+        // === NodeFault variants — filtered by `is_node_fault()` in
+        // `on_block_validation_finished` (panics before `discard_and_broadcast`). ===
         VE::TaskPanicked { .. } => {
             unreachable!(
                 "TaskPanicked is NodeFault; on_block_validation_finished panics before discard_and_broadcast"
@@ -235,9 +235,9 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
             )
         }
 
-        // === Consensus variants — filtered at `:553-554` (routed to
-        // `DiscardKind::Invalid`, which skips the soft-internal recording
-        // site at `:1128-1138`). ===
+        // === Consensus variants — routed to `DiscardKind::Invalid` in
+        // `on_block_validation_finished`, which skips the soft-internal
+        // recording site in `discard_and_broadcast`. ===
         VE::VdfValidationFailed(_)
         | VE::SeedDataInvalid(_)
         | VE::ExecutionLayerFailed(_)
