@@ -539,3 +539,179 @@ async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
     ctx.stop().await;
     Ok(())
 }
+
+/// Regression for the double-publish bypass via the canonical-DB fallback at
+/// `data_txs_are_valid`'s `Searching { ledger_current: Publish }` arm.
+///
+/// **Exploit shape:** a tx has already been canonically Submit-confirmed and
+/// Publish-promoted, but the prior Publish block sits outside
+/// `anchor_expiry_depth` from the new block's parent.  The in-window walk's
+/// `Found { historical: Publish, current: Publish }` arm — which would emit
+/// `PublishTxAlreadyIncluded` — never fires because the prior Publish is
+/// past the scan window.  Without a `promoted_height` check in the fallback,
+/// the canonical-DB lookup would accept the tx (warns + continues) and the
+/// peer would succeed in re-publishing.  The fix is to inspect the
+/// metadata's `promoted_height` and reject when set to a migrated height
+/// ≤ parent_height.
+///
+/// **Test driver:** force the in-window walk to be empty by overriding
+/// `tx_anchor_expiry_depth = 0`, then construct a Publish-ledger block whose
+/// tx already has both `included_height` and `promoted_height` set in
+/// `IrysDataTxMetadata` (with matching `MigratedBlockHashes` rows).  Expect
+/// `Err(PublishTxAlreadyIncluded { tx_id, block_hash })` matching the
+/// pre-populated promoted block hash.
+#[tokio::test]
+async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result<()> {
+    use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::{
+        insert_tx_header, set_data_tx_included_height, set_data_tx_promoted_height,
+    };
+    use irys_types::H256List;
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // `PrevalidationTestContext` lands `ctx.block` at height 1 (parent =
+    // genesis at height 0), so the bad block we'll build below has
+    // `parent_height = 0`.  Both `included_height` and `promoted_height`
+    // must be ≤ 0 for the fallback to consider the tx "already canonical";
+    // we collapse both onto the genesis row and pin the assertion to the
+    // genesis block hash already populated in `MigratedBlockHashes[0]`.
+    let genesis_block_hash = ctx
+        .node
+        .get_block_by_height(0)
+        .await
+        .expect("genesis block")
+        .block_hash;
+
+    // A Publish-ledger tx that will impersonate "already canonically
+    // promoted" via the pre-populated metadata below.
+    let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
+    tx.data_root = H256::from_low_u64_be(0x517A_1EBA_DD15);
+    tx.data_size = 0;
+    tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
+    tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
+    tx.ledger_id = DataLedger::Publish as u32;
+    let tx = tx
+        .sign(&ctx.config.signer())
+        .expect("Failed to sign test transaction");
+
+    // Pre-populate canonical metadata: tx was Submit-included AND
+    // Publish-promoted at genesis (same-block promotion).  Both heights are
+    // ≤ parent_height = 0; both share `MigratedBlockHashes[0]` which the
+    // node already populated with `genesis_block_hash`.  This is the
+    // minimum-viable canonical-storage state that exercises the fallback's
+    // `promoted_height` rejection without touching adjacent canonical
+    // rows.
+    let prior_submit_height = 0_u64;
+    let prior_publish_height = 0_u64;
+    ctx.node.node_ctx.db.update_eyre(|db_tx| {
+        // `tx_header_by_txid_canonical` reads `IrysDataTxHeaders` first, so
+        // metadata-only writes would surface as "tx unknown" — also
+        // populate the header table.
+        insert_tx_header(db_tx, &tx)?;
+        set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
+        set_data_tx_promoted_height(db_tx, &tx.id, prior_publish_height)?;
+        Ok(())
+    })?;
+
+    // Build a block whose Publish ledger re-includes `tx`.  Mirror the
+    // pattern from `test_prevalidation_rejects_submit_targeted_tx`: keep
+    // ctx.block as the structural baseline and swap the data ledgers.
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![tx.clone()];
+
+    let mut header = (**ctx.block.header()).clone();
+    let publish_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    publish_ledger.tx_ids = H256List(vec![tx.id]);
+    let submit_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    submit_ledger.tx_ids = H256List(Vec::new());
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    {
+        let mut tree = ctx.node.node_ctx.block_tree_guard.write();
+        let parent_hash = bad_block.header().previous_block_hash;
+        let commitment_snapshot = tree
+            .get_commitment_snapshot(&parent_hash)
+            .expect("parent commitment snapshot");
+        let epoch_snapshot = tree
+            .get_epoch_snapshot(&parent_hash)
+            .expect("parent epoch snapshot");
+        let ema_snapshot = tree
+            .get_ema_snapshot(&parent_hash)
+            .expect("parent ema snapshot");
+        tree.add_block(
+            &bad_block,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+        )?;
+    }
+
+    let (service_senders, mut service_receivers) = build_test_service_senders();
+    let block_tree_guard = ctx.node.node_ctx.block_tree_guard.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = service_receivers.block_tree.recv().await {
+            let BlockTreeServiceMessage::GetBlockTreeReadGuard { response } = msg.inner else {
+                continue;
+            };
+            let _ = response.send(block_tree_guard.clone());
+        }
+    });
+
+    // `tx_anchor_expiry_depth = 0` collapses the in-window walk to zero
+    // blocks, forcing every Publish-ledger tx to take the canonical-DB
+    // fallback path that this regression exists to cover.
+    let mut consensus = ctx.config.consensus_config();
+    consensus.mempool.tx_anchor_expiry_depth = 0;
+    let mut node_config = ctx.config.clone();
+    node_config.consensus = ConsensusOptions::Custom(consensus);
+    let config_override = Config::new_with_random_peer_id(node_config);
+
+    let cascade_active = {
+        let tree = ctx.node.node_ctx.block_tree_guard.read();
+        let epoch_snapshot = tree.canonical_epoch_snapshot();
+        config_override
+            .consensus
+            .hardforks
+            .is_cascade_active_for_epoch(&epoch_snapshot)
+    };
+
+    let result = irys_actors::block_validation::data_txs_are_valid(
+        &config_override,
+        &service_senders,
+        bad_block.header(),
+        &ctx.node.node_ctx.db,
+        &ctx.node.node_ctx.block_tree_guard,
+        bad_block.transactions(),
+        cascade_active,
+    )
+    .await;
+
+    match result {
+        Err(PreValidationError::PublishTxAlreadyIncluded { tx_id, block_hash }) => {
+            assert_eq!(tx_id, tx.id, "rejection must name the doubly-published tx");
+            assert_eq!(
+                block_hash, genesis_block_hash,
+                "rejection must surface the canonical promoted-block hash from MigratedBlockHashes (= genesis hash in this fixture)"
+            );
+        }
+        other => panic!(
+            "expected PublishTxAlreadyIncluded via canonical-DB fallback, got {:?}",
+            other
+        ),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
