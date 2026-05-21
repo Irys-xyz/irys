@@ -3609,7 +3609,7 @@ fn get_submit_ledger_slot_assignments(
     partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
     partition_assignments
         .iter()
-        .map(|pa| pa.slot_index.unwrap())
+        .map(|pa| pa.slot_index.expect("Submit-ledger partition assignment must have slot_index — invariant from epoch_snapshot"))
         .collect()
 }
 

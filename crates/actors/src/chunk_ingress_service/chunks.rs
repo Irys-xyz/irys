@@ -542,6 +542,8 @@ impl ChunkIngressServiceInner {
         // `tx_inclusion::find_canonical_ledger_range` at validation /
         // promotion time.  An empty set, by contrast, means no writer has
         // ever attached this data_root to a block, so we short-circuit.
+        // After a reorg that empties block_set, the next canonical confirmation
+        // re-populates it via the mempool BlockConfirmed path (lifecycle.rs:96).
         if cdr.block_set.is_empty() {
             return Ok(());
         }
