@@ -7,7 +7,7 @@ use irys_types::{
     SystemLedger, Traced, app_state::DatabaseProvider,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, RwLock},
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -202,6 +202,7 @@ impl BlockMigrationService {
         // in debug builds, before any DB I/O.
         #[cfg(debug_assertions)]
         {
+            use std::collections::HashSet;
             let confirmed_submit: HashSet<H256> = blocks_to_confirm
                 .iter()
                 .flat_map(|b| b.transactions().get_ledger_txs(DataLedger::Submit))
