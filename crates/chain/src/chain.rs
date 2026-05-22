@@ -912,7 +912,6 @@ impl IrysNode {
             let config = ctx.config.clone();
             let storage_modules = ctx.storage_modules_guard.clone();
             let mempool_pledge_provider = ctx.mempool_pledge_provider.clone();
-            let latest_block = Arc::clone(&latest_block);
             let sync_state = ctx.sync_state.clone();
             // this is a task as we don't want to block startup, & it lets us gossip blocks to the peer in the auto_stake_pledge test so it syncs to the network tip
             runtime_handle.spawn(async move {
@@ -930,32 +929,48 @@ impl IrysNode {
                     )
                     .await;
                 }
-                let config = config;
-                let latest_block = latest_block;
                 let mut validation_tracker =
                     BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
-                // wait for any pending blocks to finish validating
-                let latest_hash = validation_tracker
+                // Wait for any pending blocks to finish validating so the canonical
+                // tip is stable before we pick an anchor.
+                validation_tracker
                     .wait_for_validation()
                     .await
                     .context("Unable to wait for validation to finish")
                     .unwrap();
 
-                {
+                // Anchor commitments at `tip - block_migration_depth`. This
+                // satisfies both anchor windows simultaneously:
+                //   * mempool ingress (`latest_height - tx_anchor_expiry_depth`
+                //     <= anchor_height), which the stale pre-sync `latest_block`
+                //     used to violate on long-syncing nodes (InvalidAnchor at
+                //     submit), and
+                //   * block-production selection in `tx_selector`, which also
+                //     requires `anchor_height <= latest_height - block_migration_depth`
+                //     and would reject the bare tip as "too new" until the chain
+                //     advances another `block_migration_depth` blocks.
+                // Saturating-sub so chains shorter than `block_migration_depth`
+                // (e.g. tests with just genesis + a couple blocks) fall back to
+                // the oldest in-memory entry, which is genesis in practice.
+                let (anchor_hash, anchor_height, tip_height) = {
                     let btrg = block_tree_guard.read();
-                    debug!(
-                        "Checking stakes & pledges at height {}, latest hash: {}",
-                        btrg.get_canonical_chain().0.last().unwrap().height(),
-                        &latest_hash
-                    );
+                    let chain = &btrg.get_canonical_chain().0;
+                    let tip_idx = chain.len().saturating_sub(1);
+                    let tip = &chain[tip_idx];
+                    let depth = config.consensus.block_migration_depth as usize;
+                    let anchor_idx = tip_idx.saturating_sub(depth);
+                    let anchor = &chain[anchor_idx];
+                    (anchor.block_hash(), anchor.height(), tip.height())
                 };
-                // TODO: add code to proactively grab the latest head block from peers
-                // this only really affects tests, as in a network deployment other nodes will be continuously mining & gossiping, which will trigger a sync to the network head
+                debug!(
+                    "Checking stakes & pledges at tip height {tip_height}, \
+                     anchoring at height {anchor_height} (hash {anchor_hash})"
+                );
                 stake_and_pledge(
                     &config,
                     block_tree_guard,
                     storage_modules,
-                    latest_block.block_hash,
+                    anchor_hash,
                     mempool_pledge_provider,
                 )
                 .await
@@ -2563,11 +2578,26 @@ async fn stake_and_pledge(
 
     let api_uri = config.node_config.local_api_url();
 
-    let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
+    let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| -> eyre::Result<()> {
         let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment-tx", api_uri);
 
-        client.post(url).json(commitment_tx).send().await
+        let resp = client
+            .post(&url)
+            .json(commitment_tx)
+            .send()
+            .await
+            .with_context(|| format!("POST {url} failed"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            eyre::bail!(
+                "POST {url} returned {status} for commitment tx {:?}: {body}",
+                commitment_tx.id()
+            );
+        }
+        Ok(())
     };
 
     // now check the canonical state
@@ -2603,7 +2633,9 @@ async fn stake_and_pledge(
 
         total_cost += stake_tx.total_cost();
 
-        post_commitment_tx(&stake_tx).await.unwrap();
+        post_commitment_tx(&stake_tx)
+            .await
+            .context("posting stake tx")?;
         debug!(
             "Posted stake tx {:?} (value: {}, fee: {})",
             &stake_tx.id(),
@@ -2645,7 +2677,9 @@ async fn stake_and_pledge(
 
         signer.sign_commitment(&mut pledge_tx)?;
 
-        post_commitment_tx(&pledge_tx).await.unwrap();
+        post_commitment_tx(&pledge_tx)
+            .await
+            .with_context(|| format!("posting pledge tx {}/{}", idx + 1, to_pledge_count))?;
         total_cost += pledge_tx.total_cost();
         metrics::record_pledge_tx_posted();
 
