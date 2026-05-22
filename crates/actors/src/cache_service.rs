@@ -741,6 +741,11 @@ impl InnerCacheTask {
     /// needed because block-hash pruning does not need to be serialised.
     fn spawn_prune_block_hash_task(&self, data_root: DataRoot, block_hash: H256) {
         let clone = self.clone();
+        // Deliberately NO catch_unwind here: this task has no completion signal
+        // to forward to the actor loop. A panic loses one block_set entry but
+        // doesn't jam the queue (contrast with spawn_prune_txids_task,
+        // spawn_pruning_task, and spawn_epoch_processing, which all wrap their
+        // body in catch_unwind to protect their completion signals).
         std::thread::spawn(move || {
             let result = clone.db.update_eyre(|db_tx| {
                 let Some(mut cached) = cached_data_root_by_data_root(db_tx, data_root)? else {
