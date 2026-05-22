@@ -4919,7 +4919,7 @@ pub async fn data_txs_are_valid(
                         // `Err` is a local DB/header inconsistency that we
                         // surface as `BlockBoundsLookupError` for diagnostic
                         // accuracy.  `BlockBoundsLookupError` is classified as
-                        // `NodeFault` post-merge, so an `Err(_)` here panics +
+                        // `NodeFault`, so an `Err(_)` here panics +
                         // restarts via `is_internal_failure`, matching the
                         // `IrysBlockHeaders` and prev-header arms.
                         //
