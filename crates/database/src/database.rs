@@ -19,9 +19,9 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseProvider, DatabaseVersion, H256, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE,
-    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
+    H256, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
+    LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -187,57 +187,120 @@ pub fn tx_header_by_txid<T: DbTx>(
     }
 }
 
-/// Gets a [`DataTransactionHeader`] by its [`IrysTransactionId`], but only if it was
-/// included (Submit ledger) on the canonical chain at or before `max_height`.
+/// Fork-aware canonical-height lookups
+/// ====================================
 ///
-/// This prevents accepting tx headers that were persisted from orphaned forks or
-/// that were included in blocks beyond a given parent height.
+/// `IrysDataTxMetadata` (the non-fork-aware hint table written from
+/// whatever block last became the local node's tip at a given height) is
+/// not safe to trust on its own when answering "is this tx canonically
+/// included on the chain a validator is currently evaluating?".  An
+/// orphaned tip can leave a stranded `included_height` / `promoted_height`
+/// behind, and Phase-1 scrub only fires on reorg.
 ///
-/// Checks:
-/// 1. The tx header exists in `IrysDataTxHeaders`
-/// 2. Its `included_height` metadata is set and ≤ `max_height`
-/// 3. The block at `included_height` in `MigratedBlockHashes` is canonical
+/// `MigratedBlockHashes` (MBH) IS fork-aware past `block_migration_depth`
+/// — `validate_reorg_within_migration_depth` aborts any reorg that would
+/// rewrite a migrated row, so MBH attests the canonical hash from every
+/// chain's perspective.
 ///
-/// Returns `Ok(None)` if any check fails.
-pub fn tx_header_by_txid_canonical<T: DbTx>(
+/// The two helpers in this section return a height from `IrysDataTxMetadata`
+/// only if MBH confirms it ≤ `max_height`.  They return primitive
+/// `Option<u64>` (no header mutation) so call sites can't accidentally
+/// treat a stranded hint as canonical.
+///
+/// **Fork-awareness caveat (reorg-readiness).**  The "MBH-verified ⇒
+/// canonical-on-every-chain" inference rests on `block_migration_depth`
+/// being the absolute reorg ceiling.  If deeper reorgs are ever permitted,
+/// MBH rows past `block_migration_depth` become a LOCAL-canonical view
+/// that can disagree with the chain a validator is evaluating.  These
+/// helpers (and every site that reads from them) must be audited together
+/// with the `Searching { Publish }` arm in `data_txs_are_valid` when that
+/// invariant changes.
+fn canonical_metadata_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
     max_height: u64,
-) -> eyre::Result<Option<DataTransactionHeader>> {
-    let Some(header) = tx_header_by_txid(tx, txid)? else {
+    pick: impl FnOnce(&DataTransactionMetadata) -> Option<u64>,
+    field_name: &'static str,
+) -> eyre::Result<Option<u64>> {
+    let Some(metadata) = crate::get_data_tx_metadata(tx, txid)? else {
         return Ok(None);
     };
-
-    // The tx must have an included_height (set during block migration)
-    let Some(included_height) = header.metadata().included_height else {
-        debug!(tx.id = %txid, "DB fallback: tx has no included_height metadata, rejecting");
+    let Some(height) = pick(&metadata) else {
         return Ok(None);
     };
-
-    // The inclusion must be at or before the parent's height
-    if included_height > max_height {
+    if height > max_height {
         debug!(
             tx.id = %txid,
-            tx.included_height = included_height,
+            tx.height = height,
             max_height,
-            "DB fallback: tx included_height exceeds parent height, rejecting"
+            field = field_name,
+            "canonical lookup: metadata height exceeds max_height — rejecting hint"
         );
         return Ok(None);
     }
-
-    // Verify the height has been migrated (canonical chain reached this height)
-    // If MigratedBlockHashes has an entry, that height is on the canonical chain
-    let canonical_hash = tx.get::<MigratedBlockHashes>(included_height)?;
-    if canonical_hash.is_none() {
+    if tx.get::<MigratedBlockHashes>(height)?.is_none() {
         debug!(
             tx.id = %txid,
-            tx.included_height = included_height,
-            "DB fallback: height not yet migrated, cannot verify canonicality, rejecting"
+            tx.height = height,
+            field = field_name,
+            "canonical lookup: MigratedBlockHashes has no row for hint — rejecting (stranded write or unmigrated)"
         );
         return Ok(None);
     }
+    Ok(Some(height))
+}
 
-    Ok(Some(header))
+/// Returns the MBH-verified Submit-ledger inclusion height of `txid`, if
+/// any, capped at `max_height`.
+///
+/// `Some(h)` means: `IrysDataTxMetadata` carries `included_height = h ≤
+/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).  The
+/// raw header table is not consulted — Submit confirmation is purely a
+/// metadata-vs-MBH question.
+///
+/// `None` means: tx unknown, metadata missing, hint > `max_height`, OR
+/// hint not confirmed by MBH (stranded local-tip write).  Callers cannot
+/// distinguish these cases from the return value alone — by design, since
+/// they all share the same outcome at every existing call site ("no
+/// canonical Submit at or below `max_height`").
+pub fn canonical_submit_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    canonical_metadata_height(
+        tx,
+        txid,
+        max_height,
+        |m| m.included_height,
+        "included_height",
+    )
+}
+
+/// Returns the MBH-verified Publish (promotion) height of `txid`, if any,
+/// capped at `max_height`.
+///
+/// `Some(h)` means: `IrysDataTxMetadata` carries `promoted_height = h ≤
+/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).
+///
+/// `None` is the validator-safe answer for *all* of: tx unknown, no
+/// `promoted_height` hint, hint > `max_height`, OR hint not confirmed by
+/// MBH.  This is the explicit fix for the stranded-`promoted_height` bug
+/// where an orphaned local-tip write left a hint behind that
+/// `MigratedBlockHashes` never recorded — previously read as cross-table
+/// corruption, now correctly classified as "no canonical promotion."
+pub fn canonical_promoted_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    canonical_metadata_height(
+        tx,
+        txid,
+        max_height,
+        |m| m.promoted_height,
+        "promoted_height",
+    )
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -1025,10 +1088,11 @@ mod tests {
         Ok(())
     }
 
-    mod tx_header_by_txid_canonical_tests {
+    mod canonical_height_tests {
         use crate::{
-            db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
-            tables::IrysTables, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
+            canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
+            db_index::set_data_tx_included_height, db_index::set_data_tx_promoted_height,
+            insert_tx_header, tables::IrysTables, tables::MigratedBlockHashes,
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
@@ -1053,8 +1117,9 @@ mod tests {
         #[case::height_equals_max(5, true, true)]
         #[case::height_exceeds_max(3, true, false)]
         #[case::unmigrated_height(10, false, false)]
-        /// Verifies `tx_header_by_txid_canonical` respects both height bounds and migration status.
-        fn canonical_lookup(
+        /// `canonical_submit_height` returns Some iff metadata is set, ≤ max_height,
+        /// and confirmed by `MigratedBlockHashes`.
+        fn submit_height_respects_bounds_and_migration(
             #[case] max_height: u64,
             #[case] insert_migration: bool,
             #[case] expect_found: bool,
@@ -1084,12 +1149,176 @@ mod tests {
             .unwrap();
 
             let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, max_height))
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, max_height))
                 .unwrap();
             assert_eq!(
                 result.is_some(),
                 expect_found,
                 "max_height={max_height}, migrated={insert_migration} => found={expect_found}"
+            );
+        }
+
+        /// Regression for the stranded-`promoted_height` bug.  Setup mirrors
+        /// the production fault that crashed the validator with
+        /// `BlockBoundsLookupError`:
+        ///   - tx has `included_height = 5` with `MBH[5]` set (canonical Submit)
+        ///   - tx has `promoted_height = 24688` with `MBH[24688] = None`
+        ///     (writer block became a local tip via FCFS tie-break, was
+        ///     later orphaned, never migrated, and the node didn't reorg
+        ///     away from it so Phase 1 scrub never ran).
+        ///
+        /// Pre-fix the validator's DB fallback raised
+        /// `BlockBoundsLookupError` (NodeFault → restart) on the MBH
+        /// mismatch.  Post-fix `canonical_promoted_height` returns `None`
+        /// for the same input — the explicit "no canonical promotion per
+        /// the migration index" signal the validator now relies on to fall
+        /// through to accept.
+        ///
+        /// `canonical_submit_height` independently still returns
+        /// `Some(submit_height)` — the Submit row is MBH-confirmed, only
+        /// the Publish row is stranded.
+        #[test]
+        fn promoted_height_returns_none_when_mbh_disagrees() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let canonical_submit_hash = H256::random();
+            let submit_height = 5_u64;
+            let stranded_promote_height = 24_688_u64;
+            let parent_height = 25_000_u64;
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                // Canonical Submit inclusion: metadata hint + MBH agree.
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, canonical_submit_hash)?;
+                // Stranded promotion: metadata hint set, MBH deliberately absent.
+                set_data_tx_promoted_height(tx, &tx_id, stranded_promote_height)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let submit = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+
+            assert_eq!(
+                submit,
+                Some(submit_height),
+                "canonical_submit_height must still attest the MBH-confirmed Submit row"
+            );
+            assert_eq!(
+                promoted, None,
+                "canonical_promoted_height MUST be None when MBH[promoted_height] is None; \
+                 a Some(_) here would let the validator treat the stranded \
+                 non-fork-aware hint as canonical evidence of a prior promotion \
+                 (the original BlockBoundsLookupError-then-NodeFault bug)"
+            );
+        }
+
+        /// Companion to `promoted_height_returns_none_when_mbh_disagrees`:
+        /// when MBH agrees, `canonical_promoted_height` MUST surface the
+        /// hint — otherwise the validator's legitimate double-publish
+        /// signal disappears.
+        #[test]
+        fn promoted_height_returns_some_when_mbh_agrees() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let submit_hash = H256::random();
+            let publish_hash = H256::random();
+            let submit_height = 5_u64;
+            let promote_height = 7_u64;
+            let parent_height = 25_000_u64;
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                set_data_tx_promoted_height(tx, &tx_id, promote_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, submit_hash)?;
+                tx.put::<MigratedBlockHashes>(promote_height, publish_hash)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let submit = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+
+            assert_eq!(submit, Some(submit_height));
+            assert_eq!(
+                promoted,
+                Some(promote_height),
+                "MBH-confirmed promotion must survive the cross-check"
+            );
+        }
+
+        /// `canonical_promoted_height` rejects hints above `max_height`,
+        /// mirroring the existing `included_height > max_height` rejection.
+        /// A peer could otherwise present metadata claiming a future
+        /// promotion that hasn't happened yet from the validator's
+        /// vantage point.
+        #[test]
+        fn promoted_height_returns_none_when_above_max_height() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let submit_height = 3_u64;
+            let promote_height = 10_u64;
+            let parent_height = 5_u64; // < promote_height
+            let submit_hash = H256::random();
+            let publish_hash = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                set_data_tx_promoted_height(tx, &tx_id, promote_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, submit_hash)?;
+                tx.put::<MigratedBlockHashes>(promote_height, publish_hash)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+            assert_eq!(
+                promoted, None,
+                "promoted_height > max_height must return None — \
+                 it's not visible to the validator's parent_height window"
             );
         }
     }

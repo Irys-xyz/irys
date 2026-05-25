@@ -11,8 +11,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
-    tx_header_by_txid_canonical,
+    cached_data_root_by_data_root, canonical_submit_height, ingress_proofs_by_data_root,
+    tx_header_by_txid,
 };
 use irys_domain::{
     BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
@@ -890,7 +890,7 @@ async fn get_publish_txs_and_proofs(
             if !submit_txs_from_canonical.contains(&tx_header.id) {
                 match ctx
                     .db
-                    .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_header.id, current_height))
+                    .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
                 {
                     Ok(Some(_)) => {
                         // canonical Submit inclusion past the live-tree window
@@ -916,7 +916,7 @@ async fn get_publish_txs_and_proofs(
                             tx.id = ?tx_header.id,
                             tx.data_root = ?tx_header.data_root,
                             error = %e,
-                            "tx_header_by_txid_canonical failed for publish candidate; skipping"
+                            "canonical_submit_height failed for publish candidate; skipping"
                         );
                         continue;
                     }
@@ -1008,7 +1008,7 @@ async fn get_publish_txs_and_proofs(
                 Ok(result) => result,
                 Err(e) => {
                     // TODO(block-producer-errors): same asymmetry as the
-                    // `tx_header_by_txid_canonical` call above — the validator
+                    // `canonical_submit_height` call above — the validator
                     // path (`get_assigned_ingress_proofs`) classifies this `Err`
                     // as a node-fault and panics+restarts.  The producer here
                     // still warn+continues.  Resolve via the block-producer

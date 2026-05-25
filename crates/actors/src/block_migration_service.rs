@@ -32,10 +32,17 @@ pub struct BlockMigrationService {
 /// is populated — every downstream loop that iterates body txs (block_set
 /// mutation, `insert_tx_header`, etc.) silently no-ops, while
 /// `write_data_ledger_metadata` reads from `header.data_ledgers` and writes
-/// `included_height` / `promoted_height` anyway.  The result is metadata rows
-/// for tx_ids that `IrysDataTxHeaders` has no entry for —
-/// `tx_header_by_txid_canonical` then returns `Ok(None)` for those tx_ids
-/// (see `database.rs:207-209`), silently masking the divergence.
+/// `included_height` / `promoted_height` anyway.  `persist_block` also
+/// writes `MigratedBlockHashes[height]` body-independently.  The result is
+/// `IrysDataTxMetadata` + `MigratedBlockHashes` rows for tx_ids that
+/// `IrysDataTxHeaders` has no entry for — `canonical_submit_height` /
+/// `canonical_promoted_height` would return `Some(height)` for those
+/// tx_ids, surfacing the divergence to the validator as a consensus-
+/// relevant false positive ("canonically included" for a tx_id with no
+/// header).  The pre-refactor `tx_header_by_txid_canonical` masked this by
+/// gating on `IrysDataTxHeaders`; the new helpers don't, so this guard is
+/// now load-bearing — fail loudly here rather than let the divergence
+/// escape.
 ///
 /// Compare as sorted lists — same-length-different-ids must also fail loudly.
 fn ensure_header_body_consistent(block: &SealedBlock) -> eyre::Result<()> {
@@ -1383,8 +1390,11 @@ mod tests {
     /// trigger the guard when its header advertises a tx_id its body lacks.
     /// Prior to broadening, only Submit was checked, so a stripped
     /// OneYear/ThirtyDay/Publish body would silently write `included_height` /
-    /// `promoted_height` rows for tx_ids `IrysDataTxHeaders` has no entry
-    /// for — `tx_header_by_txid_canonical` then returns `Ok(None)` for them.
+    /// `promoted_height` rows alongside `MigratedBlockHashes[height]` for
+    /// tx_ids `IrysDataTxHeaders` has no entry for — `canonical_submit_height`
+    /// / `canonical_promoted_height` would return `Some(height)` for them
+    /// (both metadata and MBH get written body-independently), surfacing the
+    /// divergence to the validator as a consensus-relevant false positive.
     #[rstest::rstest]
     #[case::submit(DataLedger::Submit)]
     #[case::publish(DataLedger::Publish)]

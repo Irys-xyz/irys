@@ -8,7 +8,9 @@ use crate::{
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
-use irys_database::{tables::MigratedBlockHashes, tx_header_by_txid_canonical};
+use irys_database::{
+    canonical_promoted_height, canonical_submit_height, tables::MigratedBlockHashes,
+};
 use irys_domain::{
     BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, HardforkConfigExt as _,
@@ -4885,7 +4887,15 @@ pub async fn data_txs_are_valid(
         );
     }
 
-    // Step 3: Check past inclusions only for non-promoted txs
+    // Step 3: Check past inclusions only for non-promoted txs.
+    //
+    // Walk depth is `tx_anchor_expiry_depth`: anchor-expiry semantics
+    // bound any legitimate prior inclusion of `block`'s txs to within
+    // this window of `block`, regardless of how deep reorgs go (see the
+    // docblock on `get_previous_tx_inclusions` for the derivation).
+    // Deeper reorg support changes which chain the block tree buffers,
+    // not where on `block`'s chain a tx with a given anchor can have
+    // been included.
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
@@ -4910,93 +4920,119 @@ pub async fn data_txs_are_valid(
                 match ledger_current {
                     DataLedger::Publish => {
                         // Past Submit inclusion was not in the historical scan
-                        // window — fall back to the canonical DB index.  A
-                        // `Some` here is sufficient evidence of prior Submit:
-                        // the structural pre-pass guarantees `tx.ledger_id ==
-                        // Publish`, and term ledgers reject `ledger_id ==
-                        // Publish`, so the only term ledger that could have
-                        // produced this `included_height` is Submit.  An
-                        // `Err` is a local DB/header inconsistency that we
-                        // surface as `BlockBoundsLookupError` for diagnostic
-                        // accuracy.  `BlockBoundsLookupError` is classified as
-                        // `NodeFault`, so an `Err(_)` here panics +
-                        // restarts via `is_internal_failure`, matching the
-                        // `IrysBlockHeaders` and prev-header arms.
+                        // window — fall back to the fork-aware canonical-
+                        // height getters in `irys_database`.
                         //
-                        // We must *also* reject when this tx has already been
-                        // canonically promoted past the in-window walk: the
-                        // walk's `Found { historical: Publish, current:
-                        // Publish }` arm correctly emits
-                        // `PublishTxAlreadyIncluded`, but that arm is
-                        // unreachable when the prior Publish block sits
-                        // outside `anchor_expiry_depth`.  Without a
-                        // `promoted_height` check here a peer can re-publish
-                        // a tx at `h_publish + anchor_expiry_depth + N` and
-                        // get a `warn!`+accept instead of the consensus-level
-                        // double-include rejection.
+                        // `canonical_submit_height` is sufficient evidence of
+                        // prior Submit: the structural pre-pass guarantees
+                        // `tx.ledger_id == Publish`, and term ledgers reject
+                        // `ledger_id == Publish`, so the only term ledger
+                        // that could have produced an `included_height` is
+                        // Submit.  An MDBX I/O failure is a local fault that
+                        // we surface as `BlockBoundsLookupError` (classified
+                        // as `NodeFault`, so the caller aborts rather than
+                        // peer-attributing the local DB error).
+                        //
+                        // Defense-in-depth `canonical_promoted_height`
+                        // rejection.  Under the current invariants this is
+                        // effectively unreachable for legitimate prior
+                        // promotions: anchor expiry forces any legitimate
+                        // prior Publish of a tx in `block` to lie within
+                        // `tx_anchor_expiry_depth` of `block` (see
+                        // `get_previous_tx_inclusions`'s derivation), so the
+                        // parent walk above would have surfaced it as
+                        // `Found { historical: Publish, current: Publish }`
+                        // before we reach `Searching`.  The check is kept
+                        // as a safety net against a future bug that lets a
+                        // prior promotion escape the walk.
+                        //
+                        // FORK-AWARENESS CAVEAT (reorg-readiness): the
+                        // rejection's `block_hash` is taken from
+                        // `MigratedBlockHashes[promoted_height]`, which today
+                        // is fork-invariant past `block_migration_depth`
+                        // (deeper reorgs are aborted, so migrated rows are
+                        // irreversibly canonical from every chain's
+                        // perspective).  When deeper reorgs land, MBH past
+                        // migration_depth becomes a LOCAL-canonical view
+                        // that can disagree with `block`'s chain — this
+                        // check would then report `PublishTxAlreadyIncluded`
+                        // for a tx that isn't actually promoted on
+                        // `block`'s chain.
+                        // The same invariant change breaks
+                        // `canonical_promoted_height` / `canonical_submit_height`:
+                        // their "MBH-verified ⇒ canonical" contracts rely on
+                        // `block_migration_depth` being the absolute reorg
+                        // ceiling.  Audit this arm and those helpers (and
+                        // every site that consumes them, e.g. tx_selector's
+                        // prior-Submit fallback) together when changing
+                        // that invariant.
                         let parent_height = block.height.saturating_sub(1);
-                        match tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height) {
-                            Ok(Some(header)) => {
-                                if let Some(promoted_height) = header.metadata().promoted_height
-                                    && promoted_height <= parent_height
-                                {
-                                    // `MigratedBlockHashes[h]` is written by
-                                    // initial migration (`persist_block`) in the
-                                    // same MDBX tx as `promoted_height`, and rows
-                                    // in that table are never deleted — only
-                                    // overwritten on reorg. A missing row here is
-                                    // cross-table corruption — surface as internal,
-                                    // matching the IrysBlockHeaders / prev-header arms.
-                                    let promoted_block_hash = ro_tx
-                                        .get::<MigratedBlockHashes>(promoted_height)
-                                        .map_err(|e| {
-                                            PreValidationError::BlockBoundsLookupError(format!(
-                                                "MigratedBlockHashes read failed for promoted_height {} of tx {}: {}",
-                                                promoted_height, tx.id, e
-                                            ))
-                                        })?
-                                        .ok_or_else(|| {
-                                            PreValidationError::BlockBoundsLookupError(format!(
-                                                "canonical metadata inconsistent: tx {} has promoted_height {} but MigratedBlockHashes has no row at that height",
-                                                tx.id, promoted_height
-                                            ))
-                                        })?;
-                                    return Err(PreValidationError::PublishTxAlreadyIncluded {
-                                        tx_id: tx.id,
-                                        block_hash: promoted_block_hash,
-                                    });
-                                }
-                                warn!(
-                                    tx.id = %tx.id,
-                                    parent_height,
-                                    "submit inclusion not in anchor window; resolved via canonical DB index"
-                                );
-                            }
-                            Ok(None) => {
-                                // Publish tx with no past inclusion - INVALID
-                                return Err(PreValidationError::PublishTxMissingPriorSubmit {
-                                    tx_id: tx.id,
-                                });
-                            }
-                            Err(e) => {
-                                // Local MDBX I/O failure during the canonical-DB
-                                // prior-Submit lookup. Surface as
-                                // `BlockBoundsLookupError`, matching the
-                                // neighbouring `MigratedBlockHashes` /
-                                // header-resolution arms above; our classifier
-                                // routes that variant as NodeFault, so the
-                                // caller aborts rather than peer-attributing
-                                // the local DB error.
+
+                        let submit_lookup =
+                            canonical_submit_height(&ro_tx, &tx.id, parent_height).map_err(|e| {
                                 error!(
-                                    "tx_header_by_txid_canonical DB error for tx {}: {}",
+                                    "canonical_submit_height DB error for tx {}: {}",
                                     &tx.id, &e
                                 );
-                                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                                    "tx_header_by_txid_canonical failed for tx {} during prior-Submit check: {}",
+                                PreValidationError::BlockBoundsLookupError(format!(
+                                    "canonical_submit_height failed for tx {} during prior-Submit check: {}",
                                     tx.id, e
-                                )));
-                            }
+                                ))
+                            })?;
+                        if submit_lookup.is_none() {
+                            // Publish tx with no canonical prior Submit - INVALID
+                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                tx_id: tx.id,
+                            });
                         }
+
+                        let promoted_lookup =
+                            canonical_promoted_height(&ro_tx, &tx.id, parent_height).map_err(
+                                |e| {
+                                    error!(
+                                        "canonical_promoted_height DB error for tx {}: {}",
+                                        &tx.id, &e
+                                    );
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "canonical_promoted_height failed for tx {} during prior-Publish check: {}",
+                                        tx.id, e
+                                    ))
+                                },
+                            )?;
+                        if let Some(promoted_height) = promoted_lookup {
+                            // `canonical_promoted_height` already attested
+                            // `MBH[promoted_height] = Some` inside this
+                            // snapshot; a missing row on re-read would mean
+                            // MDBX returned a different value for the same
+                            // key within one read tx — cross-table
+                            // corruption, surfaced as NodeFault.
+                            let promoted_block_hash = ro_tx
+                                .get::<MigratedBlockHashes>(promoted_height)
+                                .map_err(|e| {
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "MigratedBlockHashes read failed for promoted_height {} of tx {}: {}",
+                                        promoted_height, tx.id, e
+                                    ))
+                                })?
+                                .ok_or_else(|| {
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "snapshot-inconsistent MigratedBlockHashes: \
+                                         canonical_promoted_height attested MBH[{}] = Some, \
+                                         but a re-read returned None (tx {})",
+                                        promoted_height, tx.id
+                                    ))
+                                })?;
+                            return Err(PreValidationError::PublishTxAlreadyIncluded {
+                                tx_id: tx.id,
+                                block_hash: promoted_block_hash,
+                            });
+                        }
+
+                        warn!(
+                            tx.id = %tx.id,
+                            parent_height,
+                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index"
+                        );
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
@@ -5570,11 +5606,50 @@ enum TxInclusionState {
     },
 }
 
+/// Walks `block_under_validation`'s ancestors via the block tree (DB fallback
+/// for tree-evicted headers), updating each entry in `tx_ids` with the
+/// inclusion state found on this chain.
+///
+/// **Fork-awareness contract.**  This walk is the validator's fork-aware
+/// source for prior inclusions of `block_under_validation`'s txs.  It is
+/// both *sufficient* and *tight*: every legitimate prior inclusion of any
+/// tx in `block_under_validation` necessarily lies within
+/// `tx_anchor_expiry_depth` blocks of `block_under_validation`, and no
+/// legitimate prior inclusion can lie outside it.
+///
+/// **Derivation of the bound.**  For any tx in `block_under_validation`
+/// with signed anchor `A`:
+///   * `block_under_validation.height ≤ A + tx_anchor_expiry_depth` —
+///     `block_under_validation` itself must include the tx with an
+///     unexpired anchor.
+///   * Any prior canonical inclusion `I` of that tx has the *same* `A`
+///     (the tx_id is derived from the signed payload, which includes the
+///     anchor — re-anchoring produces a different tx_id), and must also
+///     satisfy `I ≤ A + tx_anchor_expiry_depth`.
+///   * Combined: `I ∈ [block_under_validation.height − tx_anchor_expiry_depth,
+///     block_under_validation.height − 1]`.
+///
+/// Note that `I ≥ 1` is implicit: `build_unsigned_irys_genesis_block`
+/// constructs height 0 with `tx_ids = H256List::new()` for every data ledger,
+/// so no tx can have a prior inclusion at genesis.  The loop below relies on
+/// that fact to short-circuit at `block.1 == 0` without inspecting genesis.
+///
+/// So `walk_depth = tx_anchor_expiry_depth` covers exactly the reachable
+/// range of any prior inclusion `block_under_validation` could have.
+/// Walking deeper does no harm but is wasted work; walking shallower
+/// (e.g. `block_migration_depth`) would leave a legitimate-inclusion
+/// window uncovered and would force the DB fallback to bear correctness
+/// responsibility it isn't structurally equipped for (see the
+/// `Searching { ledger_current: Publish }` arm in `data_txs_are_valid`).
+///
+/// The bound is independent of reorg depth: deeper reorgs change which
+/// chain `block_tree` buffers but not where on `block_under_validation`'s
+/// chain a tx with a given anchor can have been included.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,
-    anchor_expiry_depth: u64,
+    walk_depth: u64,
     service_senders: &ServiceSenders,
     db: &DatabaseProvider,
 ) -> eyre::Result<()> {
@@ -5591,15 +5666,13 @@ async fn get_previous_tx_inclusions(
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
-    let min_anchor_height = block_under_validation
-        .height
-        .saturating_sub(anchor_expiry_depth);
+    let walk_min_height = block_under_validation.height.saturating_sub(walk_depth);
 
     let mut block = (
         block_under_validation.block_hash,
         block_under_validation.height,
     );
-    while block.1 >= min_anchor_height {
+    while block.1 >= walk_min_height {
         // Stop if we've reached the genesis block
         if block.1 == 0 {
             break;

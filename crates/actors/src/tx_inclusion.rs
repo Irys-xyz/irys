@@ -13,9 +13,7 @@
 //!      + `MigratedBlockHashes` — O(1) DB read once the confirming block
 //!      has migrated out of the tree window.
 
-use irys_database::{
-    block_header_by_hash, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
-};
+use irys_database::{block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes};
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::{
     DataLedger, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
@@ -69,28 +67,22 @@ fn lookup_via_migrated_metadata(
     max_height: u64,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<LedgerChunkRange>> {
-    // `tx_header_by_txid_canonical` already enforces, inside this same MDBX
-    // snapshot:
-    //   - tx exists
-    //   - included_height is set
-    //   - included_height ≤ max_height
+    // `canonical_submit_height` enforces, inside this same MDBX snapshot:
+    //   - tx metadata exists with `included_height` set
+    //   - `included_height ≤ max_height`
     //   - `MigratedBlockHashes[included_height]` is `Some` (canonical)
     db.view(|tx| -> eyre::Result<Option<LedgerChunkRange>> {
-        let Some(header) = tx_header_by_txid_canonical(tx, tx_id, max_height)? else {
+        let Some(included_height) = canonical_submit_height(tx, tx_id, max_height)? else {
             return Ok(None);
         };
-        // Both `included_height` and `MigratedBlockHashes[included_height]`
-        // are guaranteed `Some` by the canonical-lookup contract above.  A
-        // missing row here would mean MDBX returned a different value for
-        // the same key within one snapshot — treat as corruption, matching
-        // the IrysBlockHeaders / prev-header arms below.
-        let included_height = header
-            .metadata()
-            .included_height
-            .expect("tx_header_by_txid_canonical guarantees included_height is Some");
+        // `MigratedBlockHashes[included_height]` was attested by
+        // `canonical_submit_height` inside this snapshot.  A missing row on
+        // re-read would mean MDBX returned a different value for the same
+        // key within one snapshot — treat as corruption, matching the
+        // IrysBlockHeaders / prev-header arms below.
         let block_hash = tx.get::<MigratedBlockHashes>(included_height)?.ok_or_else(|| {
             eyre::eyre!(
-                "canonical metadata inconsistent: tx_header_by_txid_canonical attested MigratedBlockHashes[{}] was Some, but a re-read in the same snapshot returned None",
+                "canonical metadata inconsistent: canonical_submit_height attested MigratedBlockHashes[{}] was Some, but a re-read in the same snapshot returned None",
                 included_height,
             )
         })?;
