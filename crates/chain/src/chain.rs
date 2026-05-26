@@ -932,12 +932,18 @@ impl IrysNode {
                 let mut validation_tracker =
                     BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
                 // Wait for any pending blocks to finish validating so the canonical
-                // tip is stable before we pick an anchor.
-                validation_tracker
+                // tip is stable before we pick an anchor. This task is detached
+                // (no JoinHandle held); log and return instead of panicking so
+                // an auto-stake/pledge failure does not silently terminate the
+                // task or take down the runtime.
+                if let Err(e) = validation_tracker
                     .wait_for_validation()
                     .await
                     .context("Unable to wait for validation to finish")
-                    .unwrap();
+                {
+                    tracing::error!(error = ?e, "auto stake/pledge: aborting before anchor selection");
+                    return;
+                }
 
                 // Anchor commitments at `tip - block_migration_depth`. This
                 // satisfies both anchor windows simultaneously:
@@ -957,7 +963,8 @@ impl IrysNode {
                     let chain = &btrg.get_canonical_chain().0;
                     let tip_idx = chain.len().saturating_sub(1);
                     let tip = &chain[tip_idx];
-                    let depth = config.consensus.block_migration_depth as usize;
+                    let depth = usize::try_from(config.consensus.block_migration_depth)
+                        .expect("block_migration_depth u32 fits usize");
                     let anchor_idx = tip_idx.saturating_sub(depth);
                     let anchor = &chain[anchor_idx];
                     (anchor.block_hash(), anchor.height(), tip.height())
@@ -966,7 +973,7 @@ impl IrysNode {
                     "Checking stakes & pledges at tip height {tip_height}, \
                      anchoring at height {anchor_height} (hash {anchor_hash})"
                 );
-                stake_and_pledge(
+                if let Err(e) = stake_and_pledge(
                     &config,
                     block_tree_guard,
                     storage_modules,
@@ -975,7 +982,9 @@ impl IrysNode {
                 )
                 .await
                 .context("Unable to automatically stake & pledge")
-                .unwrap()
+                {
+                    tracing::error!(error = ?e, "auto stake/pledge failed");
+                }
             });
         }
 
