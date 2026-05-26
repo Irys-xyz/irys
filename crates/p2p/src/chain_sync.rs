@@ -1,4 +1,5 @@
 use crate::block_pool::{BlockRemovalReason, CriticalBlockPoolError, FailureReason};
+use crate::types::AdvisoryGossipError;
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
 use irys_actors::MempoolFacade;
@@ -446,6 +447,12 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     Some("prev_block_not_found")
                 }
                 GossipError::BlockPool(_) => Some("block_pool_other"),
+                // Block stays in cache for retry — see is_advisory() branch at
+                // line 461. Distinct metric so operators can tell apart "we
+                // dropped the block" from "we kept it for retry".
+                GossipError::Advisory(AdvisoryGossipError::BlockPoolError(_)) => {
+                    Some("block_pool_advisory_retain_cache")
+                }
                 _ => None,
             };
             if let Some(reason) = rejection_reason {

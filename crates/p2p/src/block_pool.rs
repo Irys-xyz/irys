@@ -140,6 +140,13 @@ pub enum CriticalBlockPoolError {
 pub enum AdvisoryBlockPoolError {
     #[error("Block {0:?} has already been processed")]
     AlreadyProcessed(BlockHash),
+    /// Transient internal failure (not peer-attributable) that should NOT
+    /// evict the block from cache. Routed by the `SoftInternal` arm of
+    /// prevalidation classification so the next gossip arrival (or orphan
+    /// resolve) retries against the same cached block. No peer-scoring
+    /// penalty because the error reflects local state, not the peer's data.
+    #[error("Transient internal block-pool failure (block stays cached for retry): {0}")]
+    TransientInternal(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -1120,9 +1127,16 @@ where
                             .await;
                         self.sync_state
                             .record_block_processing_error(pre_err.to_string());
-                        return Err(
-                            CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into()
-                        );
+                        // Route through `Advisory` so `GossipError::is_advisory()`
+                        // returns true and chain-sync's eviction (chain_sync.rs:461)
+                        // is skipped — the block stays in cache for the next
+                        // gossip arrival or orphan-resolve to retry. The intent
+                        // here was always "keep cached + clear is_processing",
+                        // but returning `Critical` defeated it via chain-sync's
+                        // non-advisory eviction path.
+                        return Err(BlockPoolError::Advisory(
+                            AdvisoryBlockPoolError::TransientInternal(pre_err.to_string()),
+                        ));
                     }
                     // Consensus rejection: peer's block is genuinely invalid.
                     // Fall through to the outer error/remove/return path so
