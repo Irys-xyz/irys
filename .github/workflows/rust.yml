@@ -148,6 +148,11 @@ jobs:
             SHOULD_RUN=true
           fi
 
+          # always run on deployment branches (testnet/mainnet/devnet carry env patches)
+          if [[ "${{ github.ref }}" == refs/heads/deployment/* ]]; then
+            SHOULD_RUN=true
+          fi
+
           # always run on workflow_dispatch
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SHOULD_RUN=true
