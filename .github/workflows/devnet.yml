@@ -1,0 +1,96 @@
+name: Devnet Build
+
+concurrency:
+  group: devnet
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Commit SHA on deployment/devnet (defaults to HEAD of the branch)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    name: build and push devnet image
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || 'deployment/devnet' }}
+          fetch-depth: 0
+
+      - name: Resolve commit
+        id: resolve
+        run: |
+          SHA=$(git rev-parse HEAD)
+          SHORT=$(echo "$SHA" | cut -c1-12)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate commit is on deployment/devnet
+        env:
+          COMMIT_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          BRANCHES=$(git branch -r --contains "${COMMIT_SHA}" | grep 'origin/deployment/devnet$' || true)
+          if [ -z "$BRANCHES" ]; then
+            echo "::error::Commit ${COMMIT_SHA} is not on deployment/devnet"
+            echo "Found on branches:"
+            git branch -r --contains "${COMMIT_SHA}"
+            exit 1
+          fi
+          echo "Commit on deployment/devnet"
+
+      - name: Set image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LOWER}/irys-devnet" >> "$GITHUB_OUTPUT"
+
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless.sh &
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+            || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build Docker image
+        env:
+          COMMIT_SHA: ${{ steps.resolve.outputs.sha }}
+          SHORT_SHA: ${{ steps.resolve.outputs.short }}
+        run: |
+          docker build \
+            --file ./docker/Dockerfile.release \
+            --build-arg GIT_COMMIT="${COMMIT_SHA}" \
+            --build-arg GIT_SHA="${COMMIT_SHA}" \
+            --build-arg GIT_HAS_TAG=false \
+            --build-arg GIT_DIRTY=false \
+            --tag "${{ steps.image.outputs.name }}:${SHORT_SHA}" \
+            --tag "${{ steps.image.outputs.name }}:latest" \
+            .
+
+      - name: Push images
+        env:
+          SHORT_SHA: ${{ steps.resolve.outputs.short }}
+        run: |
+          docker push "${{ steps.image.outputs.name }}:${SHORT_SHA}"
+          docker push "${{ steps.image.outputs.name }}:latest"
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker system prune -a -f --volumes || true
+          pkill -f dockerd-rootless.sh || true
+          sleep 2
+          rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
+          rm -rf ~/.local/share/docker/* || true
