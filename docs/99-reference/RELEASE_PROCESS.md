@@ -82,17 +82,68 @@ Both git and Docker have head-tracking tags that are updated automatically:
 
 These are force-updated on every successful release. They can also be manually moved for rollback via the **Docker Retag** workflow.
 
-## Approval Gates
+## Initial Repo Setup
 
-The release-touching workflows (`release.yml`, `docker.yml`, `docker-retag.yml`) declare `environment: ${{ inputs.<env> }}` on their build/publish jobs. Three matching environments must exist in the repo's **Settings → Environments** for the workflows to run:
+These steps run once per repo, before the first release ever lands. They establish the GitHub Environments the workflows consult, the long-lived branches the release flow needs, and the protection rules that gate writes to them.
 
-| Environment name | Used by                                                  | Suggested protection rules                              |
+### 1. GitHub Environments
+
+The release-touching workflows (`release.yml`, `docker.yml`, `docker-retag.yml`) declare `environment: ${{ inputs.<env> }}` on their build/publish jobs. Three matching environments must exist in **Settings → Environments** or the workflows will fail to start with "environment was not found".
+
+| Environment | Used by | Suggested protection rules |
 |---|---|---|
-| `devnet`  | `docker.yml`                                             | None — devnet builds on demand.                         |
-| `testnet` | `release.yml`, `docker.yml`, `docker-retag.yml`          | Optional reviewers; testnet is the rc path.             |
-| `mainnet` | `release.yml`, `docker.yml`, `docker-retag.yml`          | Required reviewers; the gate before any mainnet write. |
+| `devnet`  | `docker.yml` | None — devnet builds on demand. |
+| `testnet` | `release.yml`, `docker.yml`, `docker-retag.yml` | Optional reviewers; testnet is the rc path. |
+| `mainnet` | `release.yml`, `docker.yml`, `docker-retag.yml` | **Required reviewers** — the gate before any mainnet write. |
 
-Required reviewers configured on the `mainnet` environment apply to every job that uses `environment: mainnet`, so a single setting covers cutting a mainnet release, an emergency Docker rebuild into the mainnet stream, and a Docker retag/rollback of mainnet's `latest`.
+Required reviewers on `mainnet` apply to every job that uses `environment: mainnet`, so a single setting covers cutting a release, an emergency Docker rebuild, and a Docker retag/rollback. The environments are global to the repo — they do not need to be re-created per release branch.
+
+### 2. Self-Hosted Runners
+
+The workflows pin to `[self-hosted, misc-runner]` and `[self-hosted, test-runner]` labels. Runner setup lives in the [`Irys-CI`](https://github.com/Irys-xyz/Irys-CI) repo and registers runners at repo or org scope. The release flow only needs `misc-runner`.
+
+### 3. Long-Lived Branches
+
+Create and protect:
+
+- `master` — already exists.
+- `deployment/devnet` — branch from `master`.
+
+Branch protection on all of these (and on the per-major release branches below) should require: PR review, passing CI, no force-push, no direct delete.
+
+### 4. First Release Branch
+
+Follow [Per-Release-Branch Setup](#per-release-branch-setup) below for the first `release/<major>.x`.
+
+## Per-Release-Branch Setup
+
+Each time you start a new release line — typically a new major version — three branches need to exist before you can dispatch the release workflow against them.
+
+```bash
+# Pick the major you're cutting. The example below uses 1.
+MAJOR=1
+
+git fetch origin
+git checkout master
+git pull --ff-only
+
+# 1. Long-lived release branch — canonical version source.
+git checkout -b "release/${MAJOR}.x" master
+git push -u origin "release/${MAJOR}.x"
+
+# 2. Deployment branches — one per env, branched from the release branch.
+git checkout -b "deployment/testnet/${MAJOR}.x" "release/${MAJOR}.x"
+git push -u origin "deployment/testnet/${MAJOR}.x"
+
+git checkout -b "deployment/mainnet/${MAJOR}.x" "release/${MAJOR}.x"
+git push -u origin "deployment/mainnet/${MAJOR}.x"
+```
+
+Then in **Settings → Branches**, apply branch protection to all three new branches with the same rules as `master` (PR review, CI, no force-push). The Irys-CI runners listen for jobs from `release/*` and `deployment/*` already — see `rust.yml` for the always-run conditions.
+
+You do **not** need to create new GitHub Environments for a new release branch. The three environments configured in [Initial Repo Setup](#1-github-environments) are reused across all majors.
+
+After the branches exist, follow [`RELEASE_PLAYBOOK.md`](./RELEASE_PLAYBOOK.md) to cut the first release on that major (cherry-pick → version bump → merge forward → dispatch).
 
 ## Hotfixes
 
