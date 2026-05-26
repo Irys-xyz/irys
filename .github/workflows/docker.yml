@@ -1,5 +1,12 @@
 name: Docker Rebuild
 
+# Serialize with release.yml / docker-retag.yml (same group) so a manual rebuild
+# can't race a release or rollback and overwrite :latest or a version tag
+# mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,16 +48,26 @@ jobs:
     steps:
       - name: Validate inputs
         env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_COMMIT: ${{ inputs.commit }}
         run: |
-          if ! [[ "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-            echo "::error::Invalid tag format: $INPUT_TAG"
-            exit 1
-          fi
           if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
             echo "::error::Invalid commit SHA format: $INPUT_COMMIT"
             exit 1
+          fi
+          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
+            # devnet images are tagged by short-sha — allow the looser format
+            if ! [[ "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+              echo "::error::Invalid tag format: $INPUT_TAG"
+              exit 1
+            fi
+          else
+            # testnet/mainnet rebuild a released version — tag must be semver X.Y.Z
+            if ! [[ "$INPUT_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::For $INPUT_ENVIRONMENT, tag must be semver X.Y.Z, got: $INPUT_TAG"
+              exit 1
+            fi
           fi
 
       - uses: actions/checkout@v4
@@ -58,6 +75,45 @@ jobs:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+
+      # Mirror release.yml / devnet.yml: don't let the rebuild path publish a
+      # mislabeled image. The commit must live on the matching deployment branch,
+      # and for testnet/mainnet the Cargo.toml version must equal the tag.
+      - name: Validate commit provenance
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
+            echo "::error::Commit ${INPUT_COMMIT} does not exist"
+            exit 1
+          fi
+
+          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
+            EXPECTED_BRANCH="origin/deployment/devnet"
+          else
+            MAJOR="${INPUT_TAG%%.*}"
+            EXPECTED_BRANCH="origin/deployment/${INPUT_ENVIRONMENT}/${MAJOR}.x"
+          fi
+          if ! git branch -r --contains "${INPUT_COMMIT}" \
+              | sed 's/^[[:space:]]*//' \
+              | grep -Fxq "$EXPECTED_BRANCH"; then
+            echo "::error::Commit ${INPUT_COMMIT} is not on $EXPECTED_BRANCH"
+            echo "Found on branches:"
+            git branch -r --contains "${INPUT_COMMIT}"
+            exit 1
+          fi
+
+          if [[ "$INPUT_ENVIRONMENT" != "devnet" ]]; then
+            CARGO_VER=$(git show "${INPUT_COMMIT}:crates/chain/Cargo.toml" \
+              | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
+            if [ "$CARGO_VER" != "${INPUT_TAG}" ]; then
+              echo "::error::Tag ${INPUT_TAG} does not match irys-chain Cargo.toml version $CARGO_VER at ${INPUT_COMMIT}"
+              exit 1
+            fi
+            echo "Version validated: ${INPUT_TAG} matches irys-chain $CARGO_VER"
+          fi
 
       - name: Set lowercase image name
         id: image
@@ -83,12 +139,21 @@ jobs:
       - name: Build and push Docker image
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
         run: |
+          # testnet/mainnet rebuild a tagged release, so the embedded version must
+          # match the original (X.Y.Z+irys, has_tag=true). devnet has no release
+          # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/chain/build.rs.
+          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
+            GIT_HAS_TAG=false
+          else
+            GIT_HAS_TAG=true
+          fi
           docker build \
             --file ./docker/Dockerfile.release \
             --build-arg GIT_COMMIT="${INPUT_COMMIT}" \
             --build-arg GIT_SHA="${INPUT_COMMIT}" \
-            --build-arg GIT_HAS_TAG=false \
+            --build-arg GIT_HAS_TAG="${GIT_HAS_TAG}" \
             --build-arg GIT_DIRTY=false \
             --tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} \
             .

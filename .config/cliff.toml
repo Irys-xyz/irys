@@ -27,6 +27,12 @@ conventional_commits = true
 filter_unconventional = true
 protect_breaking_commits = true
 sort_commits = "oldest"
+# Releases live on diverged branches (deployment/testnet/<major>.x vs
+# deployment/mainnet/<major>.x), each with its own tag lineage. Restrict version
+# boundaries to tags reachable on the branch being released so a tag from another
+# release line can't be picked as the previous-release boundary. (release.yml
+# also passes --ignore-tags ^testnet- for mainnet as a backstop.)
+use_branch_tags = true
 
 commit_preprocessors = [
     # Strip trailing periods from commit messages

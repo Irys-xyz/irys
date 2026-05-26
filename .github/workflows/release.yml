@@ -57,7 +57,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
+          # Credentials persisted (read-only token): the tag-existence and
+          # mainnet merge-base gates below must read authoritative tag state
+          # from origin, not stale local tags left on reused self-hosted runners.
+
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
 
       - name: Validate commit exists on deployment/<env>/<major>.x matching the version
         env:
@@ -181,6 +186,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Mirror local tags to origin so save_head reads the true previous
+      # <env>-latest position (and a stale local version tag can't survive).
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
 
       - name: Set image name
         id: image
@@ -376,6 +386,7 @@ jobs:
           else
             echo "::warning::No previous head-tracking git tag $HEAD_TAG existed, deleting"
             git push origin --delete "$HEAD_TAG" || true
+            git tag -d "$HEAD_TAG" 2>/dev/null || true
           fi
 
       - name: Tear down rootless Docker

@@ -58,6 +58,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Resolve_git below reads the source git tag's commit; mirror local tags to
+      # origin first so a stale local tag on a reused runner can't move
+      # <env>-latest to a commit that was never published.
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
+
       - name: Set image name
         id: image
         env:
