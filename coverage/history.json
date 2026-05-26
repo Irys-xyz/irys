@@ -208,5 +208,12 @@
     "total_lines": 86642,
     "covered_lines": 63482,
     "percentage": 73.27
+  },
+  {
+    "date": "2026-05-26T09:32:26Z",
+    "commit": "f5f31b306a08",
+    "total_lines": 92113,
+    "covered_lines": 68532,
+    "percentage": 74.4
   }
 ]
