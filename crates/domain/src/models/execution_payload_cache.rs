@@ -408,10 +408,27 @@ impl ExecutionPayloadCache {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(ExecutionPayloadWaitError::WaitTimeout {
-                evm_block_hash: *evm_block_hash,
-                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            }),
+            Err(_) => {
+                let elapsed_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                // We hit the documented worst case: peer advertised the
+                // header (or the request-retry budget elapsed without anyone
+                // ACKing) but the payload never arrived within `wait_timeout`.
+                // The layered budget (request_budget ~50s + wait_timeout
+                // ~60s) is intentional — see the DEFERRED block above — but
+                // a tripped wait_timeout in prod is interesting enough that
+                // operators want it surfaced above the default log level.
+                tracing::warn!(
+                    evm_block_hash = ?evm_block_hash,
+                    elapsed_ms,
+                    wait_timeout_ms = u64::try_from(self.wait_timeout.as_millis()).unwrap_or(u64::MAX),
+                    "execution_payload_cache: wait_for_sealed_block hit WaitTimeout — payload-withholding lane (block parks for retry, not a node fault)"
+                );
+                Err(ExecutionPayloadWaitError::WaitTimeout {
+                    evm_block_hash: *evm_block_hash,
+                    elapsed_ms,
+                })
+            }
         }
     }
 
