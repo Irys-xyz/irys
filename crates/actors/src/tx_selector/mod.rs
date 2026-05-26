@@ -191,7 +191,16 @@ pub async fn select_best_txs(
         "Starting mempool transaction selection"
     );
 
-    // Collect confirmed commitment transactions from canonical chain to avoid duplicates
+    // Collect confirmed commitment transactions from canonical chain to avoid duplicates.
+    //
+    // TODO(tx-selector-onchain-filter): `canonical` here includes `Validated`
+    // and `NotOnchain(ValidBlock)` entries per `get_canonical_chain` (see
+    // `block_tree.rs:686-749`), not just `Onchain`. Under reorg replay, a
+    // dedup-against-Validated entry can briefly drop a commitment that should
+    // have been included. Self-correcting (next block re-includes it; no
+    // consensus impact), but worth filtering to Onchain-only to match the
+    // pattern in `tx_inclusion::lookup_via_block_tree:167-179`. Same gap at
+    // the `submit_txs_from_canonical` site below — fix both together.
     for entry in canonical.iter() {
         let commitment_ledger = entry
             .header()
@@ -859,7 +868,17 @@ async fn get_publish_txs_and_proofs(
                 .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
-        // reduce down the canonical chain to the txs in the submit ledger
+        // reduce down the canonical chain to the txs in the submit ledger.
+        //
+        // TODO(tx-selector-onchain-filter): same `canonical` includes-non-Onchain
+        // issue as the commitment-dedup site above. Under reorg replay, a
+        // `Validated` entry can leak its Submit tx_ids here, making the
+        // fast-path say "already submitted" for a tx whose Submit inclusion is
+        // about to be rolled back. The producer then skips the DB fallback
+        // (line ~893) and includes the tx as a publish candidate; peer
+        // validators catch any genuine double-publish via Vector B's
+        // canonical-DB check, so the worst case is a rejected block (no
+        // consensus impact, producer pays the cost).
         let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
             acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
             acc
