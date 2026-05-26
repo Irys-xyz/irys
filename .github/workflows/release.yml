@@ -19,11 +19,11 @@ on:
         required: true
         type: string
       commit:
-        description: 'Commit SHA on a release/* branch'
+        description: 'Commit SHA on a deployment/<env>/<major>.x branch'
         required: true
         type: string
       force:
-        description: 'Skip RC validation check (emergency hotfixes only)'
+        description: 'Skip testnet-tag validation check (emergency hotfixes only)'
         required: false
         type: boolean
         default: false
@@ -134,8 +134,14 @@ jobs:
           fi
 
           TESTNET_COMMIT=$(git rev-parse "refs/tags/$TESTNET_TAG^{commit}")
-          TESTNET_BASE=$(git merge-base "$TESTNET_COMMIT" "$RELEASE_BRANCH")
-          MAINNET_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH")
+          if ! TESTNET_BASE=$(git merge-base "$TESTNET_COMMIT" "$RELEASE_BRANCH"); then
+            echo "::error::No common ancestor between testnet tag $TESTNET_TAG and $RELEASE_BRANCH"
+            exit 1
+          fi
+          if ! MAINNET_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH"); then
+            echo "::error::No common ancestor between mainnet commit ${INPUT_COMMIT} and $RELEASE_BRANCH"
+            exit 1
+          fi
           if [ "$TESTNET_BASE" != "$MAINNET_BASE" ]; then
             echo "::error::Testnet tag $TESTNET_TAG and mainnet commit ${INPUT_COMMIT} have different $RELEASE_BRANCH ancestors"
             echo "  testnet merge-base: $TESTNET_BASE"
