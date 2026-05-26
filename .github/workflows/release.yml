@@ -238,13 +238,11 @@ jobs:
         run: |
           docker push "${{ steps.image.outputs.name }}:${DOCKER_TAG}"
 
-      - name: Update head-tracking Docker tag
-        id: head_docker
-        if: ${{ !inputs.dry_run }}
-        run: |
-          docker tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" "${{ steps.image.outputs.name }}:latest"
-          docker push "${{ steps.image.outputs.name }}:latest"
-
+      # Head-tracking git tag is updated BEFORE the GH release create, so a
+      # failure in `gh release create` rolls everything (git tag + head git)
+      # back together. The Docker `:latest` retag is deferred to the very last
+      # step so a failure there leaves `:latest` on the previous release
+      # rather than on a release that we then rolled back.
       - name: Save current head-tracking git tag position
         id: save_head
         if: ${{ !inputs.dry_run }}
@@ -324,6 +322,27 @@ jobs:
             --target "${INPUT_COMMIT}" \
             -F /tmp/release-body.md \
             "${RELEASE_TAG}"
+
+      # Moving Docker `:latest` is the last write of the release flow and is
+      # non-fatal: if it fails, the version-tagged image and the GH release
+      # are already published, so the operator can recover by re-running
+      # docker-retag.yml. Marked continue-on-error so we don't trigger the
+      # cleanup steps below (which would roll back the now-published release).
+      - name: Update head-tracking Docker tag
+        id: head_docker
+        if: ${{ !inputs.dry_run }}
+        continue-on-error: true
+        run: |
+          docker tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" "${{ steps.image.outputs.name }}:latest"
+          docker push "${{ steps.image.outputs.name }}:latest"
+
+      - name: Warn if head-tracking Docker tag was not moved
+        if: ${{ !inputs.dry_run && steps.head_docker.outcome == 'failure' }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          DOCKER_TAG: ${{ env.DOCKER_TAG }}
+        run: |
+          echo "::warning::${IMAGE_NAME}:latest was NOT updated. Run docker-retag.yml with source_tag=${DOCKER_TAG} target_tag=latest to fix."
 
       # --- Cleanup: runs on failure to remove orphaned git tags ---
 

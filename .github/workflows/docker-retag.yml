@@ -66,6 +66,30 @@ jobs:
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_ENVIRONMENT}" >> "$GITHUB_OUTPUT"
 
+      # Resolve the git side BEFORE touching the Docker daemon so a missing
+      # source git tag fails the job before we've pulled anything or moved
+      # any image. The inconsistency window between Docker push and git tag
+      # move is unavoidable without a registry-side manifest copy tool, but
+      # validating up front shrinks it as much as a single-job workflow can.
+      - name: Resolve source git tag commit
+        id: resolve_git
+        if: ${{ inputs.move_git_tag }}
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          SOURCE_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_SOURCE_TAG}"
+          TARGET_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_TARGET_TAG}"
+          if ! git rev-parse "${SOURCE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Git tag ${SOURCE_GIT_TAG} does not exist — cannot move git tag"
+            exit 1
+          fi
+          COMMIT=$(git rev-parse "${SOURCE_GIT_TAG}^{commit}")
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "source_git_tag=${SOURCE_GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "target_git_tag=${TARGET_GIT_TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup
         with:
@@ -89,18 +113,10 @@ jobs:
       - name: Move git tag
         if: ${{ inputs.move_git_tag }}
         env:
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
-          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
-          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+          SOURCE_GIT_TAG: ${{ steps.resolve_git.outputs.source_git_tag }}
+          TARGET_GIT_TAG: ${{ steps.resolve_git.outputs.target_git_tag }}
+          COMMIT: ${{ steps.resolve_git.outputs.commit }}
         run: |
-          SOURCE_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_SOURCE_TAG}"
-          TARGET_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_TARGET_TAG}"
-          if ! git rev-parse "${SOURCE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
-            echo "::error::Git tag ${SOURCE_GIT_TAG} does not exist — cannot move git tag"
-            exit 1
-          fi
-          COMMIT=$(git rev-parse "${SOURCE_GIT_TAG}^{commit}")
-
           echo "Moving git tag ${TARGET_GIT_TAG} to commit ${COMMIT} (from ${SOURCE_GIT_TAG})"
           git tag -f "${TARGET_GIT_TAG}" "${COMMIT}"
           git push -f origin "${TARGET_GIT_TAG}"

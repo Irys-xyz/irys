@@ -67,7 +67,9 @@ release/<major>.x  (canonical version source; never deployed directly)
 
 ### Atomicity
 
-The workflow builds the Docker image **before** pushing any git tags. If the build fails, nothing is published. If a later step fails after the git tag is pushed, cleanup steps automatically delete orphaned git tags and restore the env-prefixed head-tracking git tag (`testnet-latest` / `mainnet-latest`) to its previous position. Note that pushed Docker images are not automatically cleaned up on failure — use the **Docker Retag** workflow to manually restore the `latest` Docker tag within the affected image stream if needed.
+The workflow builds the Docker image **before** pushing any git tags. If the build fails, nothing is published. Publish order is: push version git tag → push versioned Docker image → move `<env>-latest` git tag → create GH Release → move Docker `:latest`. If any step from `push git tag` through `create GH Release` fails, cleanup steps automatically delete orphaned git tags and restore the env-prefixed head-tracking git tag (`testnet-latest` / `mainnet-latest`) to its previous position. The versioned Docker image stays in the registry (orphaned) on failure — use the **Docker Retag** workflow if you need to remove or replace it.
+
+The Docker `:latest` retag is the **final** step and is marked `continue-on-error`, so a failure there does not roll back the rest of the release. If `:latest` is not moved, the workflow logs a warning telling the operator to fix it by re-running **Docker Retag** with `source_tag=<version>` and `target_tag=latest`.
 
 ### Head-Tracking Tags
 
