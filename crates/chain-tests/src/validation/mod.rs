@@ -1219,7 +1219,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
 }
 
 /// A publish tx in a block must have a prior Submit ledger inclusion.
-/// The DB fallback (`tx_header_by_txid_canonical`) constrains results to the canonical chain
+/// The DB fallback (`canonical_submit_height`) constrains results to the canonical chain
 /// at or below the parent height. This test plants a tx header in the DB at a height far beyond
 /// the parent, then builds a block containing that tx in the Publish ledger.
 /// The validator must reject it with `PublishTxMissingPriorSubmit`.

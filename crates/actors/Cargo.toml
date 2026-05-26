@@ -63,6 +63,7 @@ rand.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 tracing-subscriber.workspace = true
+tracing-test.workspace = true
 fastrand = "2.0"
 
 [lints]

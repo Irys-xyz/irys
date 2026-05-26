@@ -323,6 +323,12 @@ impl GossipServiceTestFixture {
         let execution_payload_provider = ExecutionPayloadCache::new(
             peer_list.clone(),
             RethBlockProvider::Mock(mocked_execution_payloads),
+            Duration::from_millis(
+                config
+                    .node_config
+                    .sync
+                    .execution_payload_wait_timeout_millis,
+            ),
         );
 
         let vdf_state_stub =
@@ -996,8 +1002,16 @@ pub(crate) fn data_handler_stub(
         internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
         block_status_provider: block_status_provider_mock,
     };
-    let execution_payload_cache =
-        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+    let execution_payload_cache = ExecutionPayloadCache::new(
+        peer_list_guard.clone(),
+        reth_block_mock_provider,
+        Duration::from_millis(
+            config
+                .node_config
+                .sync
+                .execution_payload_wait_timeout_millis,
+        ),
+    );
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     // Keep the chunk_ingress receiver alive so the channel remains open.
@@ -1029,7 +1043,7 @@ pub(crate) fn data_handler_stub(
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(
-            Duration::from_millis(100000),
+            Duration::from_secs(5),
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
@@ -1063,8 +1077,16 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let mempool_state = AtomicMempoolState::new(state);
     let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
-    let execution_payload_cache =
-        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+    let execution_payload_cache = ExecutionPayloadCache::new(
+        peer_list_guard.clone(),
+        reth_block_mock_provider,
+        Duration::from_millis(
+            config
+                .node_config
+                .sync
+                .execution_payload_wait_timeout_millis,
+        ),
+    );
 
     let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db);
@@ -1084,7 +1106,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         block_pool,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(
-            Duration::from_millis(100000),
+            Duration::from_secs(5),
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),

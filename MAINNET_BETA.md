@@ -175,6 +175,14 @@ Once you’ve configured the `./config.toml` file and `<base dir>/irys_submodule
 OR run the executable directly: 
 
 `target/release/irys`
+
+**Important:** you must run the node under a supervisor that automatically restarts it on exit (e.g. `systemd` with `Restart=always`, Docker with `--restart=unless-stopped`, or equivalent). This is a requirement, not a recommendation. Without one, the node stays offline after any crash until you manually restart it, falls behind the network, and stops earning rewards.
+
+On any unrecoverable local fault — a failed DB read, a poisoned lock, a verifier thread panic, an internal arithmetic bug, etc. — the node exits the process immediately. There is no occurrence threshold, no retry, and no in-process recovery: a single unrecoverable fault ends the process and the supervisor must bring it back up.
+
+**Behavioural change:** earlier releases logged these local faults and kept running. This release exits on the same conditions. If you are upgrading and do not already have an auto-restart supervisor in place, add one before running this build.
+
+**Why:** when the node hits a local fault during block validation, it cannot tell whether the peer's block was actually valid or invalid — the failure was inside the node, not in the block. Marking the block either way risks forking off the network with silent data-level errors, so the safe response is to abort and let the supervisor restart the node clean from a known-good state.
 ## Auto Stake and Pledge
 By default your mining address needs to be staked before your storage modules can be pledged and mined. When you are ready to do this, and your node has synchronised to the network head, change the `stake_pledge_drives` config value in `./config.toml` to `true` and restart your node. If you have the funds in your miners account the node will automatically stake your mining address and pledge any storage modules you’ve configured for mining on Irys.
 ## Logs
