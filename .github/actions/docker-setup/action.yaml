@@ -1,0 +1,34 @@
+name: "Start rootless Docker and log in to GHCR"
+description: "Starts dockerd-rootless on the runner and authenticates to ghcr.io. Pair with docker-cleanup in an `if: always()` step."
+
+inputs:
+  registry:
+    description: "Container registry to authenticate against."
+    required: false
+    default: "ghcr.io"
+  username:
+    description: "Username for `docker login`."
+    required: false
+    default: ${{ github.actor }}
+  password:
+    description: "Token piped to `docker login` via stdin. Must be a secret."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Start rootless Docker
+      shell: bash
+      run: |
+        dockerd-rootless.sh &
+        timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+          || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
+
+    - name: Log in to ${{ inputs.registry }}
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        USERNAME: ${{ inputs.username }}
+        PASSWORD: ${{ inputs.password }}
+      run: |
+        echo "${PASSWORD}" | docker login "${REGISTRY}" --username "${USERNAME}" --password-stdin

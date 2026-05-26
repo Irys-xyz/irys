@@ -180,15 +180,10 @@ jobs:
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_RELEASE_TYPE}" >> "$GITHUB_OUTPUT"
 
-      - name: Start rootless Docker
-        run: |
-          dockerd-rootless.sh &
-          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
-            || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
-
-      - name: Log in to GitHub Container Registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Start rootless Docker and log in to GHCR
+        uses: ./.github/actions/docker-setup
+        with:
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # --- Build phase: build image locally, no push yet ---
 
@@ -347,12 +342,6 @@ jobs:
             git push origin --delete "$HEAD_TAG" || true
           fi
 
-      - name: Cleanup Docker
+      - name: Tear down rootless Docker
         if: always()
-        run: |
-          docker stop $(docker ps -aq) 2>/dev/null || true
-          docker system prune -a -f --volumes || true
-          pkill -f dockerd-rootless.sh || true
-          sleep 2
-          rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
-          rm -rf ~/.local/share/docker/* || true
+        uses: ./.github/actions/docker-cleanup
