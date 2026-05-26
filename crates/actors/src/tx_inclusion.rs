@@ -42,11 +42,24 @@ pub fn find_canonical_ledger_range(
     //
     // Tree-path errors (storage inconsistencies surfaced by
     // `lookup_via_block_tree`) MUST NOT block the migrated-metadata
-    // fallback: a narrow race can evict the parent from both tree and DB
-    // briefly while migration is in flight, and the migrated path may
-    // resolve correctly once the row appears.  Log + try DB; if the DB
-    // path also fails, propagate that error (it has the more actionable
-    // diagnostic).
+    // fallback.  In practice the tree path returns Err only on:
+    //   (1) raw MDBX read failure on the parent-header lookup,
+    //   (2) cross-table corruption (a canonical block's parent missing from
+    //       BOTH block_tree AND IrysBlockHeaders — see `lookup_via_block_tree`
+    //       line ~197), or
+    //   (3) backwards total_chunks in `compute_submit_range` (data
+    //       corruption).
+    // None of these are recoverable by retrying via the migrated path (it
+    // reads the same MDBX), but the migrated path may *coincidentally*
+    // resolve `tx_id` if the tree errored on an unrelated read while
+    // walking the canonical window.  In that case the caller correctly
+    // gets the migrated answer; the tree-error context is logged at
+    // `debug` and not propagated.  If the migrated path also fails, that
+    // error wins (more actionable diagnostic).  If the migrated path
+    // returns `Ok(None)` while the tree errored, we surface `Ok(None)`
+    // — Vector B's canonical-DB fallback at the validator catches the
+    // worst-case double-publish risk, so the producer-side asymmetry
+    // here is bounded.
     match lookup_via_block_tree(tx_id, max_height, block_migration_depth, block_tree, db) {
         Ok(Some(range)) => return Ok(Some(range)),
         Ok(None) => {}
