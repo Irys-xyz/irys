@@ -3864,6 +3864,16 @@ pub async fn submit_payload_to_reth(
 
     // Submit to reth execution layer
     let engine_api_client = reth_adapter.inner.engine_http_client();
+    // Observability for stuck `Syncing`: log a `warn` at the first minute and
+    // again every five minutes thereafter. `Syncing` from `new_payload_v4`
+    // means reth's EL is missing predecessors — distinct from "reth currently
+    // validating", which blocks the single call instead of cycling through
+    // `Syncing`. No timeout is applied here because we can't cleanly bound
+    // "expected catch-up under load" without false positives; if this fires
+    // in practice we'll revisit (option B/C in REVIEW.md).
+    const SYNCING_WARN_FIRST_AT: u32 = 60;
+    const SYNCING_WARN_REPEAT_EVERY: u32 = 300;
+    let mut syncing_iters: u32 = 0;
     loop {
         let payload_status = engine_api_client
             .new_payload_v4(
@@ -3879,10 +3889,25 @@ pub async fn submit_payload_to_reth(
                 return Err(SubmitPayloadError::PayloadRejected(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!(
-                    "syncing extra blocks to validate payload {:?}",
-                    payload_v3.payload_inner.payload_inner.block_num_hash()
-                );
+                syncing_iters = syncing_iters.saturating_add(1);
+                if syncing_iters == SYNCING_WARN_FIRST_AT
+                    || (syncing_iters > SYNCING_WARN_FIRST_AT
+                        && (syncing_iters - SYNCING_WARN_FIRST_AT)
+                            .is_multiple_of(SYNCING_WARN_REPEAT_EVERY))
+                {
+                    tracing::warn!(
+                        block.hash = %block.block_hash,
+                        block.height = block.height,
+                        syncing_iters,
+                        "submit_payload_to_reth: reth has been Syncing for {}s — pinning this validation slot",
+                        syncing_iters
+                    );
+                } else {
+                    tracing::debug!(
+                        "syncing extra blocks to validate payload {:?}",
+                        payload_v3.payload_inner.payload_inner.block_num_hash()
+                    );
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -3891,6 +3916,10 @@ pub async fn submit_payload_to_reth(
                 break;
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                // Irys CL drives canonicality via `update_forkchoice_full`
+                // separately. `Accepted` here means reth deemed the payload
+                // structurally valid but on a side chain from reth's POV —
+                // that is fine at this stage; fork-choice is updated later.
                 tracing::info!("accepted a side-chain (fork) payload");
                 break;
             }
