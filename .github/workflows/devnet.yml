@@ -21,6 +21,18 @@ jobs:
       packages: write
       contents: read
     steps:
+      - name: Validate inputs
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if [ -n "$INPUT_COMMIT" ] && ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::Invalid commit SHA format: $INPUT_COMMIT"
+            exit 1
+          fi
+
+      # GHA expressions have no ternary; the && / || idiom below works because
+      # the truthy branch is non-empty when the condition is true, so the ||
+      # fallback only fires when inputs.commit is empty.
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit != '' && inputs.commit || 'deployment/devnet' }}

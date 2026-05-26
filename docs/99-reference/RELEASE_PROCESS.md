@@ -88,7 +88,7 @@ Hotfixes follow the same flow — fix on `master`, cherry-pick to `release/<majo
 
 To roll back testnet or mainnet to a previous version, use the **Docker Retag** workflow (`docker-retag.yml`):
 
-1. Trigger the workflow with `environment` set to the env (`testnet` or `mainnet`), `source_tag` set to the Docker version to roll back to (e.g., `1.0.1`), and `target_tag` set to `latest`.
+1. Trigger the workflow with `environment` set to the env (`testnet` or `mainnet`), `source_tag` set to the Docker version to roll back to (e.g., `1.0.1` — the Docker tag inside the stream, not the env-prefixed git tag `testnet-1.0.1`), and `target_tag` set to `latest`.
 2. The workflow re-tags the existing Docker image inside the env's image stream — no rebuild.
 3. With `move_git_tag` enabled (default), the corresponding env-prefixed git tag (`testnet-latest` or `mainnet-latest`) is also moved to match.
 

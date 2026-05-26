@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Environment to rollback'
+        description: 'Environment whose image stream to retag (testnet or mainnet)'
         required: true
         type: choice
         options:
