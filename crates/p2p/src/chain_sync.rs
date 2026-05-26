@@ -1,6 +1,6 @@
 use crate::block_pool::{BlockRemovalReason, CriticalBlockPoolError, FailureReason};
-use crate::types::AdvisoryGossipError;
 use crate::gossip_data_handler::GossipDataHandler;
+use crate::types::AdvisoryGossipError;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
 use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;

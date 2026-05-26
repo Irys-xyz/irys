@@ -409,8 +409,7 @@ impl ExecutionPayloadCache {
         {
             Ok(result) => result,
             Err(_) => {
-                let elapsed_ms =
-                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 // We hit the documented worst case: peer advertised the
                 // header (or the request-retry budget elapsed without anyone
                 // ACKing) but the payload never arrived within `wait_timeout`.
