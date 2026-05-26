@@ -25,6 +25,12 @@ jobs:
   build-and-push:
     name: build and push docker image
     runs-on: [self-hosted, misc-runner]
+    # Gated by the GitHub Environment named after `inputs.environment`. This
+    # workflow can republish to any image stream — put required reviewers on
+    # the mainnet (and probably testnet) environments in repo settings to
+    # prevent accidental overwrites. All three envs (devnet/testnet/mainnet)
+    # must exist or the workflow fails.
+    environment: ${{ inputs.environment }}
     permissions:
       packages: write
       contents: read

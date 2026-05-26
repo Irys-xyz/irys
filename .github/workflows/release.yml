@@ -87,11 +87,11 @@ jobs:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
+          # Parse with tomllib (Python 3.11+) rather than sed/grep — survives
+          # comments, multi-line strings, and section reorders. Runners ship
+          # Python 3.12.
           CARGO_VER=$(git show "${INPUT_COMMIT}:crates/chain/Cargo.toml" \
-            | sed -n '/^\[package\]/,/^\[/p' \
-            | grep '^version' \
-            | head -1 \
-            | sed 's/.*"\(.*\)".*/\1/')
+            | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
           if [ -z "$CARGO_VER" ]; then
             echo "::error::Could not extract version from irys-chain Cargo.toml at commit ${INPUT_COMMIT}"
             exit 1
@@ -160,6 +160,11 @@ jobs:
     name: build and publish
     needs: validate
     runs-on: [self-hosted, misc-runner]
+    # The job is gated by a GitHub Environment matching the release type.
+    # Configure required reviewers (etc.) on the `mainnet` environment in
+    # repo settings; leave `testnet` with no protection rules for the
+    # auto-publish flow. Both environments must exist or the workflow fails.
+    environment: ${{ inputs.release_type }}
     permissions:
       packages: write
       contents: write

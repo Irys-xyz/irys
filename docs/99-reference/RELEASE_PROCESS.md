@@ -80,6 +80,18 @@ Both git and Docker have head-tracking tags that are updated automatically:
 
 These are force-updated on every successful release. They can also be manually moved for rollback via the **Docker Retag** workflow.
 
+## Approval Gates
+
+The release-touching workflows (`release.yml`, `docker.yml`, `docker-retag.yml`) declare `environment: ${{ inputs.<env> }}` on their build/publish jobs. Three matching environments must exist in the repo's **Settings → Environments** for the workflows to run:
+
+| Environment name | Used by                                                  | Suggested protection rules                              |
+|---|---|---|
+| `devnet`  | `docker.yml`                                             | None — devnet builds on demand.                         |
+| `testnet` | `release.yml`, `docker.yml`, `docker-retag.yml`          | Optional reviewers; testnet is the rc path.             |
+| `mainnet` | `release.yml`, `docker.yml`, `docker-retag.yml`          | Required reviewers; the gate before any mainnet write. |
+
+Required reviewers configured on the `mainnet` environment apply to every job that uses `environment: mainnet`, so a single setting covers cutting a mainnet release, an emergency Docker rebuild into the mainnet stream, and a Docker retag/rollback of mainnet's `latest`.
+
 ## Hotfixes
 
 Hotfixes follow the same flow — fix on `master`, cherry-pick to `release/<major>.x`, merge forward to the appropriate `deployment/<env>/<major>.x` branch, tag, deploy. In an emergency, a hotfix can be applied directly to a deployment branch and deployed to its environment immediately, bypassing the normal master → release → deployment progression (use the `force` flag to skip the testnet-merge-base validation).

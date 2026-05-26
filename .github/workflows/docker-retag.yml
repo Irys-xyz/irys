@@ -32,6 +32,10 @@ jobs:
   retag:
     name: retag docker image
     runs-on: [self-hosted, misc-runner]
+    # Gated by the same GitHub Environment as the matching release type.
+    # Retag is a rollback / promotion path, so it should require the same
+    # approvals as cutting a release of that environment.
+    environment: ${{ inputs.environment }}
     permissions:
       packages: write
       contents: write
