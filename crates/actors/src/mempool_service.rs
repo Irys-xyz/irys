@@ -2459,12 +2459,15 @@ impl MempoolService {
                 // out-of-band rather than on every Submit-tx ingress.
                 let sweep_inner = Arc::clone(&mempool_service.inner);
                 let sweep_handle = handle_for_inner.spawn(async move {
+                    debug!("Starting 30s anchor-resolution sweep (irys.mempool.pending_submit_unresolvable_anchors)");
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
                     interval.tick().await; // first tick fires immediately; skip it
                     loop {
                         interval.tick().await;
                         let count = sweep_inner.count_unresolvable_submit_anchors().await;
-                        crate::metrics::set_anchor_unresolvable(count as i64);
+                        let count_i64 = i64::try_from(count).unwrap_or(i64::MAX);
+                        crate::metrics::set_anchor_unresolvable(count_i64);
                     }
                 });
 

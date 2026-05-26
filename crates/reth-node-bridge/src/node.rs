@@ -264,7 +264,7 @@ mod tests {
     /// whole point of the dedicated `MetricsConfig` section.
     #[test]
     fn metrics_socket_uses_metrics_bind_ip_not_network_defaults() {
-        let mut cfg = irys_types::NodeConfig::testnet();
+        let mut cfg = irys_types::NodeConfig::testing();
         cfg.network_defaults.bind_ip = "0.0.0.0".into();
         cfg.metrics.bind_ip = "127.0.0.1".into();
 
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn metrics_socket_random_ports_uses_port_zero() {
-        let cfg = irys_types::NodeConfig::testnet();
+        let cfg = irys_types::NodeConfig::testing();
         let addr = compute_metrics_addr(&cfg, true).expect("valid addr");
         assert_eq!(addr.port(), 0);
     }

@@ -1427,14 +1427,14 @@ where
                     block.height = block_height,
                     "Block pool: re-emitting AttemptReprocessingBlock for parked SoftInternal block (gossip-driven recovery)"
                 );
-                crate::metrics::record_block_pool_orphan_retry();
-                if let Err(err) = self.sync_service_sender.send(
+                match self.sync_service_sender.send(
                     SyncChainServiceMessage::AttemptReprocessingBlock(*block_hash),
                 ) {
-                    error!(
+                    Ok(()) => crate::metrics::record_block_pool_orphan_retry(),
+                    Err(err) => error!(
                         "Block pool: failed to send AttemptReprocessingBlock for parked block {:?}: {:?}",
                         block_hash, err
-                    );
+                    ),
                 }
                 true
             }

@@ -101,7 +101,7 @@ impl BlockTreeLifecycleTimestamps {
     fn now_ms() -> i64 {
         SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0)
     }
 }
@@ -2016,6 +2016,7 @@ mod tests {
                 recent_soft_internal_discards: LruCache::new(
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                 ),
+                lifecycle_timestamps: Arc::new(BlockTreeLifecycleTimestamps::default()),
             };
 
             Self {

@@ -131,11 +131,11 @@ pub(crate) fn record_canonical_tip_height(height: u64) {
 }
 
 pub(crate) fn record_block_tree_last_block_at_ms(ms: i64) {
-    BLOCK_TREE_LAST_BLOCK_AT_MS.record(ms.max(0) as u64, &[]);
+    BLOCK_TREE_LAST_BLOCK_AT_MS.record(u64::try_from(ms).unwrap_or(0), &[]);
 }
 
 pub(crate) fn record_block_tree_last_reorg_at_ms(ms: i64) {
-    BLOCK_TREE_LAST_REORG_AT_MS.record(ms.max(0) as u64, &[]);
+    BLOCK_TREE_LAST_REORG_AT_MS.record(u64::try_from(ms).unwrap_or(0), &[]);
 }
 
 /// Record a snapshot of the validation queue. `vdf_pending_by_priority` MUST
@@ -269,13 +269,9 @@ pub(crate) fn record_data_tx_unfunded() {
 /// 30-second anchor-resolution sweep. Negative counts (impossible in
 /// practice) are clamped at zero.
 pub(crate) fn set_anchor_unresolvable(count: i64) {
-    MEMPOOL_PENDING_SUBMIT_UNRESOLVABLE_ANCHORS.record(count.max(0) as u64, &[]);
+    MEMPOOL_PENDING_SUBMIT_UNRESOLVABLE_ANCHORS.record(u64::try_from(count).unwrap_or(0), &[]);
 }
 
-#[expect(
-    dead_code,
-    reason = "call sites land in a sibling branch; helper kept so the counter surface stays declared"
-)]
 pub(crate) fn record_cached_data_root_evicted() {
     CACHED_DATA_ROOT_EVICTED.add(1, &[]);
 }
@@ -288,11 +284,7 @@ pub(crate) fn record_block_validation_failed(reason: &'static str) {
     BLOCK_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
-#[expect(
-    dead_code,
-    reason = "call sites land in a sibling branch; helper kept so the counter surface stays declared"
-)]
-pub(crate) fn record_chain_sync_block_rejected(reason: &'static str) {
+pub fn record_chain_sync_block_rejected(reason: &'static str) {
     CHAIN_SYNC_BLOCK_REJECTED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
