@@ -3,8 +3,16 @@ name: Docker Rebuild
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment whose image stream to rebuild into'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+          - devnet
       tag:
-        description: 'Existing image tag to rebuild (e.g., rc-1.2.3, 1.2.3)'
+        description: 'Existing image tag to rebuild (e.g., 1.2.3)'
         required: true
         type: string
       tag_latest:
@@ -36,9 +44,11 @@ jobs:
 
       - name: Set lowercase image name
         id: image
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> $GITHUB_OUTPUT
+          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_ENVIRONMENT}" >> "$GITHUB_OUTPUT"
 
       - name: Extract version from tag
         id: version
