@@ -782,6 +782,7 @@ where
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_hash
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             return Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ));
@@ -831,6 +832,7 @@ where
             let err = CriticalBlockPoolError::ForkedBlock(block.header().block_hash);
             self.sync_state
                 .record_block_processing_error(err.to_string());
+            crate::metrics::record_block_pool_rejection("part_of_pruned_fork");
             return Err(err.into());
         }
 
@@ -951,6 +953,7 @@ where
                     .await;
                 self.sync_state
                     .record_block_processing_error(err.to_string());
+                crate::metrics::record_block_pool_rejection("reth_payload_unavailable");
                 return Err(CriticalBlockPoolError::BlockError(err.to_string()).into());
             }
         }
@@ -1057,6 +1060,7 @@ where
                         .await;
                     self.sync_state
                         .record_block_processing_error(pre_err.to_string());
+                    crate::metrics::record_block_pool_rejection("fatal_cache_corruption");
                     return Err(
                         CriticalBlockPoolError::FatalCacheCorruption(pre_err.to_string()).into(),
                     );
@@ -1085,6 +1089,7 @@ where
                         .await;
                     self.sync_state
                         .record_block_processing_error(pre_err.to_string());
+                    crate::metrics::record_block_pool_rejection("parent_not_in_cache");
                     return Err(
                         CriticalBlockPoolError::ParentNotInCache(pre_err.to_string()).into(),
                     );
@@ -1127,6 +1132,9 @@ where
                             .await;
                         self.sync_state
                             .record_block_processing_error(pre_err.to_string());
+                        crate::metrics::record_block_pool_rejection(
+                            "internal_prevalidation_failure",
+                        );
                         // Route through `Advisory` so `GossipError::is_advisory()`
                         // returns true and chain-sync's eviction (chain_sync.rs:461)
                         // is skipped — the block stays in cache for the next
@@ -1160,6 +1168,7 @@ where
                 .await;
             self.sync_state
                 .record_block_processing_error(block_discovery_error.to_string());
+            crate::metrics::record_block_pool_rejection("block_validation_error");
             return Err(
                 CriticalBlockPoolError::BlockError(block_discovery_error.to_string()).into(),
             );
@@ -1418,6 +1427,7 @@ where
                     block.height = block_height,
                     "Block pool: re-emitting AttemptReprocessingBlock for parked SoftInternal block (gossip-driven recovery)"
                 );
+                crate::metrics::record_block_pool_orphan_retry();
                 if let Err(err) = self.sync_service_sender.send(
                     SyncChainServiceMessage::AttemptReprocessingBlock(*block_hash),
                 ) {
@@ -1579,6 +1589,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is already in tree pending validation",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ))
@@ -1588,6 +1599,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is already processed",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ))
@@ -1597,6 +1609,7 @@ fn check_block_status(
                 "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
                 block_height, block_hash,
             );
+            crate::metrics::record_block_pool_rejection("try_reprocess_finalized");
             Err(CriticalBlockPoolError::TryingToReprocessFinalizedBlock(block_hash).into())
         }
         BlockStatus::PartOfAPrunedFork => {
@@ -1604,6 +1617,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is part of a pruned fork",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("part_of_pruned_fork");
             Err(CriticalBlockPoolError::ForkedBlock(block_hash).into())
         }
     }

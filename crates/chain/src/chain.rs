@@ -13,7 +13,7 @@ use irys_actors::{
     },
     block_migration_service::BlockMigrationService,
     block_producer::BlockProducerCommand,
-    block_tree_service::{BlockTreeService, BlockTreeServiceMessage},
+    block_tree_service::{BlockTreeLifecycleTimestamps, BlockTreeService, BlockTreeServiceMessage},
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
@@ -129,6 +129,11 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
+    /// Atomic timestamps tracking the last canonical advance / last reorg
+    /// observed by [`BlockTreeService`]; same `Arc` is shared with the
+    /// service worker and with [`ApiState`] so `/v1/tip` does not have to
+    /// scrape its own metrics endpoint.
+    pub block_tree_lifecycle: Arc<BlockTreeLifecycleTimestamps>,
     backfill_complete: Arc<tokio::sync::Notify>,
 }
 
@@ -152,6 +157,7 @@ impl IrysNodeCtx {
             chunk_ingress_state: self.chunk_ingress_state.clone(),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
+            block_tree_lifecycle: self.block_tree_lifecycle.clone(),
         }
     }
 
@@ -1560,6 +1566,7 @@ impl IrysNode {
         );
 
         // Start the block tree service
+        let block_tree_lifecycle = Arc::new(BlockTreeLifecycleTimestamps::default());
         let block_tree_handle = BlockTreeService::spawn_service(
             receivers.block_tree,
             irys_db.clone(),
@@ -1569,6 +1576,7 @@ impl IrysNode {
             sync_state.clone(),
             block_migration_service,
             block_tree_cache,
+            block_tree_lifecycle.clone(),
             runtime_handle.clone(),
         );
 
@@ -1917,6 +1925,7 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
+            block_tree_lifecycle: block_tree_lifecycle.clone(),
             backfill_complete,
         };
 
@@ -2011,6 +2020,7 @@ impl IrysNode {
                 chunk_ingress_state: irys_node_ctx.chunk_ingress_state.clone(),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
+                block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
             },
             http_listener,
         );
