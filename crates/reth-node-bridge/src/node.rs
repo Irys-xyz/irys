@@ -94,6 +94,26 @@ impl From<RethNodeProvider> for RethNode {
     }
 }
 
+/// Compute the `SocketAddr` for Reth's internal Prometheus endpoint.
+///
+/// Reads `node_config.metrics.bind_ip` (separate from
+/// `network_defaults.bind_ip`, which still applies to HTTP / gossip / P2P
+/// sockets that legitimately need to listen externally). Defaults to
+/// `127.0.0.1` so an upgraded node stops publishing `:9001` to the public
+/// interface; production deployments expose the endpoint through an
+/// mTLS-terminating reverse proxy on the same host.
+///
+/// When `random_ports` is true, port `0` is used so the OS assigns a free
+/// port — only used by integration tests.
+fn compute_metrics_addr(
+    node_config: &irys_types::NodeConfig,
+    random_ports: bool,
+) -> eyre::Result<SocketAddr> {
+    let port = if random_ports { "0" } else { "9001" };
+    let addr = format!("{}:{}", node_config.metrics.bind_ip.as_str(), port).parse()?;
+    Ok(addr)
+}
+
 pub async fn run_node(
     chainspec: Arc<ChainSpec>,
     task_executor: TaskExecutor,
@@ -168,17 +188,11 @@ pub async fn run_node(
     }
     reth_config.txpool.additional_validation_tasks = node_config.reth.additional_validation_tasks;
 
-    // Enable Prometheus metrics endpoint for local scraping by OTEL collector sidecar.
-    let metrics_port = if random_ports { "0" } else { "9001" };
-    let metrics_addr: SocketAddr = format!(
-        "{}:{}",
-        node_config
-            .reth
-            .network
-            .bind_ip(&node_config.network_defaults),
-        metrics_port
-    )
-    .parse()?;
+    // Reth's internal Prometheus endpoint. Bound to
+    // node_config.metrics.bind_ip (default 127.0.0.1) so external scrapers
+    // must go through an mTLS-terminating reverse proxy configured by the
+    // deployment layer.
+    let metrics_addr = compute_metrics_addr(&node_config, random_ports)?;
     reth_config.metrics = MetricArgs {
         prometheus: Some(metrics_addr),
         ..Default::default()
@@ -238,4 +252,31 @@ pub async fn run_node(
     }
 
     Ok((handle, context))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard: the metrics socket must follow
+    /// `node_config.metrics.bind_ip`, not the (intentionally external-by-
+    /// default) `network_defaults.bind_ip`. Bind isolation here is the
+    /// whole point of the dedicated `MetricsConfig` section.
+    #[test]
+    fn metrics_socket_uses_metrics_bind_ip_not_network_defaults() {
+        let mut cfg = irys_types::NodeConfig::testnet();
+        cfg.network_defaults.bind_ip = "0.0.0.0".into();
+        cfg.metrics.bind_ip = "127.0.0.1".into();
+
+        let addr = compute_metrics_addr(&cfg, false).expect("valid addr");
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(addr.port(), 9001);
+    }
+
+    #[test]
+    fn metrics_socket_random_ports_uses_port_zero() {
+        let cfg = irys_types::NodeConfig::testnet();
+        let addr = compute_metrics_addr(&cfg, true).expect("valid addr");
+        assert_eq!(addr.port(), 0);
+    }
 }

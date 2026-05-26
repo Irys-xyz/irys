@@ -272,6 +272,10 @@ pub(crate) fn set_anchor_unresolvable(count: i64) {
     MEMPOOL_PENDING_SUBMIT_UNRESOLVABLE_ANCHORS.record(count.max(0) as u64, &[]);
 }
 
+#[expect(
+    dead_code,
+    reason = "call sites land in a sibling branch; helper kept so the counter surface stays declared"
+)]
 pub(crate) fn record_cached_data_root_evicted() {
     CACHED_DATA_ROOT_EVICTED.add(1, &[]);
 }
@@ -284,7 +288,11 @@ pub(crate) fn record_block_validation_failed(reason: &'static str) {
     BLOCK_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
-pub fn record_chain_sync_block_rejected(reason: &'static str) {
+#[expect(
+    dead_code,
+    reason = "call sites land in a sibling branch; helper kept so the counter surface stays declared"
+)]
+pub(crate) fn record_chain_sync_block_rejected(reason: &'static str) {
     CHAIN_SYNC_BLOCK_REJECTED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
