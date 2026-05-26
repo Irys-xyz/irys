@@ -74,6 +74,18 @@ pub enum CacheServiceAction {
     /// `tx_inclusion::find_canonical_ledger_range`); this action exists so
     /// observers that detect stale entries can scrub them without waiting
     /// for the next confirmation to overwrite the hint.
+    ///
+    /// **Status: intentionally parked primitive — no live production emitter.**
+    /// The original emitter (validator `get_assigned_ingress_proofs` walk
+    /// over `block_set` → `AssignedProofBlockMissing` recovery) was deleted
+    /// in commit 7da520194 when the validator was rewritten to use
+    /// `tx_inclusion::find_canonical_ledger_range` (no longer walks
+    /// `block_set`). The action + worker + handler are kept so future
+    /// stale-entry observers can wire in without rebuilding the primitive.
+    /// The `prune_block_hash_from_block_set_removes_stale_hash` test below
+    /// covers this path despite there being no current producer; treat any
+    /// "this is unused, delete it" review feedback against this primitive
+    /// as already-considered (REVIEW.md P2 #8).
     PruneBlockHashFromBlockSet {
         data_root: DataRoot,
         block_hash: H256,
@@ -2344,6 +2356,12 @@ mod tests {
 
     // Verifies that `PruneBlockHashFromBlockSet` removes a stale block hash from
     // `CachedDataRoot.block_set` and leaves other hashes untouched.
+    //
+    // NOTE: This exercises an intentionally parked primitive — no live
+    // production emitter sends `PruneBlockHashFromBlockSet` after the
+    // `AssignedProofBlockMissing` recovery walk was deleted (commit
+    // 7da520194). The test is kept so the primitive stays wirable for
+    // future stale-entry observers. See the action's doc-comment.
     #[tokio::test]
     async fn prune_block_hash_from_block_set_removes_stale_hash() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
