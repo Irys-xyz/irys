@@ -7,16 +7,23 @@ concurrency:
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
       source_tag:
-        description: 'Existing image tag to promote (e.g., 1.0.1, rc-1.0.2)'
+        description: 'Existing Docker tag in the env stream to promote (e.g., 1.0.1)'
         required: true
         type: string
       target_tag:
-        description: 'Tag to point at it (e.g., latest, rc-latest)'
+        description: 'Docker tag to point at it (must be `latest`)'
         required: true
         type: string
       move_git_tag:
-        description: 'Also move the corresponding git tag to the same commit'
+        description: 'Also move the corresponding env-prefixed git tag (e.g., testnet-latest) to the same commit'
         required: false
         type: boolean
         default: true
@@ -38,8 +45,8 @@ jobs:
             echo "::error::Invalid source_tag format: $INPUT_SOURCE_TAG"
             exit 1
           fi
-          if [[ "$INPUT_TARGET_TAG" != "latest" && "$INPUT_TARGET_TAG" != "rc-latest" ]]; then
-            echo "::error::target_tag must be 'latest' or 'rc-latest', got: $INPUT_TARGET_TAG"
+          if [[ "$INPUT_TARGET_TAG" != "latest" ]]; then
+            echo "::error::target_tag must be 'latest', got: $INPUT_TARGET_TAG"
             exit 1
           fi
 
@@ -49,9 +56,11 @@ jobs:
 
       - name: Set image name
         id: image
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_ENVIRONMENT}" >> "$GITHUB_OUTPUT"
 
       - name: Start rootless Docker
         run: |
@@ -81,20 +90,21 @@ jobs:
       - name: Move git tag
         if: ${{ inputs.move_git_tag }}
         env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
           INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
           INPUT_TARGET_TAG: ${{ inputs.target_tag }}
         run: |
-          # Find the commit that source_tag points to
-          SOURCE_TAG="${INPUT_SOURCE_TAG}"
-          if ! git rev-parse "${SOURCE_TAG}^{commit}" >/dev/null 2>&1; then
-            echo "::error::Git tag ${SOURCE_TAG} does not exist — cannot move git tag"
+          SOURCE_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_SOURCE_TAG}"
+          TARGET_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_TARGET_TAG}"
+          if ! git rev-parse "${SOURCE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Git tag ${SOURCE_GIT_TAG} does not exist — cannot move git tag"
             exit 1
           fi
-          COMMIT=$(git rev-parse "${SOURCE_TAG}^{commit}")
+          COMMIT=$(git rev-parse "${SOURCE_GIT_TAG}^{commit}")
 
-          echo "Moving git tag ${INPUT_TARGET_TAG} to commit ${COMMIT} (from ${SOURCE_TAG})"
-          git tag -f "${INPUT_TARGET_TAG}" "${COMMIT}"
-          git push -f origin "${INPUT_TARGET_TAG}"
+          echo "Moving git tag ${TARGET_GIT_TAG} to commit ${COMMIT} (from ${SOURCE_GIT_TAG})"
+          git tag -f "${TARGET_GIT_TAG}" "${COMMIT}"
+          git push -f origin "${TARGET_GIT_TAG}"
 
       - name: Cleanup Docker
         if: always()
