@@ -44,8 +44,8 @@ commit_parsers = [
     { message = "^chore|^ci", group = "Miscellaneous" },
 ]
 
-# Match both production (X.Y.Z) and RC (rc-X.Y.Z) tags as versions
-tag_pattern = "^(rc-)?[0-9]+\\.[0-9]+\\.[0-9]+$"
+# Match testnet (testnet-X.Y.Z) and mainnet (mainnet-X.Y.Z) tags as versions
+tag_pattern = "^(testnet|mainnet)-[0-9]+\\.[0-9]+\\.[0-9]+$"
 
-# Exclude head-tracking tags (rc-latest, latest) — they are not versions
-ignore_tags = "^(rc-)?latest$"
+# Exclude head-tracking tags (testnet-latest, mainnet-latest) — they are not versions
+ignore_tags = "^(testnet|mainnet)-latest$"
