@@ -69,6 +69,7 @@ jobs:
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup
         with:
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image

@@ -177,6 +177,11 @@ jobs:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
 
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Set image name
         id: image
         env:
@@ -188,6 +193,7 @@ jobs:
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup
         with:
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # --- Build phase: build image locally, no push yet ---
@@ -229,6 +235,11 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
+          # Drop any stale local tag left by a previously-failed run on this
+          # runner. Self-hosted runners reuse the workspace and checkout does
+          # not prune local-only tags, so a leftover would make `git tag -a`
+          # fail here even though the tag was never published to origin.
+          git tag -d "$GIT_TAG" 2>/dev/null || true
           git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
           git push origin "$GIT_TAG"
 
@@ -351,6 +362,7 @@ jobs:
         run: |
           echo "::warning::Cleaning up orphaned git tag $GIT_TAG"
           git push origin --delete "$GIT_TAG" || true
+          git tag -d "$GIT_TAG" 2>/dev/null || true
 
       - name: 'Cleanup: revert head-tracking git tag'
         if: failure() && steps.head_git.outcome == 'success'

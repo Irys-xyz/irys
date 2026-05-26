@@ -7,9 +7,8 @@ inputs:
     required: false
     default: "ghcr.io"
   username:
-    description: "Username for `docker login`."
-    required: false
-    default: ${{ github.actor }}
+    description: "Username for `docker login`. Callers must pass this explicitly (e.g. ${{ github.actor }}); composite-action input defaults do not reliably expand expressions."
+    required: true
   password:
     description: "Token piped to `docker login` via stdin. Must be a secret."
     required: true
