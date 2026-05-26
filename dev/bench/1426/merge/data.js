@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779791858514,
+  "lastUpdate": 1779827703402,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4147,6 +4147,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "36373d0dbdf6e2ca2e29b4f822fa8d52a9ec7c9b",
+          "message": "feat: obs follow-ups and Reth metrics bind hardening",
+          "timestamp": "2026-05-26T10:22:31Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1426/commits/36373d0dbdf6e2ca2e29b4f822fa8d52a9ec7c9b"
+        },
+        "date": 1779827702302,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011871,
+            "range": "± 0.000113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.118888,
+            "range": "± 0.002632",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.192912,
+            "range": "± 0.029064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.904784,
+            "range": "± 0.213797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07499,
+            "range": "± 0.000695",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.003729,
+            "range": "± 27.625438",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 970.694939,
+            "range": "± 3.201854",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11989,
+            "range": "± 0.003389",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1198.39847,
+            "range": "± 10.041257",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1578.688192,
+            "range": "± 19.242404",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033894,
+            "range": "± 0.000816",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.141879,
+            "range": "± 0.344622",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.57724,
+            "range": "± 0.288995",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
