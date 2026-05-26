@@ -502,7 +502,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let scope_args_mismatch = scope_args.clone(); // clone: needed for mismatch analysis
                 let html_result = cmd!(
                     sh,
-                    "cargo llvm-cov report --html --output-dir target/llvm-cov/html {scope_args...}"
+                    "cargo llvm-cov report --html --output-dir target/llvm-cov {scope_args...}"
                 )
                 .remove_and_run();
 
