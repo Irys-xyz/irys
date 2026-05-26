@@ -37,6 +37,7 @@ jobs:
         with:
           ref: ${{ inputs.commit != '' && inputs.commit || 'deployment/devnet' }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve commit
         id: resolve

@@ -57,26 +57,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Validate commit exists on a deployment branch matching release_type
+      - name: Validate commit exists on deployment/<env>/<major>.x matching the version
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
             echo "::error::Commit ${INPUT_COMMIT} does not exist"
             exit 1
           fi
 
-          EXPECTED_PREFIX="origin/deployment/${INPUT_RELEASE_TYPE}/"
-          BRANCHES=$(git branch -r --contains "${INPUT_COMMIT}" | grep "$EXPECTED_PREFIX" || true)
-          if [ -z "$BRANCHES" ]; then
-            echo "::error::Commit ${INPUT_COMMIT} is not on any ${EXPECTED_PREFIX}<major>.x branch"
+          MAJOR="${INPUT_VERSION%%.*}"
+          EXPECTED_BRANCH="origin/deployment/${INPUT_RELEASE_TYPE}/${MAJOR}.x"
+          if ! git branch -r --contains "${INPUT_COMMIT}" \
+              | sed 's/^[[:space:]]*//' \
+              | grep -Fxq "$EXPECTED_BRANCH"; then
+            echo "::error::Commit ${INPUT_COMMIT} is not on $EXPECTED_BRANCH"
             echo "Found on branches:"
             git branch -r --contains "${INPUT_COMMIT}"
             exit 1
           fi
-          echo "Commit found on: $BRANCHES"
+          echo "Commit found on $EXPECTED_BRANCH"
 
       - name: Verify Cargo.toml version matches input
         env:
@@ -202,7 +206,7 @@ jobs:
             .
 
       - name: Generate changelog
-        uses: orhun/git-cliff-action@v4
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
         with:
           config: .config/cliff.toml
           args: >-
