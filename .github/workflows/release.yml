@@ -8,12 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: 'Release type'
+        description: 'Release type / environment'
         required: true
         type: choice
         options:
-          - rc
-          - release
+          - testnet
+          - mainnet
       version:
         description: 'Semver version (e.g. 1.2.3)'
         required: true
@@ -58,18 +58,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate commit exists on a release branch
+      - name: Validate commit exists on a deployment branch matching release_type
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
             echo "::error::Commit ${INPUT_COMMIT} does not exist"
             exit 1
           fi
 
-          BRANCHES=$(git branch -r --contains "${INPUT_COMMIT}" | grep 'origin/release/' || true)
+          EXPECTED_PREFIX="origin/deployment/${INPUT_RELEASE_TYPE}/"
+          BRANCHES=$(git branch -r --contains "${INPUT_COMMIT}" | grep "$EXPECTED_PREFIX" || true)
           if [ -z "$BRANCHES" ]; then
-            echo "::error::Commit ${INPUT_COMMIT} is not on any release/* branch"
+            echo "::error::Commit ${INPUT_COMMIT} is not on any ${EXPECTED_PREFIX}<major>.x branch"
             echo "Found on branches:"
             git branch -r --contains "${INPUT_COMMIT}"
             exit 1
@@ -102,11 +104,7 @@ jobs:
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
-            echo "name=rc-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "name=${INPUT_RELEASE_TYPE}-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Check tag does not already exist
         run: |
@@ -116,24 +114,35 @@ jobs:
             exit 1
           fi
 
-      - name: Validate RC tag exists (release only)
-        if: inputs.release_type == 'release' && !inputs.force
+      - name: Validate testnet release exists with matching upstream (mainnet only)
+        if: inputs.release_type == 'mainnet' && !inputs.force
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          RC_TAG="rc-${INPUT_VERSION}"
-          if ! git rev-parse "refs/tags/$RC_TAG" >/dev/null 2>&1; then
-            echo "::error::RC tag $RC_TAG does not exist. Deploy an RC first, or use force=true to override."
+          TESTNET_TAG="testnet-${INPUT_VERSION}"
+          if ! git rev-parse "refs/tags/$TESTNET_TAG" >/dev/null 2>&1; then
+            echo "::error::Testnet tag $TESTNET_TAG does not exist. Release to testnet first, or use force=true to override."
             exit 1
           fi
 
-          RC_COMMIT=$(git rev-parse "refs/tags/$RC_TAG^{commit}")
-          if [ "$RC_COMMIT" != "${INPUT_COMMIT}" ]; then
-            echo "::error::RC tag $RC_TAG points to $RC_COMMIT, but requested commit is ${INPUT_COMMIT}"
+          MAJOR="${INPUT_VERSION%%.*}"
+          RELEASE_BRANCH="origin/release/${MAJOR}.x"
+          if ! git rev-parse "$RELEASE_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Release branch $RELEASE_BRANCH does not exist"
             exit 1
           fi
-          echo "RC tag $RC_TAG validated (same commit)"
+
+          TESTNET_COMMIT=$(git rev-parse "refs/tags/$TESTNET_TAG^{commit}")
+          TESTNET_BASE=$(git merge-base "$TESTNET_COMMIT" "$RELEASE_BRANCH")
+          MAINNET_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH")
+          if [ "$TESTNET_BASE" != "$MAINNET_BASE" ]; then
+            echo "::error::Testnet tag $TESTNET_TAG and mainnet commit ${INPUT_COMMIT} have different $RELEASE_BRANCH ancestors"
+            echo "  testnet merge-base: $TESTNET_BASE"
+            echo "  mainnet merge-base: $MAINNET_BASE"
+            exit 1
+          fi
+          echo "Testnet tag $TESTNET_TAG validated (same upstream merge-base: $TESTNET_BASE)"
     outputs:
       tag: ${{ steps.tag.outputs.name }}
 
@@ -145,7 +154,8 @@ jobs:
       packages: write
       contents: write
     env:
-      TAG: ${{ needs.validate.outputs.tag }}
+      GIT_TAG: ${{ needs.validate.outputs.tag }}
+      DOCKER_TAG: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,9 +164,11 @@ jobs:
 
       - name: Set image name
         id: image
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> "$GITHUB_OUTPUT"
+          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_RELEASE_TYPE}" >> "$GITHUB_OUTPUT"
 
       - name: Start rootless Docker
         run: |
@@ -180,7 +192,7 @@ jobs:
             --build-arg GIT_SHA="${INPUT_COMMIT}" \
             --build-arg GIT_HAS_TAG=true \
             --build-arg GIT_DIRTY=false \
-            --tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" \
+            --tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" \
             .
 
       - name: Generate changelog
@@ -189,8 +201,8 @@ jobs:
           config: .config/cliff.toml
           args: >-
             --unreleased
-            --tag ${{ env.TAG }}
-            ${{ inputs.release_type == 'release' && '--ignore-tags ^rc-' || '' }}
+            --tag ${{ env.GIT_TAG }}
+            ${{ inputs.release_type == 'mainnet' && '--ignore-tags ^testnet-' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
@@ -207,28 +219,21 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          git tag -a "$TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
-          git push origin "$TAG"
+          git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
+          git push origin "$GIT_TAG"
 
       - name: Push Docker image
         id: push_image
         if: ${{ !inputs.dry_run }}
         run: |
-          docker push "${{ steps.image.outputs.name }}:${{ env.TAG }}"
+          docker push "${{ steps.image.outputs.name }}:${DOCKER_TAG}"
 
       - name: Update head-tracking Docker tag
         id: head_docker
         if: ${{ !inputs.dry_run }}
-        env:
-          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
-            HEAD_TAG="rc-latest"
-          else
-            HEAD_TAG="latest"
-          fi
-          docker tag "${{ steps.image.outputs.name }}:${{ env.TAG }}" "${{ steps.image.outputs.name }}:${HEAD_TAG}"
-          docker push "${{ steps.image.outputs.name }}:${HEAD_TAG}"
+          docker tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" "${{ steps.image.outputs.name }}:latest"
+          docker push "${{ steps.image.outputs.name }}:latest"
 
       - name: Save current head-tracking git tag position
         id: save_head
@@ -236,11 +241,7 @@ jobs:
         env:
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
-            HEAD_TAG="rc-latest"
-          else
-            HEAD_TAG="latest"
-          fi
+          HEAD_TAG="${INPUT_RELEASE_TYPE}-latest"
           PREV=$(git rev-parse "$HEAD_TAG" 2>/dev/null || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
           echo "tag=${HEAD_TAG}" >> "$GITHUB_OUTPUT"
@@ -252,20 +253,17 @@ jobs:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          if [ "${INPUT_RELEASE_TYPE}" = "rc" ]; then
-            HEAD_TAG="rc-latest"
-          else
-            HEAD_TAG="latest"
-          fi
+          HEAD_TAG="${INPUT_RELEASE_TYPE}-latest"
           git tag -f "$HEAD_TAG" "${INPUT_COMMIT}"
           git push -f origin "$HEAD_TAG"
 
-      - name: Create GitHub Release (RC — auto-published prerelease)
-        if: inputs.release_type == 'rc' && !inputs.dry_run
+      - name: Create GitHub Release (testnet — auto-published prerelease)
+        if: inputs.release_type == 'testnet' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_NAME: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ env.TAG }}
+          RELEASE_TAG: ${{ env.GIT_TAG }}
+          DOCKER_TAG: ${{ env.DOCKER_TAG }}
           INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           {
@@ -276,7 +274,7 @@ jobs:
             echo "## Docker"
             echo ""
             echo '```'
-            echo "docker pull ${IMAGE_NAME}:${RELEASE_TAG}"
+            echo "docker pull ${IMAGE_NAME}:${DOCKER_TAG}"
             echo '```'
           } > /tmp/release-body.md
 
@@ -287,11 +285,12 @@ jobs:
             "${RELEASE_TAG}"
 
       - name: Create GitHub Release (mainnet — draft for manual review)
-        if: inputs.release_type == 'release' && !inputs.dry_run
+        if: inputs.release_type == 'mainnet' && !inputs.dry_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_NAME: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ env.TAG }}
+          RELEASE_TAG: ${{ env.GIT_TAG }}
+          DOCKER_TAG: ${{ env.DOCKER_TAG }}
           INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           {
@@ -306,7 +305,7 @@ jobs:
             echo "## Docker"
             echo ""
             echo '```'
-            echo "docker pull ${IMAGE_NAME}:${RELEASE_TAG}"
+            echo "docker pull ${IMAGE_NAME}:${DOCKER_TAG}"
             echo '```'
           } > /tmp/release-body.md
 
@@ -321,8 +320,8 @@ jobs:
       - name: 'Cleanup: delete release git tag'
         if: failure() && steps.push_tag.outcome == 'success'
         run: |
-          echo "::warning::Cleaning up orphaned git tag $TAG"
-          git push origin --delete "$TAG" || true
+          echo "::warning::Cleaning up orphaned git tag $GIT_TAG"
+          git push origin --delete "$GIT_TAG" || true
 
       - name: 'Cleanup: revert head-tracking git tag'
         if: failure() && steps.head_git.outcome == 'success'
