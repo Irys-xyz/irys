@@ -1,0 +1,136 @@
+name: Docker Retag
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment whose image stream to retag (testnet or mainnet)'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+      source_tag:
+        description: 'Existing Docker tag in the env stream to promote (e.g., 1.0.1)'
+        required: true
+        type: string
+      target_tag:
+        description: 'Docker tag to point at it (must be `latest`)'
+        required: true
+        type: string
+      move_git_tag:
+        description: 'Also move the corresponding env-prefixed git tag (e.g., testnet-latest) to the same commit'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  retag:
+    name: retag docker image
+    runs-on: [self-hosted, misc-runner]
+    # Gated by the same GitHub Environment as the matching release type.
+    # Retag is a rollback / promotion path, so it should require the same
+    # approvals as cutting a release of that environment.
+    environment: ${{ inputs.environment }}
+    permissions:
+      packages: write
+      contents: write
+    steps:
+      - name: Validate inputs
+        env:
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          if ! [[ "$INPUT_SOURCE_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error::Invalid source_tag format: $INPUT_SOURCE_TAG"
+            exit 1
+          fi
+          if [[ "$INPUT_TARGET_TAG" != "latest" ]]; then
+            echo "::error::target_tag must be 'latest', got: $INPUT_TARGET_TAG"
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          # Credentials persisted: the "Move git tag" step below force-pushes
+          # <env>-latest to origin, which needs the checkout's auth.
+
+      # Resolve_git below reads the source git tag's commit; mirror local tags to
+      # origin first so a stale local tag on a reused runner can't move
+      # <env>-latest to a commit that was never published.
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        uses: ./.github/actions/sync-tags
+
+      - name: Set image name
+        id: image
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.environment }}
+
+      # Resolve the git side BEFORE touching the Docker daemon so a missing
+      # source git tag fails the job before we've pulled anything or moved
+      # any image. The inconsistency window between Docker push and git tag
+      # move is unavoidable without a registry-side manifest copy tool, but
+      # validating up front shrinks it as much as a single-job workflow can.
+      - name: Resolve source git tag commit
+        id: resolve_git
+        if: ${{ inputs.move_git_tag }}
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          SOURCE_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_SOURCE_TAG}"
+          TARGET_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_TARGET_TAG}"
+          if ! git rev-parse "${SOURCE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
+            echo "::error::Git tag ${SOURCE_GIT_TAG} does not exist — cannot move git tag"
+            exit 1
+          fi
+          COMMIT=$(git rev-parse "${SOURCE_GIT_TAG}^{commit}")
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "source_git_tag=${SOURCE_GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "target_git_tag=${TARGET_GIT_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Start rootless Docker and log in to GHCR
+        uses: ./.github/actions/docker-setup
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull, retag, and push
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
+          INPUT_TARGET_TAG: ${{ inputs.target_tag }}
+        run: |
+          echo "Pulling ${IMAGE}:${INPUT_SOURCE_TAG}"
+          docker pull "${IMAGE}:${INPUT_SOURCE_TAG}"
+
+          echo "Retagging as ${IMAGE}:${INPUT_TARGET_TAG}"
+          docker tag "${IMAGE}:${INPUT_SOURCE_TAG}" "${IMAGE}:${INPUT_TARGET_TAG}"
+
+          echo "Pushing ${IMAGE}:${INPUT_TARGET_TAG}"
+          docker push "${IMAGE}:${INPUT_TARGET_TAG}"
+
+      - name: Move git tag
+        if: ${{ inputs.move_git_tag }}
+        env:
+          SOURCE_GIT_TAG: ${{ steps.resolve_git.outputs.source_git_tag }}
+          TARGET_GIT_TAG: ${{ steps.resolve_git.outputs.target_git_tag }}
+          COMMIT: ${{ steps.resolve_git.outputs.commit }}
+        run: |
+          echo "Moving git tag ${TARGET_GIT_TAG} to commit ${COMMIT} (from ${SOURCE_GIT_TAG})"
+          git tag -f "${TARGET_GIT_TAG}" "${COMMIT}"
+          git push -f origin "${TARGET_GIT_TAG}"
+
+      - name: Tear down rootless Docker
+        if: always()
+        uses: ./.github/actions/docker-cleanup

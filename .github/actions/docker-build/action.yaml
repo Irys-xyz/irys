@@ -1,0 +1,44 @@
+name: "Build the Irys release image"
+description: >-
+  Runs `docker build` from docker/Dockerfile.release with the standard git
+  build-args (GIT_COMMIT/GIT_SHA/GIT_HAS_TAG/GIT_DIRTY — consumed by
+  crates/chain/build.rs for version embedding). Builds a single local tag;
+  callers handle push and the `:latest` alias, which differ per workflow.
+  Requires Docker running (pair with docker-setup) and a checkout of the
+  source commit.
+
+inputs:
+  commit:
+    description: "Source commit SHA (passed as GIT_COMMIT and GIT_SHA)."
+    required: true
+  has-tag:
+    description: >-
+      GIT_HAS_TAG build-arg: 'true' for tagged releases (testnet/mainnet),
+      'false' for devnet (appends the short SHA to the embedded version).
+    required: true
+  image:
+    description: "Full image name, e.g. ghcr.io/owner/irys-testnet."
+    required: true
+  tag:
+    description: "Image tag to build (e.g. 1.2.3 or a short SHA)."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build image
+      shell: bash
+      env:
+        GIT_COMMIT: ${{ inputs.commit }}
+        GIT_HAS_TAG: ${{ inputs.has-tag }}
+        IMAGE: ${{ inputs.image }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        docker build \
+          --file ./docker/Dockerfile.release \
+          --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+          --build-arg GIT_SHA="${GIT_COMMIT}" \
+          --build-arg GIT_HAS_TAG="${GIT_HAS_TAG}" \
+          --build-arg GIT_DIRTY=false \
+          --tag "${IMAGE}:${TAG}" \
+          .

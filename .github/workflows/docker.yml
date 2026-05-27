@@ -1,15 +1,34 @@
-name: Docker Release
+name: Docker Rebuild
+
+# testnet/mainnet rebuilds serialize with release.yml / docker-retag.yml (shared
+# `release` group) so a rebuild can't race a release or rollback and overwrite
+# :latest or a version tag mid-publish. A devnet rebuild instead joins devnet.yml's
+# `devnet` group, so a tag_latest=true rebuild can't race devnet.yml over
+# irys-devnet:latest.
+concurrency:
+  group: ${{ inputs.environment == 'devnet' && 'devnet' || 'release' }}
+  cancel-in-progress: false
+
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
 
 on:
-  push:
-    tags:
-      - mainnet-*
-      - testnet-*
-      - nightly-*
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment whose image stream to rebuild into'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+          - devnet
+      commit:
+        description: 'Commit SHA to rebuild (the source commit for this image)'
+        required: true
+        type: string
       tag:
-        description: 'Image tag (e.g., mainnet-0.1.0, testnet-0.2.0, nightly-20250611)'
+        description: 'Existing image tag to rebuild (e.g., 1.2.3)'
         required: true
         type: string
       tag_latest:
@@ -22,67 +41,101 @@ jobs:
   build-and-push:
     name: build and push docker image
     runs-on: [self-hosted, misc-runner]
+    # Gated by the GitHub Environment named after `inputs.environment`. This
+    # workflow can republish to any image stream — put required reviewers on
+    # the mainnet (and probably testnet) environments in repo settings to
+    # prevent accidental overwrites. All three envs (devnet/testnet/mainnet)
+    # must exist or the workflow fails.
+    environment: ${{ inputs.environment }}
     permissions:
       packages: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate inputs
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid commit SHA: $INPUT_COMMIT (expected full 40-char SHA; abbreviated SHAs are not accepted by actions/checkout)"
+            exit 1
+          fi
+          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
+            # devnet images are tagged by short-sha — allow the looser format
+            if ! [[ "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+              echo "::error::Invalid tag format: $INPUT_TAG"
+              exit 1
+            fi
+          else
+            # testnet/mainnet rebuild a released version — tag must be semver X.Y.Z
+            if ! [[ "$INPUT_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::For $INPUT_ENVIRONMENT, tag must be semver X.Y.Z, got: $INPUT_TAG"
+              exit 1
+            fi
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 0
+          # Credentials persisted (read-only token): the provenance check below
+          # resolves the <env>-<tag> release tag from origin to confirm the
+          # rebuild targets the exact released commit.
+
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        uses: ./.github/actions/sync-tags
+
+      # Don't let the rebuild path publish a mislabeled image. For testnet/mainnet,
+      # require-release-tag also pins the commit to the exact one <env>-<tag>
+      # points at (a rebuild must reproduce the released commit). devnet only
+      # checks the deployment branch. See the verify-commit-provenance action.
+      - name: Validate commit provenance
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: ${{ inputs.environment }}
+          commit: ${{ inputs.commit }}
+          version: ${{ inputs.tag }}
+          require-release-tag: ${{ inputs.environment != 'devnet' }}
 
       - name: Set lowercase image name
         id: image
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> $GITHUB_OUTPUT
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.environment }}
 
-      - name: Extract version from tag
-        id: version
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
+      - name: Start rootless Docker and log in to GHCR
+        uses: ./.github/actions/docker-setup
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Start rootless Docker
-        run: |
-          dockerd-rootless.sh &
-          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
+      # testnet/mainnet rebuild a tagged release, so the embedded version must
+      # match the original (X.Y.Z+irys, has_tag=true). devnet has no release
+      # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/chain/build.rs.
+      - name: Build Docker image
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ inputs.commit }}
+          has-tag: ${{ inputs.environment != 'devnet' }}
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ inputs.tag }}
 
-      - name: Log in to GitHub Container Registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${{ github.actor }} --password-stdin
-
-      - name: Build and push Docker image
-        run: |
-          docker build \
-            --file ./docker/Dockerfile.release \
-            --build-arg GIT_COMMIT=${{ github.sha }} \
-            --tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} \
-            .
-
-          docker push ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }}
+      - name: Push Docker image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: docker push "${IMAGE}:${INPUT_TAG}"
 
       - name: Tag as latest
-        if: ${{ inputs.tag_latest || (startsWith(github.ref_name, 'mainnet-') && !contains(github.ref_name, '-rc') && github.event_name == 'push') }}
+        if: ${{ inputs.tag_latest }}
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          docker tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} ${{ steps.image.outputs.name }}:latest
-          docker push ${{ steps.image.outputs.name }}:latest
+          docker tag "${IMAGE}:${INPUT_TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
 
-      - name: Cleanup Docker
+      - name: Tear down rootless Docker
         if: always()
-        run: |
-          # stop all containers
-          docker stop $(docker ps -aq) 2>/dev/null || true
-          docker system prune -a -f --volumes
-
-          # kill daemon
-          pkill -f dockerd-rootless.sh || true
-
-          # Wait a moment for cleanup
-          sleep 2
-
-          # remove runtime data (ignoring errors)
-          rm -rf ${XDG_RUNTIME_DIR}/* || true
-          rm -rf ~/.local/share/docker/* || true
+        uses: ./.github/actions/docker-cleanup

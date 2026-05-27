@@ -1,0 +1,13 @@
+name: "Sync tags from origin"
+description: >-
+  Force-syncs local tags to match origin, pruning stale local-only tags that a
+  reused self-hosted runner can leave behind (a plain checkout does not prune
+  them). Every tag-existence / tag-identity gate in the release workflows reads
+  local refs, so they must be authoritative. Requires a prior checkout.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Sync tags from origin
+      shell: bash
+      run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"

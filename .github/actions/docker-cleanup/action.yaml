@@ -1,0 +1,26 @@
+name: "Tear down rootless Docker"
+description: "Logs out of the registry, stops containers, prunes images/volumes, kills the daemon, and removes runtime data. Run with `if: always()` after docker-setup."
+
+inputs:
+  registry:
+    description: "Registry to log out of."
+    required: false
+    default: "ghcr.io"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cleanup Docker
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+      run: |
+        docker logout "${REGISTRY}" 2>/dev/null || true
+        docker stop $(docker ps -aq) 2>/dev/null || true
+        docker system prune -a -f --volumes || true
+        pkill -f dockerd-rootless.sh || true
+        sleep 2
+        # Guard with -n rather than ${VAR:?}: the :? form exits the shell before
+        # `|| true` can catch it, which would fail teardown after a good publish.
+        if [ -n "${XDG_RUNTIME_DIR:-}" ]; then rm -rf "${XDG_RUNTIME_DIR}"/* || true; fi
+        rm -rf ~/.local/share/docker/* || true

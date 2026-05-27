@@ -43,6 +43,12 @@ Conventions for adding tracing to functions in the Irys codebase.
 ### [Authoring Hardforks](./06-authoring-hardforks.md)
 Outlines the steps involved to add a hardfork to the Irys codebase.
 
+### [Release Process](./RELEASE_PROCESS.md)
+Conceptual reference for the release process: branches, tags, image streams, atomicity, head-tracking tags, hotfixes, rollback, and the rules for authoring deployment-specific patches.
+
+### [Release Playbook](./RELEASE_PLAYBOOK.md)
+Step-by-step operator walkthrough for cutting a release — prep on `release/<major>.x`, merging forward to deployment branches, dispatching the workflow, and publishing the draft mainnet release with a custom changelog.
+
 ---
 
 ## Related Sections
