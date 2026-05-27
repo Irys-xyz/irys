@@ -49,8 +49,8 @@ jobs:
             echo "::error::Invalid version format: $INPUT_VERSION (expected: X.Y.Z)"
             exit 1
           fi
-          if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::Invalid commit SHA format: $INPUT_COMMIT"
+          if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid commit SHA: $INPUT_COMMIT (expected full 40-char SHA; abbreviated SHAs are not accepted by actions/checkout)"
             exit 1
           fi
 

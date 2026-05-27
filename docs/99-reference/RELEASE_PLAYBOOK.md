@@ -188,7 +188,7 @@ The workflow does everything testnet did, plus:
 
 The draft body the workflow created has this shape:
 
-```markdown
+````markdown
 ## Summary
 
 <!-- Fill in release highlights, breaking changes, critical fixes -->
@@ -207,7 +207,7 @@ The draft body the workflow created has this shape:
 ```
 docker pull ghcr.io/<owner>/irys-mainnet:1.2.3
 ```
-```
+````
 
 The auto-generated `## Changes` section comes from git-cliff walking
 commits from `mainnet-prev..HEAD` (testnet tags excluded via
