@@ -53,6 +53,13 @@ runs:
           MAJOR="${VERSION%%.*}"
           EXPECTED_BRANCH="origin/deployment/${ENVIRONMENT}/${MAJOR}.x"
         fi
+        # Distinguish "deployment branch missing locally" (a setup/fetch problem)
+        # from "commit not on it" — otherwise a missing branch surfaces as a
+        # confusing provenance failure for the commit.
+        if ! git show-ref --verify --quiet "refs/remotes/$EXPECTED_BRANCH"; then
+          echo "::error::Expected branch $EXPECTED_BRANCH not found locally. Create it on origin (per-release-branch setup) and ensure the checkout used fetch-depth: 0."
+          exit 1
+        fi
         if ! git branch -r --contains "${COMMIT}" \
             | sed 's/^[[:space:]]*//' \
             | grep -Fxq "$EXPECTED_BRANCH"; then
