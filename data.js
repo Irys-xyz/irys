@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779893542593,
+  "lastUpdate": 1779919904527,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4687,6 +4687,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b603f1e98cba5fa7b7c66cb0b66e2826351eec76",
+          "message": "feat: improved multiversion tests (#1404)\n\n* fix(p2p): restore v1 wire compatibility for older nodes\n\nTwo on-the-wire shapes drifted between d071fc03 and HEAD in ways that\nbreak cross-version gossip on the receive side:\n\n* `RejectionReason::HandshakeRequired` was a unit variant on older\n  nodes (`\"HandshakeRequired\"`) but became a newtype variant carrying\n  an `Option<HandshakeRequirementReason>` on HEAD\n  (`{\"HandshakeRequired\": null}`). The diagnostic payload is purely\n  advisory — older peers cannot deserialize the newtype shape.\n\n  Replace the derived `Serialize`/`Deserialize` for `RejectionReason`\n  with custom impls. Serialize emits the v1 unit-string form for\n  `HandshakeRequired` (dropping the `Option` payload on the wire),\n  keeps the newtype shape for `UnsupportedProtocolVersion(u32)`\n  whose payload is load-bearing, and emits all other variants as\n  unit strings. Deserialize accepts both unit-string and single-key\n  object forms, with an `IgnoredAny` tolerance for legacy emissions\n  of object-shaped unit variants.\n\n* `/v1/protocol_version` returned a single `u32` on older nodes but\n  HEAD's `get_protocol_versions` deserializes the response body as\n  `Vec<u32>`. Add an untagged `ProtocolVersionsRepr` enum that\n  accepts either `[1, 2]` or bare `1` and normalizes to a `Vec<u32>`,\n  preserving the `MAX_PROTOCOL_VERSIONS` DDoS guard.\n\nRegenerate `fixtures/gossip_fixtures.json` to reflect the v1 wire\nform of the four `gossip_response_rejected_handshake_required_*`\nfixtures.\n\n* feat(multiversion-tests): cross-version harness with config templates, data tx flow, and promotion verification\n\nThe harness used to verify cross-version upgrades by checking that\nnodes booted, gossiped, and converged. That gave a thin signal: a\nbinary swap could leave silent data-shape corruption on disk and the\ntests would still pass. This change extends the harness so every\ntest path actually drives transactions through the cluster and\nstrictly validates what every node serves back, across binary\nboundaries.\n\nCross-version cluster configuration\n-----------------------------------\n* `BinaryKind` (`Old` | `New`) is attached to every `ResolvedBinary`,\n  letting the cluster route per-node config generation through the\n  right base template when OLD and NEW disagree on `NodeConfig`\n  schema.\n* `ClusterSpec` carries `base_config_old` + `base_config_new` instead\n  of a single template. `Cluster::upgrade_node` regenerates the\n  on-disk config from the new template before respawn, so the new\n  binary never sees the old-shaped file. For peer nodes the new\n  template's `[consensus.Custom]` block (when present) is overlaid\n  on top of what the running genesis serves at `/v1/network/config`\n  via `patch_peer_consensus(template_overlay=...)`, letting users\n  backfill new-only fields without losing the genesis-provided\n  values for shared fields.\n* `xtask multiversion-test --base-config-old/--base-config-new`\n  point at TOML templates, exported as `IRYS_BASE_CONFIG_OLD/NEW`\n  env vars to the test process. Sample templates for the\n  d071fc03 ↔ HEAD span are committed under `examples/`.\n\nRun config (`--run-config`)\n---------------------------\n* New `run_config.rs` module parses an optional TOML run config\n  with three sections:\n    [tx_header]     aliases + skip lists for the strict tx-header\n                    diff\n    [block_header]  same shape, applied to the cross-node block\n                    consistency check\n    [tx_build]      `keep_default` list of header fields to leave\n                    at default at signing time (for spans where a\n                    non-default value would change the canonical\n                    signature prehash on the older side).\n* Surfaced via `--run-config` and the `IRYS_TEST_RUN_CONFIG` env\n  var. Default is the empty config — the right baseline for\n  adjacent-release tests where renames are rare. The d071fc03 ↔\n  HEAD example config lives at\n  `examples/run-config-d071fc03.toml`.\n\nData tx submission and strict verification\n------------------------------------------\n* New `data_tx.rs` module submits signed Publish-ledger data\n  transactions over plain HTTP (`/v1/anchor`, `/v1/price`,\n  `/v1/tx`, `/v1/tx/{id}`). It uses HEAD's `irys-types` for\n  signing — the wire-shape compatibility of the request/response\n  body is what we're actually testing.\n* `submit_data_tx` sets `header_size` to a non-default sentinel\n  before signing so the on-disk `Compact` encoding actually\n  exercises non-zero payload bytes. `metadata_format` (the\n  renamed field) is opt-in non-default via `tx_build.keep_default`.\n* `assert_tx_matches_original` does a strict full-header round\n  trip against `/v1/tx/{id}` on every node, comparing every field\n  in the JSON object via `compare_full_object`. Aliased rename\n  pairs (`bundleFormat` ↔ `metadataFormat`) check presence only;\n  value comparison is skipped because the rename also changes\n  types.\n* `Cluster::assert_block_index_consistent` enumerates\n  `/v1/block-index?height=0&limit=500` from the genesis, then\n  for each block hash fetches `/v1/block/{hash}` from every node\n  and diffs the responses against the genesis's view via\n  `compare_full_object`. Catches PoA / ledger-metadata /\n  signature drift independently of the tx-header layout.\n\nChunk upload and promotion verification\n---------------------------------------\n* `upload_chunks_for_tx` POSTs every `UnpackedChunk` to\n  `/v1/chunk` so storage nodes can produce ingress proofs and\n  promote the tx from Submit to Publish.\n* `wait_for_promotion` polls `/v1/tx/{id}/promotion-status`\n  until `promotion_height` is set, on both OLD and NEW nodes\n  (same response shape on both).\n* `Cluster::submit_promote_and_verify` strings the whole flow\n  together: submit, upload chunks, wait for genesis to promote,\n  then wait for the chain to advance past\n  `block_migration_depth + 2` so every peer's\n  `block_migration_service` durably commits the promotion to\n  `IrysDataTxMetadata`.\n* `assert_tx_promoted_on_all_nodes` polls every running node\n  for non-`None` `promotion_height` — catches loss of promotion\n  state across binary swaps.\n\nTest wiring\n-----------\n* All three e2e tests now submit + promote + verify, not just\n  produce blocks.\n* All four upgrade tests submit + promote + verify before the\n  first transition; after each transition they re-verify the\n  full tx history is visible everywhere; the strict full-header\n  round-trip and block-index sweep run after every binary swap;\n  promotion preservation is asserted as well.\n* `rolling_upgrade_all_nodes` does its end-to-end promotion\n  check once at the end of the loop — per-step checks raced the\n  just-restarted miner.\n* `rollback_after_upgrade` waits past `block_migration_depth + 4`\n  blocks before each binary swap so on-disk records are actually\n  populated when the migrations run.\n\nDependency additions\n--------------------\n* `irys-types` (with `test-utils`) for `IrysSigner`, `BoundedFee`,\n  `DataTransaction`, `H256`, `U256`.\n* `irys-api-client` for typed wire shapes shared with chain-tests.\n* `k256` for constructing the signer from the funded dev key.\n* `hex`, `eyre` for support.\n\n* docs(multiversion-tests): document cross-version configuration and future improvements\n\nBring the README in line with the new harness shape:\n\n* Add `## Cross-Version Configuration` covering the\n  `--base-config-old` / `--base-config-new` template flow and the\n  `--run-config` TOML structure (tx-header / block-header alias and\n  skip lists, `tx_build.keep_default`). Includes a fully-worked\n  invocation for the d071fc03 ↔ HEAD span and the simpler\n  adjacent-release case.\n* Document the three-layer cross-version assertion stack\n  (visibility, strict tx-header round-trip, cross-node block-header\n  consistency, plus end-to-end tx promotion).\n* Update the env-vars table to include `IRYS_BASE_CONFIG_OLD/NEW`\n  and `IRYS_TEST_RUN_CONFIG`, and pair every variable with its\n  matching xtask flag.\n* Refresh the architecture tree (new `examples/` dir, new\n  `data_tx.rs` and `run_config.rs` modules, tests now live under\n  `src/tests/` rather than a separate `tests/` directory).\n* Refresh the test-suite tables to reflect that every test now\n  submits + promotes + verifies, and explicitly call out the\n  rollback test's `block_migration_depth` wait and end-of-loop\n  promotion check on rolling upgrades.\n* Add `## Future Improvements` at the bottom enumerating concrete\n  follow-ups: chunk-level read-back, non-default values for\n  renamed fields on adjacent-release runs, long-running rollback\n  populations, true gossip-isolated rollback (requires a\n  bootstrap-from-disk flag on the node binary), partition + upgrade\n  combinations, commitment-tx coverage, parallelization, build\n  cache reuse, multi-mismatch reporting in `compare_full_object`,\n  and a per-tx block-signature round-trip.\n\n* fix: update readme\n\n* feat: improvements\n\n* feat: node info now exposes correct version info\n\n* fix: wire protocol compatability",
+          "timestamp": "2026-05-27T22:48:43+01:00",
+          "tree_id": "1a2bc844934e2b4aafc8b6d70145aa2a434b6607",
+          "url": "https://github.com/Irys-xyz/irys/commit/b603f1e98cba5fa7b7c66cb0b66e2826351eec76"
+        },
+        "date": 1779919902695,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012356,
+            "range": "± 0.000248",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.128474,
+            "range": "± 0.005132",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.211047,
+            "range": "± 0.04803",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.137889,
+            "range": "± 0.429319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078403,
+            "range": "± 0.000648",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 799.952228,
+            "range": "± 34.210783",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 972.436852,
+            "range": "± 6.091398",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118327,
+            "range": "± 0.002596",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1201.96851,
+            "range": "± 9.471773",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1559.705431,
+            "range": "± 10.667757",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034391,
+            "range": "± 0.001466",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.956017,
+            "range": "± 1.116313",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.612709,
+            "range": "± 1.390396",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
