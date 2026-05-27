@@ -218,11 +218,7 @@ jobs:
         uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
         with:
           config: .config/cliff.toml
-          # -vv logs each non-conventional/unparseable commit (to stderr, i.e. the
-          # Actions log) so the "N commit(s) skipped due to parse error" warning is
-          # actionable. The changelog itself still goes to the OUTPUT file.
           args: >-
-            -vv
             --unreleased
             --tag ${{ env.GIT_TAG }}
             ${{ inputs.release_type == 'mainnet' && '--ignore-tags ^testnet-' || '' }}
@@ -230,6 +226,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
           OUTPUT: /tmp/cliff-changelog.md
+          # Name each skipped/non-conventional commit in the Actions log so the
+          # "N commit(s) skipped due to parse error" warning is actionable. Scope
+          # trace to git-cliff itself — do NOT pass the `-vv` flag, which enables
+          # GLOBAL trace and floods the log with thousands of hyper/HTTP lines from
+          # git-cliff's GitHub remote-data fetch, burying (and truncating) the useful line.
+          RUST_LOG: git_cliff_core=trace
 
       # --- Publish phase: tag, push image, update head-tracking, create release ---
       # If any step here fails, cleanup steps at the bottom delete pushed git tags.
