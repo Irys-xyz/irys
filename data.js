@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779791858514,
+  "lastUpdate": 1779868519860,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4147,6 +4147,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "30a6ac6ab50a0852063db7f0d61fbb0e5bf35070",
+          "message": "feat: obs follow-ups and Reth metrics bind hardening (#1426)\n\n* feat(obs): land block-tree, mempool, and block-pool primitives\n\n* feat(metrics): default Reth Prometheus endpoint to 127.0.0.1\n\n* fix(metrics): restore `pub` on record_chain_sync_block_rejected",
+          "timestamp": "2026-05-27T08:40:43+01:00",
+          "tree_id": "47594f972352ca0b061302c0df1e550215572126",
+          "url": "https://github.com/Irys-xyz/irys/commit/30a6ac6ab50a0852063db7f0d61fbb0e5bf35070"
+        },
+        "date": 1779868518835,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015676,
+            "range": "± 0.000772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153365,
+            "range": "± 0.003286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.568767,
+            "range": "± 0.047323",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.496399,
+            "range": "± 0.221126",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083413,
+            "range": "± 0.002332",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 780.170571,
+            "range": "± 14.989568",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.364925,
+            "range": "± 15.592278",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126962,
+            "range": "± 0.004115",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1337.794775,
+            "range": "± 99.811445",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1617.398543,
+            "range": "± 141.59093",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.14092,
+            "range": "± 0.035818",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 214.216496,
+            "range": "± 2.265751",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.843383,
+            "range": "± 3.440427",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
