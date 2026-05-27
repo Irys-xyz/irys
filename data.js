@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779882899672,
+  "lastUpdate": 1779888036706,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4471,6 +4471,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "435dea4b84af724a8a939b1c44d1caa9aa2c868b",
+          "message": "fix(ci): drop literal expression from docker-setup input description (#1427)\n\n* fix(ci): drop literal expression from docker-setup input description\n\nThe `username` input description contained a literal ${{ github.actor }}\nexample. GitHub's action manifest loader evaluates expressions even inside\ndescription text, and the github context is unavailable at load time, so the\nwhole composite action fails to load with \"Unrecognized named-value: 'github'\".\n\nThis broke the \"Start rootless Docker and log in to GHCR\" step in every job\nthat uses the action (release, docker, devnet) — caught by a testnet dry-run.\nRefer to the context by name only; the real `username: ${{ github.actor }}`\nlives in the calling workflows, where it's valid.\n\n* ci(release): run git-cliff with -vv so skipped commits are logged\n\nThe changelog step logs \"N commit(s) skipped due to parse error\" without\nnaming them. Pass -vv so git-cliff logs each non-conventional/unparseable\ncommit (e.g. a commit missing a `type:` prefix) to stderr — visible in the\nActions log. Output is unaffected; the changelog still goes to OUTPUT.\n\n* ci(release): scope changelog trace to git-cliff via RUST_LOG (drop -vv)\n\n-vv enables global TRACE, which floods the changelog log with thousands of\nhyper/HTTP lines from git-cliff's GitHub remote-data fetch and truncates before\nthe useful line. RUST_LOG=git_cliff_core=trace names each skipped/non-conventional\ncommit (e.g. the missing-`type:` commit) without the noise.\n\n* fix(release): bound changelog to the same env's previous release\n\nEach release's notes should span since the previous release of the SAME\nenvironment: testnet-X.Y.Z since the last testnet-*, mainnet-X.Y.Z since the\nlast mainnet-*.\n\nThe prior `--ignore-tags ^testnet-` (mainnet) didn't achieve this: git-cliff's\n--unreleased anchors the commit range to the latest reachable version tag, and\n--ignore-tags only relabels the \"previous\" link without moving the range. With\nboth testnet-0.2.0 and the newer mainnet-0.1.3 reachable from the 3.x line, a\ntestnet release wrongly spanned since mainnet-0.1.3.\n\nOverride tag_pattern per env via GIT_CLIFF_TAG_PATTERN so --unreleased anchors to\nthe env's own previous tag (verified: testnet-3.0.0 -> previous testnet-0.2.0).\nFirst release of an env (no prior tag) spans full history, as expected.",
+          "timestamp": "2026-05-27T14:05:49+01:00",
+          "tree_id": "23f391d1426ce892ce112d000594f2efdd747f69",
+          "url": "https://github.com/Irys-xyz/irys/commit/435dea4b84af724a8a939b1c44d1caa9aa2c868b"
+        },
+        "date": 1779888035661,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015207,
+            "range": "± 0.000551",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153216,
+            "range": "± 0.005237",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.558462,
+            "range": "± 0.09328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.530837,
+            "range": "± 0.448349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.08324,
+            "range": "± 0.002054",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 849.69895,
+            "range": "± 14.187389",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1109.18922,
+            "range": "± 23.182703",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.142115,
+            "range": "± 0.011335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1469.455042,
+            "range": "± 119.311035",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1713.053059,
+            "range": "± 164.736103",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035795,
+            "range": "± 0.004572",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 221.276822,
+            "range": "± 14.574637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 278.126054,
+            "range": "± 3.369609",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
