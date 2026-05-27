@@ -281,6 +281,33 @@ pub enum GossipResponse<T> {
     Rejected(RejectionReason),
 }
 
+/// JSON body for a v2 gossip rejection. Same `{"Rejected": ...}` envelope
+/// as [`GossipResponse::<T>::Rejected`], but [`RejectionReason::HandshakeRequired`]
+/// keeps its `Option<HandshakeRequirementReason>` payload on the wire as a
+/// newtype-variant object (e.g. `{"HandshakeRequired": "MinerAddressIsUnknown"}`)
+/// instead of being flattened to the bare unit string by the default v1-compat
+/// [`RejectionReason`] [`Serialize`] impl.
+///
+/// Used by v2 server handlers responding to peers that came in on a
+/// `/gossip/v2/*` route — v2 peers run code whose [`RejectionReason`]
+/// [`Deserialize`] accepts both wire shapes, so they recover the diagnostic.
+/// v1 handlers and shared (no-version-prefix) routes keep using
+/// [`GossipResponse::<T>::Rejected`] directly so older peers — which only
+/// know the unit form — can still parse the response.
+pub(crate) fn rejected_v2_json(reason: RejectionReason) -> serde_json::Value {
+    let inner = match reason {
+        // The only variant whose v2 wire form differs from v1: keep the
+        // `Option<HandshakeRequirementReason>` payload visible on the wire.
+        RejectionReason::HandshakeRequired(payload) => {
+            serde_json::json!({ "HandshakeRequired": payload })
+        }
+        // All other variants serialize identically in v1 and v2.
+        other => serde_json::to_value(other)
+            .expect("RejectionReason serialize is infallible for in-memory values"),
+    };
+    serde_json::json!({ "Rejected": inner })
+}
+
 /// Wire type — serialized as part of [`RejectionReason::HandshakeRequired`].
 /// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
@@ -292,7 +319,29 @@ pub enum HandshakeRequirementReason {
 
 /// Wire type — serialized as part of [`GossipResponse::Rejected`].
 /// Adding a variant? Add a fixture entry in `gossip_fixture_tests.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+///
+/// Two wire forms exist depending on which envelope is used:
+///
+/// * **v1-compatible** (default `Serialize` impl, used by [`GossipResponse`]
+///   and emitted from `/gossip/*` v1 routes plus shared no-version-prefix
+///   routes): every variant serializes as a bare unit string
+///   (e.g. `"HandshakeRequired"`) — except [`Self::UnsupportedProtocolVersion`],
+///   which keeps its newtype shape because the version number is load-bearing.
+///   The `Option<HandshakeRequirementReason>` payload on
+///   [`Self::HandshakeRequired`] is dropped on serialize so mainnet v1 nodes
+///   (which only know the unit form) can still parse our responses.
+///
+/// * **v2** ([`rejected_v2_json`], used from `/gossip/v2/*` handlers via
+///   [`crate::server::GossipServer::check_peer_v2`]): same outer envelope,
+///   but [`Self::HandshakeRequired`] keeps its
+///   `Option<HandshakeRequirementReason>` payload as a newtype-variant object
+///   (e.g. `{"HandshakeRequired": "MinerAddressIsUnknown"}`). v2 peers can
+///   parse this richer form via the [`Deserialize`] impl below.
+///
+/// On the receive side the [`Deserialize`] impl accepts *both* shapes — the
+/// unit string from v1 producers, and the newtype-variant object from v2
+/// producers (or future versions that serialize differently).
+#[derive(Debug, Clone, Copy)]
 pub enum RejectionReason {
     HandshakeRequired(Option<HandshakeRequirementReason>),
     GossipDisabled,
@@ -303,6 +352,162 @@ pub enum RejectionReason {
     ProtocolMismatch,
     UnsupportedProtocolVersion(u32),
     UnsupportedFeature,
+}
+
+const REJECTION_REASON_VARIANTS: &[&str] = &[
+    "HandshakeRequired",
+    "GossipDisabled",
+    "InvalidData",
+    "RateLimited",
+    "UnableToVerifyOrigin",
+    "InvalidCredentials",
+    "ProtocolMismatch",
+    "UnsupportedProtocolVersion",
+    "UnsupportedFeature",
+];
+
+impl Serialize for RejectionReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // v1-compat: drop the diagnostic `Option<reason>` and emit just
+            // the unit string. v1 peers only know the unit form, so this
+            // keeps NEW→OLD responses parseable. Local code paths that need
+            // the reason can read it directly from the in-memory value
+            // before it's serialized.
+            Self::HandshakeRequired(_) => {
+                serializer.serialize_unit_variant("RejectionReason", 0, "HandshakeRequired")
+            }
+            Self::GossipDisabled => {
+                serializer.serialize_unit_variant("RejectionReason", 1, "GossipDisabled")
+            }
+            Self::InvalidData => {
+                serializer.serialize_unit_variant("RejectionReason", 2, "InvalidData")
+            }
+            Self::RateLimited => {
+                serializer.serialize_unit_variant("RejectionReason", 3, "RateLimited")
+            }
+            Self::UnableToVerifyOrigin => {
+                serializer.serialize_unit_variant("RejectionReason", 4, "UnableToVerifyOrigin")
+            }
+            Self::InvalidCredentials => {
+                serializer.serialize_unit_variant("RejectionReason", 5, "InvalidCredentials")
+            }
+            Self::ProtocolMismatch => {
+                serializer.serialize_unit_variant("RejectionReason", 6, "ProtocolMismatch")
+            }
+            // The version number IS load-bearing — without it the peer can't
+            // tell what version we expected — so we keep the newtype shape.
+            // v1 peers will reject this as unknown, which is the correct
+            // outcome (they didn't understand the negotiation anyway).
+            Self::UnsupportedProtocolVersion(n) => serializer.serialize_newtype_variant(
+                "RejectionReason",
+                7,
+                "UnsupportedProtocolVersion",
+                n,
+            ),
+            Self::UnsupportedFeature => {
+                serializer.serialize_unit_variant("RejectionReason", 8, "UnsupportedFeature")
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RejectionReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = RejectionReason;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(
+                    "a RejectionReason variant: either a unit string \
+                     (v1 wire form) or a single-key object (newtype form)",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<RejectionReason, E> {
+                match s {
+                    "HandshakeRequired" => Ok(RejectionReason::HandshakeRequired(None)),
+                    "GossipDisabled" => Ok(RejectionReason::GossipDisabled),
+                    "InvalidData" => Ok(RejectionReason::InvalidData),
+                    "RateLimited" => Ok(RejectionReason::RateLimited),
+                    "UnableToVerifyOrigin" => Ok(RejectionReason::UnableToVerifyOrigin),
+                    "InvalidCredentials" => Ok(RejectionReason::InvalidCredentials),
+                    "ProtocolMismatch" => Ok(RejectionReason::ProtocolMismatch),
+                    "UnsupportedFeature" => Ok(RejectionReason::UnsupportedFeature),
+                    other => Err(E::unknown_variant(other, REJECTION_REASON_VARIANTS)),
+                }
+            }
+
+            fn visit_string<E: serde::de::Error>(self, s: String) -> Result<RejectionReason, E> {
+                self.visit_str(&s)
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<RejectionReason, A::Error> {
+                let key: String = map.next_key()?.ok_or_else(|| {
+                    serde::de::Error::custom("RejectionReason object must have a single key")
+                })?;
+                let value = match key.as_str() {
+                    "HandshakeRequired" => {
+                        let reason: Option<HandshakeRequirementReason> = map.next_value()?;
+                        RejectionReason::HandshakeRequired(reason)
+                    }
+                    "UnsupportedProtocolVersion" => {
+                        let n: u32 = map.next_value()?;
+                        RejectionReason::UnsupportedProtocolVersion(n)
+                    }
+                    // Older peers may have serialized these as objects when
+                    // they were derived; tolerate that on input even though
+                    // we never emit it.
+                    "GossipDisabled" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::GossipDisabled
+                    }
+                    "InvalidData" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::InvalidData
+                    }
+                    "RateLimited" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::RateLimited
+                    }
+                    "UnableToVerifyOrigin" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::UnableToVerifyOrigin
+                    }
+                    "InvalidCredentials" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::InvalidCredentials
+                    }
+                    "ProtocolMismatch" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::ProtocolMismatch
+                    }
+                    "UnsupportedFeature" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::UnsupportedFeature
+                    }
+                    other => {
+                        return Err(serde::de::Error::unknown_variant(
+                            other,
+                            REJECTION_REASON_VARIANTS,
+                        ));
+                    }
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "RejectionReason object must have exactly one key",
+                    ));
+                }
+                Ok(value)
+            }
+        }
+
+        deserializer.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -418,13 +623,156 @@ mod tests {
             prop_assert_eq!(json, json2);
         }
 
+        /// Asserts each [`RejectionReason`] serializes to exactly the wire form
+        /// the v1-compat shim documents — bare unit string for every variant
+        /// except `UnsupportedProtocolVersion`, which keeps its newtype shape
+        /// because the version number is load-bearing. A pure JSON-stable
+        /// round-trip (`json == json2`) silently passes if a payload-bearing
+        /// variant accidentally re-enables on serialize, so this asserts the
+        /// shape directly.
         #[test]
-        fn gossip_response_rejected_json_roundtrip(reason in arb_rejection_reason()) {
-            let resp: GossipResponse<u64> = GossipResponse::Rejected(reason);
-            let json = serde_json::to_string(&resp).unwrap();
-            let decoded: GossipResponse<u64> = serde_json::from_str(&json).unwrap();
-            let json2 = serde_json::to_string(&decoded).unwrap();
-            prop_assert_eq!(json, json2);
+        fn rejection_reason_serializes_to_v1_wire_form(reason in arb_rejection_reason()) {
+            let json = serde_json::to_value(GossipResponse::<u64>::Rejected(reason)).unwrap();
+            let inner = json.get("Rejected").expect("Rejected envelope");
+            let expected = match reason {
+                RejectionReason::HandshakeRequired(_) => serde_json::json!("HandshakeRequired"),
+                RejectionReason::GossipDisabled => serde_json::json!("GossipDisabled"),
+                RejectionReason::InvalidData => serde_json::json!("InvalidData"),
+                RejectionReason::RateLimited => serde_json::json!("RateLimited"),
+                RejectionReason::UnableToVerifyOrigin => serde_json::json!("UnableToVerifyOrigin"),
+                RejectionReason::InvalidCredentials => serde_json::json!("InvalidCredentials"),
+                RejectionReason::ProtocolMismatch => serde_json::json!("ProtocolMismatch"),
+                RejectionReason::UnsupportedFeature => serde_json::json!("UnsupportedFeature"),
+                RejectionReason::UnsupportedProtocolVersion(n) => {
+                    serde_json::json!({ "UnsupportedProtocolVersion": n })
+                }
+            };
+            prop_assert_eq!(inner, &expected);
+        }
+    }
+
+    /// Object-form deserialize: `{"HandshakeRequired": "<reason>"}` parses to
+    /// the matching `Some(reason)`. Covers the input direction the v1-compat
+    /// shim must keep working — the serialize side drops the payload, but old
+    /// peers that emit it (or future versions that re-emit it) must still parse.
+    #[test]
+    fn deserialize_handshake_required_object_form() {
+        let cases = [
+            (
+                "RequestOriginIsNotInThePeerList",
+                HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+            ),
+            (
+                "RequestOriginDoesNotMatchExpected",
+                HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+            ),
+            (
+                "MinerAddressIsUnknown",
+                HandshakeRequirementReason::MinerAddressIsUnknown,
+            ),
+        ];
+        for (wire_name, expected) in cases {
+            let json = format!(r#"{{"HandshakeRequired":"{wire_name}"}}"#);
+            let parsed: RejectionReason = serde_json::from_str(&json).unwrap();
+            match parsed {
+                RejectionReason::HandshakeRequired(Some(reason)) => {
+                    assert!(
+                        std::mem::discriminant(&reason) == std::mem::discriminant(&expected),
+                        "expected {expected:?}, got {reason:?}",
+                    );
+                }
+                other => panic!("expected HandshakeRequired(Some(_)), got {other:?}"),
+            }
+        }
+
+        // Bare unit string (v1 wire form) parses to `None`.
+        let parsed: RejectionReason = serde_json::from_str(r#""HandshakeRequired""#).unwrap();
+        assert!(matches!(parsed, RejectionReason::HandshakeRequired(None)));
+
+        // Object with explicit null reason — also a legitimate v2 wire form.
+        let parsed: RejectionReason =
+            serde_json::from_str(r#"{"HandshakeRequired":null}"#).unwrap();
+        assert!(matches!(parsed, RejectionReason::HandshakeRequired(None)));
+    }
+
+    /// [`rejected_v2_json`] keeps the `HandshakeRequired` newtype payload on
+    /// the wire — the whole point of the helper. Other rejection variants
+    /// share their wire form with [`GossipResponse::Rejected`] (the unit
+    /// string for unit variants, newtype for `UnsupportedProtocolVersion`).
+    #[test]
+    fn rejected_v2_json_preserves_handshake_required_payload() {
+        let cases = [
+            (
+                HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                "RequestOriginIsNotInThePeerList",
+            ),
+            (
+                HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+                "RequestOriginDoesNotMatchExpected",
+            ),
+            (
+                HandshakeRequirementReason::MinerAddressIsUnknown,
+                "MinerAddressIsUnknown",
+            ),
+        ];
+        for (reason, wire_name) in cases {
+            let json = rejected_v2_json(RejectionReason::HandshakeRequired(Some(reason)));
+            assert_eq!(
+                json,
+                serde_json::json!({ "Rejected": { "HandshakeRequired": wire_name } }),
+                "v2 envelope must preserve {reason:?} on the wire",
+            );
+        }
+
+        // `HandshakeRequired(None)` — the in-memory form when the producer
+        // doesn't have a specific reason — still emits the object form on v2.
+        assert_eq!(
+            rejected_v2_json(RejectionReason::HandshakeRequired(None)),
+            serde_json::json!({ "Rejected": { "HandshakeRequired": serde_json::Value::Null } }),
+        );
+    }
+
+    /// Non-`HandshakeRequired` variants serialize identically through
+    /// [`rejected_v2_json`] and [`GossipResponse::Rejected`] — the v2 envelope
+    /// only changes the wire shape for the variant that carries the diagnostic.
+    #[test]
+    fn rejected_v2_json_matches_v1_for_non_handshake_variants() {
+        for reason in [
+            RejectionReason::GossipDisabled,
+            RejectionReason::InvalidData,
+            RejectionReason::RateLimited,
+            RejectionReason::UnableToVerifyOrigin,
+            RejectionReason::InvalidCredentials,
+            RejectionReason::ProtocolMismatch,
+            RejectionReason::UnsupportedFeature,
+            RejectionReason::UnsupportedProtocolVersion(7),
+        ] {
+            let v1 = serde_json::to_value(GossipResponse::<()>::Rejected(reason)).unwrap();
+            let v2 = rejected_v2_json(reason);
+            assert_eq!(v1, v2, "v2 envelope diverged from v1 for {reason:?}");
+        }
+    }
+
+    /// End-to-end: a v2-form rejection is parsed by the receiver as
+    /// [`GossipResponse`] (which is what real clients use), and the
+    /// `Some(reason)` payload survives the round-trip.
+    #[test]
+    fn rejected_v2_json_round_trips_through_v1_deserializer() {
+        let original = RejectionReason::HandshakeRequired(Some(
+            HandshakeRequirementReason::MinerAddressIsUnknown,
+        ));
+        let json = rejected_v2_json(original).to_string();
+        let decoded: GossipResponse<()> = serde_json::from_str(&json).unwrap();
+        match decoded {
+            GossipResponse::Rejected(RejectionReason::HandshakeRequired(Some(reason))) => {
+                assert_eq!(
+                    std::mem::discriminant(&reason),
+                    std::mem::discriminant(&HandshakeRequirementReason::MinerAddressIsUnknown),
+                );
+            }
+            other => {
+                panic!("expected HandshakeRequired(Some(MinerAddressIsUnknown)), got {other:?}")
+            }
         }
     }
 

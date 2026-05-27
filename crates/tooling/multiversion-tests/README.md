@@ -1,6 +1,6 @@
 # Multiversion Test Harness
 
-Integration test framework for verifying that Irys nodes running different binary versions can form clusters, produce blocks, and converge on a canonical chain. Catches protocol-breaking changes before they reach production.
+Integration test framework for verifying that Irys nodes running different binary versions can form clusters, produce blocks, propagate transactions, and converge on a canonical chain. Catches protocol-breaking and data-format-breaking changes before they reach production.
 
 ## Quick Start
 
@@ -16,13 +16,11 @@ cargo xtask multiversion-test --filter rolling_upgrade_all_nodes
 
 # Combine: specific file + name filter
 cargo xtask multiversion-test --test upgrade --filter rolling
-
-# Run directly with cargo
-cargo test -p irys-multiversion-tests --test '*' -- --ignored --test-threads=1 --nocapture
-cargo test -p irys-multiversion-tests --test upgrade -- --ignored rolling_upgrade_all_nodes --nocapture
 ```
 
 Tests are marked `#[ignore]` because they build full `irys` binaries from source, which takes several minutes on first run. The xtask handles `--ignored` automatically; when running directly via `cargo test` you must pass it yourself.
+
+For cross-version runs you'll typically pass at least `--old-ref <ref>` and `--new-ref <ref>`. For wider version spans where the `NodeConfig` or wire-format schemas have drifted, see [Cross-Version Configuration](#cross-version-configuration).
 
 ## Prerequisites
 
@@ -94,7 +92,96 @@ Binary path overrides (`IRYS_BINARY_NEW`/`IRYS_BINARY_OLD`) take precedence over
 
 All node data lives in a run directory under `target/multiversion/test-data/{run_id}/{test_name}/`. Artifacts are never cleaned up automatically — see [Artifact Preservation](#artifact-preservation).
 
-### Artifact Preservation
+## Cross-Version Configuration
+
+The harness ships with two layers of optional, file-based configuration that let it drive arbitrary OLD↔NEW spans without baking any particular version pair's quirks into the harness code itself. Both are **optional** — for adjacent-release tests (e.g. `vN` → `vN+1`) you typically don't need either, and the bundled defaults work.
+
+You'll reach for them when:
+
+- The OLD ref's `NodeConfig` / `[consensus]` TOML schema has drifted enough that one bundled template can't satisfy both binaries' `deny_unknown_fields` parsers → use **base-config templates**.
+- The OLD ref's wire format for `DataTransactionHeader` or `BlockHeader` has drifted (renames, retypes, added fields) → use a **run config** to teach the strict cross-version comparison about those changes.
+
+### Per-Version Base-Config Templates
+
+`--base-config-old <path>` and `--base-config-new <path>` point to TOML templates the harness uses when generating each node's `config.toml`. The cluster picks the template based on which binary kind a given node is running, so OLD nodes can run with one schema and NEW nodes with another.
+
+For peer nodes, the template's `[consensus.Custom]` block (if any) is overlaid on top of whatever the genesis serves at `/v1/network/config`. This is the cross-version-schema escape hatch: bare `consensus = "Testing"` in the template means "fetch consensus from genesis verbatim"; a hand-authored `[consensus.Custom]` block means "overlay these fields on top of what the genesis serves." Use this when the new binary requires consensus fields the old genesis doesn't know about.
+
+When omitted, both kinds fall back to `fixtures/base-config.toml`. Sample templates for the d071fc03 ↔ HEAD span live in `examples/base-config-old.toml` and `examples/base-config-new.toml`.
+
+### Run Config (`--run-config`)
+
+A small TOML file with knobs for **what to compare** and **how to construct test transactions**. Pointed to by `--run-config <path>`; surfaced to the test harness via the `IRYS_TEST_RUN_CONFIG` env var. Default (no flag) is the empty config: no aliases, no skips, every applicable header field gets exercised non-default. That's the right default for adjacent-release tests where renames are rare.
+
+```toml
+# Cross-version handling for /v1/tx/{id} responses, compared against
+# the originally-signed tx via a strict full-header diff.
+[tx_header]
+# camelCase field name pairs that mean the same thing across the OLD
+# and NEW schemas (e.g. after a rename). When the two sides use the
+# different names of the pair, presence is verified but values are NOT
+# compared (a rename can also retype). When both sides emit the same
+# name, no rename happened in that response, so values ARE compared.
+aliases = [["bundleFormat", "metadataFormat"]]
+# Field names to skip entirely from the strict diff. Use when a field's
+# wire shape differs between OLD and NEW in a way `aliases` doesn't
+# model — e.g. a field that only exists on one side.
+skip = ["promotedHeight"]
+
+# Same shape, applied to /v1/block/{hash} responses compared across
+# every running node.
+[block_header]
+aliases = []
+skip = []
+
+# Tx-construction overrides applied before signing.
+[tx_build]
+# By default the harness pokes a few normally-default header fields
+# (e.g. metadata_format=1, header_size=64) to non-default sentinels so
+# the on-disk Compact encoding actually exercises non-zero payload
+# bytes — without that, fields whose default-value encoding is
+# zero-byte trivially survive any schema change. Naming a field here
+# (Rust struct field name, not the camelCase wire name) keeps it at
+# its default. Useful for spans that straddle a rename: a non-default
+# value would change the canonical signature prehash on one side and
+# the OLD side would (correctly) reject the tx as `Invalid Signature`.
+keep_default = ["metadata_format"]
+```
+
+A worked example for the d071fc03 ↔ HEAD span lives in `examples/run-config-d071fc03.toml`.
+
+### Putting It All Together
+
+```sh
+cargo xtask multiversion-test \
+  --profile dev \
+  --old-ref d071fc03af2721a6eb58ffcc20fd234162f49ecc \
+  --new-ref CURRENT \
+  --base-config-old crates/tooling/multiversion-tests/examples/base-config-old.toml \
+  --base-config-new crates/tooling/multiversion-tests/examples/base-config-new.toml \
+  --run-config     crates/tooling/multiversion-tests/examples/run-config-d071fc03.toml \
+  -- --no-fail-fast
+```
+
+For adjacent releases you'd typically just need the refs:
+
+```sh
+cargo xtask multiversion-test --old-ref v1.5.0 --new-ref v1.6.0
+```
+
+### What the Strict Checks Actually Verify
+
+Every test that submits transactions runs three layers of cross-version assertions:
+
+1. **Visibility** (status-code only) — every node responds 2xx to `/v1/tx/{id}`. Cheap; catches missing data.
+2. **Strict tx-header round-trip** — fetches `/v1/tx/{id}` from every running node and asserts the returned JSON header matches the originally-signed `DataTransaction` byte-for-byte across every shared field (modulo the run config's `aliases` and `skip`). Catches silent corruption from a binary mis-decoding `Compact`-encoded records that another version wrote.
+3. **Block-header cluster consistency** — enumerates `/v1/block-index?height=0&limit=500` from genesis, then for each block hash fetches `/v1/block/{hash}` from every node and diffs the responses against the genesis's view. Catches drift in enum-tagged sub-fields (PoA, ledger metadata, signatures) that the tx-header check would miss.
+
+Two further checks run in specific tests rather than on every submission: **chunk read-back** (`assert_chunk_for_tx_matches_original` — fetches each chunk back from the genesis and compares the packing-invariant fields against the original upload; run in the genesis-swap upgrade tests and as a single-version baseline) and **isolated read-back** (`assert_self_sufficient_in_isolation` — the terminal assertion in the rollback and single-node-upgrade tests, which shuts down every other node and re-runs the strict tx-header + promotion checks against the swapped node alone). See [Coverage gaps](#coverage-gaps) for exactly what each does and doesn't prove.
+
+The "tx the harness actually submits" carries non-default values for `metadata_format` and `header_size` by default, so the strict checks aren't vacuous on fields whose default-value `Compact` encoding is a zero-byte payload. Use `[tx_build] keep_default` to opt out per field when those values would invalidate the canonical signature on the older side.
+
+## Artifact Preservation
 
 Test artifacts (logs, configs, node data) and git worktrees (old-version source trees) are **never cleaned up automatically**. This ensures artifacts are always available for debugging, whether the test passed or failed.
 
@@ -114,13 +201,18 @@ cargo xtask multiversion-test --clean
 
 **Environment variables:**
 
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `IRYS_OLD_REF` | `CURRENT` | Git ref for the old binary, or `CURRENT` for working tree |
-| `IRYS_NEW_REF` | `CURRENT` | Git ref for the new binary, or `CURRENT` for working tree |
-| `IRYS_BINARY_OLD` | unset | Path to pre-built old binary (skips building entirely) |
-| `IRYS_BINARY_NEW` | unset | Path to pre-built new binary (skips building entirely) |
-| `IRYS_BUILD_PROFILE` | unset | Cargo profile (`dev`, `release`, etc.) |
+The xtask sets these for you when you pass the matching CLI flag, but you can also set them directly when running `cargo test` outside the xtask.
+
+| Variable | xtask flag | Default | Effect |
+|----------|-----------|---------|--------|
+| `IRYS_OLD_REF` | `--old-ref` | `CURRENT` | Git ref for the old binary, or `CURRENT` for working tree |
+| `IRYS_NEW_REF` | `--new-ref` | `CURRENT` | Git ref for the new binary, or `CURRENT` for working tree |
+| `IRYS_BINARY_OLD` | `--binary-old` | unset | Path to pre-built old binary (skips building entirely) |
+| `IRYS_BINARY_NEW` | `--binary-new` | unset | Path to pre-built new binary (skips building entirely) |
+| `IRYS_BUILD_PROFILE` | `--profile` | unset | Cargo profile (`dev`, `release`, etc.) |
+| `IRYS_BASE_CONFIG_OLD` | `--base-config-old` | unset (uses bundled `fixtures/base-config.toml`) | Path to a TOML base-config template for nodes running the OLD binary |
+| `IRYS_BASE_CONFIG_NEW` | `--base-config-new` | unset (uses bundled `fixtures/base-config.toml`) | Path to a TOML base-config template for nodes running the NEW binary |
+| `IRYS_TEST_RUN_CONFIG` | `--run-config` | unset (empty default) | Path to a TOML run-config (cross-version comparison knobs) — see [Run Config](#run-config---run-config) |
 
 Precedence: `IRYS_BINARY_*` > `IRYS_*_REF` > default (`CURRENT`).
 
@@ -210,7 +302,9 @@ async fn my_upgrade_test() {
 | `repo_root()` | Returns the irys repo root path |
 | `genesis_spec(name, binary, peers)` | Create a genesis `NodeSpec` with pre-configured mining key |
 | `peer_spec(name, binary, index, peers)` | Create a peer `NodeSpec` (0-based peer index; key pool index 0 is reserved for genesis) |
-| `cluster_spec(test_name, nodes)` | Bundle `NodeSpec`s into a `ClusterSpec` with tolerance=2 and a per-test run directory |
+| `cluster_spec(test_name, nodes)` | Bundle nodes into a `ClusterSpec` for **single-version** flows. Always uses the bundled fixture for both base configs and the empty `RunConfig` — env-var overrides are intentionally ignored here. |
+| `cluster_spec_with_refs(test_name, nodes, old_ref, new_ref)` | Same, but for cross-version flows. Loads `IRYS_BASE_CONFIG_OLD` / `IRYS_BASE_CONFIG_NEW` (templates) and `IRYS_TEST_RUN_CONFIG` (run config) from env. |
+| `base_config_old()` / `base_config_new()` | Return the OLD / NEW template TOML as a string, falling back to the bundled `fixtures/base-config.toml` when the env var is unset. |
 | `HEIGHT_TIMEOUT` | 120s — max wait for a node to reach a target height |
 | `CONVERGENCE_TIMEOUT` | 120s — max wait for all nodes to agree on chain height |
 
@@ -237,6 +331,50 @@ cluster.node_mut("peer-1")?.kill().await?;
 
 // Upgrade: shutdown → swap binary → respawn → wait ready
 cluster.upgrade_node("peer-1", &new_binary).await?;
+
+// Read chain params from the running genesis (chain_id, chunk_size,
+// block_migration_depth) — used to build signers + pace transitions.
+let chain_params = cluster.fetch_chain_params().await?;
+
+// Submit a Publish-ledger data tx through `peer-1`, then poll
+// /v1/tx/{id} on every running node until it returns 2xx.
+let tx = cluster.submit_and_verify_data(
+    "peer-1",
+    b"my payload".to_vec(),
+    chain_params.chain_id,
+    chain_params.chunk_size,
+    common::CONVERGENCE_TIMEOUT,
+).await?;
+
+// Strict full-header round-trip: every running node must return
+// JSON whose every field matches the originally-signed tx (modulo
+// run-config aliases / skips). Catches silent corruption.
+cluster.assert_tx_matches_on_all_nodes(&tx).await?;
+
+// Cross-node block-header consistency: enumerates /v1/block-index
+// from genesis, fetches each block from every running node, and
+// asserts byte-identical responses. Catches drift in enum-tagged
+// sub-fields (PoA, ledger metadata, signatures).
+cluster.assert_block_index_consistent().await?;
+
+// Wait for cluster height to advance past `target` — useful for
+// forcing tx records past `block_migration_depth` so they actually
+// land in the persistent IrysDataTxHeaders table before a binary swap.
+cluster.wait_for_height_at_least(target_height, timeout).await?;
+
+// Chunk read-back: GET every chunk of `tx` back from the genesis (the
+// miner / guaranteed chunk holder) and assert the packing-invariant
+// fields (data_root, data_size, data_path, tx_offset) match the
+// originally-uploaded chunk. Catches storage-module migrations that
+// re-encode chunk records — invisible to the tx/block-header checks.
+cluster.assert_chunk_for_tx_matches_original(&tx, timeout).await?;
+
+// Isolated read-back: shut down every node except `peer-1`, then assert
+// it alone serves the full signed header + promotion state of every tx
+// from its own DB — no live peer to mask a mis-decode via re-sync.
+// TERMINAL (only `peer-1` survives). See the method doc for what this
+// does and does NOT prove (the --bootstrap-from-disk caveat).
+cluster.assert_self_sufficient_in_isolation("peer-1", &history, timeout).await?;
 ```
 
 ## Fault Injection
@@ -277,22 +415,29 @@ guard.undo()?; // removes iptables rules
 
 ## Existing Test Suite
 
-### End-to-End Tests (`tests/e2e.rs`)
+Every test below also runs the [data-tx submission + strict cross-version assertions](#what-the-strict-checks-actually-verify) described above.
+
+### End-to-End Tests (`src/tests/e2e.rs`)
+
+Single-version flows. The `IRYS_BASE_CONFIG_*` and `IRYS_TEST_RUN_CONFIG` env vars are intentionally ignored here — fresh clusters always boot from the bundled fixture.
 
 | Test | Nodes | What it verifies |
 |------|-------|-----------------|
-| `single_genesis_produces_blocks` | 1 | Genesis node reaches height 3 |
-| `same_version_two_node_convergence` | 2 | Two nodes on same version converge |
-| `three_node_cluster_convergence` | 3 | Three-node cluster reaches consensus |
+| `single_genesis_produces_blocks` | 1 | Genesis reaches height 3 + serves a submitted data tx via `/v1/tx/{id}` |
+| `same_version_two_node_convergence` | 2 | Two nodes converge + a tx posted to a peer reaches the genesis |
+| `three_node_cluster_convergence` | 3 | Three-node cluster reaches consensus + cross-peer gossip works in both directions |
 
-### Upgrade Tests (`tests/upgrade.rs`)
+### Upgrade Tests (`src/tests/upgrade.rs`)
+
+Cross-version flows. Each transition is bracketed by data-tx submissions so the strict checks have something to compare; the rollback test also waits past `block_migration_depth` to force on-disk persistence before the binary swap so post-migration records actually get exercised.
 
 | Test | Nodes | What it verifies |
 |------|-------|-----------------|
-| `upgrade_one_node_in_running_cluster` | 3 | Upgrade one peer, cluster re-converges |
-| `rolling_upgrade_all_nodes` | 3 | Sequentially upgrade all nodes one by one |
-| `rollback_after_upgrade` | 2 | Upgrade then downgrade back to old version |
-| `crash_during_upgrade` | 2 | Kill a node, then upgrade it from crashed state |
+| `upgrade_one_node_in_running_cluster` | 3 | Upgrade one peer, cluster re-converges, NEW peer can read OLD-written tx + write fresh tx OLD peers accept; then **isolated read-back** — NEW peer serves its full history from disk with the genesis shut down |
+| `rolling_upgrade_all_nodes` | 3 | Sequentially upgrade all nodes (producer last); each freshly-upgraded node submits + verifies full tx history; final **chunk read-back** from the now-NEW genesis |
+| `upgrade_producer_first_old_validator_follows` | 2 | Upgrade the **sole producer (genesis) first** while a peer stays OLD — exercises NEW-produces / OLD-validates: the chain must advance and the OLD peer must validate, follow, and serve NEW-produced blocks + txs + chunks |
+| `rollback_after_upgrade` | 2 | Upgrade → wait past `block_migration_depth` → submit more under NEW → roll back → strict-verify pre-rollback writes survive + OLD accepts new writes; then **isolated read-back** — rolled-back OLD peer serves its full history + promotion from disk with the genesis shut down |
+| `crash_during_upgrade` | 2 | Kill a node, upgrade it from crashed state, verify it recovers prior history + accepts new writes |
 
 ## CI
 
@@ -308,23 +453,31 @@ The multiversion tests run in GitHub Actions (`.github/workflows/multiversion.ym
 ```text
 crates/tooling/multiversion-tests/
 ├── fixtures/
-│   └── base-config.toml     # Node config template (ports, peers, consensus)
+│   └── base-config.toml          # Default node config template (used when --base-config-* is omitted)
+├── examples/
+│   ├── base-config-old.toml      # Sample template for the d071fc03 OLD ref
+│   ├── base-config-new.toml      # Sample template for HEAD
+│   └── run-config-d071fc03.toml  # Sample run config for the d071fc03 ↔ HEAD span
 ├── src/
-│   ├── lib.rs                # URL helpers, module exports
-│   ├── binary.rs             # BinaryResolver: build + cache versioned binaries
-│   ├── cluster.rs            # Cluster: multi-node orchestration + upgrade
-│   ├── config.rs             # TOML config generation + consensus patching
-│   ├── ports.rs              # Ephemeral port allocation with guard pattern
-│   ├── probe.rs              # HTTP polling (/v1/info, /v1/genesis, convergence)
-│   ├── process.rs            # NodeProcess: spawn, shutdown, freeze, log capture
-│   └── fault/
-│       ├── mod.rs            # FaultInjector trait + FaultGuard (RAII cleanup)
-│       ├── crash.rs          # ProcessFreezer (SIGSTOP) + ProcessKiller (SIGKILL)
-│       └── network.rs        # NetworkPartitioner (iptables-based packet dropping)
-└── tests/
-    ├── common/mod.rs         # Shared helpers (specs, keys, timeouts)
-    ├── e2e.rs                # Single-version cluster tests
-    └── upgrade.rs            # Cross-version upgrade/rollback tests
+│   ├── lib.rs                    # URL helpers, module exports
+│   ├── binary.rs                 # BinaryResolver: build + cache versioned binaries
+│   ├── cluster.rs                # Cluster: multi-node orchestration + upgrade + cross-version assertions
+│   ├── config.rs                 # TOML config generation + consensus patching/overlay
+│   ├── data_tx.rs                # /v1/tx submission, strict header diff, /v1/block-index sweep
+│   ├── run_config.rs             # RunConfig (--run-config TOML): aliases, skip lists, tx-build knobs
+│   ├── ports.rs                  # Ephemeral port allocation with guard pattern
+│   ├── probe.rs                  # HTTP polling (/v1/info, /v1/network/config, convergence)
+│   ├── process.rs                # NodeProcess: spawn, shutdown, freeze, log capture
+│   ├── fault/
+│   │   ├── mod.rs                # FaultInjector trait + FaultGuard (RAII cleanup)
+│   │   ├── crash.rs              # ProcessFreezer (SIGSTOP) + ProcessKiller (SIGKILL)
+│   │   └── network.rs            # NetworkPartitioner (iptables-based packet dropping)
+│   └── tests/                    # Test files live in src/ so the harness modules can be private/pub-crate
+│       ├── mod.rs                # Test module roots
+│       ├── helpers.rs            # Shared helpers (specs, keys, timeouts, base-config + run-config loading)
+│       ├── e2e.rs                # Single-version cluster tests
+│       └── upgrade.rs            # Cross-version upgrade/rollback tests
+└── README.md
 ```
 
 This is a workspace crate at `crates/tooling/multiversion-tests/`, part of the main Cargo workspace.
@@ -339,3 +492,34 @@ This is a workspace crate at `crates/tooling/multiversion-tests/`, part of the m
 | `CONVERGENCE_TIMEOUT` | 120s | Waiting for all nodes to agree on chain height |
 | `GIT_TIMEOUT` | 30s | Git operations (rev-parse, worktree add, worktree prune) |
 | `CARGO_BUILD_TIMEOUT` | 1200s | Building a binary from source |
+
+## Future Improvements
+
+The harness in its current form catches a meaningful slice of cross-version regressions, but there are several gaps where coverage is shallower than it could be. None of these are urgent — they're tracked here so future operators have a working list when (a) a real regression slips past the current checks, or (b) someone wants to tighten the rollback signal specifically.
+
+### Coverage gaps
+
+- **Chunk-level read-back.** *(Addressed.)* `cluster.assert_chunk_for_tx_matches_original(tx, timeout)` now GETs every chunk of a tx back from the genesis via `/v1/chunk/data-root/{ledger}/{data_root}/{offset}` and asserts the packing-invariant fields (`data_root`, `data_size`, `data_path`, `tx_offset`) match the originally-uploaded chunk. It targets the genesis rather than sweeping every node because packed bytes are node-local (XORed with each node's mining address) and unstaked peers may not store the partition at all — so a node-vs-node diff would be meaningless or 404. Run in the producer-first and rolling-upgrade tests (where the genesis's own binary changes, so it decodes records another version wrote) and as a single-version baseline in `single_genesis_produces_blocks`. **Remaining:** it compares against the originally-uploaded data on the one chunk-holding node; it does not yet verify chunk *bytes* survive (would require replicating the packing XOR to unpack), only the Merkle proof + identity.
+- **Non-default values for renamed fields.** `tx_build.keep_default` exists specifically so non-default `metadata_format` doesn't trip OLD signature validation across the d071fc03 ↔ HEAD rename. For adjacent-release tests where renames don't apply, dropping that entry exercises actual non-zero `Compact` payload bytes for that field. A nice follow-up would be a CI matrix entry that runs *without* `keep_default` against a recent enough OLD ref to prove the field is genuinely round-trip-safe.
+- **Long-running chains under rollback.** The rollback test populates only a few txs and waits past `block_migration_depth` once. Persistent-corruption modes that only manifest after many migrated blocks (e.g. migration-state inconsistency between `IrysBlockHeaders` and `IrysDataTxMetadata`) wouldn't surface. A variant that runs the chain for several hundred blocks under NEW before rolling back, with periodic submissions throughout, would catch more.
+- **Promotion-state preservation under true isolation.** *(Partially addressed.)* `cluster.assert_self_sufficient_in_isolation(keep, history, timeout)` shuts down every node except `keep` and then re-asserts the full strict tx-header round-trip + promotion state against `keep` alone — so with no live peer to gossip-fetch from, whatever it returns came from its own DB. Wired into `rollback_after_upgrade` (OLD peer-1 on a NEW-migrated DB) and `upgrade_one_node_in_running_cluster` (NEW peer-1 on an OLD-written-then-migrated DB), as the terminal assertion. Isolation is done via graceful shutdown rather than `SIGSTOP` (Docker's default seccomp profile blocks `SIGSTOP` without `--cap-add=SYS_PTRACE`) and rather than `iptables` (no sudo needed). **Remaining:** this isolates *after* startup, so a node that re-synced from a live peer before the isolation may already have rewritten records in its own format — it proves the node's *current* on-disk state is self-sufficient, not that it decoded the *other* version's bytes at boot. Truly isolating the at-startup read path still needs (a) a direct OLD-schema MDBX reader, or (b) a `--bootstrap-from-disk` node flag so the old binary can boot with no reachable trusted peer.
+- **Network-partition + upgrade combinations.** The `fault` module already provides `NetworkPartitioner` with iptables-based packet dropping. No current test combines a partition with an upgrade. A scenario like "partition peer-2 from genesis, upgrade peer-1, heal partition, verify peer-2 catches up correctly" would exercise gossip recovery against version-mixed peers — a class of bug the current happy-path tests would miss.
+- **Commitment txs (stake / pledge / unstake).** Every test today exercises only data txs. Commitment txs go through `IrysCommitments` — a different table with a different `Compact` derivation — and are how staking and pledges propagate. Migrations to that table would be invisible to the current suite.
+
+### Harness ergonomics
+
+- **End-to-end run time.** A full-suite run is ~4–6 min. Most of that is sequential `--test-threads=1` execution to avoid port + tmpfs contention. With per-test isolated tmpfs subdirs and a small bump to the port-allocation range, several tests could run in parallel.
+- **Build cache reuse for `--new-ref CURRENT`.** The harness rebuilds the working-tree binary on every run because cargo's fingerprinting decides whether to rebuild. A persistent test-data dir keyed by working-tree hash (or a sentinel file checked against `git diff --stat`) would let consecutive same-tree runs skip the rebuild.
+- **Better failure-time artifact summaries.** Today, when a test panics, the harness preserves the full `target/multiversion/test-data/{run_id}/` tree but doesn't produce a summary. A post-failure step that scans node logs for the first `ERROR` / first panic and prints a one-line cause per test would shorten the debug loop.
+- **Parameterizing the test set.** Right now the test functions are hardcoded against the harness's specific specs. Reframing them as table-driven cases (e.g. `#[rstest]` with parametric `(node_count, upgrade_order, fault_pattern)`) would let CI run a wider matrix without proportional code growth.
+
+### Comparison-strictness improvements
+
+- **Per-tx commitment check on the genesis side.** The block-index sweep proves every node agrees on each block's full content, but it doesn't directly assert that the genesis's signed-block hash matches the block's serialized form (in case some field is included in the hash but excluded from the JSON envelope). A round-trip via `block.signature_hash()` would catch that.
+- **Detect drift in the run config itself.** If a future schema rename happens and nobody updates the example run config, the d071fc03 ↔ HEAD test would silently start passing for the wrong reason. A separate test that fails when the run config carries an alias for a field that doesn't actually exist on either OLD or NEW (i.e. is over-permissive) would prevent silent rot.
+- **`compare_full_object` could surface multiple field mismatches.** Today it short-circuits on the first mismatch. For investigating large drifts, it'd be more useful to collect every diff and print a unified report.
+
+### Documentation
+
+- **Walked-through examples for two more spans.** This README has a complete worked example for the d071fc03 ↔ HEAD span and a one-line example for adjacent releases. Adding a third intermediate case (e.g. one major-version step where only one of `--base-config-old` / `--run-config` is needed) would make the "how to set this up for a new span" decision easier for future operators.
+- **Run-config field reference.** The TOML structure is documented in the inline `[tx_header]` / `[tx_build]` example, but a separate "every field, what it does" table would be easier to skim.
