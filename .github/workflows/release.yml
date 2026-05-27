@@ -265,7 +265,12 @@ jobs:
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           HEAD_TAG="${INPUT_RELEASE_TYPE}-latest"
-          PREV=$(git rev-parse "$HEAD_TAG" 2>/dev/null || true)
+          # --verify --quiet so a missing tag yields an empty string. Plain
+          # `git rev-parse "$HEAD_TAG"` echoes the literal tag name to stdout on a
+          # miss, which would make `prev` non-empty and send the failure-cleanup
+          # down the "restore previous" branch (leaving <env>-latest on the failed
+          # release) instead of deleting it — wrong on an environment's first release.
+          PREV=$(git rev-parse --verify --quiet "$HEAD_TAG" || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
           echo "tag=${HEAD_TAG}" >> "$GITHUB_OUTPUT"
 

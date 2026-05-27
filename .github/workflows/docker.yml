@@ -1,10 +1,12 @@
 name: Docker Rebuild
 
-# Serialize with release.yml / docker-retag.yml (same group) so a manual rebuild
-# can't race a release or rollback and overwrite :latest or a version tag
-# mid-publish.
+# testnet/mainnet rebuilds serialize with release.yml / docker-retag.yml (shared
+# `release` group) so a rebuild can't race a release or rollback and overwrite
+# :latest or a version tag mid-publish. A devnet rebuild instead joins devnet.yml's
+# `devnet` group, so a tag_latest=true rebuild can't race devnet.yml over
+# irys-devnet:latest.
 concurrency:
-  group: release
+  group: ${{ inputs.environment == 'devnet' && 'devnet' || 'release' }}
   cancel-in-progress: false
 
 # Restrictive default; each job sets the scopes it actually needs.
