@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779888036706,
+  "lastUpdate": 1779893542593,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4579,6 +4579,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f26fa19715c007cec909ea1376a1eed0d1f7058b",
+          "message": "fix(release): disable git-cliff GitHub remote fetch (panics on flaky API) (#1428)\n\nThe changelog step panicked (changelog.rs:493 -> exit 101) fetching every\ncommit + every closed PR from the GitHub API and hitting a truncated response\n(\"end of file before message length reached\"). That remote data is unused —\nthe cliff.toml template references only local commit fields.\n\nDrop GITHUB_REPO from the step env; git-cliff v2.13.1 (pinned by the action)\nwon't fetch without an explicit repo and doesn't auto-detect from origin\n(verified). The action still supplies a token for its own binary download.",
+          "timestamp": "2026-05-27T15:37:15+01:00",
+          "tree_id": "6fc0c7fe1649334ff41d47ca8ad47f6b6628b871",
+          "url": "https://github.com/Irys-xyz/irys/commit/f26fa19715c007cec909ea1376a1eed0d1f7058b"
+        },
+        "date": 1779893541458,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015325,
+            "range": "± 0.000421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153468,
+            "range": "± 0.007079",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.579885,
+            "range": "± 0.11797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.67997,
+            "range": "± 0.764737",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078787,
+            "range": "± 0.001322",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 786.499138,
+            "range": "± 20.286735",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1067.017054,
+            "range": "± 38.199516",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.128074,
+            "range": "± 0.003733",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1307.01394,
+            "range": "± 94.208354",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1860.503902,
+            "range": "± 155.023091",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035025,
+            "range": "± 0.001696",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.272092,
+            "range": "± 1.298065",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.853925,
+            "range": "± 2.119266",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000007",
             "unit": "ms/iter"
           }
         ]
