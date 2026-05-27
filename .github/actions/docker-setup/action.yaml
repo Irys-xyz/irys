@@ -7,7 +7,11 @@ inputs:
     required: false
     default: "ghcr.io"
   username:
-    description: "Username for `docker login`. Callers must pass this explicitly (e.g. ${{ github.actor }}); composite-action input defaults do not reliably expand expressions."
+    # NOTE: do not embed a literal Actions expression in this description — the
+    # action manifest loader evaluates expressions even inside description text,
+    # and the github context is unavailable at load time, so it fails the whole
+    # action to load. Refer to contexts by name only (e.g. github.actor).
+    description: "Username for `docker login`. Callers must pass this explicitly (e.g. github.actor); composite-action input defaults do not reliably expand expressions."
     required: true
   password:
     description: "Token piped to `docker login` via stdin. Must be a secret."
