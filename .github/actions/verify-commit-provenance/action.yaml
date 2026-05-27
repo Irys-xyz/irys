@@ -4,8 +4,9 @@ description: >-
   lives on the matching deployment branch, and — for testnet/mainnet — carries
   the expected crates/chain version, optionally requiring that the
   <env>-<version> release tag points at it. The caller must have already checked
-  out the repo (fetch-depth: 0) and synced tags from origin; this action only
-  reads local refs.
+  out the repo (fetch-depth: 0); for testnet/mainnet it must also have synced tags
+  from origin (devnet does only the branch check and reads no tags). This action
+  only reads local refs.
 
 inputs:
   environment:

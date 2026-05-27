@@ -4,6 +4,9 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
 on:
   workflow_dispatch:
     inputs:
@@ -104,10 +107,10 @@ jobs:
 
       - name: Pull, retag, and push
         env:
+          IMAGE: ${{ steps.image.outputs.name }}
           INPUT_SOURCE_TAG: ${{ inputs.source_tag }}
           INPUT_TARGET_TAG: ${{ inputs.target_tag }}
         run: |
-          IMAGE="${{ steps.image.outputs.name }}"
           echo "Pulling ${IMAGE}:${INPUT_SOURCE_TAG}"
           docker pull "${IMAGE}:${INPUT_SOURCE_TAG}"
 

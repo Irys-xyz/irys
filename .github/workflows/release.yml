@@ -4,6 +4,9 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
 on:
   workflow_dispatch:
     inputs:
@@ -151,7 +154,18 @@ jobs:
     # Configure required reviewers (etc.) on the `mainnet` environment in
     # repo settings; leave `testnet` with no protection rules for the
     # auto-publish flow. Both environments must exist or the workflow fails.
-    environment: ${{ inputs.release_type }}
+    #
+    # dry-run resolves the environment to an empty string, which disables the
+    # gate: a dry-run publishes nothing, so it should not need a mainnet
+    # reviewer's approval — and must not park on the approval gate while holding
+    # the shared `release` concurrency slot, which would block real releases and
+    # rollbacks. (dry-run still runs in the `release` group so it can't race a
+    # real publish on a shared runner.)
+    #
+    # The expression is written `!dry_run && release_type || ''` (not
+    # `dry_run && '' || release_type`): GHA's `a && b || c` returns `c` whenever
+    # `b` is falsy, and '' is falsy, so the naive form would never select ''.
+    environment: ${{ !inputs.dry_run && inputs.release_type || '' }}
     permissions:
       packages: write
       contents: write
@@ -163,6 +177,9 @@ jobs:
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
+          # Credentials persisted (write token): the publish steps below push the
+          # release git tag and force-move <env>-latest, and the failure-cleanup
+          # steps delete/revert those tags on origin — all need the checkout's auth.
 
       - name: Configure git identity
         run: |
@@ -231,8 +248,10 @@ jobs:
       - name: Push Docker image
         id: push_image
         if: ${{ !inputs.dry_run }}
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
         run: |
-          docker push "${{ steps.image.outputs.name }}:${DOCKER_TAG}"
+          docker push "${IMAGE}:${DOCKER_TAG}"
 
       # Head-tracking git tag is updated BEFORE the GH release create, so a
       # failure in `gh release create` rolls everything (git tag + head git)
@@ -312,9 +331,11 @@ jobs:
         id: head_docker
         if: ${{ !inputs.dry_run }}
         continue-on-error: true
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
         run: |
-          docker tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" "${{ steps.image.outputs.name }}:latest"
-          docker push "${{ steps.image.outputs.name }}:latest"
+          docker tag "${IMAGE}:${DOCKER_TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
 
       - name: Warn if head-tracking Docker tag was not moved
         if: ${{ !inputs.dry_run && steps.head_docker.outcome == 'failure' }}

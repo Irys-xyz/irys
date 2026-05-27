@@ -7,6 +7,9 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
 on:
   workflow_dispatch:
     inputs:
