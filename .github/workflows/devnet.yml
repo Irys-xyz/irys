@@ -17,6 +17,10 @@ jobs:
   build:
     name: build and push devnet image
     runs-on: [self-hosted, misc-runner]
+    # Gated by the `devnet` GitHub Environment for consistency with the other
+    # publishing workflows. devnet has no protection rules (builds on demand),
+    # but routing through the environment honors any rules added later.
+    environment: devnet
     permissions:
       packages: write
       contents: read

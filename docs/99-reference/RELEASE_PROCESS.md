@@ -159,6 +159,16 @@ To roll back testnet or mainnet to a previous version, use the **Docker Retag** 
 
 This is the fastest rollback path — it re-uses the existing tested image.
 
+> **If a release is in flight, cancel it first.** `release.yml`, `docker.yml`,
+> and `docker-retag.yml` share the `release` concurrency group (with
+> `cancel-in-progress: false`) so they can never race each other over `:latest`
+> or a version tag. A `release.yml` run parked on its environment-approval gate
+> still **holds** that slot, so a rollback dispatched while a release awaits
+> approval will queue behind it. In an emergency, cancel the pending release run
+> (Actions → the run → Cancel) before dispatching `docker-retag.yml`. The shared
+> group is deliberate: a rollback racing a concurrent publish is more dangerous
+> than a rollback that waits.
+
 ## Process in Action
 
 Starting from a new major version:

@@ -123,6 +123,20 @@ jobs:
             exit 1
           fi
 
+      # A leftover GitHub release/draft with this tag name (e.g. from a prior
+      # partially-failed run) would only surface at `gh release create` in the
+      # publish phase — after the git tag and versioned image are already pushed,
+      # leaving an orphaned image. Catch it here, before the approval gate.
+      - name: Check no GitHub release/draft already uses this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::A GitHub release or draft named $TAG already exists. Delete it before re-running (it would collide with 'gh release create')."
+            exit 1
+          fi
+
       - name: Validate testnet release exists with matching upstream (mainnet only)
         if: inputs.release_type == 'mainnet' && !inputs.force
         env:

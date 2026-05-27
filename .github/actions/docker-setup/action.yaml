@@ -19,6 +19,18 @@ runs:
     - name: Start rootless Docker
       shell: bash
       run: |
+        # Defensive reset before starting. This runner is reused for sequential
+        # jobs; a prior job that crashed or was killed may have skipped
+        # docker-cleanup, leaving a rootless daemon + images/data/socket behind.
+        # Each runner instance is its own container, so no concurrent job shares
+        # this state — wiping it here is safe and guarantees a clean start (and a
+        # leftover healthy daemon would otherwise make `docker info` succeed
+        # against the previous job's dirty state).
+        pkill -f dockerd-rootless.sh || true
+        sleep 2
+        if [ -n "${XDG_RUNTIME_DIR:-}" ]; then rm -rf "${XDG_RUNTIME_DIR}"/docker* || true; fi
+        rm -rf ~/.local/share/docker/* || true
+
         dockerd-rootless.sh &
         timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
           || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }

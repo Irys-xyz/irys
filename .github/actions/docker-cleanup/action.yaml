@@ -20,5 +20,7 @@ runs:
         docker system prune -a -f --volumes || true
         pkill -f dockerd-rootless.sh || true
         sleep 2
-        rm -rf "${XDG_RUNTIME_DIR:?}"/* || true
+        # Guard with -n rather than ${VAR:?}: the :? form exits the shell before
+        # `|| true` can catch it, which would fail teardown after a good publish.
+        if [ -n "${XDG_RUNTIME_DIR:-}" ]; then rm -rf "${XDG_RUNTIME_DIR}"/* || true; fi
         rm -rf ~/.local/share/docker/* || true

@@ -100,8 +100,9 @@ The workflow will:
 1. Verify the commit is on `deployment/testnet/<major>.x`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
 3. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
-4. Push git tag `testnet-1.2.3`, push the Docker image, retag and push `irys-testnet:latest`, move the `testnet-latest` git tag.
+4. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
 5. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.
+6. As the final, non-fatal step, retag and push `irys-testnet:latest` (a failure here leaves `:latest` on the previous release rather than rolling back the published one — see [`RELEASE_PROCESS.md` § Atomicity](./RELEASE_PROCESS.md#atomicity)).
 
 Then deploy `irys-testnet:1.2.3` to testnet and validate.
 
@@ -132,6 +133,13 @@ fi
 ```
 
 If the check warns, go back to Phase B with a new version (`1.2.4`).
+
+> This local pre-flight is intentionally stricter than the workflow gate. The
+> workflow only requires the testnet and mainnet commits to share the **same
+> `release/<major>.x` merge-base** (same upstream code, env patches aside) — it
+> does not require `release/<major>.x` to be unchanged. Keeping the branch
+> frozen between the two releases is the simplest way to guarantee that, which
+> is what this check verifies.
 
 Merge `release/1.x` forward into the mainnet deployment branch:
 
@@ -171,9 +179,10 @@ The workflow does everything testnet did, plus:
 - Verifies `testnet-1.2.3` exists.
 - Verifies `testnet-1.2.3` and `$MAINNET_SHA` share the same `release/1.x`
   merge-base (same upstream code; only env patches differ).
-- Pushes git tag `mainnet-1.2.3`, image `irys-mainnet:1.2.3`, retags and
-  pushes `irys-mainnet:latest`, moves `mainnet-latest` git tag.
+- Pushes git tag `mainnet-1.2.3`, image `irys-mainnet:1.2.3`, moves the
+  `mainnet-latest` git tag.
 - Creates a **draft** GitHub Release — does NOT auto-publish.
+- As the final, non-fatal step, retags and pushes `irys-mainnet:latest`.
 
 ## Phase D — Custom changelog and publish
 

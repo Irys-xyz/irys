@@ -46,6 +46,9 @@ commit_parsers = [
     { message = "^refactor", group = "Refactoring" },
     { message = "^doc|^docs", group = "Documentation" },
     { message = "^test", group = "Testing" },
+    { message = "^build", group = "Build System" },
+    { message = "^revert", group = "Reverts" },
+    { message = "^style", skip = true },
     { message = "^chore\\(deps\\)", skip = true },
     { message = "^chore|^ci", group = "Miscellaneous" },
 ]
