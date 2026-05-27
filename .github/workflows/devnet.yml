@@ -37,7 +37,7 @@ jobs:
       # GHA expressions have no ternary; the && / || idiom below works because
       # the truthy branch is non-empty when the condition is true, so the ||
       # fallback only fires when inputs.commit is empty.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.commit != '' && inputs.commit || 'deployment/devnet' }}
           fetch-depth: 0
@@ -70,26 +70,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
-        env:
-          COMMIT_SHA: ${{ steps.resolve.outputs.sha }}
-          SHORT_SHA: ${{ steps.resolve.outputs.short }}
-        run: |
-          docker build \
-            --file ./docker/Dockerfile.release \
-            --build-arg GIT_COMMIT="${COMMIT_SHA}" \
-            --build-arg GIT_SHA="${COMMIT_SHA}" \
-            --build-arg GIT_HAS_TAG=false \
-            --build-arg GIT_DIRTY=false \
-            --tag "${{ steps.image.outputs.name }}:${SHORT_SHA}" \
-            --tag "${{ steps.image.outputs.name }}:latest" \
-            .
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ steps.resolve.outputs.sha }}
+          has-tag: "false"
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ steps.resolve.outputs.short }}
 
-      - name: Push images
+      - name: Tag and push images
         env:
+          IMAGE: ${{ steps.image.outputs.name }}
           SHORT_SHA: ${{ steps.resolve.outputs.short }}
         run: |
-          docker push "${{ steps.image.outputs.name }}:${SHORT_SHA}"
-          docker push "${{ steps.image.outputs.name }}:latest"
+          docker tag "${IMAGE}:${SHORT_SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHORT_SHA}"
+          docker push "${IMAGE}:latest"
 
       - name: Tear down rootless Docker
         if: always()

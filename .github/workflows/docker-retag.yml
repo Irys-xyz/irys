@@ -54,15 +54,17 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          # Credentials persisted: the "Move git tag" step below force-pushes
+          # <env>-latest to origin, which needs the checkout's auth.
 
       # Resolve_git below reads the source git tag's commit; mirror local tags to
       # origin first so a stale local tag on a reused runner can't move
       # <env>-latest to a commit that was never published.
       - name: Sync tags from origin (local tags on reused runners can be stale)
-        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
+        uses: ./.github/actions/sync-tags
 
       - name: Set image name
         id: image

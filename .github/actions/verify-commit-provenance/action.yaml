@@ -45,6 +45,10 @@ runs:
         if [[ "$ENVIRONMENT" == "devnet" ]]; then
           EXPECTED_BRANCH="origin/deployment/devnet"
         else
+          if [ -z "$VERSION" ]; then
+            echo "::error::version is required for ${ENVIRONMENT} (got empty); cannot derive deployment branch"
+            exit 1
+          fi
           MAJOR="${VERSION%%.*}"
           EXPECTED_BRANCH="origin/deployment/${ENVIRONMENT}/${MAJOR}.x"
         fi

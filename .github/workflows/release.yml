@@ -54,7 +54,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           # Credentials persisted (read-only token): the tag-existence and
@@ -62,7 +62,7 @@ jobs:
           # from origin, not stale local tags left on reused self-hosted runners.
 
       - name: Sync tags from origin (local tags on reused runners can be stale)
-        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
+        uses: ./.github/actions/sync-tags
 
       # Commit must exist, live on origin/deployment/<release_type>/<major>.x,
       # and carry crates/chain version == inputs.version. require-release-tag is
@@ -159,7 +159,7 @@ jobs:
       GIT_TAG: ${{ needs.validate.outputs.tag }}
       DOCKER_TAG: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
@@ -172,7 +172,7 @@ jobs:
       # Mirror local tags to origin so save_head reads the true previous
       # <env>-latest position (and a stale local version tag can't survive).
       - name: Sync tags from origin (local tags on reused runners can be stale)
-        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
+        uses: ./.github/actions/sync-tags
 
       - name: Set image name
         id: image
@@ -189,17 +189,12 @@ jobs:
       # --- Build phase: build image locally, no push yet ---
 
       - name: Build Docker image
-        env:
-          INPUT_COMMIT: ${{ inputs.commit }}
-        run: |
-          docker build \
-            --file ./docker/Dockerfile.release \
-            --build-arg GIT_COMMIT="${INPUT_COMMIT}" \
-            --build-arg GIT_SHA="${INPUT_COMMIT}" \
-            --build-arg GIT_HAS_TAG=true \
-            --build-arg GIT_DIRTY=false \
-            --tag "${{ steps.image.outputs.name }}:${DOCKER_TAG}" \
-            .
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ inputs.commit }}
+          has-tag: "true"
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ env.DOCKER_TAG }}
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
@@ -266,16 +261,26 @@ jobs:
           git tag -f "$HEAD_TAG" "${INPUT_COMMIT}"
           git push -f origin "$HEAD_TAG"
 
-      - name: Create GitHub Release (testnet — auto-published prerelease)
-        if: inputs.release_type == 'testnet' && !inputs.dry_run
+      # testnet auto-publishes a prerelease; mainnet ships a draft for manual
+      # review, with a Summary placeholder for the operator to fill in before
+      # publishing. Body (changelog + docker pull) is otherwise identical.
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           RELEASE_TAG: ${{ env.GIT_TAG }}
           DOCKER_TAG: ${{ env.DOCKER_TAG }}
           INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           {
+            if [ "$INPUT_RELEASE_TYPE" = "mainnet" ]; then
+              echo "## Summary"
+              echo ""
+              echo "<!-- Fill in release highlights, breaking changes, critical fixes -->"
+              echo ""
+            fi
             echo "## Changes"
             echo ""
             cat /tmp/cliff-changelog.md
@@ -287,38 +292,12 @@ jobs:
             echo '```'
           } > /tmp/release-body.md
 
-          gh release create --prerelease \
-            --title "${RELEASE_TAG}" \
-            --target "${INPUT_COMMIT}" \
-            -F /tmp/release-body.md \
-            "${RELEASE_TAG}"
-
-      - name: Create GitHub Release (mainnet — draft for manual review)
-        if: inputs.release_type == 'mainnet' && !inputs.dry_run
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_NAME: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ env.GIT_TAG }}
-          DOCKER_TAG: ${{ env.DOCKER_TAG }}
-          INPUT_COMMIT: ${{ inputs.commit }}
-        run: |
-          {
-            echo "## Summary"
-            echo ""
-            echo "<!-- Fill in release highlights, breaking changes, critical fixes -->"
-            echo ""
-            echo "## Changes"
-            echo ""
-            cat /tmp/cliff-changelog.md
-            echo ""
-            echo "## Docker"
-            echo ""
-            echo '```'
-            echo "docker pull ${IMAGE_NAME}:${DOCKER_TAG}"
-            echo '```'
-          } > /tmp/release-body.md
-
-          gh release create --draft \
+          if [ "$INPUT_RELEASE_TYPE" = "mainnet" ]; then
+            RELEASE_FLAG=--draft
+          else
+            RELEASE_FLAG=--prerelease
+          fi
+          gh release create "$RELEASE_FLAG" \
             --title "${RELEASE_TAG}" \
             --target "${INPUT_COMMIT}" \
             -F /tmp/release-body.md \

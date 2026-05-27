@@ -70,7 +70,7 @@ jobs:
             fi
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
@@ -79,7 +79,7 @@ jobs:
           # rebuild targets the exact released commit.
 
       - name: Sync tags from origin (local tags on reused runners can be stale)
-        run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
+        uses: ./.github/actions/sync-tags
 
       # Don't let the rebuild path publish a mislabeled image. For testnet/mainnet,
       # require-release-tag also pins the commit to the exact one <env>-<tag>
@@ -105,35 +105,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        env:
-          INPUT_COMMIT: ${{ inputs.commit }}
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
-        run: |
-          # testnet/mainnet rebuild a tagged release, so the embedded version must
-          # match the original (X.Y.Z+irys, has_tag=true). devnet has no release
-          # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/chain/build.rs.
-          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
-            GIT_HAS_TAG=false
-          else
-            GIT_HAS_TAG=true
-          fi
-          docker build \
-            --file ./docker/Dockerfile.release \
-            --build-arg GIT_COMMIT="${INPUT_COMMIT}" \
-            --build-arg GIT_SHA="${INPUT_COMMIT}" \
-            --build-arg GIT_HAS_TAG="${GIT_HAS_TAG}" \
-            --build-arg GIT_DIRTY=false \
-            --tag ${{ steps.image.outputs.name }}:${{ inputs.tag }} \
-            .
+      # testnet/mainnet rebuild a tagged release, so the embedded version must
+      # match the original (X.Y.Z+irys, has_tag=true). devnet has no release
+      # tag (has_tag=false → X.Y.Z+irys.<sha>). See crates/chain/build.rs.
+      - name: Build Docker image
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ inputs.commit }}
+          has-tag: ${{ inputs.environment != 'devnet' }}
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ inputs.tag }}
 
-          docker push ${{ steps.image.outputs.name }}:${{ inputs.tag }}
+      - name: Push Docker image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: docker push "${IMAGE}:${INPUT_TAG}"
 
       - name: Tag as latest
         if: ${{ inputs.tag_latest }}
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          docker tag ${{ steps.image.outputs.name }}:${{ inputs.tag }} ${{ steps.image.outputs.name }}:latest
-          docker push ${{ steps.image.outputs.name }}:latest
+          docker tag "${IMAGE}:${INPUT_TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
 
       - name: Tear down rootless Docker
         if: always()
