@@ -16,6 +16,14 @@ const NODE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// check. The test chains never run for very long (a few minutes max),
 /// so 500 covers the entire chain comfortably while bounding work.
 const BLOCK_INDEX_LIMIT: u64 = 500;
+/// Per-request timeout for the shared data-tx HTTP client. The `data_tx`
+/// poll loops only re-check their own deadline *between* requests, so a
+/// request that hangs (e.g. a node stalled mid binary-swap that accepts the
+/// connection but never responds) would otherwise block past the loop's
+/// `timeout`. Bounding each request keeps the loop honest. Kept generous so a
+/// slow-but-progressing request against a busy local node isn't aborted —
+/// well under the ~120s loop budgets.
+const DATA_CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum ClusterError {
@@ -46,6 +54,8 @@ pub enum ClusterError {
     },
     #[error("probe initialization: {0}")]
     ProbeInit(reqwest::Error),
+    #[error("data client initialization: {0}")]
+    ClientInit(reqwest::Error),
     #[error("peers present but no genesis node in cluster spec")]
     MissingGenesis,
     #[error("expected exactly 1 genesis node but found {0}")]
@@ -137,6 +147,9 @@ struct NodeIdentity {
 pub struct Cluster {
     pub nodes: HashMap<String, NodeProcess>,
     pub probe: HttpProbe,
+    /// Shared HTTP client for data-tx operations, built once with
+    /// [`DATA_CLIENT_TIMEOUT`]. Cheap to clone (Arc-backed) at each call site.
+    client: reqwest::Client,
     run_dir: PathBuf,
     port_map: HashMap<String, NodePorts>,
     height_tolerance: u64,
@@ -163,6 +176,10 @@ impl Cluster {
         )?;
 
         let probe = HttpProbe::new().map_err(ClusterError::ProbeInit)?;
+        let client = reqwest::Client::builder()
+            .timeout(DATA_CLIENT_TIMEOUT)
+            .build()
+            .map_err(ClusterError::ClientInit)?;
 
         let identities: HashMap<String, NodeIdentity> = spec
             .nodes
@@ -187,6 +204,7 @@ impl Cluster {
         Ok(Self {
             nodes,
             probe,
+            client,
             run_dir,
             port_map,
             height_tolerance: spec.height_tolerance,
@@ -346,7 +364,7 @@ impl Cluster {
             .ok_or_else(|| ClusterError::NodeNotFound(target_node.into()))?
             .api_url();
 
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         let tx = crate::data_tx::submit_data_tx(
             &client,
             &target_url,
@@ -401,7 +419,7 @@ impl Cluster {
             .ok_or_else(|| ClusterError::NodeNotFound(target_node.into()))?
             .api_url();
 
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         let tx = crate::data_tx::submit_data_tx(
             &client,
             &target_url,
@@ -470,7 +488,7 @@ impl Cluster {
         tx_id: irys_types::H256,
         timeout: Duration,
     ) -> Result<(), ClusterError> {
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         let urls = self.checked_api_urls()?;
         for url in &urls {
             crate::data_tx::wait_for_promotion(&client, url, tx_id, timeout)
@@ -495,7 +513,7 @@ impl Cluster {
         &mut self,
         expected: &irys_types::DataTransaction,
     ) -> Result<(), ClusterError> {
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         let urls = self.checked_api_urls()?;
         for url in &urls {
             crate::data_tx::assert_tx_matches_original(
@@ -525,7 +543,7 @@ impl Cluster {
     /// OLD-only and OLD/NEW-mixed clusters, since `block-index` exists
     /// on both versions but `/status` is HEAD-only.
     pub async fn assert_block_index_consistent(&mut self) -> Result<(), ClusterError> {
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         let genesis_url = self.find_running_genesis_url()?;
         let block_hashes =
             crate::data_tx::fetch_block_index_hashes(&client, &genesis_url, BLOCK_INDEX_LIMIT)
@@ -592,7 +610,7 @@ impl Cluster {
         timeout: Duration,
     ) -> Result<(), ClusterError> {
         let genesis_url = self.find_running_genesis_url()?;
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         crate::data_tx::assert_chunks_match_original(&client, &genesis_url, tx, timeout)
             .await
             .map_err(|e| ClusterError::DataTx(format!("chunk read-back on genesis: {e}")))
@@ -656,7 +674,7 @@ impl Cluster {
             .get_mut(keep)
             .ok_or_else(|| ClusterError::NodeNotFound(keep.into()))?
             .api_url();
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         for tx in history {
             let tx_id = tx.header.id;
             crate::data_tx::assert_tx_matches_original(
