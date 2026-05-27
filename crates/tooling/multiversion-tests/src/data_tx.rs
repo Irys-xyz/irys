@@ -43,13 +43,30 @@ pub enum DataTxError {
         body: String,
     },
     #[error(
-        "tx {tx_id:?} did not become visible at {url} within {timeout:?}; last status={last_status:?}"
+        "tx {tx_id:?} did not become visible at {url} within {timeout:?}; \
+         last status={last_status:?}, last request error={last_request_error:?}"
     )]
     Timeout {
         tx_id: H256,
         url: String,
         timeout: Duration,
+        /// Last HTTP status the server returned, if any. `None` means we
+        /// never got a response back inside the window — see `last_request_error`.
         last_status: Option<u16>,
+        /// Last transport-level error from `reqwest`, if any. `None` here
+        /// alongside `Some(_)` in `last_status` means the server was
+        /// reachable but returning non-2xx; `Some(_)` means we failed to
+        /// reach it at all (connection refused, DNS, TLS, etc.).
+        last_request_error: Option<String>,
+    },
+    #[error(
+        "tx {tx_id:?} promotion-status response at {url} is missing the \
+         expected `promotion_height`/`promotionHeight` field — schema drift? body={body}"
+    )]
+    UnexpectedPromotionResponse {
+        tx_id: H256,
+        url: String,
+        body: String,
     },
 }
 
@@ -154,6 +171,12 @@ pub async fn submit_data_tx(
     // non-default value would change the canonical signature prehash
     // on one side. Those fields can be opted-out via the run config's
     // `tx_build.keep_default` list — see [`crate::run_config`].
+    //
+    // The field names below MUST be kept in sync with
+    // [`crate::run_config::SUPPORTED_KEEP_DEFAULT_FIELDS`]. `RunConfig::validate`
+    // fails fast on any `keep_default` entry that doesn't appear in that
+    // list, which prevents the silent failure where a typo'd opt-out
+    // re-enables the override and OLD rejects every signed tx.
     if !tx_build.keep_default.iter().any(|f| f == "metadata_format") {
         tx.header.metadata_format = 1;
     }
@@ -250,6 +273,7 @@ pub async fn wait_for_promotion(
     let url = format!("{api_url}/v1/tx/{tx_id}/promotion-status");
     let start = Instant::now();
     let mut last_status: Option<u16> = None;
+    let mut last_request_error: Option<String> = None;
 
     loop {
         match client.get(&url).send().await {
@@ -261,24 +285,62 @@ pub async fn wait_for_promotion(
                             url: url.clone(),
                             source: e,
                         })?;
-                    if let Some(height) = body
+                    // Distinguish "field present but null" (not yet promoted —
+                    // keep polling) from "field absent" (schema drift — fail
+                    // fast so the harness doesn't mask a renamed field as a
+                    // flaky timeout).
+                    match body
                         .get("promotion_height")
                         .or_else(|| body.get("promotionHeight"))
-                        .and_then(|v| match v {
-                            serde_json::Value::Number(n) => n.as_u64(),
-                            serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                            _ => None,
-                        })
                     {
-                        return Ok(height);
+                        None => {
+                            return Err(DataTxError::UnexpectedPromotionResponse {
+                                tx_id,
+                                url,
+                                body: body.to_string(),
+                            });
+                        }
+                        Some(serde_json::Value::Null) => { /* not yet promoted */ }
+                        Some(v) => match v {
+                            serde_json::Value::Number(n) => {
+                                if let Some(height) = n.as_u64() {
+                                    return Ok(height);
+                                }
+                                return Err(DataTxError::UnexpectedPromotionResponse {
+                                    tx_id,
+                                    url,
+                                    body: body.to_string(),
+                                });
+                            }
+                            serde_json::Value::String(s) => {
+                                if let Ok(height) = s.parse::<u64>() {
+                                    return Ok(height);
+                                }
+                                return Err(DataTxError::UnexpectedPromotionResponse {
+                                    tx_id,
+                                    url,
+                                    body: body.to_string(),
+                                });
+                            }
+                            _ => {
+                                return Err(DataTxError::UnexpectedPromotionResponse {
+                                    tx_id,
+                                    url,
+                                    body: body.to_string(),
+                                });
+                            }
+                        },
                     }
-                    // Endpoint OK but not yet promoted — keep polling.
                 } else {
                     last_status = Some(status.as_u16());
                 }
             }
             Err(e) => {
-                tracing::trace!(url = %url, error = %e, "promotion poll: request error");
+                // `debug!` (not `trace!`) so default-tracing CI logs show the
+                // transport error — the alternative is a timeout message
+                // with `last_status: None` and no breadcrumb of why.
+                tracing::debug!(url = %url, error = %e, "promotion poll: request error");
+                last_request_error = Some(e.to_string());
             }
         }
         if start.elapsed() >= timeout {
@@ -287,6 +349,7 @@ pub async fn wait_for_promotion(
                 url,
                 timeout,
                 last_status,
+                last_request_error,
             });
         }
         sleep(POLL_INTERVAL).await;
@@ -312,6 +375,7 @@ pub async fn wait_for_tx_visible(
     let url = format!("{api_url}/v1/tx/{tx_id}");
     let start = Instant::now();
     let mut last_status: Option<u16> = None;
+    let mut last_request_error: Option<String> = None;
 
     loop {
         match client.get(&url).send().await {
@@ -323,7 +387,10 @@ pub async fn wait_for_tx_visible(
                 last_status = Some(status.as_u16());
             }
             Err(e) => {
-                tracing::trace!(url = %url, error = %e, "tx visibility poll: request error");
+                // See `wait_for_promotion` — `debug!` so the breadcrumb
+                // survives to the timeout message.
+                tracing::debug!(url = %url, error = %e, "tx visibility poll: request error");
+                last_request_error = Some(e.to_string());
             }
         }
         if start.elapsed() >= timeout {
@@ -332,6 +399,7 @@ pub async fn wait_for_tx_visible(
                 url,
                 timeout,
                 last_status,
+                last_request_error,
             });
         }
         sleep(POLL_INTERVAL).await;
@@ -412,11 +480,15 @@ pub async fn assert_tx_matches_original(
 /// Strict whole-object diff with rename-aware exemptions. Used by both
 /// the tx-header check and the block-header cluster-consistency check.
 ///
-/// Compares `expected` and `actual` field-by-field. A field that appears
-/// in either alias pair is treated as belonging to a single logical slot:
-/// having either one is fine, missing both is still a miss. All other
-/// fields must be present on both sides with equivalent values (modulo
-/// `string-vs-number` u64 wire drift).
+/// Compares `expected` and `actual` field-by-field. An alias pair models a
+/// field that was *renamed* across versions: when the two sides use the
+/// different names of the pair, presence is verified but values are not
+/// compared (a rename can also retype, so values aren't comparable). When the
+/// *same* name appears on both sides — no rename happened in this response —
+/// values ARE compared, so the alias never silently disables a field it was
+/// merely configured to tolerate. All non-aliased fields must be present on
+/// both sides with equivalent values (modulo `string-vs-number` u64 wire
+/// drift).
 pub fn compare_full_object(
     context: &str,
     expected: &serde_json::Value,
@@ -444,21 +516,37 @@ pub fn compare_full_object(
     let is_skipped = |key: &str| -> bool { schema.skip.iter().any(|s| s == key) };
 
     // Forward sweep — every expected key must be reachable on the actual
-    // side. For aliased rename pairs we only verify the field exists;
-    // values are inherently type-incompatible across the rename so byte
-    // comparison would always fail. Fields in `skip` are ignored.
+    // side. Fields in `skip` are ignored.
+    //
+    // Aliases relax the check *only* when the field was genuinely renamed —
+    // i.e. the expected key is absent on the actual side and only the alias
+    // is present. A rename can also retype, so values across the rename
+    // aren't comparable; presence is all we can check. But when the *same*
+    // key name appears on the actual side, no rename happened in this
+    // response, so we compare values normally — otherwise an alias configured
+    // for some other span would silently stop checking the very field it
+    // names whenever both versions happen to emit the shared name.
     for (key, expected_value) in expected_obj {
         if is_skipped(key) {
             continue;
         }
         match alias_for(key) {
-            Some(alias) => {
-                if actual_obj.get(key).is_none() && actual_obj.get(&alias).is_none() {
+            Some(alias) => match actual_obj.get(key) {
+                // Same key present on both sides — not a rename here, compare.
+                Some(av) if !json_values_equivalent(expected_value, av) => {
+                    return Err(DataTxError::TxBuild(format!(
+                        "{context}: field `{key}` mismatch:\n  expected: {expected_value}\n  actual:   {av}"
+                    )));
+                }
+                Some(_) => {}
+                // Key renamed away — accept the alias's presence, don't compare.
+                None if actual_obj.get(&alias).is_some() => {}
+                None => {
                     return Err(DataTxError::TxBuild(format!(
                         "{context}: field `{key}` (or alias `{alias}`) present in expected but missing in actual response"
                     )));
                 }
-            }
+            },
             None => match actual_obj.get(key) {
                 None => {
                     return Err(DataTxError::TxBuild(format!(
@@ -515,6 +603,12 @@ fn json_values_equivalent(a: &serde_json::Value, b: &serde_json::Value) -> bool 
 /// check to enumerate every block that ought to be byte-identical across
 /// running nodes — works on both OLD and NEW since the endpoint shape
 /// hasn't drifted (same `BlockIndexItem` struct in both versions).
+///
+/// A block-index item that doesn't yield a string `blockHash`/`block_hash`
+/// is a hard error, **not** a silent skip: if the endpoint shape ever drifts
+/// (the exact failure this harness exists to catch), silently dropping the
+/// item would shrink the consistency sweep into a partial check — or a no-op
+/// that still passes. Failing loud keeps the sweep honest.
 pub async fn fetch_block_index_hashes(
     client: &reqwest::Client,
     api_url: &str,
@@ -538,15 +632,21 @@ pub async fn fetch_block_index_hashes(
         url: url.clone(),
         source: e,
     })?;
-    Ok(body
-        .iter()
-        .filter_map(|item| {
-            item.get("blockHash")
-                .or_else(|| item.get("block_hash"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        })
-        .collect())
+    let mut hashes = Vec::with_capacity(body.len());
+    for (idx, item) in body.iter().enumerate() {
+        let hash = item
+            .get("blockHash")
+            .or_else(|| item.get("block_hash"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                DataTxError::TxBuild(format!(
+                    "block-index item {idx} from {url} has no string `blockHash`/`block_hash` \
+                     field — endpoint schema drift? item={item}"
+                ))
+            })?;
+        hashes.push(hash.to_owned());
+    }
+    Ok(hashes)
 }
 
 /// Fetches a block header (as raw JSON) from `/v1/block/{block_hash}`.
@@ -576,4 +676,268 @@ pub async fn fetch_block_header(
         url: url.clone(),
         source: e,
     })
+}
+
+/// Polls a chunk GET URL until it returns 2xx with a JSON body, or the
+/// timeout elapses. A tx becomes visible via `/v1/tx/{id}` before its chunks
+/// are necessarily retrievable by data-root (the storage node still has to
+/// finish ingress-proof generation and land the chunk in the Publish-ledger
+/// partition), so the read-back check polls rather than assuming the chunk is
+/// immediately available.
+async fn fetch_chunk_until_available(
+    client: &reqwest::Client,
+    url: &str,
+    tx_id: H256,
+    timeout: Duration,
+) -> Result<serde_json::Value, DataTxError> {
+    let start = Instant::now();
+    let mut last_status: Option<u16> = None;
+    let mut last_request_error: Option<String> = None;
+
+    loop {
+        match client.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return resp.json().await.map_err(|e| DataTxError::Http {
+                        url: url.to_owned(),
+                        source: e,
+                    });
+                }
+                last_status = Some(status.as_u16());
+            }
+            Err(e) => {
+                tracing::debug!(url = %url, error = %e, "chunk poll: request error");
+                last_request_error = Some(e.to_string());
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Err(DataTxError::Timeout {
+                tx_id,
+                url: url.to_owned(),
+                timeout,
+                last_status,
+                last_request_error,
+            });
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// For every chunk of `tx`, fetches it back from `api_url` via
+/// `/v1/chunk/data-root/{ledger}/{data_root}/{offset}` and asserts the
+/// packing-invariant fields (`dataRoot`, `dataSize`, `dataPath`, `txOffset`)
+/// match the chunk we originally built and uploaded.
+///
+/// The endpoint serves a *packed* chunk (`ChunkFormat::Packed`), whose
+/// `bytes` / `packingAddress` / `partitionOffset` / `partitionHash` are local
+/// to the serving node's mining identity and partition layout — comparing
+/// those across nodes, or against the unpacked original, is meaningless, so
+/// they're skipped (`bytes` is the only such field that also exists on the
+/// unpacked original; the rest are accepted as actual-only). `dataPath` (the
+/// Merkle inclusion proof) is the version-sensitive field: a storage-module
+/// migration that re-encodes chunk records would surface as a `dataPath` (or
+/// `dataRoot` / `dataSize`) mismatch here — a class of corruption the
+/// tx-header and block-header checks cannot see, because chunk storage lives
+/// in separate MDBX tables with their own `Compact` derivations.
+pub async fn assert_chunks_match_original(
+    client: &reqwest::Client,
+    api_url: &str,
+    tx: &DataTransaction,
+    timeout: Duration,
+) -> Result<(), DataTxError> {
+    let chunks = tx
+        .data_chunks()
+        .map_err(|e| DataTxError::TxBuild(format!("data_chunks(): {e}")))?;
+    let ledger_id = DataLedger::Publish as u32;
+    let data_root = tx.header.data_root;
+    // Packing is node-local, so only the packing-invariant identity + Merkle
+    // proof are comparable against the original unpacked chunk.
+    let schema = SchemaConfig {
+        aliases: vec![],
+        skip: vec!["bytes".to_owned()],
+    };
+
+    for (offset, chunk) in chunks.into_iter().enumerate() {
+        let url = format!("{api_url}/v1/chunk/data-root/{ledger_id}/{data_root}/{offset}");
+        let served = fetch_chunk_until_available(client, &url, tx.header.id, timeout).await?;
+        let expected =
+            serde_json::to_value(&chunk).map_err(|e| DataTxError::TxBuild(e.to_string()))?;
+        compare_full_object(
+            &format!("chunk {offset} of tx {} at {url}", tx.header.id),
+            &expected,
+            &served,
+            &schema,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod compare_full_object_tests {
+    use super::*;
+    use crate::run_config::SchemaConfig;
+    use serde_json::json;
+
+    fn empty_schema() -> SchemaConfig {
+        SchemaConfig::default()
+    }
+
+    fn schema_with_alias(a: &str, b: &str) -> SchemaConfig {
+        SchemaConfig {
+            aliases: vec![(a.to_owned(), b.to_owned())],
+            skip: vec![],
+        }
+    }
+
+    fn schema_with_skip(field: &str) -> SchemaConfig {
+        SchemaConfig {
+            aliases: vec![],
+            skip: vec![field.to_owned()],
+        }
+    }
+
+    #[test]
+    fn passes_on_identical_objects() {
+        let v = json!({"a": 1, "b": "two", "c": [1, 2, 3]});
+        compare_full_object("ctx", &v, &v, &empty_schema()).expect("identical objects must match");
+    }
+
+    #[test]
+    fn fails_on_value_mismatch() {
+        let expected = json!({"a": 1});
+        let actual = json!({"a": 2});
+        let err = compare_full_object("ctx", &expected, &actual, &empty_schema())
+            .expect_err("value mismatch must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("`a`"), "error must name the field: {msg}");
+        assert!(msg.contains("mismatch"), "error must say mismatch: {msg}");
+    }
+
+    #[test]
+    fn fails_on_field_missing_from_actual() {
+        let expected = json!({"a": 1, "b": 2});
+        let actual = json!({"a": 1});
+        let err = compare_full_object("ctx", &expected, &actual, &empty_schema())
+            .expect_err("missing-on-actual must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`b`"),
+            "error must name the missing field: {msg}"
+        );
+        assert!(msg.contains("missing"), "error must say missing: {msg}");
+    }
+
+    #[test]
+    fn skip_list_exempts_field_from_comparison() {
+        let expected = json!({"a": 1, "b": 2});
+        // Differing values *and* missing-from-actual are both exempt when
+        // the field is in the skip list.
+        let actual = json!({"a": 1, "b": 999});
+        compare_full_object("ctx", &expected, &actual, &schema_with_skip("b"))
+            .expect("skipped field must not fail on value mismatch");
+
+        let actual_missing = json!({"a": 1});
+        compare_full_object("ctx", &expected, &actual_missing, &schema_with_skip("b"))
+            .expect("skipped field must not fail when missing from actual");
+    }
+
+    #[test]
+    fn alias_pair_passes_when_either_side_has_field() {
+        let schema = schema_with_alias("bundleFormat", "metadataFormat");
+
+        // OLD-name on expected, NEW-name on actual.
+        let expected = json!({"bundleFormat": 0, "other": "v"});
+        let actual = json!({"metadataFormat": 1, "other": "v"});
+        compare_full_object("ctx", &expected, &actual, &schema)
+            .expect("alias pair: OLD↔NEW name swap must pass");
+
+        // Same name on both sides with equal values passes — no rename
+        // happened in this response, so values are compared (and match).
+        let same_name = json!({"bundleFormat": 0, "other": "v"});
+        compare_full_object("ctx", &same_name, &same_name, &schema)
+            .expect("alias pair: same-name on both sides with equal values must pass");
+    }
+
+    #[test]
+    fn alias_pair_compares_values_when_same_key_on_both_sides() {
+        // Regression guard: an alias must NOT silently disable value
+        // comparison for a field that both sides still emit under the same
+        // name. Presence-only is only correct across an actual rename.
+        let schema = schema_with_alias("bundleFormat", "metadataFormat");
+        let expected = json!({"metadataFormat": 0, "other": "v"});
+        let actual = json!({"metadataFormat": 999, "other": "v"});
+        let err = compare_full_object("ctx", &expected, &actual, &schema).expect_err(
+            "aliased field present under the same name on both sides must compare values",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metadataFormat"),
+            "error must name the field: {msg}"
+        );
+        assert!(msg.contains("mismatch"), "error must say mismatch: {msg}");
+    }
+
+    #[test]
+    fn alias_pair_fails_when_neither_side_has_field() {
+        let schema = schema_with_alias("bundleFormat", "metadataFormat");
+        let expected = json!({"bundleFormat": 0, "other": "v"});
+        let actual = json!({"unrelated": 1, "other": "v"});
+        let err = compare_full_object("ctx", &expected, &actual, &schema)
+            .expect_err("alias pair: neither side has the field, must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bundleFormat"),
+            "error must name the missing field: {msg}",
+        );
+    }
+
+    #[test]
+    fn alias_pair_does_not_compare_values_across_rename() {
+        // The whole point of an alias pair: a rename can also retype
+        // (`Option<u64>` → `u8`), so values on either side of the rename
+        // are not byte-comparable. The check is presence-only.
+        let schema = schema_with_alias("bundleFormat", "metadataFormat");
+        let expected = json!({"bundleFormat": 0});
+        let actual = json!({"metadataFormat": "completely different"});
+        compare_full_object("ctx", &expected, &actual, &schema).expect(
+            "alias pair does NOT compare values — type drift across the rename is the design",
+        );
+    }
+
+    #[test]
+    fn actual_only_fields_are_accepted() {
+        // The route can carry server-derived data (e.g. `promotedHeight`)
+        // that the originally-signed header didn't. Extra fields on the
+        // actual side are not an error.
+        let expected = json!({"a": 1});
+        let actual = json!({"a": 1, "promotedHeight": 42});
+        compare_full_object("ctx", &expected, &actual, &empty_schema())
+            .expect("server-derived extra fields must be accepted");
+    }
+
+    #[test]
+    fn string_and_number_u64_are_equivalent() {
+        // Some serde wrappers stringify u64 values; some don't. Both encode
+        // the same logical value.
+        let expected = json!({"chainId": "42"});
+        let actual = json!({"chainId": 42});
+        compare_full_object("ctx", &expected, &actual, &empty_schema())
+            .expect("string-vs-number u64 must be tolerated");
+
+        // But NOT when the values genuinely differ.
+        let actual_wrong = json!({"chainId": 43});
+        compare_full_object("ctx", &expected, &actual_wrong, &empty_schema())
+            .expect_err("string `42` vs number `43` is a real mismatch");
+    }
+
+    #[test]
+    fn errors_on_non_object_input() {
+        let array = json!([1, 2, 3]);
+        let obj = json!({"a": 1});
+        compare_full_object("ctx", &array, &obj, &empty_schema())
+            .expect_err("non-object expected must error");
+        compare_full_object("ctx", &obj, &array, &empty_schema())
+            .expect_err("non-object actual must error");
+    }
 }

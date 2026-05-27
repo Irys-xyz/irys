@@ -107,6 +107,34 @@ async fn assert_block_headers_consistent_across_nodes(cluster: &mut Cluster) {
         .unwrap_or_else(|e| panic!("block headers differ across nodes: {e}"));
 }
 
+/// Reads every chunk of every tx in `history` back from the genesis (the
+/// miner, and the node guaranteed to store the Publish-ledger partition) and
+/// asserts the packing-invariant fields match what we originally uploaded.
+/// Closes the chunk-decode gap the tx-header and block-header checks miss:
+/// chunk storage lives in separate MDBX tables with their own `Compact`
+/// derivations, so a migration that re-encodes chunk records is invisible to
+/// those checks. Most meaningful when the genesis itself has changed binary
+/// versions, since then the storing node is decoding records a different
+/// version wrote.
+async fn assert_chunks_for_history(
+    cluster: &mut Cluster,
+    label: &str,
+    history: &[DataTransaction],
+    timeout: Duration,
+) {
+    for tx in history {
+        cluster
+            .assert_chunk_for_tx_matches_original(tx, timeout)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{label}: chunk read-back from genesis failed for tx {}: {e}",
+                    tx.header.id
+                )
+            });
+    }
+}
+
 async fn resolve_binaries() -> (ResolvedBinary, ResolvedBinary) {
     let old_ref = std::env::var("IRYS_OLD_REF").unwrap_or_else(|_| CURRENT_REF.to_owned());
     if old_ref == CURRENT_REF {
@@ -203,6 +231,17 @@ async fn upgrade_one_node_in_running_cluster() {
         common::CONVERGENCE_TIMEOUT,
     )
     .await;
+    // Strict full-header diff catches the silent-corruption case the
+    // visibility check inside `submit_and_assert_full_history` misses: a
+    // mixed-version cluster where one side mis-decodes records the other
+    // side wrote and serves structurally-valid but wrong content.
+    assert_full_history_matches(
+        &mut cluster,
+        "upgrade_one_node:post-upgrade (strict)",
+        &history,
+    )
+    .await;
+    assert_block_headers_consistent_across_nodes(&mut cluster).await;
     assert_history_promoted(
         &mut cluster,
         "upgrade_one_node:post-upgrade",
@@ -210,6 +249,15 @@ async fn upgrade_one_node_in_running_cluster() {
         common::CONVERGENCE_TIMEOUT,
     )
     .await;
+
+    // Isolated read-back: cut peer-1 off from the genesis and prove the
+    // freshly-upgraded NEW binary serves the full OLD-written, then
+    // NEW-migrated history from its own disk alone — with no live peer to mask
+    // a mis-decode by re-syncing. Terminal: only peer-1 survives this call.
+    cluster
+        .assert_self_sufficient_in_isolation("peer-1", &history, common::CONVERGENCE_TIMEOUT)
+        .await
+        .expect("upgrade_one_node: NEW peer-1 could not serve its history from disk in isolation");
 
     cluster.shutdown().await;
 }
@@ -304,15 +352,28 @@ async fn rolling_upgrade_all_nodes() {
         common::assert_node_running_binary(&mut cluster, name, &new_binary.path).await;
     }
 
-    // Final promotion check, run once after every node has rolled to NEW.
+    // Final strict checks, run once after every node has rolled to NEW.
     // By now the chain has had time to advance past the migration depth
     // for every tx submitted along the way, including the last one
     // submitted right after the genesis upgrade — so every node should
     // have all of `history` recorded as promoted in its
-    // `IrysDataTxMetadata` table. If any node lost promotion state
-    // across one of the upgrades (the failure mode we care about), it
-    // surfaces here.
+    // `IrysDataTxMetadata` table, AND every node should serve byte-
+    // identical headers for every tx and every block. If any node lost
+    // promotion state or silently corrupted records across one of the
+    // upgrades (the failure modes we care about), they surface here.
+    assert_full_history_matches(&mut cluster, "rolling_upgrade:final (strict)", &history).await;
+    assert_block_headers_consistent_across_nodes(&mut cluster).await;
     assert_history_promoted(
+        &mut cluster,
+        "rolling_upgrade:final",
+        &history,
+        common::CONVERGENCE_TIMEOUT,
+    )
+    .await;
+    // Chunk read-back: genesis is now NEW and has migrated the chunk store it
+    // (and its OLD predecessor) wrote. Prove every historical tx's chunks
+    // still decode to the originally-uploaded data_root/data_path/data_size.
+    assert_chunks_for_history(
         &mut cluster,
         "rolling_upgrade:final",
         &history,
@@ -508,6 +569,21 @@ async fn rollback_after_upgrade() {
     )
     .await;
 
+    // Isolated read-back — the headline rollback property. Cut peer-1 off from
+    // the still-OLD genesis and prove the rolled-back OLD binary serves the
+    // full history + promotion state from its own on-disk DB alone. Every
+    // earlier check above ran with the genesis gossiping, so a peer that
+    // mis-decoded its NEW-migrated records could mask the failure by
+    // re-syncing live; isolation closes that escape route. (See the method's
+    // CAVEAT: this proves peer-1's *current* on-disk state is self-sufficient,
+    // not that it specifically decoded NEW bytes — true at-startup isolation
+    // needs a node-side bootstrap-from-disk flag.) Terminal: only peer-1
+    // survives this call.
+    cluster
+        .assert_self_sufficient_in_isolation("peer-1", &history, common::CONVERGENCE_TIMEOUT)
+        .await
+        .expect("rollback: OLD peer-1 could not serve its history from disk in isolation");
+
     cluster.shutdown().await;
 }
 
@@ -591,9 +667,136 @@ async fn crash_during_upgrade() {
         common::CONVERGENCE_TIMEOUT,
     )
     .await;
+    // Strict checks: the freshly-upgraded peer recovering from a crashed
+    // OLD-state must serve byte-identical tx and block headers — anything
+    // less means the recovery path silently mis-decoded persisted records.
+    assert_full_history_matches(
+        &mut cluster,
+        "crash_during_upgrade:post-recovery (strict)",
+        &history,
+    )
+    .await;
+    assert_block_headers_consistent_across_nodes(&mut cluster).await;
     assert_history_promoted(
         &mut cluster,
         "crash_during_upgrade:post-recovery",
+        &history,
+        common::CONVERGENCE_TIMEOUT,
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[ignore = "requires building irys binaries from HEAD and master"]
+async fn upgrade_producer_first_old_validator_follows() {
+    let (old_binary, new_binary) = resolve_binaries().await;
+
+    // The genesis is the sole block producer in these clusters. Upgrading it
+    // FIRST — while peer-1 stays OLD — is the one ordering that exercises a
+    // NEW node producing blocks an OLD node must validate and follow.
+    // `rolling_upgrade_all_nodes` deliberately upgrades the producer LAST, so
+    // it only ever covers OLD-produces / NEW-validates; this fills the gap in
+    // the opposite direction, which is the riskier one during a real rolling
+    // upgrade that bumps the producer before its validators.
+    let spec = common::cluster_spec_with_refs(
+        "upgrade_producer_first_old_validator_follows",
+        vec![
+            common::genesis_spec("genesis", &old_binary, vec![]),
+            common::peer_spec("peer-1", &old_binary, 0, vec!["genesis".to_owned()]),
+        ],
+        Some(old_binary.git_rev.clone()),
+        Some(new_binary.git_rev.clone()),
+    );
+    let mut cluster = crate::cluster::Cluster::start(spec)
+        .await
+        .expect("failed to start cluster");
+
+    cluster
+        .wait_for_convergence(common::CONVERGENCE_TIMEOUT)
+        .await
+        .expect("initial cluster did not converge");
+
+    let chain_params = cluster
+        .fetch_chain_params()
+        .await
+        .expect("failed to fetch chain params");
+    let mut history: Vec<DataTransaction> = Vec::new();
+    submit_and_assert_full_history(
+        &mut cluster,
+        "peer-1",
+        "producer_first:pre-upgrade",
+        chain_params.chain_id,
+        chain_params.chunk_size,
+        &mut history,
+        common::CONVERGENCE_TIMEOUT,
+    )
+    .await;
+
+    let baseline = cluster
+        .get_max_height()
+        .await
+        .expect("failed to get baseline height before upgrading the producer");
+
+    // Upgrade the producer. After this, NEW genesis mines and OLD peer-1 must
+    // validate, accept, and follow those NEW-produced blocks.
+    cluster
+        .upgrade_node("genesis", &new_binary)
+        .await
+        .expect("failed to upgrade genesis");
+
+    cluster
+        .wait_for_convergence(common::CONVERGENCE_TIMEOUT)
+        .await
+        .expect("cluster did not converge after upgrading the producer");
+
+    // The chain advancing past `baseline` while OLD peer-1 stays in the
+    // cluster is the core assertion: it can only happen if OLD peer-1 accepted
+    // and built on blocks the NEW producer minted after the swap.
+    cluster
+        .wait_for_height_above(baseline, common::CONVERGENCE_TIMEOUT)
+        .await
+        .expect(
+            "chain did not advance after producer upgrade — OLD peer-1 may be rejecting NEW blocks",
+        );
+
+    common::assert_node_running_binary(&mut cluster, "genesis", &new_binary.path).await;
+    common::assert_node_running_binary(&mut cluster, "peer-1", &old_binary.path).await;
+
+    // A fresh tx produced under the NEW miner must validate, gossip, and be
+    // served identically by the OLD peer — NEW-produces / OLD-validates at the
+    // tx + block level, not merely "the height number went up".
+    submit_and_assert_full_history(
+        &mut cluster,
+        "genesis",
+        "producer_first:post-upgrade",
+        chain_params.chain_id,
+        chain_params.chunk_size,
+        &mut history,
+        common::CONVERGENCE_TIMEOUT,
+    )
+    .await;
+    assert_full_history_matches(
+        &mut cluster,
+        "producer_first:post-upgrade (strict)",
+        &history,
+    )
+    .await;
+    assert_block_headers_consistent_across_nodes(&mut cluster).await;
+    assert_history_promoted(
+        &mut cluster,
+        "producer_first:post-upgrade",
+        &history,
+        common::CONVERGENCE_TIMEOUT,
+    )
+    .await;
+    // Chunk read-back: genesis is NEW and stored these chunks (the pre-upgrade
+    // ones as OLD, then migrated across the swap). Prove they still decode to
+    // the originally-uploaded data.
+    assert_chunks_for_history(
+        &mut cluster,
+        "producer_first:post-upgrade",
         &history,
         common::CONVERGENCE_TIMEOUT,
     )

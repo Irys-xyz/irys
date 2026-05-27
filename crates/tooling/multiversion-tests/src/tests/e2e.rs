@@ -51,6 +51,15 @@ async fn single_genesis_produces_blocks() {
         .await
         .expect("tx promoted on genesis but not on every node");
 
+    // Single-version baseline for the chunk read-back check (exercised
+    // cross-version in the upgrade tests). Proves the check works on a
+    // known-good node: the genesis must serve the tx's chunks back with
+    // data_root/data_path/data_size matching what we uploaded.
+    cluster
+        .assert_chunk_for_tx_matches_original(&tx, common::HEIGHT_TIMEOUT)
+        .await
+        .expect("genesis did not serve the tx's chunks back matching the original");
+
     cluster.shutdown().await;
 }
 

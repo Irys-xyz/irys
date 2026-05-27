@@ -118,9 +118,10 @@ A small TOML file with knobs for **what to compare** and **how to construct test
 # the originally-signed tx via a strict full-header diff.
 [tx_header]
 # camelCase field name pairs that mean the same thing across the OLD
-# and NEW schemas (e.g. after a rename). Field presence is verified on
-# both sides; values are NOT compared since a rename can also change
-# types.
+# and NEW schemas (e.g. after a rename). When the two sides use the
+# different names of the pair, presence is verified but values are NOT
+# compared (a rename can also retype). When both sides emit the same
+# name, no rename happened in that response, so values ARE compared.
 aliases = [["bundleFormat", "metadataFormat"]]
 # Field names to skip entirely from the strict diff. Use when a field's
 # wire shape differs between OLD and NEW in a way `aliases` doesn't
@@ -175,6 +176,8 @@ Every test that submits transactions runs three layers of cross-version assertio
 1. **Visibility** (status-code only) — every node responds 2xx to `/v1/tx/{id}`. Cheap; catches missing data.
 2. **Strict tx-header round-trip** — fetches `/v1/tx/{id}` from every running node and asserts the returned JSON header matches the originally-signed `DataTransaction` byte-for-byte across every shared field (modulo the run config's `aliases` and `skip`). Catches silent corruption from a binary mis-decoding `Compact`-encoded records that another version wrote.
 3. **Block-header cluster consistency** — enumerates `/v1/block-index?height=0&limit=500` from genesis, then for each block hash fetches `/v1/block/{hash}` from every node and diffs the responses against the genesis's view. Catches drift in enum-tagged sub-fields (PoA, ledger metadata, signatures) that the tx-header check would miss.
+
+Two further checks run in specific tests rather than on every submission: **chunk read-back** (`assert_chunk_for_tx_matches_original` — fetches each chunk back from the genesis and compares the packing-invariant fields against the original upload; run in the genesis-swap upgrade tests and as a single-version baseline) and **isolated read-back** (`assert_self_sufficient_in_isolation` — the terminal assertion in the rollback and single-node-upgrade tests, which shuts down every other node and re-runs the strict tx-header + promotion checks against the swapped node alone). See [Coverage gaps](#coverage-gaps) for exactly what each does and doesn't prove.
 
 The "tx the harness actually submits" carries non-default values for `metadata_format` and `header_size` by default, so the strict checks aren't vacuous on fields whose default-value `Compact` encoding is a zero-byte payload. Use `[tx_build] keep_default` to opt out per field when those values would invalidate the canonical signature on the older side.
 
@@ -358,6 +361,20 @@ cluster.assert_block_index_consistent().await?;
 // forcing tx records past `block_migration_depth` so they actually
 // land in the persistent IrysDataTxHeaders table before a binary swap.
 cluster.wait_for_height_at_least(target_height, timeout).await?;
+
+// Chunk read-back: GET every chunk of `tx` back from the genesis (the
+// miner / guaranteed chunk holder) and assert the packing-invariant
+// fields (data_root, data_size, data_path, tx_offset) match the
+// originally-uploaded chunk. Catches storage-module migrations that
+// re-encode chunk records — invisible to the tx/block-header checks.
+cluster.assert_chunk_for_tx_matches_original(&tx, timeout).await?;
+
+// Isolated read-back: shut down every node except `peer-1`, then assert
+// it alone serves the full signed header + promotion state of every tx
+// from its own DB — no live peer to mask a mis-decode via re-sync.
+// TERMINAL (only `peer-1` survives). See the method doc for what this
+// does and does NOT prove (the --bootstrap-from-disk caveat).
+cluster.assert_self_sufficient_in_isolation("peer-1", &history, timeout).await?;
 ```
 
 ## Fault Injection
@@ -416,9 +433,10 @@ Cross-version flows. Each transition is bracketed by data-tx submissions so the 
 
 | Test | Nodes | What it verifies |
 |------|-------|-----------------|
-| `upgrade_one_node_in_running_cluster` | 3 | Upgrade one peer, cluster re-converges, NEW peer can read OLD-written tx + write fresh tx OLD peers accept |
-| `rolling_upgrade_all_nodes` | 3 | Sequentially upgrade all nodes; each freshly-upgraded node submits + verifies full tx history |
-| `rollback_after_upgrade` | 2 | Upgrade → wait past `block_migration_depth` → submit more under NEW → roll back → strict-verify pre-rollback writes survive + OLD accepts new writes |
+| `upgrade_one_node_in_running_cluster` | 3 | Upgrade one peer, cluster re-converges, NEW peer can read OLD-written tx + write fresh tx OLD peers accept; then **isolated read-back** — NEW peer serves its full history from disk with the genesis shut down |
+| `rolling_upgrade_all_nodes` | 3 | Sequentially upgrade all nodes (producer last); each freshly-upgraded node submits + verifies full tx history; final **chunk read-back** from the now-NEW genesis |
+| `upgrade_producer_first_old_validator_follows` | 2 | Upgrade the **sole producer (genesis) first** while a peer stays OLD — exercises NEW-produces / OLD-validates: the chain must advance and the OLD peer must validate, follow, and serve NEW-produced blocks + txs + chunks |
+| `rollback_after_upgrade` | 2 | Upgrade → wait past `block_migration_depth` → submit more under NEW → roll back → strict-verify pre-rollback writes survive + OLD accepts new writes; then **isolated read-back** — rolled-back OLD peer serves its full history + promotion from disk with the genesis shut down |
 | `crash_during_upgrade` | 2 | Kill a node, upgrade it from crashed state, verify it recovers prior history + accepts new writes |
 
 ## CI
@@ -481,10 +499,10 @@ The harness in its current form catches a meaningful slice of cross-version regr
 
 ### Coverage gaps
 
-- **Chunk-level read-back.** We upload chunks via `/v1/chunk` so promotion can happen, but the strict post-transition checks never fetch them back. Storage-module schemas evolve independently of `IrysDataTxHeaders` (different MDBX tables, different `Compact` derivations), so a migration that breaks chunk decoding wouldn't surface in any current test. Adding a `cluster.assert_chunk_for_tx_consistent(tx)` that GETs `/v1/chunk/{ledger}/{data_root}/{offset}` from every node and diffs — analogous to the existing block-index sweep — would close this.
+- **Chunk-level read-back.** *(Addressed.)* `cluster.assert_chunk_for_tx_matches_original(tx, timeout)` now GETs every chunk of a tx back from the genesis via `/v1/chunk/data-root/{ledger}/{data_root}/{offset}` and asserts the packing-invariant fields (`data_root`, `data_size`, `data_path`, `tx_offset`) match the originally-uploaded chunk. It targets the genesis rather than sweeping every node because packed bytes are node-local (XORed with each node's mining address) and unstaked peers may not store the partition at all — so a node-vs-node diff would be meaningless or 404. Run in the producer-first and rolling-upgrade tests (where the genesis's own binary changes, so it decodes records another version wrote) and as a single-version baseline in `single_genesis_produces_blocks`. **Remaining:** it compares against the originally-uploaded data on the one chunk-holding node; it does not yet verify chunk *bytes* survive (would require replicating the packing XOR to unpack), only the Merkle proof + identity.
 - **Non-default values for renamed fields.** `tx_build.keep_default` exists specifically so non-default `metadata_format` doesn't trip OLD signature validation across the d071fc03 ↔ HEAD rename. For adjacent-release tests where renames don't apply, dropping that entry exercises actual non-zero `Compact` payload bytes for that field. A nice follow-up would be a CI matrix entry that runs *without* `keep_default` against a recent enough OLD ref to prove the field is genuinely round-trip-safe.
 - **Long-running chains under rollback.** The rollback test populates only a few txs and waits past `block_migration_depth` once. Persistent-corruption modes that only manifest after many migrated blocks (e.g. migration-state inconsistency between `IrysBlockHeaders` and `IrysDataTxMetadata`) wouldn't surface. A variant that runs the chain for several hundred blocks under NEW before rolling back, with periodic submissions throughout, would catch more.
-- **Promotion-state preservation under true isolation.** Current promotion checks pass on the rolled-back peer in part because gossip catch-up rebuilds the peer's `IrysDataTxMetadata` table from blocks delivered after the binary swap. To prove peer-1's *own* on-disk state is sufficient post-rollback, we'd need to either (a) inspect the MDBX file directly with an OLD-schema reader, or (b) add a no-gossip mode (firewall the peer with `iptables` post-rollback). Earlier in this branch's history we tried (b) but hit OLD's startup requirement that a trusted peer be reachable; adding a `--bootstrap-from-disk` flag to the node binary would unblock it.
+- **Promotion-state preservation under true isolation.** *(Partially addressed.)* `cluster.assert_self_sufficient_in_isolation(keep, history, timeout)` shuts down every node except `keep` and then re-asserts the full strict tx-header round-trip + promotion state against `keep` alone — so with no live peer to gossip-fetch from, whatever it returns came from its own DB. Wired into `rollback_after_upgrade` (OLD peer-1 on a NEW-migrated DB) and `upgrade_one_node_in_running_cluster` (NEW peer-1 on an OLD-written-then-migrated DB), as the terminal assertion. Isolation is done via graceful shutdown rather than `SIGSTOP` (Docker's default seccomp profile blocks `SIGSTOP` without `--cap-add=SYS_PTRACE`) and rather than `iptables` (no sudo needed). **Remaining:** this isolates *after* startup, so a node that re-synced from a live peer before the isolation may already have rewritten records in its own format — it proves the node's *current* on-disk state is self-sufficient, not that it decoded the *other* version's bytes at boot. Truly isolating the at-startup read path still needs (a) a direct OLD-schema MDBX reader, or (b) a `--bootstrap-from-disk` node flag so the old binary can boot with no reachable trusted peer.
 - **Network-partition + upgrade combinations.** The `fault` module already provides `NetworkPartitioner` with iptables-based packet dropping. No current test combines a partition with an upgrade. A scenario like "partition peer-2 from genesis, upgrade peer-1, heal partition, verify peer-2 catches up correctly" would exercise gossip recovery against version-mixed peers — a class of bug the current happy-path tests would miss.
 - **Commitment txs (stake / pledge / unstake).** Every test today exercises only data txs. Commitment txs go through `IrysCommitments` — a different table with a different `Compact` derivation — and are how staking and pledges propagate. Migrations to that table would be invisible to the current suite.
 

@@ -16,6 +16,12 @@
 
 use serde::Deserialize;
 
+/// Tx-header fields that [`crate::data_tx::submit_data_tx`] knows how to
+/// override before signing. Anything not in this list is a typo — every
+/// `keep_default` entry must match one of these exactly. Keep in sync with
+/// the override block in `data_tx::submit_data_tx`.
+pub const SUPPORTED_KEEP_DEFAULT_FIELDS: &[&str] = &["metadata_format", "header_size"];
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RunConfig {
@@ -68,9 +74,11 @@ impl RunConfig {
     /// Loads from the path in `IRYS_TEST_RUN_CONFIG`, or returns the
     /// default (empty) config if unset. Panics on read/parse failure
     /// because a misspelled config path is almost certainly a user
-    /// error worth surfacing immediately.
+    /// error worth surfacing immediately. Also runs [`Self::validate`]
+    /// to catch typo'd field names before they silently no-op into a
+    /// run that looks correct but isn't.
     pub fn load() -> Self {
-        match std::env::var("IRYS_TEST_RUN_CONFIG") {
+        let cfg: Self = match std::env::var("IRYS_TEST_RUN_CONFIG") {
             Ok(path) if !path.is_empty() => {
                 let raw = std::fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("failed to read run config at {path}: {e}"));
@@ -78,7 +86,37 @@ impl RunConfig {
                     .unwrap_or_else(|e| panic!("failed to parse run config at {path}: {e}"))
             }
             _ => Self::default(),
+        };
+        cfg.validate()
+            .unwrap_or_else(|e| panic!("invalid run config: {e}"));
+        cfg
+    }
+
+    /// Validates that every entry in `tx_build.keep_default` matches a
+    /// field name the harness actually knows how to override. Without
+    /// this, a typo (e.g. `metadataFormat` vs `metadata_format`) silently
+    /// re-enables the sentinel override that the entry was meant to
+    /// suppress — and on a span where that field straddles a rename, the
+    /// OLD binary will reject every signed tx as `Invalid Signature`. The
+    /// failure looks like a real wire-compat bug; it isn't.
+    ///
+    /// `skip` and `aliases` entries name JSON wire fields that vary
+    /// across versions, so we can't validate them against a static list.
+    /// Their typos surface as comparison failures with the field name in
+    /// the error — bad UX, but not a silent mask.
+    pub fn validate(&self) -> Result<(), String> {
+        for entry in &self.tx_build.keep_default {
+            if !SUPPORTED_KEEP_DEFAULT_FIELDS.contains(&entry.as_str()) {
+                return Err(format!(
+                    "tx_build.keep_default contains `{entry}`, which is not a recognized \
+                     overridable field. Supported fields: {:?}. \
+                     Note these are Rust struct field names (snake_case), not the camelCase \
+                     wire names.",
+                    SUPPORTED_KEEP_DEFAULT_FIELDS,
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -126,5 +164,54 @@ mod tests {
     fn omitted_sections_default() {
         let cfg: RunConfig = toml::from_str("").unwrap();
         assert!(cfg.tx_header.aliases.is_empty());
+    }
+
+    #[test]
+    fn validate_accepts_supported_keep_default_fields() {
+        let cfg = RunConfig {
+            tx_build: TxBuildConfig {
+                keep_default: vec!["metadata_format".into(), "header_size".into()],
+            },
+            ..Default::default()
+        };
+        cfg.validate().expect("supported fields must validate");
+    }
+
+    #[test]
+    fn validate_accepts_empty_keep_default() {
+        RunConfig::default()
+            .validate()
+            .expect("empty config must validate");
+    }
+
+    #[test]
+    fn validate_rejects_typo_in_keep_default() {
+        let cfg = RunConfig {
+            tx_build: TxBuildConfig {
+                // Common typo: camelCase wire name instead of snake_case
+                // struct field name. Catching this matters because the
+                // failure mode is severe (every signed tx invalidated on
+                // OLD across a rename).
+                keep_default: vec!["metadataFormat".into()],
+            },
+            ..Default::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("typo'd keep_default entry must fail validation");
+        assert!(err.contains("metadataFormat"));
+        assert!(err.contains("metadata_format"));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_field_in_keep_default() {
+        let cfg = RunConfig {
+            tx_build: TxBuildConfig {
+                keep_default: vec!["nonexistent_field".into()],
+            },
+            ..Default::default()
+        };
+        cfg.validate()
+            .expect_err("unknown keep_default field must fail validation");
     }
 }

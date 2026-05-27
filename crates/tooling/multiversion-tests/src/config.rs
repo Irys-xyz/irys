@@ -172,16 +172,25 @@ pub fn patch_peer_consensus(
 }
 
 /// Returns the `[consensus.Custom]` sub-table from a base-config template, or
-/// `None` if the template uses bare `consensus = "Testing"` / `"Mainnet"` /
+/// `Ok(None)` if the template uses bare `consensus = "Testing"` / `"Mainnet"` /
 /// has no `consensus` key. Used by [`patch_peer_consensus`] as the
 /// cross-version overlay source.
+///
+/// A malformed TOML template returns an `Err` rather than silently dropping
+/// the user's overlay — otherwise the upgraded peer would run with stale
+/// consensus values and the test would fail downstream with a confusing
+/// symptom unrelated to the actual cause.
 pub fn extract_consensus_custom_from_template(
     template: &str,
-) -> Option<toml::map::Map<String, Value>> {
-    let parsed: Value = template.parse().ok()?;
-    let consensus = parsed.as_table()?.get("consensus")?;
-    let custom = consensus.as_table()?.get("Custom")?;
-    custom.as_table().cloned()
+) -> Result<Option<toml::map::Map<String, Value>>, ConfigError> {
+    let parsed: Value = template.parse()?;
+    let Some(consensus) = parsed.as_table().and_then(|t| t.get("consensus")) else {
+        return Ok(None);
+    };
+    let Some(custom) = consensus.as_table().and_then(|t| t.get("Custom")) else {
+        return Ok(None);
+    };
+    Ok(custom.as_table().cloned())
 }
 
 /// Recursively merges `overlay` into `target`, with overlay values winning

@@ -3544,6 +3544,44 @@ mod tests {
                 .expect("to get versions");
             assert_eq!(versions, vec![1, 2]);
         }
+
+        /// v1 peers — older nodes whose `/protocol_version` endpoint
+        /// returns the bare `u32` they understand instead of an array —
+        /// must round-trip through the untagged-enum fallback. This is the
+        /// exact regression the `ProtocolVersionsRepr` enum was added to
+        /// fix; without this test, a future "simplification" back to
+        /// `Vec<u32>` would silently break v1 peer discovery.
+        #[tokio::test]
+        async fn test_get_protocol_versions_accepts_single_u32() {
+            let server = MockHttpServer::new_with_response(200, "1", "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let versions = fixture
+                .client
+                .get_protocol_versions(peer)
+                .await
+                .expect("to accept the v1 single-u32 shape");
+            assert_eq!(versions, vec![1]);
+        }
+
+        /// Sanity: the untagged fallback isn't *too* permissive. An object
+        /// shape (e.g. `{"version": 1}`) is neither `Vec<u32>` nor `u32`,
+        /// so it must error rather than silently produce an empty Vec or
+        /// some other surprise.
+        #[tokio::test]
+        async fn test_get_protocol_versions_rejects_object_shape() {
+            let server =
+                MockHttpServer::new_with_response(200, r#"{"version": 1}"#, "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let result = fixture.client.get_protocol_versions(peer).await;
+            assert!(
+                result.is_err(),
+                "object-shaped response must be rejected, got {result:?}",
+            );
+        }
     }
 
     mod handle_peer_pull_response_tests {

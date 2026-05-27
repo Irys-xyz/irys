@@ -4,7 +4,9 @@
 )]
 use crate::block_pool::CriticalBlockPoolError;
 use crate::types::GossipRoutes;
-use crate::wire_types::{self, GossipResponse, HandshakeRequirementReason, RejectionReason};
+use crate::wire_types::{
+    self, GossipResponse, HandshakeRequirementReason, RejectionReason, rejected_v2_json,
+};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError, InvalidDataError},
@@ -196,6 +198,11 @@ where
 
     /// Check peer for V2 requests - uses peer_id as primary identifier
     /// Also verifies that miner_address matches what we have stored
+    ///
+    /// Rejections are emitted via [`rejected_v2_json`] so the
+    /// `HandshakeRequired` diagnostic survives the wire — only v2 peers reach
+    /// this function (it's only called from `/gossip/v2/*` handlers), and v2
+    /// peers run code that can parse the newtype-form payload.
     fn check_peer_v2(
         peer_list: &PeerList,
         req: &actix_web::HttpRequest,
@@ -204,9 +211,9 @@ where
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
             warn!("Failed to get peer address from gossip POST request");
-            return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::UnableToVerifyOrigin,
-            )));
+            return Err(
+                HttpResponse::Ok().json(rejected_v2_json(RejectionReason::UnableToVerifyOrigin))
+            );
         };
 
         // Try to look up by peer_id first, fallback to miner_address for V1 peers
@@ -224,7 +231,7 @@ where
                     actual_ip = %peer_address.ip(),
                     "Rejecting gossip: IP mismatch requires handshake"
                 );
-                return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                return Err(HttpResponse::Ok().json(rejected_v2_json(
                     RejectionReason::HandshakeRequired(Some(
                         HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
                     )),
@@ -240,7 +247,7 @@ where
                     miner_address = %miner_address,
                     "Peer ID mismatch - peer may have changed their peer_id, requires handshake"
                 );
-                return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                return Err(HttpResponse::Ok().json(rejected_v2_json(
                     RejectionReason::HandshakeRequired(Some(
                         HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
                     )),
@@ -255,11 +262,11 @@ where
                 peer_ip = %peer_address.ip(),
                 "Rejecting gossip: unknown peer requires handshake"
             );
-            Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(Some(
-                    HandshakeRequirementReason::MinerAddressIsUnknown,
-                )),
-            )))
+            Err(
+                HttpResponse::Ok().json(rejected_v2_json(RejectionReason::HandshakeRequired(
+                    Some(HandshakeRequirementReason::MinerAddressIsUnknown),
+                ))),
+            )
         }
     }
 
@@ -1029,36 +1036,75 @@ where
     // End V2 Handlers
     // ============================================================================
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
-    async fn handle_health_check(server: Data<Self>, req: actix_web::HttpRequest) -> HttpResponse {
+    /// Computes the health-check decision shared by the v1 and v2 handlers.
+    /// Returns `Ok(is_gossip_enabled)` when the peer is allowed to query and
+    /// gossip is up, or `Err(reason)` for any rejection. Wire-shape choice
+    /// (v1-compat unit string vs v2 newtype envelope for `HandshakeRequired`)
+    /// is left to the caller.
+    fn compute_health_check(
+        server: &Data<Self>,
+        req: &actix_web::HttpRequest,
+    ) -> Result<bool, RejectionReason> {
         let Some(peer_addr) = req.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::UnableToVerifyOrigin,
-            ));
+            return Err(RejectionReason::UnableToVerifyOrigin);
         };
-
         match server.peer_list.peer_by_gossip_address(peer_addr) {
             Some(_info) => {
                 let sync_state = &server.data_handler.sync_state;
                 let is_gossip_enabled = sync_state.is_gossip_reception_enabled()
                     && sync_state.is_gossip_broadcast_enabled();
                 if is_gossip_enabled {
-                    HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
+                    Ok(is_gossip_enabled)
                 } else {
                     debug!("Rejecting health check from peer {peer_addr:?}: gossip is disabled");
-                    HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                        RejectionReason::GossipDisabled,
-                    ))
+                    Err(RejectionReason::GossipDisabled)
                 }
             }
-            None => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired(Some(
-                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
-                )),
-            )),
+            None => Err(RejectionReason::HandshakeRequired(Some(
+                HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+            ))),
+        }
+    }
+
+    /// v1 handler: rejections go through the v1-compat [`Serialize`] impl on
+    /// [`RejectionReason`], which collapses `HandshakeRequired(_)` to the
+    /// bare unit-string `"HandshakeRequired"` so older peers can still parse
+    /// it. The diagnostic payload is intentionally dropped here — v1 peers
+    /// don't know the newtype form.
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_health_check_v1(
+        server: Data<Self>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        match Self::compute_health_check(&server, &req) {
+            Ok(is_gossip_enabled) => {
+                HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
+            }
+            Err(reason) => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(reason)),
+        }
+    }
+
+    /// v2 handler: rejections go through [`rejected_v2_json`], which keeps
+    /// the `HandshakeRequired` `Option<HandshakeRequirementReason>` payload
+    /// on the wire as a newtype-variant object. v2 peers know how to parse
+    /// both shapes; v1 peers are routed to [`handle_health_check_v1`] and
+    /// never reach this code path.
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_health_check_v2(
+        server: Data<Self>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        match Self::compute_health_check(&server, &req) {
+            Ok(is_gossip_enabled) => {
+                HttpResponse::Ok().json(GossipResponse::Accepted(is_gossip_enabled))
+            }
+            Err(reason) => HttpResponse::Ok().json(rejected_v2_json(reason)),
         }
     }
 
@@ -1746,7 +1792,7 @@ where
                     )
                     .route(
                         GossipRoutes::Health.as_str(),
-                        web::get().to(Self::handle_health_check),
+                        web::get().to(Self::handle_health_check_v2),
                     )
                     .route(
                         GossipRoutes::StakeAndPledgeWhitelist.as_str(),
@@ -1803,7 +1849,7 @@ where
             )
             .route(
                 GossipRoutes::Health.as_str(),
-                web::get().to(Self::handle_health_check),
+                web::get().to(Self::handle_health_check_v1),
             )
             .route(
                 GossipRoutes::StakeAndPledgeWhitelist.as_str(),

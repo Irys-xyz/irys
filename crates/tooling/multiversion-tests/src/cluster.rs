@@ -301,9 +301,13 @@ impl Cluster {
                 }
                 .into());
             }
-            self.probe
-                .wait_for_height(url, target, timeout.checked_sub(elapsed).unwrap())
-                .await?;
+            // Saturate at zero — `elapsed >= timeout` was just checked, but
+            // the elapsed clock can advance into a `None` between the guard
+            // and the subtraction. Returning a zero-budget probe is fine:
+            // it'll fail on the next poll and the caller treats that as the
+            // expected timeout.
+            let remaining = timeout.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+            self.probe.wait_for_height(url, target, remaining).await?;
         }
         Ok(())
     }
@@ -440,7 +444,11 @@ impl Cluster {
         // for promotion can race the migration on slower peers (the case
         // we hit immediately after upgrading the only mining node).
         let consensus = self.probe.get_network_config(&genesis_url).await?;
-        let migration_depth = read_consensus_u64(&consensus, "blockMigrationDepth").unwrap_or(6);
+        // Propagate schema-drift errors loudly: if `blockMigrationDepth`
+        // is renamed/restructured by a future release, a fallback would
+        // hide the regression behind a hardcoded wait — exactly the
+        // class of bug this harness exists to surface.
+        let migration_depth = read_consensus_u64(&consensus, "blockMigrationDepth")?;
         self.wait_for_height_at_least(height + migration_depth + 2, timeout)
             .await?;
 
@@ -557,6 +565,123 @@ impl Cluster {
         Ok(())
     }
 
+    /// Reads every chunk of `tx` back from the genesis and asserts its
+    /// packing-invariant fields match the originally-uploaded chunk.
+    ///
+    /// We target the genesis specifically rather than sweeping every node:
+    /// the genesis is the sole miner here, so it's the one node guaranteed to
+    /// hold the Publish-ledger partition the chunk lands in. Unstaked peers
+    /// may not store the chunk at all, so a node-vs-node chunk diff would
+    /// 404 for reasons unrelated to version compatibility. The packed bytes
+    /// are also node-local (XORed with the serving node's mining address), so
+    /// comparing against the unpacked original — not across nodes — is the
+    /// only meaningful reference. See
+    /// [`crate::data_tx::assert_chunks_match_original`] for exactly which
+    /// fields are compared and why.
+    ///
+    /// This closes the chunk-decode gap the tx-header and block-header checks
+    /// miss: storage-module records live in separate MDBX tables with their
+    /// own `Compact` derivations, so a migration that breaks chunk decoding
+    /// is invisible to those checks. The signal is strongest in tests where
+    /// the genesis's own binary changes (rolling upgrade, producer-first
+    /// upgrade) — that's when the storing node decodes records a different
+    /// version wrote.
+    pub async fn assert_chunk_for_tx_matches_original(
+        &mut self,
+        tx: &irys_types::DataTransaction,
+        timeout: Duration,
+    ) -> Result<(), ClusterError> {
+        let genesis_url = self.find_running_genesis_url()?;
+        let client = reqwest::Client::new();
+        crate::data_tx::assert_chunks_match_original(&client, &genesis_url, tx, timeout)
+            .await
+            .map_err(|e| ClusterError::DataTx(format!("chunk read-back on genesis: {e}")))
+    }
+
+    /// Shuts down every node except `keep`, leaving it with no peer to
+    /// gossip-fetch from, then asserts `keep` alone still serves the full
+    /// signed header of every tx in `history` and reports each as promoted —
+    /// answering purely from its own persisted database.
+    ///
+    /// This is the strongest on-disk-survival signal the harness can produce
+    /// without a node-side bootstrap-from-disk flag. The standard
+    /// post-transition checks run with the genesis still gossiping, so a node
+    /// that mis-decoded its *own* migrated records could mask the failure by
+    /// re-syncing the data live from a healthy peer. With every other node
+    /// down, that escape route is closed: whatever `keep` returns came from
+    /// its local DB, decoded by its current binary.
+    ///
+    /// CAVEAT: this proves `keep`'s *current* on-disk state is self-consistent
+    /// and readable by its current binary — not that it specifically decoded
+    /// the *other* version's bytes. A node connected to a live peer earlier in
+    /// the test may already have re-synced and rewritten records in its own
+    /// format before this isolation. Truly isolating the at-startup read path
+    /// needs the node binary to support booting with no reachable trusted peer
+    /// (tracked in the README's "Future Improvements"); isolating *after*
+    /// startup is the most we can do against an unmodified old binary.
+    ///
+    /// TERMINAL: after this call only `keep` is still running, so it must be
+    /// the last assertion in a test. Isolation is done via graceful shutdown
+    /// rather than `SIGSTOP`, which Docker's default seccomp profile blocks
+    /// unless `--cap-add=SYS_PTRACE`.
+    pub async fn assert_self_sufficient_in_isolation(
+        &mut self,
+        keep: &str,
+        history: &[irys_types::DataTransaction],
+        timeout: Duration,
+    ) -> Result<(), ClusterError> {
+        if !self.nodes.contains_key(keep) {
+            return Err(ClusterError::NodeNotFound(keep.into()));
+        }
+
+        let others: Vec<String> = self
+            .nodes
+            .keys()
+            .filter(|name| name.as_str() != keep)
+            .cloned()
+            .collect();
+        for name in others {
+            let node = self
+                .nodes
+                .get_mut(&name)
+                .ok_or_else(|| ClusterError::NodeNotFound(name.clone()))?;
+            if node.is_running() {
+                tracing::info!(node = %name, isolating = %keep, "shutting down peer to isolate node");
+                node.shutdown(SHUTDOWN_TIMEOUT).await?;
+            }
+        }
+
+        let url = self
+            .nodes
+            .get_mut(keep)
+            .ok_or_else(|| ClusterError::NodeNotFound(keep.into()))?
+            .api_url();
+        let client = reqwest::Client::new();
+        for tx in history {
+            let tx_id = tx.header.id;
+            crate::data_tx::assert_tx_matches_original(
+                &client,
+                &url,
+                tx,
+                &self.run_config.tx_header,
+            )
+            .await
+            .map_err(|e| {
+                ClusterError::DataTx(format!(
+                    "isolated {keep}: tx {tx_id} header does not match original from its own DB: {e}"
+                ))
+            })?;
+            crate::data_tx::wait_for_promotion(&client, &url, tx_id, timeout)
+                .await
+                .map_err(|e| {
+                    ClusterError::DataTx(format!(
+                        "isolated {keep}: tx {tx_id} not reported promoted from its own DB: {e}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Runtime view of the chain parameters that test code needs to
     /// construct signed payloads *and* pace cross-version transitions —
     /// queried once from the running genesis's `/v1/network/config` instead
@@ -614,7 +739,7 @@ impl Cluster {
         // its own source of truth — we want to preserve its on-chain
         // consensus state across the binary swap. Querying it before
         // shutdown is the same network call the peers make.
-        let template_overlay = crate::config::extract_consensus_custom_from_template(&template);
+        let template_overlay = crate::config::extract_consensus_custom_from_template(&template)?;
         let genesis_url = self.find_running_genesis_url()?;
         let genesis_hash = self.probe.get_genesis_hash(&genesis_url).await?;
         let consensus_json = self.probe.get_network_config(&genesis_url).await?;
@@ -704,7 +829,17 @@ impl Cluster {
             .get_mut(&genesis_name)
             .ok_or(ClusterError::MissingGenesis)?;
         if !node.is_running() {
-            return Err(ClusterError::MissingGenesis);
+            // Genesis crashed at runtime — surface it as `NodeCrashed` with
+            // the captured logs, not as the static-config `MissingGenesis`.
+            // Mirrors the pattern in `checked_api_urls` so callers debugging
+            // a flaky test see "what" actually died, not just "spec said
+            // there should be a genesis."
+            let raw_logs = node.drain_logs().join("\n");
+            let logs = strip_ansi_codes(&raw_logs);
+            return Err(ClusterError::NodeCrashed {
+                name: genesis_name,
+                logs,
+            });
         }
         Ok(node.api_url())
     }
