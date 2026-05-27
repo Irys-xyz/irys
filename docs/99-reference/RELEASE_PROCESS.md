@@ -50,7 +50,7 @@ Testnet releases ARE the release candidates for mainnet — there is no separate
 
 ## Release Flow
 
-```
+```text
 master ──► deployment/devnet ──► devnet (on demand)
   │
   ▼ (cherry-pick / merge)

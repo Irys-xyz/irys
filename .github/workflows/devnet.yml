@@ -50,7 +50,10 @@ jobs:
         id: resolve
         run: |
           SHA=$(git rev-parse HEAD)
-          SHORT=$(echo "$SHA" | cut -c1-12)
+          # 7-char short SHA to match the version metadata embedded by
+          # crates/chain/build.rs (it truncates GIT_SHA to 7), so the devnet
+          # image tag equals the SHA the running binary reports.
+          SHORT=$(echo "$SHA" | cut -c1-7)
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
 

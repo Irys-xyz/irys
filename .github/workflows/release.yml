@@ -87,8 +87,9 @@ jobs:
           echo "name=${INPUT_RELEASE_TYPE}-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Check tag does not already exist
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
         run: |
-          TAG="${{ steps.tag.outputs.name }}"
           if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "::error::Tag $TAG already exists"
             exit 1
