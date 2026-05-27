@@ -221,11 +221,22 @@ jobs:
           args: >-
             --unreleased
             --tag ${{ env.GIT_TAG }}
-            ${{ inputs.release_type == 'mainnet' && '--ignore-tags ^testnet-' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
           OUTPUT: /tmp/cliff-changelog.md
+          # Bound the changelog to the previous release of THIS env: restrict the
+          # release-tag pattern to the env's own tags so --unreleased anchors to the
+          # last <env>-X.Y.Z. testnet-3.0.0 then spans since testnet-0.2.0, not since
+          # the (newer) mainnet-0.1.3. NB: git-cliff's --ignore-tags only relabels the
+          # "previous" link — --tag-pattern (this env var) is what moves the commit
+          # range. First release of an env (no prior tag) spans the full history.
+          GIT_CLIFF_TAG_PATTERN: ${{ inputs.release_type == 'mainnet' && '^mainnet-[0-9]+\.[0-9]+\.[0-9]+$' || '^testnet-[0-9]+\.[0-9]+\.[0-9]+$' }}
+          # Name each skipped/non-conventional commit in the Actions log so the
+          # "N commit(s) skipped due to parse error" warning is actionable. Scope
+          # trace to git-cliff itself — NOT the `-vv` flag, which enables GLOBAL trace
+          # and floods the log with hyper/HTTP lines from the GitHub remote-data fetch.
+          RUST_LOG: git_cliff_core=trace
 
       # --- Publish phase: tag, push image, update head-tracking, create release ---
       # If any step here fails, cleanup steps at the bottom delete pushed git tags.
