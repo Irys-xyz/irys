@@ -14,8 +14,8 @@ Throughout, the example version is `1.2.3`.
 ## Prerequisites
 
 - `release/1.x` exists (created once per major from `master`)
-- `deployment/testnet/1.x` exists (created once per major from `release/1.x`)
-- `deployment/mainnet/1.x` exists (created once per major from `release/1.x`)
+- `release/testnet/1.x` exists (created once per major from `release/1.x`)
+- `release/mainnet/1.x` exists (created once per major from `release/1.x`)
 - All deployment branches are protected (PR-only, required CI, etc.)
 - You have write access to the repo and `gh` CLI authenticated, OR can use the GitHub Actions UI
 - Local checkout has the latest from `origin`
@@ -57,10 +57,10 @@ Merge `release/1.x` forward into the testnet deployment branch and apply
 any per-release testnet patches.
 
 ```bash
-git checkout deployment/testnet/1.x
+git checkout release/testnet/1.x
 git pull --ff-only
 git merge --no-ff origin/release/1.x \
-  -m "merge: release/1.x into deployment/testnet/1.x for 1.2.3"
+  -m "merge: release/1.x into release/testnet/1.x for 1.2.3"
 ```
 
 If the merge produces a `crates/chain/Cargo.toml` conflict, resolve to
@@ -75,12 +75,12 @@ $EDITOR <testnet-specific-config>
 git add … && git commit -m "chore(testnet): update bootstrap peers for 1.2.3"
 ```
 
-Open a PR to land these on `deployment/testnet/1.x` (it's protected).
+Open a PR to land these on `release/testnet/1.x` (it's protected).
 After the PR merges:
 
 ```bash
 git fetch origin
-TESTNET_SHA=$(git rev-parse origin/deployment/testnet/1.x)
+TESTNET_SHA=$(git rev-parse origin/release/testnet/1.x)
 echo "$TESTNET_SHA"
 ```
 
@@ -97,7 +97,7 @@ Or use the GitHub UI: **Actions → Release → Run workflow**.
 
 The workflow will:
 
-1. Verify the commit is on `deployment/testnet/<major>.x`.
+1. Verify the commit is on `release/testnet/<major>.x`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
 3. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
 4. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
@@ -111,7 +111,7 @@ Then deploy `irys-testnet:1.2.3` to testnet and validate.
 | Where the bug lives | What to do |
 |---|---|
 | Upstream code (would also affect mainnet) | Cherry-pick the fix from `master` to `release/1.x` → bump version to `1.2.4` → repeat Phase B |
-| Testnet-only (e.g. wrong bootstrap peer) | Commit the fix directly to `deployment/testnet/1.x` → bump `release/1.x` version to `1.2.4` and merge forward → repeat Phase B |
+| Testnet-only (e.g. wrong bootstrap peer) | Commit the fix directly to `release/testnet/1.x` → bump `release/1.x` version to `1.2.4` and merge forward → repeat Phase B |
 
 Each iteration gets a new SemVer; earlier `testnet-1.2.X` tags are orphaned
 by design — see [`RELEASE_PROCESS.md` § Version Iteration](./RELEASE_PROCESS.md#version-iteration).
@@ -144,10 +144,10 @@ If the check warns, go back to Phase B with a new version (`1.2.4`).
 Merge `release/1.x` forward into the mainnet deployment branch:
 
 ```bash
-git checkout deployment/mainnet/1.x
+git checkout release/mainnet/1.x
 git pull --ff-only
 git merge --no-ff origin/release/1.x \
-  -m "merge: release/1.x into deployment/mainnet/1.x for 1.2.3"
+  -m "merge: release/1.x into release/mainnet/1.x for 1.2.3"
 ```
 
 Resolve any `Cargo.toml` conflicts to `release/1.x`'s value. Apply any
@@ -162,7 +162,7 @@ Open a PR, land it, capture the SHA:
 
 ```bash
 git fetch origin
-MAINNET_SHA=$(git rev-parse origin/deployment/mainnet/1.x)
+MAINNET_SHA=$(git rev-parse origin/release/mainnet/1.x)
 ```
 
 Dispatch:
@@ -287,7 +287,7 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 |---|---|
 | Where do I bump the version? | Only on `release/1.x`. Deployment branches inherit via merge. |
 | Cargo.toml conflicts during merge-forward? | Always resolve to `release/1.x`'s value. |
-| Bug found on testnet — where do I fix it? | Upstream code: `master` → cherry-pick to `release/1.x` → bump version → re-do Phase B. Env-specific: commit to the affected `deployment/<env>/1.x` + bump version on `release/1.x`. |
+| Bug found on testnet — where do I fix it? | Upstream code: `master` → cherry-pick to `release/1.x` → bump version → re-do Phase B. Env-specific: commit to the affected `release/<env>/1.x` + bump version on `release/1.x`. |
 | Critical mainnet hotfix without testnet? | Dispatch with `force=true`. See [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). |
 | Wrong changelog scope on mainnet? | Edit the draft before publishing — nothing assumes the auto-generated text is final. |
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
@@ -327,12 +327,12 @@ real publish.
    branch. So `release.yml` must be merged to `master` before you can dispatch it.
    Dispatch from `master`; the `commit` input, not the workflow's branch, decides
    what gets built.
-2. **A deployment branch in the `<env>/<major>.x` scheme must exist for the env you
-   test,** with `crates/chain/Cargo.toml` at the version you'll pass. The
-   pre-existing *flat* `deployment/testnet` / `deployment/mainnet` branches do
-   **not** satisfy provenance — it derives `deployment/<env>/<major>.x`. For a
-   `3.0.0` dry-run, create `deployment/testnet/3.x`; branching it straight from
-   `master` is enough, since `master` is already at `3.0.0`.
+2. **A `release/<env>/<major>.x` branch must exist for the env you test,** with
+   `crates/chain/Cargo.toml` at the version you'll pass — provenance derives that
+   exact branch name. For a `3.0.0` dry-run, create `release/testnet/3.x` (it slots
+   into the existing `release/testnet/*` namespace, so there's no ref conflict);
+   branching it straight from `origin/master` is enough, since `master` is already
+   at `3.0.0`.
 3. **An online self-hosted `misc-runner` with rootless Docker** — the dry-run runs
    a full `docker build`, which is the slow part and the main thing it validates.
 
@@ -341,10 +341,10 @@ real publish.
 ```bash
 # one-time: a 3.x testnet deployment branch (master is already at version 3.0.0)
 git fetch origin
-git checkout -b deployment/testnet/3.x origin/master
-git push -u origin deployment/testnet/3.x
+git checkout -b release/testnet/3.x origin/master
+git push -u origin release/testnet/3.x
 
-COMMIT=$(git rev-parse origin/deployment/testnet/3.x)
+COMMIT=$(git rev-parse origin/release/testnet/3.x)
 
 # dispatch the dry-run (release.yml must already be on master)
 gh workflow run release.yml \
@@ -368,9 +368,9 @@ with `force=true`; otherwise you'd also need a real `testnet-3.0.0` tag, a
 `release/3.x` branch, and a matching merge-base.
 
 ```bash
-git checkout -b deployment/mainnet/3.x origin/master
-git push -u origin deployment/mainnet/3.x
-COMMIT=$(git rev-parse origin/deployment/mainnet/3.x)
+git checkout -b release/mainnet/3.x origin/master
+git push -u origin release/mainnet/3.x
+COMMIT=$(git rev-parse origin/release/mainnet/3.x)
 
 gh workflow run release.yml \
   -f release_type=mainnet \
@@ -383,6 +383,6 @@ gh workflow run release.yml \
 ### Cleanup
 
 A dry-run publishes nothing, so there's nothing to roll back. If you created the
-`deployment/<env>/3.x` branches purely to test, delete them afterward. If this is
+`release/<env>/3.x` branches purely to test, delete them afterward. If this is
 the real `3.x` line, keep them and cut the actual release by re-dispatching without
 `dry_run` (and, for mainnet, without `force` once a matching `testnet-3.0.0` exists).

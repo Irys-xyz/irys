@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: 'Commit SHA on deployment/devnet (defaults to HEAD of the branch)'
+        description: 'Commit SHA on release/devnet (defaults to HEAD of the branch)'
         required: false
         type: string
         default: ''
@@ -42,7 +42,7 @@ jobs:
       # fallback only fires when inputs.commit is empty.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ inputs.commit != '' && inputs.commit || 'deployment/devnet' }}
+          ref: ${{ inputs.commit != '' && inputs.commit || 'release/devnet' }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -57,7 +57,7 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
 
-      - name: Validate commit is on deployment/devnet
+      - name: Validate commit is on release/devnet
         uses: ./.github/actions/verify-commit-provenance
         with:
           environment: devnet

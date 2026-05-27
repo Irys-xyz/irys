@@ -22,7 +22,7 @@ on:
         required: true
         type: string
       commit:
-        description: 'Commit SHA on a deployment/<env>/<major>.x branch'
+        description: 'Commit SHA on a release/<env>/<major>.x branch'
         required: true
         type: string
       force:
@@ -67,7 +67,7 @@ jobs:
       - name: Sync tags from origin (local tags on reused runners can be stale)
         uses: ./.github/actions/sync-tags
 
-      # Commit must exist, live on origin/deployment/<release_type>/<major>.x,
+      # Commit must exist, live on origin/release/<release_type>/<major>.x,
       # and carry crates/chain version == inputs.version. require-release-tag is
       # false here: this job mints the <env>-<version> tag, so it must not exist
       # yet (checked separately below).

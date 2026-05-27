@@ -4,17 +4,17 @@
 
 | Environment | Deploys From                         | Git Tag           | Image Stream                     |
 |---|---|---|---|
-| **Devnet**  | `deployment/devnet`                  | (none)            | `ghcr.io/<owner>/irys-devnet`    |
-| **Testnet** | `deployment/testnet/<major>.x`       | `testnet-X.Y.Z`   | `ghcr.io/<owner>/irys-testnet`   |
-| **Mainnet** | `deployment/mainnet/<major>.x`       | `mainnet-X.Y.Z`   | `ghcr.io/<owner>/irys-mainnet`   |
+| **Devnet**  | `release/devnet`                  | (none)            | `ghcr.io/<owner>/irys-devnet`    |
+| **Testnet** | `release/testnet/<major>.x`       | `testnet-X.Y.Z`   | `ghcr.io/<owner>/irys-testnet`   |
+| **Mainnet** | `release/mainnet/<major>.x`       | `mainnet-X.Y.Z`   | `ghcr.io/<owner>/irys-mainnet`   |
 
 ## Branches
 
 - **`master`** — integration branch. All feature work merges here via PR. Not deployed to any environment.
 - **`release/<major>.x`** — long-lived release branches (e.g. `release/1.x`). Source of truth for the canonical SemVer version. Created from `master`; receives cherry-picks from `master`. Version bumps in `crates/chain/Cargo.toml` happen on these branches directly. Never deployed.
-- **`deployment/devnet`** — long-lived branch for devnet. Carries devnet-specific patches on top of `master`. Built on demand.
-- **`deployment/testnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + testnet-specific patch commits (chain IDs, bootstrap peers, etc.).
-- **`deployment/mainnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + mainnet-specific patch commits.
+- **`release/devnet`** — long-lived branch for devnet. Carries devnet-specific patches on top of `master`. Built on demand.
+- **`release/testnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + testnet-specific patch commits (chain IDs, bootstrap peers, etc.).
+- **`release/mainnet/<major>.x`** — long-lived branch per major. `release/<major>.x` merged forward + mainnet-specific patch commits.
 - **Feature branches** — short-lived, merge into `master` via PR.
 
 ## Versioning
@@ -51,19 +51,19 @@ Testnet releases ARE the release candidates for mainnet — there is no separate
 ## Release Flow
 
 ```text
-master ──► deployment/devnet ──► devnet (on demand)
+master ──► release/devnet ──► devnet (on demand)
   │
   ▼ (cherry-pick / merge)
 release/<major>.x  (canonical version source; never deployed directly)
   │
-  ├──► deployment/testnet/<major>.x  ──testnet-X.Y.Z──► testnet (auto-published prerelease)
-  └──► deployment/mainnet/<major>.x  ──mainnet-X.Y.Z──► mainnet (draft release → manual publish)
+  ├──► release/testnet/<major>.x  ──testnet-X.Y.Z──► testnet (auto-published prerelease)
+  └──► release/mainnet/<major>.x  ──mainnet-X.Y.Z──► mainnet (draft release → manual publish)
 ```
 
-1. Work merges into `master`. Devnet builds from `deployment/devnet` (merged forward from `master` on demand).
+1. Work merges into `master`. Devnet builds from `release/devnet` (merged forward from `master` on demand).
 2. When ready to release, cherry-pick changes from `master` into `release/<major>.x`, bump the version in `crates/chain/Cargo.toml`, and stabilize.
-3. Merge `release/<major>.x` forward into `deployment/testnet/<major>.x`. Apply any per-release testnet patches as additional commits. Trigger the **Release** workflow as `testnet` → validates, builds, pushes `testnet-X.Y.Z` git tag, pushes image to `irys-testnet:X.Y.Z`, updates `testnet-latest` (both Docker and git), creates auto-published prerelease. Deploy to testnet.
-4. After testnet validation, merge `release/<major>.x` forward into `deployment/mainnet/<major>.x`. Apply any per-release mainnet patches as additional commits. Trigger the **Release** workflow as `mainnet` on a commit whose `release/<major>.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-X.Y.Z` git tag, pushes image to `irys-mainnet:X.Y.Z`, updates `mainnet-latest`, creates **draft** release. A maintainer reviews the notes and publishes.
+3. Merge `release/<major>.x` forward into `release/testnet/<major>.x`. Apply any per-release testnet patches as additional commits. Trigger the **Release** workflow as `testnet` → validates, builds, pushes `testnet-X.Y.Z` git tag, pushes image to `irys-testnet:X.Y.Z`, updates `testnet-latest` (both Docker and git), creates auto-published prerelease. Deploy to testnet.
+4. After testnet validation, merge `release/<major>.x` forward into `release/mainnet/<major>.x`. Apply any per-release mainnet patches as additional commits. Trigger the **Release** workflow as `mainnet` on a commit whose `release/<major>.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-X.Y.Z` git tag, pushes image to `irys-mainnet:X.Y.Z`, updates `mainnet-latest`, creates **draft** release. A maintainer reviews the notes and publishes.
 
 ### Atomicity
 
@@ -109,7 +109,7 @@ The workflows pin to `[self-hosted, misc-runner]` and `[self-hosted, test-runner
 Create and protect:
 
 - `master` — already exists.
-- `deployment/devnet` — branch from `master`.
+- `release/devnet` — branch from `master`.
 
 Branch protection on all of these (and on the per-major release branches below) should require: PR review, passing CI, no force-push, no direct delete.
 
@@ -134,14 +134,14 @@ git checkout -b "release/${MAJOR}.x" master
 git push -u origin "release/${MAJOR}.x"
 
 # 2. Deployment branches — one per env, branched from the release branch.
-git checkout -b "deployment/testnet/${MAJOR}.x" "release/${MAJOR}.x"
-git push -u origin "deployment/testnet/${MAJOR}.x"
+git checkout -b "release/testnet/${MAJOR}.x" "release/${MAJOR}.x"
+git push -u origin "release/testnet/${MAJOR}.x"
 
-git checkout -b "deployment/mainnet/${MAJOR}.x" "release/${MAJOR}.x"
-git push -u origin "deployment/mainnet/${MAJOR}.x"
+git checkout -b "release/mainnet/${MAJOR}.x" "release/${MAJOR}.x"
+git push -u origin "release/mainnet/${MAJOR}.x"
 ```
 
-Then in **Settings → Branches**, apply branch protection to all three new branches with the same rules as `master` (PR review, CI, no force-push). The Irys-CI runners listen for jobs from `release/*` and `deployment/*` already — see `rust.yml` for the always-run conditions.
+Then in **Settings → Branches**, apply branch protection to all three new branches with the same rules as `master` (PR review, CI, no force-push). The Irys-CI runners listen for jobs from `release/*` already — see `rust.yml` for the always-run conditions.
 
 You do **not** need to create new GitHub Environments for a new release branch. The three environments configured in [Initial Repo Setup](#1-github-environments) are reused across all majors.
 
@@ -149,7 +149,7 @@ After the branches exist, follow [`RELEASE_PLAYBOOK.md`](./RELEASE_PLAYBOOK.md) 
 
 ## Hotfixes
 
-Hotfixes follow the same flow — fix on `master`, cherry-pick to `release/<major>.x`, merge forward to the appropriate `deployment/<env>/<major>.x` branch, tag, deploy. In an emergency, a hotfix can be applied directly to a deployment branch and deployed to its environment immediately, bypassing the normal master → release → deployment progression (use the `force` flag to skip the testnet-merge-base validation).
+Hotfixes follow the same flow — fix on `master`, cherry-pick to `release/<major>.x`, merge forward to the appropriate `release/<env>/<major>.x` branch, tag, deploy. In an emergency, a hotfix can be applied directly to a deployment branch and deployed to its environment immediately, bypassing the normal master → release → deployment progression (use the `force` flag to skip the testnet-merge-base validation).
 
 ## Rollback
 
@@ -178,16 +178,16 @@ Starting from a new major version:
 1. Branch `release/1.x` from `master`.
 2. Cherry-pick the desired commits from `master` to `release/1.x`.
 3. Bump version in `crates/chain/Cargo.toml` on `release/1.x`, commit.
-4. Branch `deployment/testnet/1.x` from `release/1.x` (first time only). Apply any sticky testnet patches.
-5. Trigger the release workflow as `testnet` targeting a commit on `deployment/testnet/1.x` → validates, builds, pushes `testnet-1.0.0` tag + image to `irys-testnet`, updates `testnet-latest`, auto-publishes prerelease. Deploy to testnet.
-6. Validate on testnet. Fix issues via cherry-pick to `release/1.x` (if upstream) or direct commit to `deployment/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, repeat as needed. Earlier testnet versions are orphaned.
-7. Once stable, branch `deployment/mainnet/1.x` from `release/1.x` (first time only). Apply any sticky mainnet patches. Merge `release/1.x` forward.
-8. Trigger the release workflow as `mainnet` on a commit on `deployment/mainnet/1.x` whose `release/1.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-1.0.1` tag + image, updates `mainnet-latest`, creates draft release. Maintainer reviews and publishes. Deploy to mainnet.
-9. Future minor/patch releases continue on `release/1.x` and flow through the same deployment branches. A new `release/2.x` branch plus new `deployment/testnet/2.x` and `deployment/mainnet/2.x` are created when a major version bump is needed.
+4. Branch `release/testnet/1.x` from `release/1.x` (first time only). Apply any sticky testnet patches.
+5. Trigger the release workflow as `testnet` targeting a commit on `release/testnet/1.x` → validates, builds, pushes `testnet-1.0.0` tag + image to `irys-testnet`, updates `testnet-latest`, auto-publishes prerelease. Deploy to testnet.
+6. Validate on testnet. Fix issues via cherry-pick to `release/1.x` (if upstream) or direct commit to `release/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, repeat as needed. Earlier testnet versions are orphaned.
+7. Once stable, branch `release/mainnet/1.x` from `release/1.x` (first time only). Apply any sticky mainnet patches. Merge `release/1.x` forward.
+8. Trigger the release workflow as `mainnet` on a commit on `release/mainnet/1.x` whose `release/1.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-1.0.1` tag + image, updates `mainnet-latest`, creates draft release. Maintainer reviews and publishes. Deploy to mainnet.
+9. Future minor/patch releases continue on `release/1.x` and flow through the same deployment branches. A new `release/2.x` branch plus new `release/testnet/2.x` and `release/mainnet/2.x` are created when a major version bump is needed.
 
 ## Authoring Deployment-Specific Patches
 
-Deployment-specific patches (e.g., chain IDs, bootstrap peer addresses, env-specific hardcoded values) live as normal git commits on the relevant `deployment/<env>/<major>.x` branch. They are reviewed via PR into the deployment branch like any other change.
+Deployment-specific patches (e.g., chain IDs, bootstrap peer addresses, env-specific hardcoded values) live as normal git commits on the relevant `release/<env>/<major>.x` branch. They are reviewed via PR into the deployment branch like any other change.
 
 **Rules:**
 
