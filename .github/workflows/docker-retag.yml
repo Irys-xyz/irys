@@ -66,11 +66,9 @@ jobs:
 
       - name: Set image name
         id: image
-        env:
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.environment }}
 
       # Resolve the git side BEFORE touching the Docker daemon so a missing
       # source git tag fails the job before we've pulled anything or moved

@@ -1,0 +1,90 @@
+name: "Verify commit provenance"
+description: >-
+  Verifies a commit is a legitimate build source for an environment: it exists,
+  lives on the matching deployment branch, and — for testnet/mainnet — carries
+  the expected crates/chain version, optionally requiring that the
+  <env>-<version> release tag points at it. The caller must have already checked
+  out the repo (fetch-depth: 0) and synced tags from origin; this action only
+  reads local refs.
+
+inputs:
+  environment:
+    description: "devnet, testnet, or mainnet."
+    required: true
+  commit:
+    description: "Commit SHA to verify."
+    required: true
+  version:
+    description: "Expected SemVer X.Y.Z (testnet/mainnet). Ignored for devnet."
+    required: false
+    default: ""
+  require-release-tag:
+    description: >-
+      If 'true', also require the <env>-<version> release tag to point at the
+      commit (the rebuild path — proves the commit is the released one). Leave
+      'false' when minting a new release tag.
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Verify provenance
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        COMMIT: ${{ inputs.commit }}
+        VERSION: ${{ inputs.version }}
+        REQUIRE_RELEASE_TAG: ${{ inputs.require-release-tag }}
+      run: |
+        if ! git cat-file -e "${COMMIT}^{commit}" 2>/dev/null; then
+          echo "::error::Commit ${COMMIT} does not exist"
+          exit 1
+        fi
+
+        if [[ "$ENVIRONMENT" == "devnet" ]]; then
+          EXPECTED_BRANCH="origin/deployment/devnet"
+        else
+          MAJOR="${VERSION%%.*}"
+          EXPECTED_BRANCH="origin/deployment/${ENVIRONMENT}/${MAJOR}.x"
+        fi
+        if ! git branch -r --contains "${COMMIT}" \
+            | sed 's/^[[:space:]]*//' \
+            | grep -Fxq "$EXPECTED_BRANCH"; then
+          echo "::error::Commit ${COMMIT} is not on $EXPECTED_BRANCH"
+          echo "Found on branches:"
+          git branch -r --contains "${COMMIT}"
+          exit 1
+        fi
+        echo "Commit ${COMMIT} found on $EXPECTED_BRANCH"
+
+        if [[ "$ENVIRONMENT" != "devnet" ]]; then
+          CARGO_VER=$(git show "${COMMIT}:crates/chain/Cargo.toml" \
+            | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
+          if [ "$CARGO_VER" != "${VERSION}" ]; then
+            echo "::error::Version ${VERSION} does not match irys-chain Cargo.toml version $CARGO_VER at ${COMMIT}"
+            exit 1
+          fi
+          echo "Version validated: ${VERSION} matches irys-chain $CARGO_VER"
+
+          # The Cargo version equals the tag on every commit between two releases
+          # (the version only bumps on release/<major>.x), so the check above is
+          # not enough to prove this is the *released* commit. On the rebuild path
+          # require the commit to be exactly what the <env>-<version> release tag
+          # points at, or a rebuild could overwrite the published image with bits
+          # that were never released as that version.
+          if [[ "$REQUIRE_RELEASE_TAG" == "true" ]]; then
+            RELEASE_GIT_TAG="${ENVIRONMENT}-${VERSION}"
+            if ! git rev-parse "${RELEASE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
+              echo "::error::Release git tag ${RELEASE_GIT_TAG} does not exist — cannot verify rebuild provenance"
+              exit 1
+            fi
+            TAG_COMMIT=$(git rev-parse "${RELEASE_GIT_TAG}^{commit}")
+            INPUT_FULL=$(git rev-parse "${COMMIT}^{commit}")
+            if [ "$TAG_COMMIT" != "$INPUT_FULL" ]; then
+              echo "::error::Commit ${COMMIT} (${INPUT_FULL}) is not the commit ${RELEASE_GIT_TAG} points at (${TAG_COMMIT}). A rebuild must target the exact released commit."
+              exit 1
+            fi
+            echo "Provenance validated: ${COMMIT} is ${RELEASE_GIT_TAG}"
+          fi
+        fi

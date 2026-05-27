@@ -64,48 +64,16 @@ jobs:
       - name: Sync tags from origin (local tags on reused runners can be stale)
         run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
 
-      - name: Validate commit exists on deployment/<env>/<major>.x matching the version
-        env:
-          INPUT_COMMIT: ${{ inputs.commit }}
-          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
-            echo "::error::Commit ${INPUT_COMMIT} does not exist"
-            exit 1
-          fi
-
-          MAJOR="${INPUT_VERSION%%.*}"
-          EXPECTED_BRANCH="origin/deployment/${INPUT_RELEASE_TYPE}/${MAJOR}.x"
-          if ! git branch -r --contains "${INPUT_COMMIT}" \
-              | sed 's/^[[:space:]]*//' \
-              | grep -Fxq "$EXPECTED_BRANCH"; then
-            echo "::error::Commit ${INPUT_COMMIT} is not on $EXPECTED_BRANCH"
-            echo "Found on branches:"
-            git branch -r --contains "${INPUT_COMMIT}"
-            exit 1
-          fi
-          echo "Commit found on $EXPECTED_BRANCH"
-
-      - name: Verify Cargo.toml version matches input
-        env:
-          INPUT_COMMIT: ${{ inputs.commit }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          # Parse with tomllib (Python 3.11+) rather than sed/grep — survives
-          # comments, multi-line strings, and section reorders. Runners ship
-          # Python 3.12.
-          CARGO_VER=$(git show "${INPUT_COMMIT}:crates/chain/Cargo.toml" \
-            | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
-          if [ -z "$CARGO_VER" ]; then
-            echo "::error::Could not extract version from irys-chain Cargo.toml at commit ${INPUT_COMMIT}"
-            exit 1
-          fi
-          if [ "$CARGO_VER" != "${INPUT_VERSION}" ]; then
-            echo "::error::Input version ${INPUT_VERSION} does not match irys-chain Cargo.toml version $CARGO_VER"
-            exit 1
-          fi
-          echo "Version validated: ${INPUT_VERSION} matches irys-chain $CARGO_VER"
+      # Commit must exist, live on origin/deployment/<release_type>/<major>.x,
+      # and carry crates/chain version == inputs.version. require-release-tag is
+      # false here: this job mints the <env>-<version> tag, so it must not exist
+      # yet (checked separately below).
+      - name: Validate commit provenance
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: ${{ inputs.release_type }}
+          commit: ${{ inputs.commit }}
+          version: ${{ inputs.version }}
 
       - name: Determine tag name
         id: tag
@@ -208,11 +176,9 @@ jobs:
 
       - name: Set image name
         id: image
-        env:
-          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_RELEASE_TYPE}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.release_type }}
 
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup

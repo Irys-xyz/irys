@@ -81,72 +81,23 @@ jobs:
       - name: Sync tags from origin (local tags on reused runners can be stale)
         run: git fetch origin --force --prune --prune-tags "+refs/tags/*:refs/tags/*"
 
-      # Mirror release.yml / devnet.yml: don't let the rebuild path publish a
-      # mislabeled image. The commit must live on the matching deployment branch,
-      # for testnet/mainnet the Cargo.toml version must equal the tag, and the
-      # commit must be the exact one the <env>-<tag> release tag points at.
+      # Don't let the rebuild path publish a mislabeled image. For testnet/mainnet,
+      # require-release-tag also pins the commit to the exact one <env>-<tag>
+      # points at (a rebuild must reproduce the released commit). devnet only
+      # checks the deployment branch. See the verify-commit-provenance action.
       - name: Validate commit provenance
-        env:
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
-          INPUT_TAG: ${{ inputs.tag }}
-          INPUT_COMMIT: ${{ inputs.commit }}
-        run: |
-          if ! git cat-file -e "${INPUT_COMMIT}^{commit}" 2>/dev/null; then
-            echo "::error::Commit ${INPUT_COMMIT} does not exist"
-            exit 1
-          fi
-
-          if [[ "$INPUT_ENVIRONMENT" == "devnet" ]]; then
-            EXPECTED_BRANCH="origin/deployment/devnet"
-          else
-            MAJOR="${INPUT_TAG%%.*}"
-            EXPECTED_BRANCH="origin/deployment/${INPUT_ENVIRONMENT}/${MAJOR}.x"
-          fi
-          if ! git branch -r --contains "${INPUT_COMMIT}" \
-              | sed 's/^[[:space:]]*//' \
-              | grep -Fxq "$EXPECTED_BRANCH"; then
-            echo "::error::Commit ${INPUT_COMMIT} is not on $EXPECTED_BRANCH"
-            echo "Found on branches:"
-            git branch -r --contains "${INPUT_COMMIT}"
-            exit 1
-          fi
-
-          if [[ "$INPUT_ENVIRONMENT" != "devnet" ]]; then
-            CARGO_VER=$(git show "${INPUT_COMMIT}:crates/chain/Cargo.toml" \
-              | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')
-            if [ "$CARGO_VER" != "${INPUT_TAG}" ]; then
-              echo "::error::Tag ${INPUT_TAG} does not match irys-chain Cargo.toml version $CARGO_VER at ${INPUT_COMMIT}"
-              exit 1
-            fi
-            echo "Version validated: ${INPUT_TAG} matches irys-chain $CARGO_VER"
-
-            # The Cargo version equals the tag on every commit between two
-            # releases (the version only bumps on release/<major>.x), so the
-            # check above is not enough to prove this is the *released* commit.
-            # Require the commit to be exactly what the <env>-<tag> release tag
-            # points at, or a rebuild of irys-<env>:<tag> could overwrite the
-            # published image with bits that were never released as that version.
-            RELEASE_GIT_TAG="${INPUT_ENVIRONMENT}-${INPUT_TAG}"
-            if ! git rev-parse "${RELEASE_GIT_TAG}^{commit}" >/dev/null 2>&1; then
-              echo "::error::Release git tag ${RELEASE_GIT_TAG} does not exist — cannot verify rebuild provenance"
-              exit 1
-            fi
-            TAG_COMMIT=$(git rev-parse "${RELEASE_GIT_TAG}^{commit}")
-            INPUT_FULL=$(git rev-parse "${INPUT_COMMIT}^{commit}")
-            if [ "$TAG_COMMIT" != "$INPUT_FULL" ]; then
-              echo "::error::Commit ${INPUT_COMMIT} (${INPUT_FULL}) is not the commit ${RELEASE_GIT_TAG} points at (${TAG_COMMIT}). A rebuild must target the exact released commit."
-              exit 1
-            fi
-            echo "Provenance validated: ${INPUT_COMMIT} is ${RELEASE_GIT_TAG}"
-          fi
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: ${{ inputs.environment }}
+          commit: ${{ inputs.commit }}
+          version: ${{ inputs.tag }}
+          require-release-tag: ${{ inputs.environment != 'devnet' }}
 
       - name: Set lowercase image name
         id: image
-        env:
-          INPUT_ENVIRONMENT: ${{ inputs.environment }}
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys-${INPUT_ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.environment }}
 
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup

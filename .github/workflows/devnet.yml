@@ -52,23 +52,16 @@ jobs:
           echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
 
       - name: Validate commit is on deployment/devnet
-        env:
-          COMMIT_SHA: ${{ steps.resolve.outputs.sha }}
-        run: |
-          BRANCHES=$(git branch -r --contains "${COMMIT_SHA}" | grep 'origin/deployment/devnet$' || true)
-          if [ -z "$BRANCHES" ]; then
-            echo "::error::Commit ${COMMIT_SHA} is not on deployment/devnet"
-            echo "Found on branches:"
-            git branch -r --contains "${COMMIT_SHA}"
-            exit 1
-          fi
-          echo "Commit on deployment/devnet"
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: devnet
+          commit: ${{ steps.resolve.outputs.sha }}
 
       - name: Set image name
         id: image
-        run: |
-          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER_LOWER}/irys-devnet" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/image-name
+        with:
+          environment: devnet
 
       - name: Start rootless Docker and log in to GHCR
         uses: ./.github/actions/docker-setup
