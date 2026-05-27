@@ -98,6 +98,8 @@ The release-touching workflows (`release.yml`, `docker.yml`, `docker-retag.yml`)
 
 Required reviewers on `mainnet` apply to every job that uses `environment: mainnet`, so a single setting covers cutting a release, an emergency Docker rebuild, and a Docker retag/rollback. The environments are global to the repo — they do not need to be re-created per release branch.
 
+A `release.yml` dispatch with `dry_run=true` resolves its `environment` to an empty string and therefore skips this gate entirely: a dry-run needs no reviewer approval, doesn't block on one, and doesn't even require the environments to exist yet. See [`RELEASE_PLAYBOOK.md` § Dry-run testing](./RELEASE_PLAYBOOK.md#dry-run-testing-validate-the-pipeline-without-publishing).
+
 ### 2. Self-Hosted Runners
 
 The workflows pin to `[self-hosted, misc-runner]` and `[self-hosted, test-runner]` labels. Runner setup lives in the [`Irys-CI`](https://github.com/Irys-xyz/Irys-CI) repo and registers runners at repo or org scope. The release flow only needs `misc-runner`.

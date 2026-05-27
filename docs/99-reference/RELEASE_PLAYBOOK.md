@@ -305,3 +305,84 @@ For rolling testnet or mainnet back to a previous version, see
 [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). Uses
 `docker-retag.yml` — no rebuild, just re-tags the existing image and moves
 the `<env>-latest` git tag.
+
+## Dry-run testing (validate the pipeline without publishing)
+
+`dry_run=true` exercises the whole release path — input validation, commit
+provenance, version match, the **real Docker build**, and changelog generation —
+then skips every mutating step: no git tag, no image push, no `latest` move, no
+GitHub Release. Use it to prove the workflow and the build are healthy before a
+real cut, or after changing the workflow itself.
+
+A dry-run resolves its `environment` to empty, so it does **not** wait on the
+`testnet`/`mainnet` approval gate and does **not** require those Environments to
+exist yet. It still runs in the `release` concurrency group, so it can't race a
+real publish.
+
+### Prerequisites (from the current state of the repo)
+
+1. **The release workflows must be on the default branch (`master`).**
+   `workflow_dispatch` workflows are only dispatchable once they exist on the
+   default branch — there is no way to dispatch one that lives only on a feature
+   branch. As of now `release.yml` exists only on `feat/release-process`, so
+   **merge that branch into `master` first.** After that, dispatch from `master`
+   (the `commit` input, not the workflow's branch, decides what gets built).
+2. **A deployment branch in the `<env>/<major>.x` scheme must exist for the env you
+   test,** with `crates/chain/Cargo.toml` at the version you'll pass. The
+   pre-existing *flat* `deployment/testnet` / `deployment/mainnet` branches do
+   **not** satisfy provenance — it derives `deployment/<env>/<major>.x`. For a
+   `3.0.0` dry-run, create `deployment/testnet/3.x`; branching it straight from
+   `master` is enough, since `master` is already at `3.0.0`.
+3. **An online self-hosted `misc-runner` with rootless Docker** — the dry-run runs
+   a full `docker build`, which is the slow part and the main thing it validates.
+
+### Testnet dry-run (simplest)
+
+```bash
+# one-time: a 3.x testnet deployment branch (master is already at version 3.0.0)
+git fetch origin
+git checkout -b deployment/testnet/3.x origin/master
+git push -u origin deployment/testnet/3.x
+
+COMMIT=$(git rev-parse origin/deployment/testnet/3.x)
+
+# dispatch the dry-run (release.yml must already be on master)
+gh workflow run release.yml \
+  -f release_type=testnet \
+  -f version=3.0.0 \
+  -f commit="$COMMIT" \
+  -f dry_run=true
+
+# follow it
+gh run watch "$(gh run list --workflow=release.yml -L1 --json databaseId -q '.[0].databaseId')"
+```
+
+A green run means inputs, provenance, version match, the image build, and changelog
+generation all succeeded — and nothing was published.
+
+### Mainnet dry-run
+
+Mainnet's validate job also runs the testnet↔mainnet merge-base gate, and that runs
+even on a dry-run. For a standalone dry-run with no prior testnet release, skip it
+with `force=true`; otherwise you'd also need a real `testnet-3.0.0` tag, a
+`release/3.x` branch, and a matching merge-base.
+
+```bash
+git checkout -b deployment/mainnet/3.x origin/master
+git push -u origin deployment/mainnet/3.x
+COMMIT=$(git rev-parse origin/deployment/mainnet/3.x)
+
+gh workflow run release.yml \
+  -f release_type=mainnet \
+  -f version=3.0.0 \
+  -f commit="$COMMIT" \
+  -f dry_run=true \
+  -f force=true        # skip the testnet merge-base gate for a standalone dry-run
+```
+
+### Cleanup
+
+A dry-run publishes nothing, so there's nothing to roll back. If you created the
+`deployment/<env>/3.x` branches purely to test, delete them afterward. If this is
+the real `3.x` line, keep them and cut the actual release by re-dispatching without
+`dry_run` (and, for mainnet, without `force` once a matching `testnet-3.0.0` exists).
