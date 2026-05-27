@@ -17,6 +17,34 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
+/// Why a block is being evicted from the block-tree cache.
+///
+/// Recorded on the `Removing block from block tree cache` debug log so an
+/// operator reading the log can tell a validation-driven removal from a
+/// prune-depth eviction from a cascaded-from-parent recursive removal.
+#[derive(Debug, Clone)]
+pub enum RemovalReason {
+    /// Block (or one of its ancestors) failed full validation.
+    ValidationInvalid,
+    /// Block fell outside the pruning window for the canonical tip.
+    PruneDepth,
+    /// Block was removed because it is a descendant of another block being
+    /// recursively removed; carries the original target's hash so logs can
+    /// be correlated.
+    RecursiveDescendantOf(BlockHash),
+}
+
+impl RemovalReason {
+    /// Stable, bounded-cardinality string for the `reason=` log field.
+    pub fn as_log_value(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::ValidationInvalid => "validation_invalid".into(),
+            Self::PruneDepth => "prune_depth".into(),
+            Self::RecursiveDescendantOf(h) => format!("recursive_descendant_of={h}").into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockTreeEntry(pub Arc<SealedBlock>);
 
@@ -570,7 +598,7 @@ impl BlockTree {
     }
 
     /// Helper function to delete a single block without recursion
-    fn delete_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+    fn delete_block(&mut self, block_hash: &BlockHash, reason: &RemovalReason) -> eyre::Result<()> {
         let block_entry = self
             .blocks
             .get(block_hash)
@@ -607,6 +635,7 @@ impl BlockTree {
             block.height = height,
             chain_state = ?chain_state,
             cache.size_before = self.blocks.len(),
+            reason = %reason.as_log_value(),
             "Removing block from block tree cache"
         );
         self.blocks.remove(block_hash);
@@ -622,11 +651,20 @@ impl BlockTree {
 
     #[cfg(feature = "test-utils")]
     pub fn test_delete(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
-        self.delete_block(block_hash)
+        self.delete_block(block_hash, &RemovalReason::ValidationInvalid)
     }
 
-    /// Removes a block and all its descendants recursively
-    pub fn remove_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+    /// Removes a block and all its descendants recursively.
+    ///
+    /// `reason` describes why the caller wants this block gone (and is
+    /// recorded on its `delete_block` log line). Descendants are removed with
+    /// [`RemovalReason::RecursiveDescendantOf`] so post-hoc log reading can
+    /// tell the original target from the cascaded children.
+    pub fn remove_block(
+        &mut self,
+        block_hash: &BlockHash,
+        reason: RemovalReason,
+    ) -> eyre::Result<()> {
         // Get children before deleting the block
         let children = self
             .blocks
@@ -636,11 +674,11 @@ impl BlockTree {
 
         // Recursively remove all children first
         for child in children {
-            self.remove_block(&child)?;
+            self.remove_block(&child, RemovalReason::RecursiveDescendantOf(*block_hash))?;
         }
 
         // Delete this block
-        self.delete_block(block_hash)
+        self.delete_block(block_hash, &reason)
     }
 
     // Helper to find new max difficulty when current max is removed
@@ -1289,7 +1327,7 @@ impl BlockTree {
                             && !matches!(child_entry.chain_state, ChainState::Onchain)
                         {
                             let child_state = child_entry.chain_state;
-                            if let Err(err) = self.remove_block(&child) {
+                            if let Err(err) = self.remove_block(&child, RemovalReason::PruneDepth) {
                                 tracing::error!(
                                     custom.error = ?err,
                                     custom.child_hash = ?child,
@@ -1301,7 +1339,7 @@ impl BlockTree {
                     }
 
                     // Now remove just this block
-                    if let Err(err) = self.delete_block(&hash) {
+                    if let Err(err) = self.delete_block(&hash, &RemovalReason::PruneDepth) {
                         tracing::error!(
                             custom.error = ?err,
                             block.hash = ?hash,
@@ -1601,6 +1639,34 @@ pub fn make_block_tree_entry(block: Arc<SealedBlock>) -> BlockTreeEntry {
 }
 
 #[cfg(test)]
+mod removal_reason_tests {
+    use super::*;
+
+    #[test]
+    fn as_log_value_uses_stable_snake_case_tags() {
+        assert_eq!(
+            RemovalReason::ValidationInvalid.as_log_value(),
+            "validation_invalid"
+        );
+        assert_eq!(RemovalReason::PruneDepth.as_log_value(), "prune_depth");
+    }
+
+    #[test]
+    fn recursive_descendant_log_value_carries_parent_hash() {
+        let parent = BlockHash::from([7_u8; 32]);
+        let formatted = RemovalReason::RecursiveDescendantOf(parent).as_log_value();
+        assert!(
+            formatted.starts_with("recursive_descendant_of="),
+            "unexpected prefix: {formatted}"
+        );
+        assert!(
+            formatted.contains(&parent.to_string()),
+            "missing parent hash in {formatted}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     use crate::{EmaSnapshot, dummy_epoch_snapshot};
@@ -1783,12 +1849,18 @@ mod tests {
         );
 
         // Remove b2_1
-        assert_matches!(cache.remove_block(&b2.block_hash), Ok(()));
+        assert_matches!(
+            cache.remove_block(&b2.block_hash, RemovalReason::ValidationInvalid),
+            Ok(())
+        );
         assert_eq!(cache.get_block(&b2.block_hash), None);
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
         // Remove b2_1 again
-        assert_matches!(cache.remove_block(&b2.block_hash), Err(_));
+        assert_matches!(
+            cache.remove_block(&b2.block_hash, RemovalReason::ValidationInvalid),
+            Err(_)
+        );
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
@@ -1879,7 +1951,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
         // Remove b1_2, causing b2 to now be the tip of the heaviest chain
-        assert_matches!(cache.remove_block(&b1_2.block_hash), Ok(()));
+        assert_matches!(
+            cache.remove_block(&b1_2.block_hash, RemovalReason::ValidationInvalid),
+            Ok(())
+        );
         assert_eq!(cache.get_block(&b1_2.block_hash), None);
         assert_eq!(
             cache
@@ -2207,7 +2282,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Verify previously pruned b3 can be safely removed again, with longest chain cache staying stable
-        assert_matches!(cache.remove_block(&b3.block_hash), Err(e) if e.to_string() == "Block not found");
+        assert_matches!(
+            cache.remove_block(&b3.block_hash, RemovalReason::PruneDepth),
+            Err(e) if e.to_string() == "Block not found"
+        );
         assert_eq!(None, cache.get_block(&b3.block_hash));
         assert_eq!(
             None,
@@ -2221,7 +2299,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Same safety check for b4 - removing already pruned block shouldn't affect chain state
-        assert_matches!(cache.remove_block(&b4.block_hash), Err(e) if e.to_string() == "Block not found");
+        assert_matches!(
+            cache.remove_block(&b4.block_hash, RemovalReason::PruneDepth),
+            Err(e) if e.to_string() == "Block not found"
+        );
         assert_eq!(None, cache.get_block(&b4.block_hash));
         assert_eq!(
             None,

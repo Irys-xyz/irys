@@ -2453,6 +2453,24 @@ impl MempoolService {
                         chunk_ingress_state,
                     }),
                 };
+                // 30-second sweep that backs the
+                // `irys.mempool.pending_submit_unresolvable_anchors` gauge.
+                // Path B from B6's gating decision — recompute the count
+                // out-of-band rather than on every Submit-tx ingress.
+                let sweep_inner = Arc::clone(&mempool_service.inner);
+                let sweep_handle = handle_for_inner.spawn(async move {
+                    debug!("Starting 30s anchor-resolution sweep (irys.mempool.pending_submit_unresolvable_anchors)");
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                    interval.tick().await; // first tick fires immediately; skip it
+                    loop {
+                        interval.tick().await;
+                        let count = sweep_inner.count_unresolvable_submit_anchors().await;
+                        let count_i64 = i64::try_from(count).unwrap_or(i64::MAX);
+                        crate::metrics::set_anchor_unresolvable(count_i64);
+                    }
+                });
+
                 if let Err(e) = mempool_service.start(handle_for_inner).await {
                     // Do not panic: the contention paths inside the mempool
                     // already call `signal_fatal_shutdown`, which cancels the
@@ -2466,6 +2484,7 @@ impl MempoolService {
                          this as ServiceExited and run the ordered-shutdown path"
                     );
                 }
+                sweep_handle.abort();
             }
             .instrument(tracing::Span::current()),
         );

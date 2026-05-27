@@ -251,3 +251,27 @@ async fn validate_with_span(block: Block, span: Span) -> Result<()> {
 
 **Tip:** Prefer `.instrument()` or `.in_current_span()` when possible. Manual span passing is more verbose but gives maximum control.
 
+## The `#[instrument(err)]` source-location footgun
+
+`#[tracing::instrument(level = "trace", skip_all, err)]` records the function-entry line in OTEL `event_name`, **not** the error-construction site. A first investigation pass into the 2026-05-23 testnet fork was misled by exactly this: the logged `event_name` pointed at `block_validation.rs:2379` (the `#[instrument]` macro) when the actual error string originated at `block_validation.rs:3347`. Operators reading the OTEL event went looking for a bug at the wrong source line.
+
+### Mitigation
+
+For errors that are permanently fatal to a block (validation failures, fatal cache corruption, etc.), emit an explicit `error!()` macro at the actual construction site rather than relying on `err` capture. The `error!()` call records `code.filepath` / `code.lineno` from the macro-invocation site, which is what you want operators to land on:
+
+```rust
+// Avoid: error site obscured by #[instrument(err)] — event_name points at
+// the function entry, not where the failure was decided.
+return Err(ValidationError::BlockBoundsLookupError { ledger, range });
+
+// Prefer: error site recorded at construction.
+tracing::error!(
+    block.hash = %block_hash,
+    kind = "BlockBoundsLookupError",
+    "validation lookup failed for ledger range",
+);
+return Err(ValidationError::BlockBoundsLookupError { ledger, range });
+```
+
+A fuller fix would attach `#[track_caller]` plus a `std::panic::Location` field to the error type so the source location travels with the value rather than only with the log emission. That belongs with a dedicated error-type refactor; the explicit `error!()` at the construction site is the cheap, immediately-useful mitigation.
+

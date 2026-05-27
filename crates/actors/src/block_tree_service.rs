@@ -59,6 +59,53 @@ pub struct BlockTreeService {
     inner: BlockTreeServiceInner,
 }
 
+/// Atomic lifecycle timestamps for the block-tree service.
+///
+/// Exposes two unix-ms timestamps tracking the last canonical advance and the
+/// last reorg. Two consumers read these: the OTEL gauges
+/// `irys.block_tree.last_block_at_ms` / `irys.block_tree.last_reorg_at_ms`
+/// (for dashboards), and the `/v1/tip` HTTP route (in-process, so the
+/// endpoint does not have to scrape itself). Update both via
+/// [`Self::note_canonical_advance`] / [`Self::note_reorg`].
+#[derive(Debug, Default)]
+pub struct BlockTreeLifecycleTimestamps {
+    last_block_at_ms: std::sync::atomic::AtomicI64,
+    last_reorg_at_ms: std::sync::atomic::AtomicI64,
+}
+
+impl BlockTreeLifecycleTimestamps {
+    pub fn last_block_at_ms(&self) -> i64 {
+        self.last_block_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn last_reorg_at_ms(&self) -> i64 {
+        self.last_reorg_at_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn note_canonical_advance(&self) {
+        let now = Self::now_ms();
+        self.last_block_at_ms
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        crate::metrics::record_block_tree_last_block_at_ms(now);
+    }
+
+    pub fn note_reorg(&self) {
+        let now = Self::now_ms();
+        self.last_reorg_at_ms
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        crate::metrics::record_block_tree_last_reorg_at_ms(now);
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockTreeServiceInner {
     db: DatabaseProvider,
@@ -92,6 +139,9 @@ pub struct BlockTreeServiceInner {
     /// Capacity: 4096 entries (~256 KB worst-case). Sized to be safe under
     /// any plausible discard rate without becoming an unbounded memory sink.
     recent_soft_internal_discards: LruCache<BlockHash, &'static str>,
+    /// Shared with `ApiState` so `/v1/tip` can expose the same in-process
+    /// canonical-advance / reorg timestamps the OTEL gauges record.
+    pub lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +322,7 @@ impl BlockTreeService {
         chain_sync_state: ChainSyncState,
         block_migration_service: BlockMigrationService,
         cache: Arc<RwLock<BlockTree>>,
+        lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -299,6 +350,7 @@ impl BlockTreeService {
                         recent_soft_internal_discards: LruCache::new(
                             NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                         ),
+                        lifecycle_timestamps,
                     },
                 };
                 if let Err(e) = block_tree_service.start().await {
@@ -1041,6 +1093,7 @@ impl BlockTreeServiceInner {
 
                     metrics::record_reorg();
                     metrics::record_reorg_depth(u64::try_from(old_fork_blocks.len()).unwrap_or(0));
+                    self.lifecycle_timestamps.note_reorg();
 
                     // Create reorg event with all necessary data for downstream processing
                     let event = ReorgEvent {
@@ -1161,6 +1214,7 @@ impl BlockTreeServiceInner {
                     "New canonical tip",
                 );
                 metrics::record_canonical_tip_height(arc_block.height);
+                self.lifecycle_timestamps.note_canonical_advance();
             }
 
             // Emit consensus events
@@ -1354,7 +1408,7 @@ impl BlockTreeServiceInner {
         //     `soft_internal_recovered_total`. The metric must mirror the
         //     LRU since both live in the same gate.
         let cache_write_succeeded = if maybe_height.is_some() {
-            match cache.remove_block(&block_hash) {
+            match cache.remove_block(&block_hash, irys_domain::RemovalReason::ValidationInvalid) {
                 Ok(()) => true,
                 Err(err) => {
                     tracing::error!(block.hash = %block_hash, ?err, "Failed to remove block from cache");
@@ -1962,6 +2016,7 @@ mod tests {
                 recent_soft_internal_discards: LruCache::new(
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                 ),
+                lifecycle_timestamps: Arc::new(BlockTreeLifecycleTimestamps::default()),
             };
 
             Self {
@@ -2825,5 +2880,39 @@ mod tests {
                 "Invalid discard must NOT emit at WARN level — peer-attributable rejections need to fire ERROR alerts"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    #[test]
+    fn last_block_at_updates_on_canonical_advance() {
+        let ts = Arc::new(BlockTreeLifecycleTimestamps::default());
+        assert_eq!(ts.last_block_at_ms(), 0, "starts unset");
+        ts.note_canonical_advance();
+        let after = ts.last_block_at_ms();
+        let now = now_ms();
+        assert!(
+            after > 0 && (now - after).abs() < 5_000,
+            "should be ~now (got {after}, expected ~{now})"
+        );
+    }
+
+    #[test]
+    fn last_reorg_at_updates_on_reorg() {
+        let ts = Arc::new(BlockTreeLifecycleTimestamps::default());
+        assert_eq!(ts.last_reorg_at_ms(), 0);
+        ts.note_reorg();
+        assert!(ts.last_reorg_at_ms() > 0);
     }
 }

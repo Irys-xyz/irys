@@ -10,6 +10,7 @@ use actix_web::{
     web::{self, JsonConfig, Redirect},
 };
 use irys_actors::{
+    block_tree_service::BlockTreeLifecycleTimestamps,
     chunk_ingress_service::{ChunkIngressMessage, ChunkIngressState},
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -23,7 +24,7 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{Config, IrysAddress, PeerAddress, Traced, app_state::DatabaseProvider};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
-    mining, peer_list, post_chunk, price, proxy::proxy, storage, tx,
+    mining, peer_list, post_chunk, price, proxy::proxy, storage, tip, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -61,6 +62,9 @@ pub struct ApiState {
     pub chunk_ingress_state: ChunkIngressState,
     pub started_at: Instant,
     pub mining_address: IrysAddress,
+    /// Shared with `BlockTreeService` so `/v1/tip` reads the same in-process
+    /// canonical-advance / reorg timestamps the OTEL gauges record.
+    pub block_tree_lifecycle: Arc<BlockTreeLifecycleTimestamps>,
 }
 
 impl ApiState {
@@ -104,6 +108,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
+        .route("/tip", web::get().to(tip::tip_route))
         .route("/genesis", web::get().to(index::genesis_route))
         // TODO: need to fix serialization here
         .route("/network/config", web::get().to(config::get_config))
