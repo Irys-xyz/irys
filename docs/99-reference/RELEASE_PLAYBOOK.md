@@ -321,12 +321,12 @@ real publish.
 
 ### Prerequisites (from the current state of the repo)
 
-1. **The release workflows must be on the default branch (`master`).**
+1. **The release workflow must already be on the default branch (`master`).**
    `workflow_dispatch` workflows are only dispatchable once they exist on the
    default branch — there is no way to dispatch one that lives only on a feature
-   branch. As of now `release.yml` exists only on `feat/release-process`, so
-   **merge that branch into `master` first.** After that, dispatch from `master`
-   (the `commit` input, not the workflow's branch, decides what gets built).
+   branch. So `release.yml` must be merged to `master` before you can dispatch it.
+   Dispatch from `master`; the `commit` input, not the workflow's branch, decides
+   what gets built.
 2. **A deployment branch in the `<env>/<major>.x` scheme must exist for the env you
    test,** with `crates/chain/Cargo.toml` at the version you'll pass. The
    pre-existing *flat* `deployment/testnet` / `deployment/mainnet` branches do
