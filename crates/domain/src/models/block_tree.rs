@@ -84,6 +84,22 @@ impl PartialEq for BlockTreeEntry {
 
 impl Eq for BlockTreeEntry {}
 
+/// Result of finding the divergence point between two competing chains in the
+/// block tree cache. `old_divergent` and `new_divergent` are oldest-first and
+/// exclude the LCA itself; iterating them in order walks each fork from the
+/// block immediately above the LCA to its respective tip. The LCA is reported
+/// separately as a full `Arc<SealedBlock>` so callers can extract its header
+/// for downstream events (e.g., `ReorgEvent::fork_parent`).
+///
+/// Independent of `ChainState` flags by construction — produced only from
+/// parent pointers via `BlockTree::find_reorg_split`.
+#[derive(Debug, Clone)]
+pub struct ReorgSplit {
+    pub lca: Arc<SealedBlock>,
+    pub old_divergent: Vec<Arc<SealedBlock>>,
+    pub new_divergent: Vec<Arc<SealedBlock>>,
+}
+
 #[derive(Debug)]
 pub struct BlockTree {
     // Main block storage
@@ -719,6 +735,91 @@ impl BlockTree {
             .0
             .last()
             .expect("canonical chain must always have an entry in it")
+    }
+
+    /// Find the lowest common ancestor of two tips by walking both lineages
+    /// through `previous_block_hash` links in `self.blocks`, then return both
+    /// divergent suffixes. Independent of `ChainState` flags — operates only on
+    /// parent pointers, the same source `update_longest_chain_cache` walks.
+    ///
+    /// Both `old_divergent` and `new_divergent` are oldest-first and exclude
+    /// the LCA itself, matching the existing `old_fork_blocks`/`new_fork_blocks`
+    /// contract observed by `mempool_service/lifecycle.rs:446` and other reorg
+    /// consumers.
+    ///
+    /// Returns `Err` if either tip is missing from the cache, or if the walks
+    /// exhaust without intersecting (cache miss before reaching a shared
+    /// ancestor). Never panics.
+    pub fn find_reorg_split(
+        &self,
+        new_tip: BlockHash,
+        old_tip: BlockHash,
+    ) -> eyre::Result<ReorgSplit> {
+        use std::collections::HashSet;
+
+        // Walk back from new_tip, recording every hash seen.
+        let mut new_walk: Vec<Arc<SealedBlock>> = Vec::new();
+        let mut new_hashes: HashSet<BlockHash> = HashSet::new();
+        let mut cursor = new_tip;
+        loop {
+            let Some(entry) = self.blocks.get(&cursor) else {
+                break;
+            };
+            new_hashes.insert(cursor);
+            new_walk.push(Arc::clone(&entry.block));
+            if entry.block.header().height == 0 {
+                break;
+            }
+            cursor = entry.block.header().previous_block_hash;
+        }
+        if new_walk.is_empty() {
+            return Err(eyre::eyre!("new tip {new_tip} not in block tree cache",));
+        }
+
+        // Walk back from old_tip, stopping at the first hash that appears in new_hashes.
+        let mut old_walk: Vec<Arc<SealedBlock>> = Vec::new();
+        let mut cursor = old_tip;
+        let lca = loop {
+            let Some(entry) = self.blocks.get(&cursor) else {
+                if old_walk.is_empty() {
+                    return Err(eyre::eyre!("old tip {old_tip} not in block tree cache",));
+                }
+                return Err(eyre::eyre!(
+                    "no common ancestor in cache between new tip {new_tip} \
+                     and old tip {old_tip}: old chain walk exhausted",
+                ));
+            };
+            if new_hashes.contains(&cursor) {
+                break Arc::clone(&entry.block);
+            }
+            old_walk.push(Arc::clone(&entry.block));
+            if entry.block.header().height == 0 {
+                return Err(eyre::eyre!(
+                    "no common ancestor in cache between new tip {new_tip} \
+                     and old tip {old_tip}: old chain reached genesis without intersecting",
+                ));
+            }
+            cursor = entry.block.header().previous_block_hash;
+        };
+
+        // Trim new_walk to drop blocks at or below LCA. new_walk is tip-first;
+        // LCA must appear in it because new_hashes contained it.
+        let lca_hash = lca.header().block_hash;
+        let lca_idx = new_walk
+            .iter()
+            .position(|sb| sb.header().block_hash == lca_hash)
+            .expect("lca_hash must appear in new_walk because new_hashes contained it");
+        let mut new_divergent: Vec<Arc<SealedBlock>> = new_walk.drain(..lca_idx).collect();
+
+        // Both walks are tip-first; downstream consumers require oldest-first.
+        new_divergent.reverse();
+        old_walk.reverse();
+
+        Ok(ReorgSplit {
+            lca,
+            old_divergent: old_walk,
+            new_divergent,
+        })
     }
 
     fn update_longest_chain_cache(&mut self) {
@@ -2911,5 +3012,226 @@ mod tests {
                 "fallback selection must be deterministic across insertion orders; expected smallest block_hash"
             );
         }
+    }
+
+    #[test]
+    fn find_reorg_split_returns_oldest_first_lca_exclusive_suffixes() {
+        // Build chain: G -> b1 -> b2 -> b3 -> old_tip(b4)
+        //                          \-> c1 -> c2 -> new_tip(c3)
+        // LCA = b2. old_divergent = [b3, b4]. new_divergent = [c1, c2, c3].
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut b2 = extend_chain(random_block(U256::from(2)), &b1);
+        let mut b3 = extend_chain(random_block(U256::from(3)), &b2);
+        let mut b4 = extend_chain(random_block(U256::from(4)), &b3);
+        let mut c1 = extend_chain(random_block(U256::from(5)), &b2);
+        let mut c2 = extend_chain(random_block(U256::from(6)), &c1);
+        let mut c3 = extend_chain(random_block(U256::from(7)), &c2);
+
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [
+            &mut b1, &mut b2, &mut b3, &mut b4, &mut c1, &mut c2, &mut c3,
+        ] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let split = cache
+            .find_reorg_split(c3.block_hash, b4.block_hash)
+            .expect("LCA exists in cache");
+
+        // LCA == b2
+        assert_eq!(split.lca.header().block_hash, b2.block_hash);
+        assert_eq!(split.lca.header().height, b2.height);
+
+        // old_divergent = [b3, b4], oldest-first, LCA-exclusive
+        assert_eq!(split.old_divergent.len(), 2);
+        assert_eq!(split.old_divergent[0].header().block_hash, b3.block_hash);
+        assert_eq!(split.old_divergent[1].header().block_hash, b4.block_hash);
+
+        // new_divergent = [c1, c2, c3], oldest-first, LCA-exclusive
+        assert_eq!(split.new_divergent.len(), 3);
+        assert_eq!(split.new_divergent[0].header().block_hash, c1.block_hash);
+        assert_eq!(split.new_divergent[1].header().block_hash, c2.block_hash);
+        assert_eq!(split.new_divergent[2].header().block_hash, c3.block_hash);
+
+        // LCA must not appear in either divergent Vec
+        assert!(
+            split
+                .old_divergent
+                .iter()
+                .all(|sb| sb.header().block_hash != b2.block_hash)
+        );
+        assert!(
+            split
+                .new_divergent
+                .iter()
+                .all(|sb| sb.header().block_hash != b2.block_hash)
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_new_tip_missing_from_cache() {
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let bogus = H256([0xFF; 32]);
+        let err = cache
+            .find_reorg_split(bogus, b1.block_hash)
+            .expect_err("missing new tip must produce Err, not panic");
+        assert!(
+            format!("{err}").contains("new tip"),
+            "Err must identify the missing chain side: {err}",
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_old_tip_missing_from_cache() {
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let bogus = H256([0xEE; 32]);
+        let err = cache
+            .find_reorg_split(b1.block_hash, bogus)
+            .expect_err("missing old tip must produce Err, not panic");
+        assert!(
+            format!("{err}").contains("old tip"),
+            "Err must identify the missing chain side: {err}",
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_handles_identical_tips() {
+        // old_tip == new_tip → LCA is that block, both divergent Vecs empty.
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let split = cache
+            .find_reorg_split(b1.block_hash, b1.block_hash)
+            .expect("identical tips share themselves as LCA");
+        assert_eq!(split.lca.header().block_hash, b1.block_hash);
+        assert!(split.old_divergent.is_empty());
+        assert!(split.new_divergent.is_empty());
+    }
+
+    #[test]
+    fn find_reorg_split_handles_old_tip_at_genesis() {
+        // Old chain is genesis only. New chain extends from genesis.
+        // LCA = genesis. old_divergent = []. new_divergent = full new chain.
+        let g = random_block(U256::from(0));
+        let mut n1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut n2 = extend_chain(random_block(U256::from(2)), &n1);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut n1, &mut n2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let split = cache
+            .find_reorg_split(n2.block_hash, g.block_hash)
+            .expect("genesis is a shared ancestor");
+        assert_eq!(split.lca.header().block_hash, g.block_hash);
+        assert!(split.old_divergent.is_empty());
+        assert_eq!(split.new_divergent.len(), 2);
+        assert_eq!(split.new_divergent[0].header().block_hash, n1.block_hash);
+        assert_eq!(split.new_divergent[1].header().block_hash, n2.block_hash);
+    }
+
+    #[test]
+    fn find_reorg_split_ignores_stale_onchain_flag_regression() {
+        // Topology: G -> b1 -> b2(STALE Onchain) -> old_tip(b3)
+        //                 \-> c1 -> c2 -> new_tip(c3)
+        // True LCA via parent walk = b1.
+        // If the algorithm depended on the flag, it would mistakenly select b2.
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut b2 = extend_chain(random_block(U256::from(2)), &b1);
+        let mut b3 = extend_chain(random_block(U256::from(3)), &b2);
+        let mut c1 = extend_chain(random_block(U256::from(4)), &b1);
+        let mut c2 = extend_chain(random_block(U256::from(5)), &c1);
+        let mut c3 = extend_chain(random_block(U256::from(6)), &c2);
+
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut b1, &mut b2, &mut b3, &mut c1, &mut c2, &mut c3] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        // Inject a stale Onchain flag on b2. b2 is NOT on the new canonical
+        // (which goes G -> b1 -> c1 -> c2 -> c3). If find_reorg_split scanned
+        // for an Onchain anchor, it would pick b2 and produce a wrong LCA.
+        cache
+            .blocks
+            .get_mut(&b2.block_hash)
+            .expect("b2 in cache")
+            .chain_state = ChainState::Onchain;
+
+        let split = cache
+            .find_reorg_split(c3.block_hash, b3.block_hash)
+            .expect("LCA exists in cache via parent walk");
+
+        // True LCA = b1, NOT b2 (even though b2 carries a stale Onchain flag).
+        assert_eq!(
+            split.lca.header().block_hash,
+            b1.block_hash,
+            "find_reorg_split must use parent-walk truth, not the Onchain flag",
+        );
+        // old_divergent = [b2, b3]
+        assert_eq!(split.old_divergent.len(), 2);
+        assert_eq!(split.old_divergent[0].header().block_hash, b2.block_hash);
+        assert_eq!(split.old_divergent[1].header().block_hash, b3.block_hash);
+        // new_divergent = [c1, c2, c3]
+        assert_eq!(split.new_divergent.len(), 3);
     }
 }
