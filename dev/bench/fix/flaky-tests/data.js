@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779919904527,
+  "lastUpdate": 1779968358050,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4795,6 +4795,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "21e06cb4b558d6292130e41c5264fbd55de8e8b3",
+          "message": "fix: CI flakes — VDF watchdog finish-race + gossip port TOCTOU + heavy3 reclassification",
+          "timestamp": "2026-05-27T21:48:48Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1430/commits/21e06cb4b558d6292130e41c5264fbd55de8e8b3"
+        },
+        "date": 1779968357069,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015061,
+            "range": "± 0.000279",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.151908,
+            "range": "± 0.001394",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.210345,
+            "range": "± 0.024823",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.852216,
+            "range": "± 0.096405",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077581,
+            "range": "± 0.001676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.985775,
+            "range": "± 26.3525",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1070.789021,
+            "range": "± 45.82071",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120201,
+            "range": "± 0.001003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1222.509401,
+            "range": "± 13.817338",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1611.998522,
+            "range": "± 98.821962",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.030762,
+            "range": "± 0.001674",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 212.307785,
+            "range": "± 2.067635",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.458024,
+            "range": "± 2.968481",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
