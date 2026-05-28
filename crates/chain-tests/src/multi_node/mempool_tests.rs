@@ -30,7 +30,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[tokio::test]
-async fn pending_chunks_test() -> eyre::Result<()> {
+async fn heavy3_pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
