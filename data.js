@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779919904527,
+  "lastUpdate": 1779972402820,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -4794,6 +4794,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000111,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "04bfa3f73f1e7ae6a59505f9cf0e550ad842a045",
+          "message": "fix: CI flakes and irys-reth test memory cap (#1430)\n\n* fix(validation): exempt finished VDF task handle from stall watchdog\n\n`abort_stalled_current` measures wall-clock time since the last\n`record_vdf_task_progress`, but on a heavily-loaded CI runner the select\nloop can be starved past `hard_timeout` *between* a task transitioning\nto `Completed` and `poll_vdf` reaping its `JoinHandle`. In that window\nthe task's result is already sitting ready for collection — the very\nfact that the watchdog itself is running again proves the loop has\nresumed — so aborting would discard a valid, already-computed\nvalidation result and crash an otherwise-healthy node.\n\nSkip the abort when `JoinHandle::is_finished()` is true. Genuine\ndeadlocks, poisoned locks, and runaway loops keep the handle\nunfinished and still trip the watchdog as before. Adds a regression\ntest and updates the design doc to spell out the carve-out.\n\n* fix(p2p/tests): hold gossip listener across run_service to close port race\n\n`random_free_port` binds 127.0.0.1:0, reads the port number, then drops\nthe listener before returning. `GossipServiceTestFixture::run_service`\nlater re-binds that exact port — under parallel test load a sibling\ntest can grab the port in the gap and panic the fixture with\n`AddrInUse`.\n\nIntroduce `bind_random_free_port`, which returns the listener\n*together with* its port and is stored on the fixture until\n`run_service` consumes it. The socket stays open across the previously-\nracy window, so no other process can claim it.\n\n* test: reclassify two flaky tests as heavy3\n\nBoth `pending_chunks_test` (multi-node mempool) and\n`heavy_should_broadcast_chunk_data` (p2p gossip) stand up enough\nconcurrent nodes/services that running them at the default\n`threads-required = 1` (or `2`) lets nextest schedule too many\nneighbours alongside, producing intermittent timeouts in CI.\n\nRename to `heavy3_*` so the existing nextest override in\n`.config/nextest.toml` reserves 3 thread slots each, reducing\nco-scheduled load. Test bodies are unchanged.\n\n* perf(irys-reth/tests): cap cross-block cache at 64 MB in test harness\n\nReth's `engine.cross_block_cache_size` defaults to 4 GiB per node, and\nthe payload processor allocates proportionally to that budget once it\nstarts executing payloads. The result is that every irys-reth test\nthat mines even one block paid ~2.3 GB of peak RSS for cache the test\nnever actually populated — and tests that mine on both nodes and then\nfork (e.g. `heavy_rollback_state_revert_on_fork_switch`) doubled that\nto ~4.5 GB.\n\nOverride the budget to 64 MB inside `setup_irys_reth`. The function\nlives in `#[cfg(any(feature = \"test-utils\", test))] pub mod test_utils`\nand has no production callers, so the change is behavior-test-only.\n\nMeasured per-test peak RSS on representative tests (3-run average):\n\n  test_fee_only_shadow_tx::case_1_unpledge          2.3 GB → 188 MB  (12.2x)\n  test_fee_only_shadow_tx::case_2_unstake_debit     2.3 GB → 185 MB  (12.4x)\n  heavy_test_pledge_balance_decrement               2.3 GB → 211 MB  (10.9x)\n  heavy_rollback_state_revert_on_fork_switch        4.5 GB → 276 MB  (16.3x)\n\nAll 39 irys-reth tests pass under the smaller cap. Eliminates the 2T\ntier's 29.6 GB worst-case memory contention previously surfaced by\n`nextest-report analyze`, since the ~50 `tests::heavy_*` entries at the\nold 2.3 GB plateau now sit near 250 MB.",
+          "timestamp": "2026-05-28T13:29:35+01:00",
+          "tree_id": "bb62969a8082d68d410dce6b7638a025402b3d24",
+          "url": "https://github.com/Irys-xyz/irys/commit/04bfa3f73f1e7ae6a59505f9cf0e550ad842a045"
+        },
+        "date": 1779972400964,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011886,
+            "range": "± 0.000265",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120318,
+            "range": "± 0.001518",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.219405,
+            "range": "± 0.031576",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.88086,
+            "range": "± 0.062348",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074781,
+            "range": "± 0.000934",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 757.672032,
+            "range": "± 4.452048",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.443273,
+            "range": "± 10.966032",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.146049,
+            "range": "± 0.001705",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1202.555523,
+            "range": "± 139.585042",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1541.543664,
+            "range": "± 17.688206",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034456,
+            "range": "± 0.001082",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.275664,
+            "range": "± 0.73421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.985767,
+            "range": "± 1.575868",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000128,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
