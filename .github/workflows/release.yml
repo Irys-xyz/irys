@@ -408,7 +408,15 @@ jobs:
           BRANCH: ${{ steps.push_branch.outputs.branch }}
         run: |
           echo "::warning::Cleaning up per-version release branch $BRANCH"
-          git push origin --delete "$BRANCH" || true
+          # Surface a failed remote delete instead of swallowing it. The snapshot is
+          # delete-protected by the 'release branches' ruleset and the bot is not a
+          # bypass actor, so a blocked delete leaves a stray branch that an admin must
+          # remove — fail loudly here rather than hide it behind `|| true`.
+          if ! git push origin --delete "$BRANCH"; then
+            echo "::error::Failed to delete stray release branch $BRANCH from origin. If it is protected by the 'release branches' ruleset (github-actions[bot] is not a bypass actor), an admin must delete it manually."
+            exit 1
+          fi
+          # Local-only hygiene on the reused runner; a missing local branch is benign.
           git branch -D "$BRANCH" 2>/dev/null || true
 
       - name: 'Cleanup: revert head-tracking git tag'
