@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780049386853,
+  "lastUpdate": 1780062370542,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5119,6 +5119,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000006",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a045ba99ae387d589abdeefa37c7ed8b2cbc4e6e",
+          "message": "feat: Per-version frozen release branches + tag-trust rebuild provenance (#1434)\n\n* fix(release): trust release tag on rebuild provenance, skip rebased-away branch check\n\n* feat(release): push frozen release/<env>/<version> branch on publish\n\n* fix(release): fail-safe devnet provenance guard; sharpen frozen-branch comments\n\n- verify-commit-provenance: explicitly reject devnet + require-release-tag=true\n  (would otherwise skip both the branch and version/tag checks, leaving only\n  commit-existence; unreachable today but now fails safe on its own).\n- release.yml: correct the frozen-branch comments — immutability rests on the\n  validate job's tag-existence gate (the non-force push is only a non-fast-forward\n  backstop), and the branch's unique benefit is clearing GitHub's orphaned-commit\n  flag (the tag already provides reachability/GC-safety).\n\n* fix(release): surface blocked frozen-branch rollback-delete instead of swallowing it\n\nThe 'release branches' ruleset still blocks github-actions[bot] from deleting\nrelease/<env>/<version> on rollback. Removing the '|| true' makes that leave-behind\nfail loudly with an actionable message (admin must remove the stray branch) rather\nthan silently passing. Local branch -D stays best-effort (missing local ref is benign).",
+          "timestamp": "2026-05-29T14:20:52+01:00",
+          "tree_id": "2d20dd021674bd1d2e68f08a62776a14861faaa4",
+          "url": "https://github.com/Irys-xyz/irys/commit/a045ba99ae387d589abdeefa37c7ed8b2cbc4e6e"
+        },
+        "date": 1780062368613,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012533,
+            "range": "± 0.000398",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125549,
+            "range": "± 0.0045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.267793,
+            "range": "± 0.026965",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.294281,
+            "range": "± 0.311395",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07859,
+            "range": "± 0.001221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 767.512108,
+            "range": "± 20.732908",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.364772,
+            "range": "± 50.149861",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12034,
+            "range": "± 0.000686",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1212.105711,
+            "range": "± 11.132751",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1573.20746,
+            "range": "± 5.07036",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034648,
+            "range": "± 0.001641",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.097664,
+            "range": "± 1.988014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.971745,
+            "range": "± 1.845003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
