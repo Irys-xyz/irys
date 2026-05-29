@@ -3819,13 +3819,15 @@ pub fn assert_validation_error(
 /// Assert the LCA contract that `find_reorg_split` upholds on a [`ReorgEvent`]:
 /// `fork_parent` is the common parent of both divergent suffixes, so its hash is
 /// the `previous_block_hash` of each fork's first block and its height is one
-/// below them. No-op when either fork is empty (nothing to anchor against).
+/// below them. A reorg always diverges on both sides, so empty forks are a
+/// contract violation that fails the assertion rather than being skipped.
 pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
-    let (Some(first_old), Some(first_new)) =
-        (reorg_event.old_fork.first(), reorg_event.new_fork.first())
-    else {
-        return;
-    };
+    assert!(
+        !reorg_event.old_fork.is_empty() && !reorg_event.new_fork.is_empty(),
+        "a reorg must produce non-empty old_fork and new_fork",
+    );
+    let first_old = reorg_event.old_fork.first().expect("old_fork non-empty");
+    let first_new = reorg_event.new_fork.first().expect("new_fork non-empty");
     assert_eq!(
         reorg_event.fork_parent.block_hash,
         first_old.header().previous_block_hash,
