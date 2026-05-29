@@ -100,6 +100,18 @@ pub struct ReorgSplit {
     pub new_divergent: Vec<Arc<SealedBlock>>,
 }
 
+/// The two competing chain tips handed to [`BlockTree::find_reorg_split`]. Both
+/// are `BlockHash`, so positional arguments invite silent transposition (which
+/// would swap the old/new divergent suffixes); the named fields make the
+/// new-vs-old roles explicit at every call site.
+#[derive(Debug, Clone, Copy)]
+pub struct ReorgTips {
+    /// Tip of the incoming (heavier) chain the node is switching to.
+    pub new_tip: BlockHash,
+    /// Tip of the chain currently considered canonical.
+    pub old_tip: BlockHash,
+}
+
 #[derive(Debug)]
 pub struct BlockTree {
     // Main block storage
@@ -744,18 +756,17 @@ impl BlockTree {
     ///
     /// Both `old_divergent` and `new_divergent` are oldest-first and exclude
     /// the LCA itself, matching the existing `old_fork_blocks`/`new_fork_blocks`
-    /// contract observed by `mempool_service/lifecycle.rs:446` and other reorg
-    /// consumers.
+    /// contract observed by the mempool's `get_confirmed_range` (which slices
+    /// `fork[0..migration_depth]`, so the oldest-first ordering is load-bearing)
+    /// and other reorg consumers.
     ///
     /// Returns `Err` if either tip is missing from the cache, or if the walks
     /// exhaust without intersecting (cache miss before reaching a shared
     /// ancestor). Never panics.
-    pub fn find_reorg_split(
-        &self,
-        new_tip: BlockHash,
-        old_tip: BlockHash,
-    ) -> eyre::Result<ReorgSplit> {
+    pub fn find_reorg_split(&self, tips: ReorgTips) -> eyre::Result<ReorgSplit> {
         use std::collections::HashSet;
+
+        let ReorgTips { new_tip, old_tip } = tips;
 
         // Walk back from new_tip, recording every hash seen.
         let mut new_walk: Vec<Arc<SealedBlock>> = Vec::new();
@@ -3044,7 +3055,10 @@ mod tests {
         }
 
         let split = cache
-            .find_reorg_split(c3.block_hash, b4.block_hash)
+            .find_reorg_split(ReorgTips {
+                new_tip: c3.block_hash,
+                old_tip: b4.block_hash,
+            })
             .expect("LCA exists in cache");
 
         // LCA == b2
@@ -3094,7 +3108,10 @@ mod tests {
 
         let bogus = H256([0xFF; 32]);
         let err = cache
-            .find_reorg_split(bogus, b1.block_hash)
+            .find_reorg_split(ReorgTips {
+                new_tip: bogus,
+                old_tip: b1.block_hash,
+            })
             .expect_err("missing new tip must produce Err, not panic");
         assert!(
             format!("{err}").contains("new tip"),
@@ -3119,7 +3136,10 @@ mod tests {
 
         let bogus = H256([0xEE; 32]);
         let err = cache
-            .find_reorg_split(b1.block_hash, bogus)
+            .find_reorg_split(ReorgTips {
+                new_tip: b1.block_hash,
+                old_tip: bogus,
+            })
             .expect_err("missing old tip must produce Err, not panic");
         assert!(
             format!("{err}").contains("old tip"),
@@ -3144,7 +3164,10 @@ mod tests {
             .expect("add_block");
 
         let split = cache
-            .find_reorg_split(b1.block_hash, b1.block_hash)
+            .find_reorg_split(ReorgTips {
+                new_tip: b1.block_hash,
+                old_tip: b1.block_hash,
+            })
             .expect("identical tips share themselves as LCA");
         assert_eq!(split.lca.header().block_hash, b1.block_hash);
         assert!(split.old_divergent.is_empty());
@@ -3172,7 +3195,10 @@ mod tests {
         }
 
         let split = cache
-            .find_reorg_split(n2.block_hash, g.block_hash)
+            .find_reorg_split(ReorgTips {
+                new_tip: n2.block_hash,
+                old_tip: g.block_hash,
+            })
             .expect("genesis is a shared ancestor");
         assert_eq!(split.lca.header().block_hash, g.block_hash);
         assert!(split.old_divergent.is_empty());
@@ -3218,7 +3244,10 @@ mod tests {
             .chain_state = ChainState::Onchain;
 
         let split = cache
-            .find_reorg_split(c3.block_hash, b3.block_hash)
+            .find_reorg_split(ReorgTips {
+                new_tip: c3.block_hash,
+                old_tip: b3.block_hash,
+            })
             .expect("LCA exists in cache via parent walk");
 
         // True LCA = b1, NOT b2 (even though b2 carries a stale Onchain flag).
@@ -3233,5 +3262,68 @@ mod tests {
         assert_eq!(split.old_divergent[1].header().block_hash, b3.block_hash);
         // new_divergent = [c1, c2, c3]
         assert_eq!(split.new_divergent.len(), 3);
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_chains_share_no_ancestor() {
+        // Two chains rooted at independent genesis blocks share no ancestor in
+        // the cache. Walking the old tip's lineage reaches its own genesis
+        // without ever intersecting the new chain — find_reorg_split must
+        // surface this no-common-ancestor divergence as Err, never panic.
+        let g = random_block(U256::from(0));
+        let mut n1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut n2 = extend_chain(random_block(U256::from(2)), &n1);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut n1, &mut n2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        // Plant a second, disjoint genesis. `add_common` requires the parent to
+        // be in `self.blocks`, so insert the root directly (mirroring
+        // `BlockTree::new`) before extending a chain on top of it.
+        let mut g2 = random_block(U256::from(100));
+        let g2_hash = g2.block_hash;
+        let g2_sealed = seal_block(&mut g2);
+        cache.blocks.insert(
+            g2_hash,
+            BlockMetadata {
+                block: g2_sealed,
+                chain_state: ChainState::Onchain,
+                timestamp: SystemTime::now(),
+                children: HashSet::new(),
+                epoch_snapshot: dummy_epoch_snapshot(),
+                commitment_snapshot: comm.clone(),
+                ema_snapshot: dummy_ema_snapshot(),
+            },
+        );
+        let mut o1 = extend_chain(random_block(U256::from(101)), &g2);
+        let mut o2 = extend_chain(random_block(U256::from(102)), &o1);
+        for hdr in [&mut o1, &mut o2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let err = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: n2.block_hash,
+                old_tip: o2.block_hash,
+            })
+            .expect_err("chains with no shared ancestor must Err, not panic");
+        let msg = format!("{err}");
+        assert!(msg.contains("no common ancestor"), "unexpected err: {msg}");
     }
 }

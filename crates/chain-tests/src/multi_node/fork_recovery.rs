@@ -1,4 +1,4 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, assert_reorg_event_lca_contract};
 use irys_chain::IrysNodeCtx;
 use irys_types::{DataLedger, DataTransaction, H256, NodeConfig, U256, UnixTimestamp};
 use reth::rpc::types::BlockNumberOrTag;
@@ -339,30 +339,7 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     // fork_parent must be the LCA — the common parent of both divergent
     // suffixes' first blocks. This is the contract find_reorg_split holds.
-    if let (Some(first_old), Some(first_new)) =
-        (reorg_event.old_fork.first(), reorg_event.new_fork.first())
-    {
-        assert_eq!(
-            reorg_event.fork_parent.block_hash,
-            first_old.header().previous_block_hash,
-            "fork_parent must be the previous_block_hash of old_fork[0]",
-        );
-        assert_eq!(
-            reorg_event.fork_parent.block_hash,
-            first_new.header().previous_block_hash,
-            "fork_parent must be the previous_block_hash of new_fork[0]",
-        );
-        assert_eq!(
-            reorg_event.fork_parent.height + 1,
-            first_old.header().height,
-            "fork_parent must be one height below old_fork[0]",
-        );
-        assert_eq!(
-            reorg_event.fork_parent.height + 1,
-            first_new.header().height,
-            "fork_parent must be one height below new_fork[0]",
-        );
-    }
+    assert_reorg_event_lca_contract(&reorg_event);
 
     // Wind down test
     tokio::join!(genesis_node.stop(), peer1_node.stop(), peer2_node.stop());

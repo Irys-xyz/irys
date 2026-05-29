@@ -12,7 +12,7 @@ use crate::{
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{
-    BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit,
+    BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit, ReorgTips,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
     forkchoice_markers::ForkChoiceMarkers,
@@ -966,10 +966,50 @@ impl BlockTreeServiceInner {
                 // sees both lineages in `cache.blocks`. Independent of
                 // `ChainState` flags by construction.
                 let split: Option<ReorgSplit> = if is_reorg {
-                    Some(cache.find_reorg_split(block_hash, old_tip_block.block_hash)?)
+                    Some(cache.find_reorg_split(ReorgTips {
+                        new_tip: block_hash,
+                        old_tip: old_tip_block.block_hash,
+                    })?)
                 } else {
                     None
                 };
+
+                // A reorg whose fork point predates the post-prune cache window
+                // cannot complete safely. `cache.prune()` below drops every block
+                // below `new_tip.height - (block_tree_depth - 1)`; once the LCA is
+                // in that range, `BlockTree::prune`'s recursive child removal
+                // cascades the whole old fork (and the new-fork blocks below the
+                // window) out of the cache, evicting their epoch and commitment
+                // snapshots. Downstream reorg consumers re-read those by hash
+                // (`send_epoch_events` -> `get_epoch_snapshot`,
+                // `handle_confirmed_commitment_tx_reorg` -> `get_commitment_snapshot`)
+                // and would fail mid-reorg, after the event was broadcast and
+                // metadata persisted.
+                //
+                // Abort before prune mutates the cache, so the failure is pre-commit
+                // with an accurate diagnostic. Matches master, whose post-prune
+                // `prune_chains_at_ancestor` errored whenever the LCA had been
+                // evicted from the canonical chain. The trigger — a new fork at
+                // least `block_tree_depth` long diverging inside the window — is
+                // pathological (attack / severe partition); halting is correct.
+                // Returning `Err` drives the controlled-shutdown path.
+                if let Some(split) = &split {
+                    let fork_height = split.lca.header().height;
+                    if let Err(e) = validate_reorg_within_cache_window(
+                        fork_height,
+                        arc_block.height,
+                        self.config.consensus.block_tree_depth,
+                    ) {
+                        error!(
+                            fork_height,
+                            new_tip = %block_hash,
+                            new_tip_height = arc_block.height,
+                            block_tree_depth = self.config.consensus.block_tree_depth,
+                            "reorg fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream reorg consumers re-read, to trigger controlled shutdown",
+                        );
+                        return Err(e);
+                    }
+                }
 
                 // Prune the cache after the LCA is captured.
                 //
@@ -1481,6 +1521,37 @@ pub fn validate_reorg_within_migration_depth(
             old_fork_len,
             migration_depth,
             fork_height,
+        ));
+    }
+    Ok(())
+}
+
+/// Reject reorgs whose fork point would be evicted by the cache prune that runs
+/// immediately after split computation.
+///
+/// `BlockTree::prune` keeps blocks at or above
+/// `new_tip_height - (block_tree_depth - 1)`. Once the fork point (LCA) drops
+/// below that, prune's recursive child removal cascades the divergent blocks —
+/// and the epoch/commitment snapshots keyed by their hashes — out of the cache,
+/// leaving downstream reorg consumers re-reading evicted blocks. Aborting here
+/// keeps that failure pre-commit (before the reorg event is broadcast and
+/// metadata persisted).
+///
+/// Fires only when the new fork is at least `block_tree_depth` blocks long yet
+/// diverges inside the cache window — attack / severe-partition territory, the
+/// same class master halted on when the LCA fell outside the post-prune
+/// canonical chain.
+pub fn validate_reorg_within_cache_window(
+    fork_height: u64,
+    new_tip_height: u64,
+    block_tree_depth: u64,
+) -> eyre::Result<()> {
+    let min_keep_height = new_tip_height.saturating_sub(block_tree_depth.saturating_sub(1));
+    if fork_height < min_keep_height {
+        return Err(eyre::eyre!(
+            "reorg deeper than cache window: fork point at height {fork_height} \
+             is below the post-prune minimum keep height {min_keep_height} \
+             (new tip height {new_tip_height}, block_tree_depth {block_tree_depth})"
         ));
     }
     Ok(())
@@ -2409,6 +2480,54 @@ mod tests {
         let err = validate_reorg_within_migration_depth(usize::MAX, 5, 0)
             .expect_err("usize::MAX must be treated as exceeding migration depth");
         assert!(err.to_string().contains("reorg depth"));
+    }
+
+    /// A reorg whose fork point stays within the post-prune cache window
+    /// (`new_tip - (block_tree_depth - 1)`) keeps every divergent block — and
+    /// the epoch/commitment snapshots keyed by their hashes — in the cache, so
+    /// downstream reorg consumers can re-read them. Boundary: a fork point at
+    /// exactly `min_keep_height` survives the prune.
+    #[rstest]
+    #[case::fork_at_window_boundary(51, 100, 50)]
+    #[case::fork_just_below_tip(99, 100, 50)]
+    #[case::fork_at_tip(100, 100, 50)]
+    #[case::small_depth_boundary(98, 100, 3)]
+    #[case::window_covers_genesis(0, 5, 50)]
+    fn validate_reorg_within_cache_window_passes_inside_window(
+        #[case] fork_height: u64,
+        #[case] new_tip_height: u64,
+        #[case] block_tree_depth: u64,
+    ) {
+        validate_reorg_within_cache_window(fork_height, new_tip_height, block_tree_depth)
+            .expect("reorg whose fork point survives the prune must be permitted");
+    }
+
+    /// A fork point one block below the window is evicted by `cache.prune()`,
+    /// cascading the divergent blocks (and their snapshots) out of the cache.
+    /// The gate must surface a typed error pre-prune so the caller triggers
+    /// controlled shutdown instead of crashing mid-reorg. The new-fork length at
+    /// the boundary equals `block_tree_depth` exactly.
+    #[rstest]
+    #[case::fork_one_below_window(50, 100, 50)]
+    #[case::deep_fork_small_window(10, 100, 50)]
+    #[case::small_depth_just_over(97, 100, 3)]
+    #[case::small_depth_well_over(80, 100, 3)]
+    fn validate_reorg_within_cache_window_returns_err_below_window(
+        #[case] fork_height: u64,
+        #[case] new_tip_height: u64,
+        #[case] block_tree_depth: u64,
+    ) {
+        let err = validate_reorg_within_cache_window(fork_height, new_tip_height, block_tree_depth)
+            .expect_err("fork point below the cache window must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reorg deeper than cache window"),
+            "error must name the cache-window violation; got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("fork point at height {fork_height}")),
+            "error must include the fork height; got: {msg}"
+        );
     }
 
     /// `PreValidation` reaches `soft_internal_reason_tag` whenever its
