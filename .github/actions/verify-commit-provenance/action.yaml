@@ -3,10 +3,13 @@ description: >-
   Verifies a commit is a legitimate build source for an environment: it exists,
   lives on the matching deployment branch, and — for testnet/mainnet — carries
   the expected crates/chain version, optionally requiring that the
-  <env>-<version> release tag points at it. The caller must have already checked
-  out the repo (fetch-depth: 0); for testnet/mainnet it must also have synced tags
-  from origin (devnet does only the branch check and reads no tags). This action
-  only reads local refs.
+  <env>-<version> release tag points at it. When require-release-tag is true (the
+  rebuild path) the deployment-branch check is skipped and provenance rests on the
+  exact <env>-<version> tag match instead — the trunk release/<env>/<major>.x
+  branch is rebased, so a prior release's commit is legitimately no longer on it.
+  The caller must have already checked out the repo (fetch-depth: 0); for
+  testnet/mainnet it must also have synced tags from origin (devnet does only the
+  branch check and reads no tags). This action only reads local refs.
 
 inputs:
   environment:
@@ -43,6 +46,16 @@ runs:
           exit 1
         fi
 
+        # devnet has no release tags. With require-release-tag=true the branch
+        # check below is skipped (rebuild path) AND the version/tag block is skipped
+        # (it is gated on env != devnet), which would wave a commit through on
+        # commit-existence alone. No caller sets this combination; reject it
+        # explicitly so the action fails safe on its own.
+        if [[ "$ENVIRONMENT" == "devnet" && "$REQUIRE_RELEASE_TAG" == "true" ]]; then
+          echo "::error::require-release-tag=true is not supported for devnet"
+          exit 1
+        fi
+
         if [[ "$ENVIRONMENT" == "devnet" ]]; then
           EXPECTED_BRANCH="origin/release/devnet"
         else
@@ -53,22 +66,30 @@ runs:
           MAJOR="${VERSION%%.*}"
           EXPECTED_BRANCH="origin/release/${ENVIRONMENT}/${MAJOR}.x"
         fi
-        # Distinguish "deployment branch missing locally" (a setup/fetch problem)
-        # from "commit not on it" — otherwise a missing branch surfaces as a
-        # confusing provenance failure for the commit.
-        if ! git show-ref --verify --quiet "refs/remotes/$EXPECTED_BRANCH"; then
-          echo "::error::Expected branch $EXPECTED_BRANCH not found locally. Create it on origin (per-release-branch setup) and ensure the checkout used fetch-depth: 0."
-          exit 1
+        # Branch-membership proves the commit lives on the env's deployment branch.
+        # Skip it on the rebuild path (require-release-tag=true): there we prove
+        # provenance via the exact <env>-<version> tag match below, which is
+        # strictly stronger. The trunk release/<env>/<major>.x branch is rebased,
+        # so a prior release's commit is legitimately no longer on it — requiring
+        # membership there is exactly what blocked rebuilding past releases.
+        if [[ "$REQUIRE_RELEASE_TAG" != "true" ]]; then
+          # Distinguish "deployment branch missing locally" (a setup/fetch problem)
+          # from "commit not on it" — otherwise a missing branch surfaces as a
+          # confusing provenance failure for the commit.
+          if ! git show-ref --verify --quiet "refs/remotes/$EXPECTED_BRANCH"; then
+            echo "::error::Expected branch $EXPECTED_BRANCH not found locally. Create it on origin (per-release-branch setup) and ensure the checkout used fetch-depth: 0."
+            exit 1
+          fi
+          if ! git branch -r --contains "${COMMIT}" \
+              | sed 's/^[[:space:]]*//' \
+              | grep -Fxq "$EXPECTED_BRANCH"; then
+            echo "::error::Commit ${COMMIT} is not on $EXPECTED_BRANCH"
+            echo "Found on branches:"
+            git branch -r --contains "${COMMIT}"
+            exit 1
+          fi
+          echo "Commit ${COMMIT} found on $EXPECTED_BRANCH"
         fi
-        if ! git branch -r --contains "${COMMIT}" \
-            | sed 's/^[[:space:]]*//' \
-            | grep -Fxq "$EXPECTED_BRANCH"; then
-          echo "::error::Commit ${COMMIT} is not on $EXPECTED_BRANCH"
-          echo "Found on branches:"
-          git branch -r --contains "${COMMIT}"
-          exit 1
-        fi
-        echo "Commit ${COMMIT} found on $EXPECTED_BRANCH"
 
         if [[ "$ENVIRONMENT" != "devnet" ]]; then
           CARGO_VER=$(git show "${COMMIT}:crates/chain/Cargo.toml" \

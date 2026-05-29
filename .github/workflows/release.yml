@@ -262,6 +262,32 @@ jobs:
           git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
           git push origin "$GIT_TAG"
 
+      # Per-version frozen snapshot branch, never rebased (unlike the trunk
+      # release/<env>/<major>.x branch). The <env>-<version> tag already keeps the
+      # released commit reachable and GC-safe; what this branch adds is *branch*
+      # reachability, which clears GitHub's "commit does not belong to any branch"
+      # flag on the release. Provenance on the rebuild path is proven by the
+      # <env>-<version> tag (see verify-commit-provenance), not this branch, so a
+      # missing or deleted frozen branch is cosmetic only.
+      - name: Push per-version release branch
+        id: push_branch
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          BRANCH="release/${INPUT_RELEASE_TYPE}/${INPUT_VERSION}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          # Force-move any stale local branch left by a failed run on this reused
+          # runner, then push without --force. The branch is effectively write-once
+          # per (env, version): the validate job refuses an already-existing tag, so
+          # this step runs at most once per version. The non-force push is only a
+          # backstop — it refuses to clobber a divergent (non-fast-forward) remote
+          # branch; it is not itself the source of immutability.
+          git branch -f "$BRANCH" "${INPUT_COMMIT}"
+          git push origin "refs/heads/$BRANCH"
+
       - name: Push Docker image
         id: push_image
         if: ${{ !inputs.dry_run }}
@@ -375,6 +401,23 @@ jobs:
           echo "::warning::Cleaning up orphaned git tag $GIT_TAG"
           git push origin --delete "$GIT_TAG" || true
           git tag -d "$GIT_TAG" 2>/dev/null || true
+
+      - name: 'Cleanup: delete per-version release branch'
+        if: failure() && steps.push_branch.outcome == 'success'
+        env:
+          BRANCH: ${{ steps.push_branch.outputs.branch }}
+        run: |
+          echo "::warning::Cleaning up per-version release branch $BRANCH"
+          # Surface a failed remote delete instead of swallowing it. The snapshot is
+          # delete-protected by the 'release branches' ruleset and the bot is not a
+          # bypass actor, so a blocked delete leaves a stray branch that an admin must
+          # remove — fail loudly here rather than hide it behind `|| true`.
+          if ! git push origin --delete "$BRANCH"; then
+            echo "::error::Failed to delete stray release branch $BRANCH from origin. If it is protected by the 'release branches' ruleset (github-actions[bot] is not a bypass actor), an admin must delete it manually."
+            exit 1
+          fi
+          # Local-only hygiene on the reused runner; a missing local branch is benign.
+          git branch -D "$BRANCH" 2>/dev/null || true
 
       - name: 'Cleanup: revert head-tracking git tag'
         if: failure() && steps.head_git.outcome == 'success'
