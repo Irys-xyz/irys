@@ -262,6 +262,31 @@ jobs:
           git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
           git push origin "$GIT_TAG"
 
+      # Per-version frozen snapshot branch. Unlike the rebased trunk
+      # release/<env>/<major>.x branch, this is never rebased, so it keeps the
+      # released commit reachable from a branch forever: GitHub no longer flags
+      # the release commit as orphaned, and the commit survives later rebases of
+      # the trunk env branch. Provenance on the rebuild path is proven by the
+      # <env>-<version> tag (see verify-commit-provenance), not this branch, so a
+      # missing or deleted frozen branch is cosmetic only.
+      - name: Push per-version release branch
+        id: push_branch
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          BRANCH="release/${INPUT_RELEASE_TYPE}/${INPUT_VERSION}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          # Force-move any stale local branch left by a failed run on this reused
+          # runner, then push without --force: a fresh branch is created, a re-run
+          # at the same commit is "Everything up-to-date" (exit 0), and an existing
+          # branch at a DIFFERENT commit is rejected loudly — the right behavior for
+          # an immutable per-version snapshot.
+          git branch -f "$BRANCH" "${INPUT_COMMIT}"
+          git push origin "refs/heads/$BRANCH"
+
       - name: Push Docker image
         id: push_image
         if: ${{ !inputs.dry_run }}
@@ -375,6 +400,15 @@ jobs:
           echo "::warning::Cleaning up orphaned git tag $GIT_TAG"
           git push origin --delete "$GIT_TAG" || true
           git tag -d "$GIT_TAG" 2>/dev/null || true
+
+      - name: 'Cleanup: delete per-version release branch'
+        if: failure() && steps.push_branch.outcome == 'success'
+        env:
+          BRANCH: ${{ steps.push_branch.outputs.branch }}
+        run: |
+          echo "::warning::Cleaning up per-version release branch $BRANCH"
+          git push origin --delete "$BRANCH" || true
+          git branch -D "$BRANCH" 2>/dev/null || true
 
       - name: 'Cleanup: revert head-tracking git tag'
         if: failure() && steps.head_git.outcome == 'success'
