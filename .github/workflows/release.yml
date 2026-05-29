@@ -262,11 +262,11 @@ jobs:
           git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
           git push origin "$GIT_TAG"
 
-      # Per-version frozen snapshot branch. Unlike the rebased trunk
-      # release/<env>/<major>.x branch, this is never rebased, so it keeps the
-      # released commit reachable from a branch forever: GitHub no longer flags
-      # the release commit as orphaned, and the commit survives later rebases of
-      # the trunk env branch. Provenance on the rebuild path is proven by the
+      # Per-version frozen snapshot branch, never rebased (unlike the trunk
+      # release/<env>/<major>.x branch). The <env>-<version> tag already keeps the
+      # released commit reachable and GC-safe; what this branch adds is *branch*
+      # reachability, which clears GitHub's "commit does not belong to any branch"
+      # flag on the release. Provenance on the rebuild path is proven by the
       # <env>-<version> tag (see verify-commit-provenance), not this branch, so a
       # missing or deleted frozen branch is cosmetic only.
       - name: Push per-version release branch
@@ -280,10 +280,11 @@ jobs:
           BRANCH="release/${INPUT_RELEASE_TYPE}/${INPUT_VERSION}"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           # Force-move any stale local branch left by a failed run on this reused
-          # runner, then push without --force: a fresh branch is created, a re-run
-          # at the same commit is "Everything up-to-date" (exit 0), and an existing
-          # branch at a DIFFERENT commit is rejected loudly — the right behavior for
-          # an immutable per-version snapshot.
+          # runner, then push without --force. The branch is effectively write-once
+          # per (env, version): the validate job refuses an already-existing tag, so
+          # this step runs at most once per version. The non-force push is only a
+          # backstop — it refuses to clobber a divergent (non-fast-forward) remote
+          # branch; it is not itself the source of immutability.
           git branch -f "$BRANCH" "${INPUT_COMMIT}"
           git push origin "refs/heads/$BRANCH"
 

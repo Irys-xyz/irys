@@ -46,6 +46,16 @@ runs:
           exit 1
         fi
 
+        # devnet has no release tags. With require-release-tag=true the branch
+        # check below is skipped (rebuild path) AND the version/tag block is skipped
+        # (it is gated on env != devnet), which would wave a commit through on
+        # commit-existence alone. No caller sets this combination; reject it
+        # explicitly so the action fails safe on its own.
+        if [[ "$ENVIRONMENT" == "devnet" && "$REQUIRE_RELEASE_TAG" == "true" ]]; then
+          echo "::error::require-release-tag=true is not supported for devnet"
+          exit 1
+        fi
+
         if [[ "$ENVIRONMENT" == "devnet" ]]; then
           EXPECTED_BRANCH="origin/release/devnet"
         else
