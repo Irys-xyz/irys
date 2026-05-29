@@ -12,10 +12,10 @@ use crate::{
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::{
-    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState,
+    BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit, ReorgTips,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
     create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
-    forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
+    forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
@@ -962,97 +962,72 @@ impl BlockTreeServiceInner {
                 )?;
                 let new_fcu_markers = Some(markers);
 
-                // Snapshot the orphaned-chain view BEFORE pruning so a deep new tip
-                // cannot evict `old_tip_block` from the cache mid-reorg and turn a
-                // valid reorg into a service-level error.
-                let orphaned_snapshot = if is_reorg {
-                    let mut orphaned_blocks =
-                        cache.get_fork_blocks(old_tip_block.previous_block_hash);
-                    let old_tip_entry =
-                        cache.blocks.get(&old_tip_block.block_hash).ok_or_else(|| {
-                            error!(
-                                old_tip = %old_tip_block.block_hash,
-                                "old tip pruned from cache before reorg fork-point snapshot"
-                            );
-                            eyre::eyre!(
-                                "old tip {} not in cache during reorg fork-point snapshot",
-                                old_tip_block.block_hash
-                            )
-                        })?;
-                    orphaned_blocks.push(old_tip_entry.block.clone());
-                    Some(orphaned_blocks)
+                // Compute the reorg split BEFORE pruning so the parent-walk
+                // sees both lineages in `cache.blocks`. Independent of
+                // `ChainState` flags by construction.
+                let split: Option<ReorgSplit> = if is_reorg {
+                    Some(cache.find_reorg_split(ReorgTips {
+                        new_tip: block_hash,
+                        old_tip: old_tip_block.block_hash,
+                    })?)
                 } else {
                     None
                 };
 
-                // Prune the cache after tip changes.
+                // A reorg whose fork point predates the post-prune cache window
+                // cannot complete safely. `cache.prune()` below drops every block
+                // below `new_tip.height - (block_tree_depth - 1)`; once the LCA is
+                // in that range, `BlockTree::prune`'s recursive child removal
+                // cascades the whole old fork (and the new-fork blocks below the
+                // window) out of the cache, evicting their epoch and commitment
+                // snapshots. Downstream reorg consumers re-read those by hash
+                // (`send_epoch_events` -> `get_epoch_snapshot`,
+                // `handle_confirmed_commitment_tx_reorg` -> `get_commitment_snapshot`)
+                // and would fail mid-reorg, after the event was broadcast and
+                // metadata persisted.
+                //
+                // Abort before prune mutates the cache, so the failure is pre-commit
+                // with an accurate diagnostic. Matches master, whose post-prune
+                // `prune_chains_at_ancestor` errored whenever the LCA had been
+                // evicted from the canonical chain. The trigger — a new fork at
+                // least `block_tree_depth` long diverging inside the window — is
+                // pathological (attack / severe partition); halting is correct.
+                // Returning `Err` drives the controlled-shutdown path.
+                if let Some(split) = &split {
+                    let fork_height = split.lca.header().height;
+                    if let Err(e) = validate_reorg_within_cache_window(
+                        fork_height,
+                        arc_block.height,
+                        self.config.consensus.block_tree_depth,
+                    ) {
+                        error!(
+                            fork_height,
+                            new_tip = %block_hash,
+                            new_tip_height = arc_block.height,
+                            block_tree_depth = self.config.consensus.block_tree_depth,
+                            "reorg fork point is older than the block-tree cache window; aborting before prune evicts divergent blocks (and their epoch/commitment snapshots) that downstream reorg consumers re-read, to trigger controlled shutdown",
+                        );
+                        return Err(e);
+                    }
+                }
+
+                // Prune the cache after the LCA is captured.
                 //
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
-                if is_reorg {
+                if let Some(split) = split {
                     // Handle blockchain reorganization
-
-                    let orphaned_blocks = orphaned_snapshot
-                        .expect("orphaned_snapshot is captured above when is_reorg");
-
-                    // Find the fork point where the old and new chains diverged.
-                    // orphaned_blocks must be non-empty: we just pushed the old tip above.
-                    // If this fires, the invariant was violated by a concurrent mutation
-                    // — log and abort the reorg rather than panicking.
-                    let fork_block_sealed = orphaned_blocks.first().ok_or_else(|| {
-                        error!(
-                            old_tip = %old_tip_block.block_hash,
-                            "no orphaned blocks present for reorg fork-point search"
-                        );
-                        eyre::eyre!("no orphaned blocks to determine fork point")
-                    })?;
-                    let fork_hash = fork_block_sealed.header().block_hash;
-                    let fork_height = fork_block_sealed.header().height;
-                    let fork_block = fork_block_sealed.header().clone();
-
-                    // Convert orphaned blocks to BlockTreeEntry to make a snapshot of the old canonical chain
-                    let mut old_canonical = Vec::with_capacity(orphaned_blocks.len());
-                    for block in &orphaned_blocks {
-                        let entry = make_block_tree_entry(Arc::clone(block));
-                        old_canonical.push(entry);
-                    }
-
-                    // Get the new canonical chain that's replacing the orphaned blocks
-                    let new_canonical = cache.get_canonical_chain();
-
-                    for o in old_canonical.iter() {
-                        debug!("old_canonical({}) - {}", o.height(), o.block_hash());
-                    }
-
-                    for o in new_canonical.0.iter() {
-                        debug!("new_canonical({}) - {}", o.height(), o.block_hash());
-                    }
+                    let fork_block: Arc<IrysBlockHeader> = split.lca.header().clone();
+                    let fork_hash: BlockHash = fork_block.block_hash;
+                    let fork_height: u64 = fork_block.height;
+                    let old_fork_blocks: Vec<Arc<SealedBlock>> = split.old_divergent;
+                    let new_fork_blocks: Vec<Arc<SealedBlock>> = split.new_divergent;
+                    let blocks_to_confirm = new_fork_blocks.clone();
 
                     debug!("fork_height: {} fork_hash: {}", fork_height, fork_hash);
-
-                    // Trim both chains back to their common ancestor to isolate the divergent portions
-                    let (old_fork, new_fork) = prune_chains_at_ancestor(
-                        old_canonical,
-                        new_canonical.0,
-                        fork_hash,
-                        fork_height,
-                    )?;
-
-                    // Pass sealed blocks directly (cheap Arc::clone, no deep copy)
-                    let old_fork_blocks: Vec<Arc<SealedBlock>> = old_fork
-                        .iter()
-                        .map(|e| Arc::clone(e.sealed_block()))
-                        .collect();
-
-                    let new_fork_blocks: Vec<Arc<SealedBlock>> = new_fork
-                        .iter()
-                        .map(|e| Arc::clone(e.sealed_block()))
-                        .collect();
-
-                    let blocks_to_confirm = new_fork_blocks.clone();
 
                     debug!(
                         "Reorg at block height {} with {}, old fork is {} blocks long, new one is {} blocks",
@@ -1527,54 +1502,6 @@ impl BlockTreeServiceInner {
     }
 }
 
-/// Prunes two canonical chains at the specified common ancestor, returning only the divergent portions.
-///
-/// Returns `Err` when the ancestor is missing from either chain — this is a
-/// no-common-ancestor reorg, the same divergence class F4 detects at startup.
-/// The reorg path callers log and abort the reorg instead of panicking.
-pub fn prune_chains_at_ancestor(
-    old_chain: Vec<BlockTreeEntry>,
-    new_chain: Vec<BlockTreeEntry>,
-    ancestor_hash: BlockHash,
-    ancestor_height: u64,
-) -> eyre::Result<(Vec<BlockTreeEntry>, Vec<BlockTreeEntry>)> {
-    // Find the ancestor index in the old chain
-    let old_ancestor_idx = old_chain
-        .iter()
-        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
-        .ok_or_else(|| {
-            error!(
-                ancestor.hash = %ancestor_hash,
-                ancestor.height = ancestor_height,
-                "common ancestor missing from old chain during reorg fork-point trim"
-            );
-            eyre::eyre!(
-                "common ancestor {ancestor_hash} (height {ancestor_height}) not in old chain"
-            )
-        })?;
-
-    // Find the ancestor index in the new chain
-    let new_ancestor_idx = new_chain
-        .iter()
-        .position(|e| e.block_hash() == ancestor_hash && e.height() == ancestor_height)
-        .ok_or_else(|| {
-            error!(
-                ancestor.hash = %ancestor_hash,
-                ancestor.height = ancestor_height,
-                "common ancestor missing from new chain during reorg fork-point trim"
-            );
-            eyre::eyre!(
-                "common ancestor {ancestor_hash} (height {ancestor_height}) not in new chain"
-            )
-        })?;
-
-    // Return the portions after the common ancestor (excluding the ancestor itself)
-    let old_divergent = old_chain[old_ancestor_idx + 1..].to_vec();
-    let new_divergent = new_chain[new_ancestor_idx + 1..].to_vec();
-
-    Ok((old_divergent, new_divergent))
-}
-
 /// Reject reorgs that would un-migrate already-finalised blocks.
 ///
 /// `old_fork_len` is the number of blocks on the old fork excluding the common
@@ -1594,6 +1521,37 @@ pub fn validate_reorg_within_migration_depth(
             old_fork_len,
             migration_depth,
             fork_height,
+        ));
+    }
+    Ok(())
+}
+
+/// Reject reorgs whose fork point would be evicted by the cache prune that runs
+/// immediately after split computation.
+///
+/// `BlockTree::prune` keeps blocks at or above
+/// `new_tip_height - (block_tree_depth - 1)`. Once the fork point (LCA) drops
+/// below that, prune's recursive child removal cascades the divergent blocks —
+/// and the epoch/commitment snapshots keyed by their hashes — out of the cache,
+/// leaving downstream reorg consumers re-reading evicted blocks. Aborting here
+/// keeps that failure pre-commit (before the reorg event is broadcast and
+/// metadata persisted).
+///
+/// Fires only when the new fork is at least `block_tree_depth` blocks long yet
+/// diverges inside the cache window — attack / severe-partition territory, the
+/// same class master halted on when the LCA fell outside the post-prune
+/// canonical chain.
+pub fn validate_reorg_within_cache_window(
+    fork_height: u64,
+    new_tip_height: u64,
+    block_tree_depth: u64,
+) -> eyre::Result<()> {
+    let min_keep_height = new_tip_height.saturating_sub(block_tree_depth.saturating_sub(1));
+    if fork_height < min_keep_height {
+        return Err(eyre::eyre!(
+            "reorg deeper than cache window: fork point at height {fork_height} \
+             is below the post-prune minimum keep height {min_keep_height} \
+             (new tip height {new_tip_height}, block_tree_depth {block_tree_depth})"
         ));
     }
     Ok(())
@@ -2466,74 +2424,6 @@ mod tests {
         assert!(!inner.is_node_fault());
     }
 
-    fn entry_at(height: u64, hash_byte: u8) -> BlockTreeEntry {
-        let mut header = IrysBlockHeader::new_mock_header();
-        header.height = height;
-        header.block_hash = H256([hash_byte; 32]);
-        let sealed = SealedBlock::new_unchecked(Arc::new(header), BlockTransactions::default());
-        make_block_tree_entry(Arc::new(sealed))
-    }
-
-    /// Common-ancestor present at the same hash and height in both chains:
-    /// the function returns the divergent suffix of each chain (excluding the
-    /// ancestor itself).
-    #[test]
-    fn prune_chains_at_ancestor_returns_divergent_suffixes_when_ancestor_present() {
-        let ancestor = entry_at(10, 0xAA);
-        let old = vec![ancestor.clone(), entry_at(11, 0xB1), entry_at(12, 0xB2)];
-        let new = vec![ancestor.clone(), entry_at(11, 0xC1)];
-
-        let (old_div, new_div) =
-            prune_chains_at_ancestor(old, new, ancestor.block_hash(), ancestor.height())
-                .expect("ancestor present in both chains");
-
-        assert_eq!(old_div.len(), 2);
-        assert_eq!(old_div[0].height(), 11);
-        assert_eq!(old_div[1].height(), 12);
-        assert_eq!(new_div.len(), 1);
-        assert_eq!(new_div[0].height(), 11);
-        assert_eq!(new_div[0].block_hash(), H256([0xC1; 32]));
-    }
-
-    /// Reorg fork-point trim must surface a typed error rather than panic when
-    /// the supposed common ancestor is missing from one or both chains. F4
-    /// catches this class of divergence at startup; here we ensure runtime
-    /// reorg paths do not abort the node.
-    #[rstest]
-    #[case::missing_in_old(
-        vec![entry_at(11, 0xB1), entry_at(12, 0xB2)],
-        vec![entry_at(10, 0xAA), entry_at(11, 0xC1)],
-        "old chain"
-    )]
-    #[case::missing_in_new(
-        vec![entry_at(10, 0xAA), entry_at(11, 0xB1)],
-        vec![entry_at(11, 0xC1), entry_at(12, 0xC2)],
-        "new chain"
-    )]
-    #[case::missing_in_both(
-        vec![entry_at(11, 0xB1), entry_at(12, 0xB2)],
-        vec![entry_at(11, 0xC1), entry_at(12, 0xC2)],
-        "old chain"
-    )]
-    fn prune_chains_at_ancestor_returns_err_when_ancestor_missing(
-        #[case] old: Vec<BlockTreeEntry>,
-        #[case] new: Vec<BlockTreeEntry>,
-        #[case] expected_chain_in_msg: &str,
-    ) {
-        let ancestor_hash = H256([0xAA; 32]);
-        let result = prune_chains_at_ancestor(old, new, ancestor_hash, 10);
-        let err = result.expect_err("expected Err when ancestor is missing");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains(expected_chain_in_msg),
-            "error must name the chain missing the ancestor; got: {msg}"
-        );
-        assert!(
-            !msg.contains("panic"),
-            "must not surface panic-style messages; got: {msg}"
-        );
-    }
-
     /// Reorgs at or within `migration_depth` are reversible: nothing on the
     /// old fork has been migrated to the block index yet, so the FCU path can
     /// switch chains cleanly.
@@ -2590,6 +2480,54 @@ mod tests {
         let err = validate_reorg_within_migration_depth(usize::MAX, 5, 0)
             .expect_err("usize::MAX must be treated as exceeding migration depth");
         assert!(err.to_string().contains("reorg depth"));
+    }
+
+    /// A reorg whose fork point stays within the post-prune cache window
+    /// (`new_tip - (block_tree_depth - 1)`) keeps every divergent block — and
+    /// the epoch/commitment snapshots keyed by their hashes — in the cache, so
+    /// downstream reorg consumers can re-read them. Boundary: a fork point at
+    /// exactly `min_keep_height` survives the prune.
+    #[rstest]
+    #[case::fork_at_window_boundary(51, 100, 50)]
+    #[case::fork_just_below_tip(99, 100, 50)]
+    #[case::fork_at_tip(100, 100, 50)]
+    #[case::small_depth_boundary(98, 100, 3)]
+    #[case::window_covers_genesis(0, 5, 50)]
+    fn validate_reorg_within_cache_window_passes_inside_window(
+        #[case] fork_height: u64,
+        #[case] new_tip_height: u64,
+        #[case] block_tree_depth: u64,
+    ) {
+        validate_reorg_within_cache_window(fork_height, new_tip_height, block_tree_depth)
+            .expect("reorg whose fork point survives the prune must be permitted");
+    }
+
+    /// A fork point one block below the window is evicted by `cache.prune()`,
+    /// cascading the divergent blocks (and their snapshots) out of the cache.
+    /// The gate must surface a typed error pre-prune so the caller triggers
+    /// controlled shutdown instead of crashing mid-reorg. The new-fork length at
+    /// the boundary equals `block_tree_depth` exactly.
+    #[rstest]
+    #[case::fork_one_below_window(50, 100, 50)]
+    #[case::deep_fork_small_window(10, 100, 50)]
+    #[case::small_depth_just_over(97, 100, 3)]
+    #[case::small_depth_well_over(80, 100, 3)]
+    fn validate_reorg_within_cache_window_returns_err_below_window(
+        #[case] fork_height: u64,
+        #[case] new_tip_height: u64,
+        #[case] block_tree_depth: u64,
+    ) {
+        let err = validate_reorg_within_cache_window(fork_height, new_tip_height, block_tree_depth)
+            .expect_err("fork point below the cache window must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reorg deeper than cache window"),
+            "error must name the cache-window violation; got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("fork point at height {fork_height}")),
+            "error must include the fork height; got: {msg}"
+        );
     }
 
     /// `PreValidation` reaches `soft_internal_reason_tag` whenever its
