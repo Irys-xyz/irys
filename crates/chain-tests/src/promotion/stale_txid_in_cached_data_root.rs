@@ -183,7 +183,7 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
 /// chunks → wait for ingress proof → mine blocks until anchor expires →
 /// verify txid_set was cleaned → mine a block successfully.
 #[tokio::test]
-async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Result<()> {
+async fn slow_heavy_stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Result<()> {
     let seconds_to_wait = 30;
 
     let config = NodeConfig::testing()

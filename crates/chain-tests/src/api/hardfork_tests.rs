@@ -194,20 +194,47 @@ async fn wait_until_activation(node: &IrysNodeTest<IrysNodeCtx>, activation_time
 
 async fn wait_for_wallclock(activation_timestamp: u64) {
     const MAX_WAIT_SECS: u64 = 60;
-    const POST_ACTIVATION_BUFFER_MS: u64 = 500;
-    let deadline = now_secs().saturating_add(MAX_WAIT_SECS);
+    // After realtime crosses `activation_timestamp` we hold on monotonic time
+    // and keep re-checking realtime: if it ever dips back below activation
+    // during the hold (Hyper-V time-sync lurch on WSL2, NTP correction, etc.),
+    // we restart the wait. This converts the previous static buffer into an
+    // adaptive check — fast on stable hosts, self-correcting on flaky ones.
+    const HOLD_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+    let poll_interval = std::time::Duration::from_millis(POLL_INTERVAL_MS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS);
+
     loop {
-        let current = now_secs();
-        if current >= activation_timestamp {
-            break;
+        // Phase 1: wait until realtime first crosses the activation timestamp.
+        loop {
+            if now_secs() >= activation_timestamp {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("Timed out waiting for wallclock to reach activation timestamp");
+            }
+            tokio::time::sleep(poll_interval).await;
         }
-        if current >= deadline {
-            panic!("Timed out waiting for wallclock to reach activation timestamp");
+
+        // Phase 2: hold for `HOLD_DURATION` of monotonic time, watching for a
+        // backward realtime lurch. If realtime stays >= activation throughout,
+        // we're past the boundary stably enough to return.
+        let hold_end = std::time::Instant::now() + HOLD_DURATION;
+        let mut lurched = false;
+        while std::time::Instant::now() < hold_end {
+            if now_secs() < activation_timestamp {
+                lurched = true;
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("Timed out waiting for stable post-activation wallclock");
+            }
+            tokio::time::sleep(poll_interval).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        if !lurched {
+            return;
+        }
+        // Realtime dipped below activation mid-hold; loop and re-wait.
     }
-    // Buffer to ensure node's internal state has caught up with wall clock
-    tokio::time::sleep(std::time::Duration::from_millis(POST_ACTIVATION_BUFFER_MS)).await;
 }
 
 #[cfg(test)]
@@ -329,7 +356,7 @@ mod boundary_crossing {
     use super::*;
 
     #[test_log::test(tokio::test)]
-    async fn test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
+    async fn slow_test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
@@ -353,6 +380,7 @@ mod boundary_crossing {
             "V1 submitted before activation should be mined in a pre-activation block"
         );
 
+        wait_for_wallclock(aurora_activation).await;
         let v1_after = create_stake_tx(&node, &signer2, TxVersion::V1).await;
         let result_after = node.post_commitment_tx(&v1_after).await;
         assert!(result_after.is_err(), "V1 should be rejected after Aurora");
@@ -414,7 +442,7 @@ mod edge_cases {
     /// and validators must reject blocks containing V1 transactions post-activation.
     /// This ensures consensus - all nodes agree on block validity.
     #[test_log::test(tokio::test)]
-    async fn test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
+    async fn slow_test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
@@ -450,7 +478,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn slow_test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -481,7 +509,7 @@ mod edge_cases {
     }
 
     #[test_log::test(tokio::test)]
-    async fn test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
+    async fn slow_test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
@@ -632,7 +660,7 @@ mod epoch_block_filtering {
     /// Epoch block at hardfork boundary: V1 commitments accepted pre-activation
     /// should NOT be filtered out when the epoch block falls post-activation.
     #[test_log::test(tokio::test)]
-    async fn test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
+    async fn slow_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);

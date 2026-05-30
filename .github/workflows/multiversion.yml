@@ -49,7 +49,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: Run multiversion tests
-        run: cargo xtask multiversion-test --profile dev --old-ref ${{ steps.refs.outputs.old_ref }} --new-ref HEAD --clean
+        run: cargo xtask multiversion-test --profile dev --old-ref ${{ steps.refs.outputs.old_ref }} --new-ref HEAD --clean -- --no-fail-fast
 
       - name: sccache stats
         if: always()
