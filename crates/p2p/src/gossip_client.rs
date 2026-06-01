@@ -81,6 +81,7 @@ fn pull_rejection_reason(reason: &RejectionReason) -> &'static str {
         RejectionReason::ProtocolMismatch => "protocol_mismatch",
         RejectionReason::UnsupportedProtocolVersion(_) => "unsupported_protocol_version",
         RejectionReason::UnsupportedFeature => "unsupported_feature",
+        RejectionReason::ChainIdMismatch => "chain_id_mismatch",
     }
 }
 
@@ -654,6 +655,18 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
+                // A chain-ID mismatch is terminal: the peer is on a different
+                // network and retrying won't help. Surface it as a rejection
+                // (not a retryable request error) so we stop announcing to it.
+                RejectionReason::ChainIdMismatch => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::NetworkMismatch,
+                        message: Some(
+                            "Chain ID mismatch — peer is on a different network".to_string(),
+                        ),
+                        retry_after: None,
+                    },
+                )),
                 _ => Err(GossipClientError::GetRequest(
                     peer.to_string(),
                     format!("Unexpected rejection reason: {:?}", reason),
@@ -714,6 +727,18 @@ impl GossipClient {
                     irys_types::version::RejectedResponse {
                         reason: irys_types::version::RejectionReason::ProtocolMismatch,
                         message: Some("Protocol mismatch".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                // A chain-ID mismatch is terminal: the peer is on a different
+                // network and retrying won't help. Surface it as a rejection
+                // (not a retryable request error) so we stop announcing to it.
+                RejectionReason::ChainIdMismatch => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::NetworkMismatch,
+                        message: Some(
+                            "Chain ID mismatch — peer is on a different network".to_string(),
+                        ),
                         retry_after: None,
                     },
                 )),
@@ -2080,7 +2105,8 @@ impl GossipClient {
                                 errors_by_peer.insert(peer_id, synth);
                             }
                             RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
+                            | RejectionReason::ProtocolMismatch
+                            | RejectionReason::ChainIdMismatch => {
                                 let synth = GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rejected with {:?}",
@@ -2398,7 +2424,8 @@ impl GossipClient {
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
+                            | RejectionReason::ProtocolMismatch
+                            | RejectionReason::ChainIdMismatch => {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "{}: Peer {:?} rejected with {:?}",

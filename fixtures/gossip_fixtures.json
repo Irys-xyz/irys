@@ -203,6 +203,9 @@
       "3chLuAB9CqrCNL42WFwjPLk4GEtr"
     ]
   },
+  "gossip_response_rejected_chain_id_mismatch": {
+    "Rejected": "ChainIdMismatch"
+  },
   "gossip_response_rejected_gossip_disabled": {
     "Rejected": "GossipDisabled"
   },

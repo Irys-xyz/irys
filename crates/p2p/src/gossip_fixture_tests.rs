@@ -498,6 +498,8 @@ fixture_tests! {
         GossipResponse::<()>::Rejected(RejectionReason::UnsupportedProtocolVersion(99)),
     gossip_response_rejected_unsupported_feature =>
         GossipResponse::<()>::Rejected(RejectionReason::UnsupportedFeature),
+    gossip_response_rejected_chain_id_mismatch =>
+        GossipResponse::<()>::Rejected(RejectionReason::ChainIdMismatch),
 
     // GossipResponse with typed payloads (not just unit)
     gossip_response_accepted_handshake_v1 =>
@@ -682,6 +684,8 @@ assert_fixture_coverage!(
         "gossip_response_rejected_unsupported_protocol_version",
     RejectionReason::UnsupportedFeature =>
         "gossip_response_rejected_unsupported_feature",
+    RejectionReason::ChainIdMismatch =>
+        "gossip_response_rejected_chain_id_mismatch",
 );
 
 assert_fixture_coverage!(
