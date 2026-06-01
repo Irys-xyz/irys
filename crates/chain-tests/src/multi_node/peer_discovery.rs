@@ -11,8 +11,8 @@ use alloy_genesis::GenesisAccount;
 use irys_domain::ScoreDecreaseReason;
 use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
-    BlockHash, HandshakeRequestV2, HandshakeResponse, IrysPeerId, NodeConfig, PeerAddress,
-    RethPeerInfo, build_user_agent, irys::IrysSigner,
+    BlockHash, HandshakeRequestV2, HandshakeResponse, IrysPeerId, IrysSignature, NodeConfig,
+    PeerAddress, RethPeerInfo, build_user_agent, irys::IrysSigner,
 };
 use tracing::{debug, error, info};
 
@@ -177,6 +177,37 @@ async fn peer_discovery() -> eyre::Result<()> {
             assert!(
                 matches!(reason, RejectionReason::ChainIdMismatch),
                 "Expected ChainIdMismatch, got {:?}",
+                reason
+            );
+        }
+    }
+
+    // Same foreign chain_id, but now with a deliberately invalid (zeroed)
+    // signature. Proves the chain_id check runs *before* signature
+    // verification: the response must be ChainIdMismatch, not
+    // InvalidCredentials. If the two checks were ever reordered, this fails.
+    let mut foreign_chain_bad_sig = foreign_chain_request.clone();
+    foreign_chain_bad_sig.signature = IrysSignature::default();
+
+    let req = TestRequest::post()
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
+        .peer_addr("127.0.0.9:12345".parse().unwrap())
+        .set_json(&foreign_chain_bad_sig)
+        .to_request();
+    let resp = call_service(&gossip, req).await;
+    let body = read_body(resp).await;
+    let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
+    let peer_response: GossipResponse<HandshakeResponse> =
+        serde_json::from_str(&body_str).expect("Failed to parse JSON");
+    match peer_response {
+        GossipResponse::Accepted(_) => {
+            panic!("Expected Rejected response for chain ID mismatch, got Accepted")
+        }
+        GossipResponse::Rejected(reason) => {
+            assert!(
+                matches!(reason, RejectionReason::ChainIdMismatch),
+                "chain_id must be checked before signature verification; \
+                 expected ChainIdMismatch, got {:?}",
                 reason
             );
         }
