@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780062370542,
+  "lastUpdate": 1780350333480,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5227,6 +5227,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "12614c191aab4c66e708b1cabf4bd8e4985332c6",
+          "message": "feat(p2p): hard-reject handshakes from a different chain_id (#1435)\n\n* feat(p2p): hard-reject handshakes from a different chain_id\n\nPreviously a handshake declaring a different chain_id was accepted with\nonly an advisory consensus-config-hash mismatch log. Now both the V1 and\nV2 handshake handlers hard-reject when the peer's chain_id differs from\nours, checked before signature verification as a cheap network-membership\ngate. The consensus-config-hash mismatch stays advisory.\n\nAdds a dedicated RejectionReason::ChainIdMismatch variant, kept distinct\nfrom ProtocolMismatch (a chain mismatch is not a protocol mismatch) and\nfrom the advisory config-hash check. It serializes as a bare unit string\nfor v1 wire compatibility and is only ever emitted to peers that declared\na different chain_id, so same-chain peers running older (e.g. Dec-2025)\nbuilds never receive it and are unaffected.\n\nWhen we are rejected with ChainIdMismatch during our own handshake it maps\nto a terminal NetworkMismatch rejection rather than a retryable request\nerror, so we stop announcing to cross-chain peers instead of retrying.\n\n* test(p2p): assert chain_id is checked before signature verification\n\nAdd a handshake case with a foreign chain_id and a zeroed (invalid)\nsignature, asserting the rejection is ChainIdMismatch rather than\nInvalidCredentials. Guards against ever reordering the chain_id check\nafter signature verification.",
+          "timestamp": "2026-06-01T22:24:47+01:00",
+          "tree_id": "69ef4d01512fbc73a96016e86446e6d24c6816cb",
+          "url": "https://github.com/Irys-xyz/irys/commit/12614c191aab4c66e708b1cabf4bd8e4985332c6"
+        },
+        "date": 1780350331527,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012592,
+            "range": "± 0.000486",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120043,
+            "range": "± 0.002043",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.221836,
+            "range": "± 0.029055",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.205747,
+            "range": "± 0.36871",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075365,
+            "range": "± 0.000642",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 775.176716,
+            "range": "± 23.777338",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.248261,
+            "range": "± 2.264051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120027,
+            "range": "± 0.00163",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1219.874574,
+            "range": "± 14.365903",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1591.080425,
+            "range": "± 13.569885",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034886,
+            "range": "± 0.001867",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.687363,
+            "range": "± 1.509687",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.610274,
+            "range": "± 1.752653",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
