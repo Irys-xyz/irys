@@ -1225,6 +1225,18 @@ where
             ));
         }
 
+        // Hard reject peers on a different chain (see the V2 handler for the
+        // rationale): a chain_id mismatch means the peer is on a different
+        // network entirely, so we must never peer with it.
+        let our_chain_id = server.data_handler.config.consensus.chain_id;
+        if version_request.chain_id != our_chain_id {
+            warn!(
+                "Rejecting V1 handshake: chain ID mismatch ours={} theirs={} peer_addr={} mining_address={}",
+                our_chain_id, version_request.chain_id, source_addr, version_request.mining_address,
+            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::ChainIdMismatch));
+        }
+
         if !version_request.verify_signature() {
             return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::InvalidCredentials));
         }
@@ -1322,6 +1334,24 @@ where
                     version_request.protocol_version as u32,
                 ),
             ));
+        }
+
+        // Hard reject peers on a different chain. The consensus-config-hash
+        // mismatch logged below is advisory, but a chain_id mismatch means the
+        // peer belongs to a different network entirely — we must never peer
+        // with it. Checked before signature verification because it's a cheap
+        // network-membership gate (like the protocol-version check above).
+        let our_chain_id = server.data_handler.config.consensus.chain_id;
+        if version_request.chain_id != our_chain_id {
+            warn!(
+                "Rejecting V2 handshake: chain ID mismatch ours={} theirs={} peer_addr={} mining_address={} peer_id={}",
+                our_chain_id,
+                version_request.chain_id,
+                source_addr,
+                version_request.mining_address,
+                version_request.peer_id,
+            );
+            return HttpResponse::Ok().json(Resp::Rejected(RejectionReason::ChainIdMismatch));
         }
 
         if !version_request.verify_signature() {

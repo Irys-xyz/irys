@@ -352,6 +352,10 @@ pub enum RejectionReason {
     ProtocolMismatch,
     UnsupportedProtocolVersion(u32),
     UnsupportedFeature,
+    /// The requesting peer is on a different chain (`chain_id` mismatch). Unlike
+    /// the advisory consensus-config-hash mismatch, this is a hard handshake
+    /// rejection — we never peer with a node on a different chain.
+    ChainIdMismatch,
 }
 
 const REJECTION_REASON_VARIANTS: &[&str] = &[
@@ -364,6 +368,7 @@ const REJECTION_REASON_VARIANTS: &[&str] = &[
     "ProtocolMismatch",
     "UnsupportedProtocolVersion",
     "UnsupportedFeature",
+    "ChainIdMismatch",
 ];
 
 impl Serialize for RejectionReason {
@@ -408,6 +413,9 @@ impl Serialize for RejectionReason {
             Self::UnsupportedFeature => {
                 serializer.serialize_unit_variant("RejectionReason", 8, "UnsupportedFeature")
             }
+            Self::ChainIdMismatch => {
+                serializer.serialize_unit_variant("RejectionReason", 9, "ChainIdMismatch")
+            }
         }
     }
 }
@@ -435,6 +443,7 @@ impl<'de> Deserialize<'de> for RejectionReason {
                     "InvalidCredentials" => Ok(RejectionReason::InvalidCredentials),
                     "ProtocolMismatch" => Ok(RejectionReason::ProtocolMismatch),
                     "UnsupportedFeature" => Ok(RejectionReason::UnsupportedFeature),
+                    "ChainIdMismatch" => Ok(RejectionReason::ChainIdMismatch),
                     other => Err(E::unknown_variant(other, REJECTION_REASON_VARIANTS)),
                 }
             }
@@ -489,6 +498,10 @@ impl<'de> Deserialize<'de> for RejectionReason {
                     "UnsupportedFeature" => {
                         map.next_value::<serde::de::IgnoredAny>()?;
                         RejectionReason::UnsupportedFeature
+                    }
+                    "ChainIdMismatch" => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        RejectionReason::ChainIdMismatch
                     }
                     other => {
                         return Err(serde::de::Error::unknown_variant(
@@ -610,6 +623,7 @@ mod tests {
             Just(RejectionReason::ProtocolMismatch),
             any::<u32>().prop_map(RejectionReason::UnsupportedProtocolVersion),
             Just(RejectionReason::UnsupportedFeature),
+            Just(RejectionReason::ChainIdMismatch),
         ]
     }
 
@@ -643,6 +657,7 @@ mod tests {
                 RejectionReason::InvalidCredentials => serde_json::json!("InvalidCredentials"),
                 RejectionReason::ProtocolMismatch => serde_json::json!("ProtocolMismatch"),
                 RejectionReason::UnsupportedFeature => serde_json::json!("UnsupportedFeature"),
+                RejectionReason::ChainIdMismatch => serde_json::json!("ChainIdMismatch"),
                 RejectionReason::UnsupportedProtocolVersion(n) => {
                     serde_json::json!({ "UnsupportedProtocolVersion": n })
                 }
