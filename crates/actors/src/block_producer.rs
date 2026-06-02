@@ -143,8 +143,21 @@ pub struct BlockProducerService {
     cmd_rx: mpsc::UnboundedReceiver<Traced<BlockProducerCommand>>,
     /// Inner logic
     inner: Arc<BlockProducerInner>,
-    /// Enforces block production limits during testing
+    /// Enforces block production limits during testing.
+    ///
+    /// Counts **canonical height increments** the test still wants, NOT the raw
+    /// number of blocks produced. The distinction matters because autonomous
+    /// test mining (`start_mining()` + multiple partitions + fast VDF) can
+    /// produce two blocks on the same parent before the first is validated and
+    /// becomes the canonical tip — a duplicate-height sibling. Counting that
+    /// sibling against the budget would stop production one height short of the
+    /// target and deadlock `mine_blocks`/`wait_for_block_at_height`. See
+    /// `highest_test_block_height_produced`.
     blocks_remaining_for_test: Option<u64>,
+    /// Highest block height already produced under the test budget. Used to
+    /// decrement `blocks_remaining_for_test` only when production advances to a
+    /// new height, so a duplicate-height sibling does not consume the budget.
+    highest_test_block_height_produced: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -274,6 +287,7 @@ impl BlockProducerService {
                     cmd_rx: rx,
                     inner,
                     blocks_remaining_for_test,
+                    highest_test_block_height_produced: None,
                 };
                 service
                     .start()
@@ -380,16 +394,30 @@ impl BlockProducerService {
                         return Ok(false);
                     }
 
+                    let produced_height = block.header().height;
                     info!(
                         block.hash = %block.header().block_hash,
-                        block.height = block.header().height,
+                        block.height = produced_height,
                         "Block publication completed successfully"
                     );
                     metrics::record_block_produced();
 
-                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
-                        *remaining = remaining.saturating_sub(1);
-                        debug!("Test blocks remaining after publication: {}", *remaining);
+                    // The test budget counts canonical height increments, not raw
+                    // blocks produced. Only spend a budget slot when this block
+                    // advances to a height we haven't produced before; a
+                    // duplicate-height sibling (two solutions built on the same
+                    // parent before the first was validated) must not consume the
+                    // budget, or production would stop one height short of the
+                    // target and deadlock the waiting helper.
+                    if let Some(remaining) = self.blocks_remaining_for_test {
+                        let (highest, remaining) = apply_test_budget_after_production(
+                            self.highest_test_block_height_produced,
+                            remaining,
+                            produced_height,
+                        );
+                        self.highest_test_block_height_produced = highest;
+                        self.blocks_remaining_for_test = Some(remaining);
+                        debug!("Test blocks remaining after publication: {}", remaining);
                     }
 
                     let _ = response.send(Ok(Some((block, eth_built_payload))));
@@ -407,6 +435,12 @@ impl BlockProducerService {
                     "Updating test blocks remaining"
                 );
                 self.blocks_remaining_for_test = remaining;
+                // A (re)set marks a new test-controlled mining phase. Reset the
+                // height tracker so the budget is measured against heights
+                // produced *in this phase*, not a stale tip from a previous
+                // batch or an abandoned fork (which would otherwise let
+                // post-reorg blocks at already-seen heights skip the decrement).
+                self.highest_test_block_height_produced = None;
             }
         }
         Ok(false)
@@ -1807,6 +1841,30 @@ fn choose_oracle_price(
     chosen
 }
 
+/// Applies a produced block to the test block budget.
+///
+/// The budget (`blocks_remaining_for_test`) counts **canonical height
+/// increments** the test still wants, not the raw number of blocks produced.
+/// A budget slot is consumed only when the produced block advances to a height
+/// not produced before in this mining phase. A duplicate-height sibling — two
+/// solutions built on the same parent before the first became the canonical
+/// tip, which autonomous test mining can generate under load — must not consume
+/// a slot, or production stops one height short of the target and deadlocks
+/// `mine_blocks`/`wait_for_block_at_height`.
+///
+/// Returns the updated `(highest_height_produced, blocks_remaining)`.
+fn apply_test_budget_after_production(
+    highest_produced: Option<u64>,
+    blocks_remaining: u64,
+    produced_height: u64,
+) -> (Option<u64>, u64) {
+    if highest_produced.is_none_or(|highest| produced_height > highest) {
+        (Some(produced_height), blocks_remaining.saturating_sub(1))
+    } else {
+        (highest_produced, blocks_remaining)
+    }
+}
+
 pub struct ProductionStrategy {
     pub inner: Arc<BlockProducerInner>,
 }
@@ -1855,6 +1913,72 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
     });
 
     bytes_added / chunk_size
+}
+
+#[cfg(test)]
+mod test_budget_tests {
+    use super::apply_test_budget_after_production;
+
+    #[test]
+    fn advancing_height_consumes_one_slot() {
+        let (highest, remaining) = apply_test_budget_after_production(Some(2), 5, 3);
+        assert_eq!(highest, Some(3));
+        assert_eq!(remaining, 4);
+    }
+
+    #[test]
+    fn first_block_consumes_one_slot() {
+        let (highest, remaining) = apply_test_budget_after_production(None, 6, 1);
+        assert_eq!(highest, Some(1));
+        assert_eq!(remaining, 5);
+    }
+
+    #[test]
+    fn duplicate_height_sibling_does_not_consume_a_slot() {
+        // Already produced height 3; a sibling at height 3 must not spend budget
+        // and must not lower the high-water mark.
+        let (highest, remaining) = apply_test_budget_after_production(Some(3), 4, 3);
+        assert_eq!(highest, Some(3));
+        assert_eq!(remaining, 4);
+    }
+
+    #[test]
+    fn lower_height_does_not_consume_a_slot() {
+        let (highest, remaining) = apply_test_budget_after_production(Some(5), 2, 4);
+        assert_eq!(highest, Some(5));
+        assert_eq!(remaining, 2);
+    }
+
+    /// Replays the exact CI deadlock: `mine_blocks(6)` from height 1 (target 7)
+    /// where height 3 is produced twice (a sibling). With height-increment
+    /// accounting the budget reaches 0 only after height 7 is produced, so the
+    /// waiting helper observes the target. Counting the sibling (the old
+    /// behaviour) would exhaust the budget at height 6 and hang.
+    #[test]
+    fn sibling_burst_still_reaches_target_height() {
+        // produced heights in order, including one duplicate at height 3
+        let produced = [2_u64, 3, 3, 4, 5, 6, 7];
+        let mut highest = None;
+        let mut remaining = 6_u64;
+        let mut max_height_reached_while_budget_positive = 1_u64;
+
+        for h in produced {
+            // The real producer only builds while budget > 0 (the gate at the
+            // top of the SolutionFound handler); model that here.
+            if remaining == 0 {
+                break;
+            }
+            (highest, remaining) = apply_test_budget_after_production(highest, remaining, h);
+            max_height_reached_while_budget_positive = h;
+        }
+
+        assert_eq!(
+            max_height_reached_while_budget_positive, 7,
+            "must reach the target height (1 + 6) despite the sibling"
+        );
+        assert_eq!(remaining, 0, "budget fully spent exactly at the target");
+        assert_eq!(highest, Some(7));
+    }
 }
 
 #[cfg(test)]
