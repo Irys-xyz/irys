@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780350333480,
+  "lastUpdate": 1780407691768,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5335,6 +5335,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4773009ca0b8e436f94c1e3e60990691a1c2adb5",
+          "message": "fix(block_producer): count test block budget by height, not blocks produced (#1436)\n\n`blocks_remaining_for_test` is meant to bound how many canonical *height\nincrements* a test mines (every caller — `mine_blocks`/`mine_block_with_payload`\n— waits for `start_height + n`). It was decremented once per block *produced*.\n\nUnder autonomous test mining (`start_mining()` + multiple partitions + fast\nVDF) the producer can build two blocks on the same parent before the first is\nvalidated and becomes the canonical tip — a duplicate-height sibling. The\nsibling consumed a budget slot without advancing the height, so production\nstopped one height short of the target and `mine_blocks` /\n`wait_for_block_at_height` hung until the 60s nextest kill. This surfaced as a\nCI flake in `heavy3_pending_chunks_test` (FAIL on attempt 1, PASS on re-run).\n\nDecrement the budget only when a produced block advances to a height not seen\nbefore in the current mining phase, tracked by `highest_test_block_height_produced`\n(reset whenever the budget is (re)set). The sibling is still produced/gossiped\nexactly as before — only the budget accounting changes — so fork-choice and\ngossip behaviour are untouched.\n\nAdds `apply_test_budget_after_production` (pure, unit-tested) with a regression\ntest replaying the exact CI sequence (heights 2,3,3,4,5,6,7 with budget 6 still\nreaches height 7).",
+          "timestamp": "2026-06-02T14:18:09+01:00",
+          "tree_id": "f65b855482ec8accc0fbda39ed4d20fb8d7146bf",
+          "url": "https://github.com/Irys-xyz/irys/commit/4773009ca0b8e436f94c1e3e60990691a1c2adb5"
+        },
+        "date": 1780407689811,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011957,
+            "range": "± 0.000218",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.122743,
+            "range": "± 0.002741",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.26227,
+            "range": "± 0.03556",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.21921,
+            "range": "± 0.328673",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076493,
+            "range": "± 0.001625",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.690637,
+            "range": "± 31.476664",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 970.549715,
+            "range": "± 4.686806",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118957,
+            "range": "± 0.001413",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1207.873491,
+            "range": "± 12.670862",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1583.419983,
+            "range": "± 19.766776",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034153,
+            "range": "± 0.00189",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.683423,
+            "range": "± 1.871831",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.842106,
+            "range": "± 3.240497",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
