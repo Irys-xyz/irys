@@ -3,8 +3,8 @@ use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
 use eyre::{Report, Result as EyreResult};
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::insert_peer_list_item;
 use irys_database::reth_db::DatabaseError;
+use irys_database::{delete_peer_list_item, insert_peer_list_item};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
@@ -1081,10 +1081,56 @@ impl PeerNetworkService {
                 }
                 Ok(())
             }
-            PeerResponse::Rejected(rejected_response) => Err(
-                PeerListServiceError::PeerHandshakeRejected(rejected_response),
-            ),
+            PeerResponse::Rejected(rejected_response) => {
+                // A chain_id mismatch (mapped to NetworkMismatch) means the peer
+                // is on a different network. The gossip data plane trusts cache
+                // membership, not handshake outcome, so we must evict the peer
+                // rather than leave it cached and trusted.
+                let db = inner.state.lock().await.db.clone();
+                evict_peer_on_network_mismatch(&peer_list, &db, api_address, &rejected_response);
+                Err(PeerListServiceError::PeerHandshakeRejected(
+                    rejected_response,
+                ))
+            }
         }
+    }
+}
+
+/// On a terminal network-membership rejection (a `chain_id` mismatch is surfaced
+/// as [`RejectionReason::NetworkMismatch`]), evict the peer from the in-memory
+/// cache and the persistent DB. The gossip data plane (`check_peer_v*`) trusts
+/// cache membership rather than handshake outcome, so a peer we can no longer
+/// peer with must be removed from the cache — not merely left un-handshaked.
+/// No-op for any other rejection reason.
+fn evict_peer_on_network_mismatch(
+    peer_list: &PeerList,
+    db: &DatabaseProvider,
+    api_address: SocketAddr,
+    rejected: &RejectedResponse,
+) {
+    if !matches!(
+        rejected.reason,
+        irys_types::version::RejectionReason::NetworkMismatch
+    ) {
+        return;
+    }
+    let Some(removed) = peer_list.remove_peer_by_api_address(&api_address) else {
+        return;
+    };
+    warn!(
+        "Evicted peer {} (mining {}) after its handshake was rejected with NetworkMismatch",
+        api_address, removed.mining_address
+    );
+    match db.update_scoped(|tx| delete_peer_list_item(tx, &removed.peer_id)) {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => warn!(
+            "Failed to delete evicted peer {} from the peer DB: {:?}",
+            api_address, err
+        ),
+        Err(err) => warn!(
+            "DB transaction failed deleting evicted peer {}: {:?}",
+            api_address, err
+        ),
     }
 }
 
@@ -1243,6 +1289,92 @@ mod tests {
         fn peer_list(&self) -> PeerList {
             self.inner.peer_list()
         }
+    }
+
+    fn build_peer_list(config: &Config, db: &DatabaseProvider) -> PeerList {
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        PeerList::new(
+            config,
+            db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list")
+    }
+
+    #[test]
+    async fn network_mismatch_rejection_evicts_peer_from_cache_and_db() {
+        use irys_database::reth_db::transaction::DbTx as _;
+
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let db = open_db(temp_dir.path());
+        let peer_list = build_peer_list(&config, &db);
+
+        let (_mining, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        let peer_id = peer.peer_id;
+        let api = peer.address.api;
+        peer_list.add_or_update_peer(peer.clone(), true);
+        db.update_scoped(|tx| insert_peer_list_item(tx, &peer_id, &peer))
+            .expect("db tx")
+            .expect("insert peer");
+
+        assert!(peer_list.peer_by_api_address(api).is_some());
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_some()))
+                .unwrap()
+        );
+
+        let rejected = RejectedResponse {
+            reason: irys_types::version::RejectionReason::NetworkMismatch,
+            message: None,
+            retry_after: None,
+        };
+        evict_peer_on_network_mismatch(&peer_list, &db, api, &rejected);
+
+        assert!(
+            peer_list.peer_by_api_address(api).is_none(),
+            "chain/network-mismatch rejection should evict the peer from the cache"
+        );
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))
+                .unwrap(),
+            "chain/network-mismatch rejection should delete the peer from the DB"
+        );
+    }
+
+    #[test]
+    async fn non_network_rejection_retains_peer() {
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let db = open_db(temp_dir.path());
+        let peer_list = build_peer_list(&config, &db);
+
+        let (_mining, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        let api = peer.address.api;
+        peer_list.add_or_update_peer(peer, true);
+
+        let rejected = RejectedResponse {
+            reason: irys_types::version::RejectionReason::InternalError,
+            message: None,
+            retry_after: None,
+        };
+        evict_peer_on_network_mismatch(&peer_list, &db, api, &rejected);
+
+        assert!(
+            peer_list.peer_by_api_address(api).is_some(),
+            "a non-network rejection must not evict the peer"
+        );
     }
 
     #[test]

@@ -545,6 +545,17 @@ impl PeerList {
             .cloned()
     }
 
+    /// Evict a peer (identified by its API address) from the in-memory cache and
+    /// every lookup index, returning the removed peer if it was present. Used
+    /// when a handshake is rejected on network-membership grounds (e.g. a
+    /// `chain_id` mismatch): the gossip data plane (`check_peer_v*`) trusts cache
+    /// membership, so a peer we can no longer peer with must be removed from the
+    /// cache, not merely left un-handshaked.
+    pub fn remove_peer_by_api_address(&self, api_address: &SocketAddr) -> Option<PeerListItem> {
+        let mut guard = self.0.write().expect("PeerListDataInner lock poisoned");
+        guard.remove_peer_by_api_address(api_address)
+    }
+
     pub fn get_trusted_peer_gossip_address(&self, api_address: SocketAddr) -> Option<SocketAddr> {
         let binding = self.read();
         binding
@@ -987,6 +998,33 @@ impl PeerListDataInner {
         }
     }
 
+    /// Remove a peer from the persistent cache (or purgatory) and every lookup
+    /// map, mirroring the purgatory-eviction cleanup above. Emits `PeerRemoved`.
+    /// Returns the removed peer if it was present.
+    fn remove_peer_by_api_address(&mut self, api_address: &SocketAddr) -> Option<PeerListItem> {
+        let peer_id = *self.api_addr_to_peer_id_map.get(api_address)?;
+        let peer = self
+            .persistent_peers_cache
+            .remove(&peer_id)
+            .or_else(|| self.unstaked_peer_purgatory.pop(&peer_id))?;
+        let mining_addr = peer.mining_address;
+        self.gossip_addr_to_peer_id_map
+            .remove(&peer.address.gossip.ip());
+        self.api_addr_to_peer_id_map.remove(&peer.address.api);
+        self.miner_addr_to_peer_id_map.remove(&mining_addr);
+        self.peer_id_to_miner_addr_map.remove(&peer_id);
+        self.known_peers_cache.remove(&peer.address);
+        debug!(
+            "Evicted peer {:?} (api {:?}) from all caches",
+            peer_id, api_address
+        );
+        self.emit_peer_event(PeerEvent::PeerRemoved {
+            mining_addr,
+            peer: peer.clone(),
+        });
+        Some(peer)
+    }
+
     /// Helper method to update a peer in any cache (persistent or purgatory)
     fn update_peer_in_cache<F>(
         &mut self,
@@ -1397,6 +1435,48 @@ mod tests {
             config,
         };
         PeerList(Arc::new(RwLock::new(peer_list_data)))
+    }
+
+    /// Evicting a staked peer by its API address must clear it from every
+    /// lookup path so the gossip data plane (`check_peer_v*`) stops trusting it.
+    #[test]
+    fn remove_peer_by_api_address_clears_all_lookups() {
+        let peer_list =
+            create_test_peer_list(Config::new_with_random_peer_id(NodeConfig::testing()));
+        let (mining_addr, peer_id, peer) = create_test_peer(1);
+        let api = peer.address.api;
+        peer_list.add_or_update_peer(peer.clone(), true);
+
+        // Sanity: present via every lookup before eviction.
+        assert!(peer_list.peer_by_api_address(api).is_some());
+        assert!(peer_list.get_peer(&peer_id).is_some());
+        assert!(peer_list.peer_by_mining_address(&mining_addr).is_some());
+        assert_eq!(peer_list.peer_count(), 1);
+
+        let removed = peer_list.remove_peer_by_api_address(&api);
+
+        assert_eq!(
+            removed.map(|p| p.peer_id),
+            Some(peer_id),
+            "eviction should return the removed peer"
+        );
+        assert!(
+            peer_list.peer_by_api_address(api).is_none(),
+            "peer must be gone from the api-address index"
+        );
+        assert!(
+            peer_list.get_peer(&peer_id).is_none(),
+            "peer must be gone from the persistent cache"
+        );
+        assert!(
+            peer_list.peer_by_mining_address(&mining_addr).is_none(),
+            "peer must be gone from the mining-address index"
+        );
+        assert!(
+            !peer_list.all_known_peers().contains(&peer.address),
+            "peer must be gone from the known-peers cache"
+        );
+        assert_eq!(peer_list.peer_count(), 0);
     }
 
     mod peer_list_scoring_tests {
