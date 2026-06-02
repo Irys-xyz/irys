@@ -234,15 +234,23 @@ impl PeerNetworkServiceInner {
         // set and applies removals staged by `evict_peer_on_network_mismatch`.
         // Doing the delete here (rather than in a standalone transaction) keeps
         // it from racing with the snapshot insert below and resurrecting a peer.
-        let (db, removals) = {
+        //
+        // Snapshot the peers and drain the staged removals under the *same* state
+        // lock so the two are mutually consistent. Evictions also serialize on
+        // this lock (see the handshake-rejection path), so flush never observes a
+        // half-applied eviction — a peer removed from the cache but whose delete
+        // is not yet staged, or vice versa. The lock is released before the
+        // lock-free DB write; an eviction landing during that write can still
+        // re-persist a peer for one flush cycle, which is benign: the in-memory
+        // eviction is already in effect and the next flush deletes it.
+        let (db, persistable_peers, removals) = {
             let mut state = self.state.lock().await;
-            (
-                state.db.clone(),
-                std::mem::take(&mut state.pending_db_removals),
-            )
+            let db = state.db.clone();
+            let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
+            let removals = std::mem::take(&mut state.pending_db_removals);
+            (db, persistable_peers, removals)
         };
 
-        let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
         let result = db
             .update_scoped(|tx| {
                 for (peer_id, peer) in persistable_peers.iter() {
@@ -1116,10 +1124,17 @@ impl PeerNetworkService {
                 // rather than leave it cached and trusted. The DB delete is
                 // staged for `flush` (the sole peer-DB writer) so it cannot race
                 // with the snapshot insert and resurrect the peer.
-                if let Some(peer_id) =
-                    evict_peer_on_network_mismatch(&peer_list, api_address, &rejected_response)
+                //
+                // Remove from the cache and stage the delete under the same state
+                // lock `flush` takes, so flush never observes a half-applied
+                // eviction (cache-removed but not staged, or vice versa).
                 {
-                    inner.state.lock().await.pending_db_removals.insert(peer_id);
+                    let mut state = inner.state.lock().await;
+                    if let Some(peer_id) =
+                        evict_peer_on_network_mismatch(&peer_list, api_address, &rejected_response)
+                    {
+                        state.pending_db_removals.insert(peer_id);
+                    }
                 }
                 Err(PeerListServiceError::PeerHandshakeRejected(
                     rejected_response,
