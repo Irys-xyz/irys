@@ -95,11 +95,14 @@ a map that is **written but never read** (`:605`, single usage). The data plane
 2. Add `delete_peer_list_item(tx, peer_id)` to `irys-database` (mirror of
    `insert_peer_list_item`, using `tx.delete::<PeerListItems>`).
 3. At the outbound-announce rejection site (`announce_yourself_to_address`, the
-   `PeerResponse::Rejected` arm, `peer_network_service.rs:1084`): when
-   `rejected_response.reason == version::RejectionReason::NetworkMismatch`, evict
-   the peer from the cache (`remove_peer_by_api_address`) and delete it from the
-   DB (via `inner`'s `DatabaseProvider`, using the `flush`-style
-   `db.update_scoped`), then return the existing error.
+   `PeerResponse::Rejected` arm): when `rejected_response.reason ==
+   version::RejectionReason::NetworkMismatch`, evict the peer from the in-memory
+   cache (`remove_peer_by_api_address`) and **stage its id in
+   `pending_db_removals`** — do *not* delete from the DB inline. `flush`, the sole
+   `DatabaseProvider` peer-DB writer, applies the delete (`delete_peer_list_item`)
+   within its `db.update_scoped` transaction. The cache removal and the staging
+   are performed under the same state lock `flush` takes, so flush never observes
+   a half-applied eviction. The existing error return is preserved.
 4. Inbound ("we reject them") is already correct: #1435 returns `ChainIdMismatch`
    *before* `add_or_update_peer`, so a foreign peer is never added. A cached
    foreign peer cannot occur on a fully-upgraded network, so inbound eviction is
