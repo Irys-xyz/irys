@@ -519,9 +519,14 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
+        // Dedup against any block we've already seen. The helper also
+        // re-emits `AttemptReprocessingBlock` for parked-after-SoftInternal
+        // blocks whose per-block cooldown has elapsed, so a parked tip
+        // block has a recovery path on honest gossip re-arrivals instead
+        // of waiting for LRU eviction.
         let has_block_already_been_processed = self
             .block_pool
-            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
+            .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
             .await;
 
         if has_block_already_been_processed {
@@ -614,9 +619,11 @@ where
             return Ok(());
         }
 
+        // Same dedup-and-recover hook as the header gossip path; see the
+        // comment on the equivalent call in `handle_block_header`.
         let has_block_already_been_processed = self
             .block_pool
-            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
+            .dedup_and_maybe_emit_reprocess(&block_header.block_hash, block_header.height)
             .await;
 
         if has_block_already_been_processed {

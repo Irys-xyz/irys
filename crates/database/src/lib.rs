@@ -19,6 +19,8 @@ pub mod metadata;
 pub mod migration;
 /// Extension traits for custom tables
 pub mod reth_ext;
+/// Online MDBX env copy + node-local table stripping for snapshot export
+pub mod snapshot;
 /// Tables & methods specific to submodule databases
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables

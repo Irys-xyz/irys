@@ -119,3 +119,10 @@ max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 4
+
+# Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
+# listener to the host loopback; deployments expose it externally only via
+# an mTLS-terminating reverse proxy. See the ansible repo's
+# shared/tasks/install_reth_proxy.yml if you need to expose it.
+[metrics]
+bind_ip = "127.0.0.1"

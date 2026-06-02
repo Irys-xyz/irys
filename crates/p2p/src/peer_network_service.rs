@@ -803,7 +803,8 @@ impl PeerNetworkService {
                                 ));
                             }
                             RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
+                            | RejectionReason::ProtocolMismatch
+                            | RejectionReason::ChainIdMismatch => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rejected data request {:?} with {:?}",

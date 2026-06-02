@@ -1,8 +1,10 @@
 use crate::cli_args::{
-    Commands, IrysCli, RollbackMode, RollbackTarget, parse_rollback_target,
+    Commands, IrysCli, RollbackMode, RollbackTarget, SnapshotMode, parse_rollback_target,
     timestamp_millis_to_secs,
 };
 use crate::db_utils::{cli_init_irys_db, cli_init_reth_provider, import_genesis_to_db};
+use crate::snapshot::export::{ExportOpts, run_export};
+use crate::snapshot::import::{ImportOpts, run_import};
 use crate::snapshot_output::{
     cli_compare_output, cli_config, cli_snapshot_output, replay_current_network_snapshot,
     snapshot_from_genesis_dir,
@@ -68,6 +70,100 @@ fn resolve_signing_key(
                  mining_key in config.toml"
             )
         }
+    }
+}
+
+fn run_snapshot(mode: SnapshotMode) -> eyre::Result<()> {
+    let node_config: NodeConfig = load_config()?;
+    let config = Config::new_with_random_peer_id(node_config.clone());
+    let chain_id = config.consensus.chain_id;
+    let irys_schema_version = u32::from(irys_types::DatabaseVersion::CURRENT);
+
+    match mode {
+        SnapshotMode::Export {
+            data_dir,
+            output,
+            include_caches,
+            no_compact,
+            no_throttle_mvcc,
+        } => {
+            let data_dir = data_dir.unwrap_or_else(|| node_config.base_directory.clone());
+            let chain_id = verified_chain_id_for_export(&node_config, &data_dir, chain_id)?;
+            run_export(ExportOpts {
+                data_dir,
+                output,
+                include_caches,
+                chain_id,
+                copy_flags: irys_database::snapshot::CopyFlags {
+                    compact: !no_compact,
+                    throttle_mvcc: !no_throttle_mvcc,
+                },
+            })
+        }
+        SnapshotMode::Import {
+            input,
+            data_dir,
+            force,
+        } => {
+            let data_dir = data_dir.unwrap_or_else(|| node_config.base_directory.clone());
+            run_import(ImportOpts {
+                input,
+                data_dir,
+                force,
+                expected_chain_id: chain_id,
+                expected_irys_schema_version: irys_schema_version,
+            })
+        }
+    }
+}
+
+/// Refuse to label an export with `chain_id` unless the snapshotted data dir's
+/// `.irys_genesis.json` is present and byte-identical to the active config's
+/// `base_directory/.irys_genesis.json`. Genesis blocks are deterministic per
+/// chain, so identical genesis bytes prove the data dir belongs to the
+/// configured network. Fails closed: a missing genesis on either side means
+/// the chain identity cannot be proven, so the export is refused rather than
+/// stamped with an unverified `chain_id`.
+fn verified_chain_id_for_export(
+    node_config: &NodeConfig,
+    data_dir: &std::path::Path,
+    chain_id: u64,
+) -> eyre::Result<u64> {
+    let local_path = node_config
+        .base_directory
+        .join(crate::snapshot::GENESIS_FILE);
+    let target_path = data_dir.join(crate::snapshot::GENESIS_FILE);
+    let (Some(local), Some(target)) = (
+        read_optional_file(&local_path)?,
+        read_optional_file(&target_path)?,
+    ) else {
+        eyre::bail!(
+            "cannot verify chain identity for export: {} must be present in both \
+             --data-dir {} and the configured base_directory {}. Refusing to label \
+             the snapshot with an unverified chain_id={chain_id}.",
+            crate::snapshot::GENESIS_FILE,
+            data_dir.display(),
+            node_config.base_directory.display(),
+        );
+    };
+    if local != target {
+        eyre::bail!(
+            "--data-dir {} has a different {} than the configured base_directory {}; \
+             the data dir appears to belong to a different chain. Refusing to label \
+             the snapshot with chain_id={chain_id}.",
+            data_dir.display(),
+            crate::snapshot::GENESIS_FILE,
+            node_config.base_directory.display(),
+        );
+    }
+    Ok(chain_id)
+}
+
+fn read_optional_file(path: &std::path::Path) -> eyre::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(eyre::Report::new(e).wrap_err(format!("reading {}", path.display()))),
     }
 }
 
@@ -369,6 +465,7 @@ pub(crate) async fn run(args: IrysCli) -> eyre::Result<()> {
 
             Ok(())
         }
+        Commands::Snapshot { mode } => run_snapshot(mode),
         Commands::Tui {
             node_urls,
             config,

@@ -23,6 +23,7 @@ pub mod storage_module_service;
 pub mod supply_state_calculator;
 pub mod test_helpers;
 pub mod transaction_status;
+pub mod tx_inclusion;
 pub mod tx_selector;
 pub mod validation_service;
 
@@ -35,7 +36,7 @@ pub use chunk_ingress_service::{
 pub use data_sync_service::*;
 pub use mempool_guard::*;
 pub use mempool_service::*;
-pub use metrics::record_reth_fcu_head_height;
+pub use metrics::{record_chain_sync_block_rejected, record_reth_fcu_head_height};
 pub use mining_bus::MiningBus;
 pub use partition_mining_service::*;
 pub use reth_ethereum_primitives;

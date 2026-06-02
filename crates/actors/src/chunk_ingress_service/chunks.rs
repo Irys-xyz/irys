@@ -28,6 +28,33 @@ use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
 use tracing::{Instrument as _, debug, error, info, info_span, instrument, warn};
 
+/// CDR-only ingress-proof eligibility gate, factored out so the contract is
+/// unit-testable without standing up the full service.  Returns `true` iff
+/// the caller should short-circuit `try_generate_ingress_proof_for_root`.
+///
+/// Two checks:
+///   - `!data_size_confirmed`: the rightmost-chunk merkle validation hasn't
+///     attested the size yet, so we don't know which chunks are required.
+///   - `block_set.is_empty()`: cheap "has this data_root been seen in any
+///     block yet?" gate.  `block_set` is a hint with two writers (mempool
+///     `BlockConfirmed` pre-migration forward-fill + `persist_metadata`
+///     canonical writer); a stale `BlockConfirmed` processed after a reorg
+///     can leave an orphan hash here, so non-empty does NOT prove canonical
+///     inclusion.  An over-permissive gate is correctness-safe: ingress
+///     proofs are keyed on `data_root` (see the `IngressProofs` table), so a
+///     proof generated for an orphan-tx data_root remains valid if any future
+///     canonical tx references the same data_root — i.e. speculative, not
+///     wasted.  Canonical truth is re-derived by
+///     `tx_inclusion::find_canonical_ledger_range` at validation /
+///     promotion time.  An empty set, by contrast, means no writer has ever
+///     attached this data_root to a block, so we short-circuit.  After a
+///     reorg that empties block_set, the next canonical confirmation
+///     re-populates it via the mempool `BlockConfirmed` path
+///     (`lifecycle.rs:96`).
+fn should_skip_ingress_proof_generation(cdr: &irys_database::db_cache::CachedDataRoot) -> bool {
+    !cdr.data_size_confirmed || cdr.block_set.is_empty()
+}
+
 /// Represents data_size information and if it comes from the publish ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataSizeInfo {
@@ -503,8 +530,7 @@ impl ChunkIngressServiceInner {
 
     /// Checks whether an ingress proof should be generated for the given `data_root`
     /// and spawns proof generation if all prerequisites are met:
-    /// - data_size is confirmed (rightmost chunk merkle validation)
-    /// - data_root is included in a confirmed block (block_set non-empty)
+    /// - the CDR-only prerequisites in [`should_skip_ingress_proof_generation`]
     /// - no local proof already exists
     /// - all expected chunks are present
     pub(crate) fn try_generate_ingress_proof_for_root(
@@ -522,14 +548,7 @@ impl ChunkIngressServiceInner {
             return Ok(());
         };
 
-        if !cdr.data_size_confirmed {
-            return Ok(());
-        }
-
-        // Only generate ingress proofs for txs confirmed in a block's submit ledger.
-        // block_set is populated by cache_data_root() when called with a block header
-        // during block confirmation (lifecycle.rs). Empty means mempool-only.
-        if cdr.block_set.is_empty() {
+        if should_skip_ingress_proof_generation(&cdr) {
             return Ok(());
         }
 
@@ -884,8 +903,61 @@ pub fn generate_ingress_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::db_cache::CachedDataRoot;
+    use irys_types::UnixTimestamp;
     use proptest::prelude::*;
     use rstest::rstest;
+
+    /// Build a `CachedDataRoot` with explicit gate-relevant fields.
+    fn cdr_gate_fixture(
+        data_size_confirmed: bool,
+        block_set: Vec<H256>,
+        txid_set: Vec<H256>,
+        expiry_height: Option<u64>,
+    ) -> CachedDataRoot {
+        CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed,
+            txid_set,
+            block_set,
+            expiry_height,
+            cached_at: UnixTimestamp::from_secs(0),
+        }
+    }
+
+    /// Happy path: confirmed size + any block in `block_set` → proceed.
+    #[test]
+    fn ingress_gate_proceeds_when_size_confirmed_and_block_set_populated() {
+        let cdr = cdr_gate_fixture(true, vec![H256::random()], vec![H256::random()], None);
+        assert!(!should_skip_ingress_proof_generation(&cdr));
+    }
+
+    /// Confirmed-but-not-block-set state: pending tx with chunks staged but
+    /// no `BlockConfirmed` has populated `block_set` yet.  Today the gate
+    /// **short-circuits** — pinning this so a future widening to a
+    /// `txid_set` + canonical-metadata fall-through is a deliberate change.
+    #[test]
+    fn ingress_gate_skips_when_txid_set_populated_but_block_set_empty() {
+        let cdr = cdr_gate_fixture(true, vec![], vec![H256::random()], Some(100));
+        assert!(
+            should_skip_ingress_proof_generation(&cdr),
+            "current contract: empty block_set short-circuits even when txid_set is populated"
+        );
+    }
+
+    /// Unconfirmed data_size: skip regardless of `block_set` state.
+    #[test]
+    fn ingress_gate_skips_when_data_size_unconfirmed() {
+        let cdr = cdr_gate_fixture(false, vec![H256::random()], vec![H256::random()], None);
+        assert!(should_skip_ingress_proof_generation(&cdr));
+    }
+
+    /// Both gate inputs negative: skip.
+    #[test]
+    fn ingress_gate_skips_when_both_inputs_negative() {
+        let cdr = cdr_gate_fixture(false, vec![], vec![H256::random()], None);
+        assert!(should_skip_ingress_proof_generation(&cdr));
+    }
 
     /// Helper to create a submit ledger data size entry for test cases
     fn submit(data_size: u64) -> DataSizeInfo {

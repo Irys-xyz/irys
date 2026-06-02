@@ -80,6 +80,12 @@ impl DatabaseVersion {
     }
 }
 
+impl From<DatabaseVersion> for u32 {
+    fn from(version: DatabaseVersion) -> Self {
+        version as Self
+    }
+}
+
 impl std::fmt::Display for DatabaseVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", *self as u32)

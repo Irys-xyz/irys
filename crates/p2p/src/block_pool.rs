@@ -3,7 +3,7 @@ use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade};
-use irys_actors::block_validation::PreValidationError;
+use irys_actors::block_validation::{ErrorClass, PreValidationError};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -27,13 +27,61 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 const RECENTLY_PROCESSED_CACHE_SIZE: usize = 20;
 const BACKFILL_DEPTH: u64 = 100;
+
+/// Minimum interval between successive `AttemptReprocessingBlock`
+/// re-emissions for the same parked block. Without a cooldown a gossip
+/// storm against a parked-tip block becomes a reprocessing storm,
+/// re-spawning `process_block` faster than each attempt can finish.
+///
+/// The window is sized to comfortably exceed the typical SoftInternal
+/// recovery time. `wait_for_payload` defaults to 60 s in production
+/// (`SyncConfig::execution_payload_wait_timeout_millis`), so attempts
+/// blocking on payload availability finish at most ~1 minute after they
+/// started. A 10 s cooldown is long enough to absorb a gossip burst (the
+/// in-flight reprocess will still be running, but the inner
+/// `process_block` `is_processing=true` check already deduplicates
+/// concurrent reprocesses), short enough to redrive promptly once the
+/// previous attempt has failed and parked the block again.
+const REPROCESSING_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Outcome of the gossip-dedup check used by gossip and periodic-sync
+/// pull paths. Separates "fresh — proceed with `process_block`" from
+/// three distinct "skip" reasons so callers can react appropriately:
+/// in particular, [`Self::ParkedReadyForRetry`] is the tip-stall
+/// recovery hook — a parked SoftInternal block whose cooldown has
+/// elapsed must have `AttemptReprocessingBlock` re-emitted, not be
+/// silently skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockDedupStatus {
+    /// Block is unknown locally. Proceed into `process_block`.
+    Fresh,
+    /// Block is actively being processed, already in the tree (pending
+    /// validation, validated-reorgable, finalized), or known to belong
+    /// to a pruned fork. No action required.
+    KnownInFlight,
+    /// Block is parked in `blocks_cache` after a SoftInternal failure
+    /// (`is_processing = false`) and its per-block cooldown has elapsed
+    /// (or never fired). The caller should emit
+    /// `AttemptReprocessingBlock(hash)` to re-drive `process_block`.
+    /// The cooldown timestamp is updated by the dedup check itself so a
+    /// concurrent caller observing the same parked entry will see
+    /// `ParkedCoolingDown` until the window elapses again — preventing
+    /// a gossip storm from amplifying into a reprocessing storm.
+    ParkedReadyForRetry,
+    /// Block is parked but the cooldown window has not yet elapsed.
+    /// Skip; a prior caller has already requested reprocessing, or the
+    /// previous attempt has not had time to finish.
+    ParkedCoolingDown,
+}
 
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum CriticalBlockPoolError {
@@ -92,6 +140,13 @@ pub enum CriticalBlockPoolError {
 pub enum AdvisoryBlockPoolError {
     #[error("Block {0:?} has already been processed")]
     AlreadyProcessed(BlockHash),
+    /// Transient internal failure (not peer-attributable) that should NOT
+    /// evict the block from cache. Routed by the `SoftInternal` arm of
+    /// prevalidation classification so the next gossip arrival (or orphan
+    /// resolve) retries against the same cached block. No peer-scoring
+    /// penalty because the error reflects local state, not the peer's data.
+    #[error("Transient internal block-pool failure (block stays cached for retry): {0}")]
+    TransientInternal(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -156,6 +211,12 @@ pub(crate) struct CachedBlock {
     pub(crate) block: Arc<SealedBlock>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
+    /// Timestamp of the most recent `AttemptReprocessingBlock` emission
+    /// for this block while parked (`is_processing = false`). `None`
+    /// means no reprocessing attempt has been requested yet — the next
+    /// dedup check that observes the entry parked will mark it ready
+    /// for retry. See [`BlockDedupStatus`] and `REPROCESSING_COOLDOWN`.
+    pub(crate) last_reprocess_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -291,6 +352,14 @@ impl BlockCacheGuard {
             .change_block_processing_status(block_hash, is_processing);
     }
 
+    async fn cache_dedup_status(
+        &self,
+        block_hash: &BlockHash,
+        now: Instant,
+    ) -> Option<BlockDedupStatus> {
+        self.inner.write().await.cache_dedup_status(block_hash, now)
+    }
+
     async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
         self.inner.write().await.take_txs_for_block(block_hash)
     }
@@ -323,12 +392,25 @@ impl BlockCacheInner {
     ) -> Option<(BlockHash, CachedBlock)> {
         let block_hash = block.header().block_hash;
         let previous_block_hash = block.header().previous_block_hash;
+        // Preserve `last_reprocess_at` across re-inserts. When a parked
+        // block re-enters `process_block` (via `AttemptReprocessingBlock`),
+        // `add_block` is called again with the same hash. Resetting the
+        // field to `None` would bypass the 10s `REPROCESSING_COOLDOWN`
+        // for subsequent gossip while this reprocess is in flight, and —
+        // worse — for the next park if processing finds the parent still
+        // missing. Carry the prior stamp forward so the cooldown survives
+        // the retry.
+        let previous_last_reprocess_at = self
+            .blocks
+            .peek(&block_hash)
+            .and_then(|cached| cached.last_reprocess_at);
         let evicted = self.blocks.push(
             block.header().block_hash,
             CachedBlock {
                 block: Arc::clone(&block),
                 is_processing: true,
                 is_fast_tracking: fast_track,
+                last_reprocess_at: previous_last_reprocess_at,
             },
         );
 
@@ -353,6 +435,35 @@ impl BlockCacheInner {
     fn change_block_processing_status(&mut self, block_hash: BlockHash, is_processing: bool) {
         if let Some(block) = self.blocks.get_mut(&block_hash) {
             block.is_processing = is_processing
+        }
+    }
+
+    /// Cache-side half of the gossip dedup check. Classifies the block's
+    /// presence and, when it returns [`BlockDedupStatus::ParkedReadyForRetry`],
+    /// stamps `last_reprocess_at = now` atomically so a concurrent caller
+    /// observing the same entry sees [`BlockDedupStatus::ParkedCoolingDown`]
+    /// until the window elapses again. Returns `None` when the block is
+    /// not in `blocks`; the surrounding [`BlockPool::dedup_status_for_gossip`]
+    /// then falls through to the `block_status_provider` lookup for
+    /// in-tree / pruned-fork classification.
+    fn cache_dedup_status(
+        &mut self,
+        block_hash: &BlockHash,
+        now: Instant,
+    ) -> Option<BlockDedupStatus> {
+        let cached = self.blocks.get_mut(block_hash)?;
+        if cached.is_processing {
+            return Some(BlockDedupStatus::KnownInFlight);
+        }
+        let ready = match cached.last_reprocess_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= REPROCESSING_COOLDOWN,
+        };
+        if ready {
+            cached.last_reprocess_at = Some(now);
+            Some(BlockDedupStatus::ParkedReadyForRetry)
+        } else {
+            Some(BlockDedupStatus::ParkedCoolingDown)
         }
     }
 
@@ -489,14 +600,24 @@ where
             ))
         })?;
 
-        // Fetch the execution data that was already pulled and sealed
+        // Fetch the execution data that was already pulled and sealed.
+        // `wait_for_payload` returns one of two typed soft errors when
+        // the payload cannot be delivered: `ReceiverDisrupted` (LRU
+        // eviction of `payload_senders` or explicit cache removal) or
+        // `WaitTimeout` (bounded `execution_payload_wait_timeout`
+        // elapsed against a peer that advertised the header but never
+        // served the EVM payload). The block-pool repair path treats
+        // both as a soft `OtherInternal` so the caller retries via
+        // re-entry rather than misattributing to an EL fault; the
+        // variant-specific message (carried by thiserror's `Display`)
+        // surfaces in the formatted error for operator log grep.
         let execution_data = self
             .execution_payload_provider
             .wait_for_payload(&block_header.evm_block_hash)
             .await
-            .ok_or_else(|| {
+            .map_err(|err| {
                 CriticalBlockPoolError::OtherInternal(format!(
-                    "Failed to fetch execution payload for block {:?}",
+                    "Failed to fetch execution payload for block {:?}: {err}",
                     block_header.evm_block_hash
                 ))
             })?;
@@ -661,6 +782,7 @@ where
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_hash
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             return Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ));
@@ -710,6 +832,7 @@ where
             let err = CriticalBlockPoolError::ForkedBlock(block.header().block_hash);
             self.sync_state
                 .record_block_processing_error(err.to_string());
+            crate::metrics::record_block_pool_rejection("part_of_pruned_fork");
             return Err(err.into());
         }
 
@@ -750,29 +873,15 @@ where
             let is_already_in_cache = self.blocks_cache.contains_block(&prev_block_hash).await;
 
             if is_already_in_cache {
-                let is_parent_processing = self
-                    .blocks_cache
-                    .is_block_processing(&prev_block_hash)
+                // Route through the shared dedup/cooldown helper so an orphan-child
+                // storm against one parked parent cannot bypass the per-block
+                // reprocess cooldown. Prior shape emitted `AttemptReprocessingBlock`
+                // raw on every child arrival until the parent's `is_processing`
+                // flag flipped, defeating the rate guard that `dedup_status_for_gossip`
+                // enforces for the gossip path.
+                let parent_height = current_block_height.saturating_sub(1);
+                self.dedup_and_maybe_emit_reprocess(&prev_block_hash, parent_height)
                     .await;
-                if is_parent_processing {
-                    debug!(
-                        "Parent block {:?} is already processing, skipping the request",
-                        prev_block_hash
-                    );
-                } else {
-                    debug!(
-                        "Parent block {:?} is already in the cache and not processing, triggering its processing",
-                        prev_block_hash
-                    );
-                    if let Err(err) = self.sync_service_sender.send(
-                        SyncChainServiceMessage::AttemptReprocessingBlock(prev_block_hash),
-                    ) {
-                        error!(
-                            "BlockPool: Failed to send AttemptReprocessingBlock message: {:?}",
-                            err
-                        );
-                    }
-                }
                 return Ok(ProcessBlockResult::ParentAlreadyInCache);
             } else {
                 debug!(
@@ -844,6 +953,7 @@ where
                     .await;
                 self.sync_state
                     .record_block_processing_error(err.to_string());
+                crate::metrics::record_block_pool_rejection("reth_payload_unavailable");
                 return Err(CriticalBlockPoolError::BlockError(err.to_string()).into());
             }
         }
@@ -918,7 +1028,23 @@ where
             // simply couldn't verify it locally. All remaining variants are
             // genuine consensus rejections and route to `BlockError`.
             if let BlockDiscoveryError::BlockValidationError(pre_err) = &block_discovery_error {
-                if pre_err.is_fatal_corruption() {
+                // Single dispatch table for prevalidation-error handling. Two
+                // variants short-circuit ahead of the class-based match because
+                // their action differs from the rest of their class
+                // (`CachePoisoned` is a NodeFault but takes the graceful
+                // shutdown path; `ParentNotInCache` is SoftInternal but evicts
+                // from cache so a re-pull can fix it). All other dispatch
+                // happens via `classify()` to avoid duplicating the
+                // variant-classification table from `block_validation.rs` —
+                // adding a new `PreValidationError` variant only needs
+                // updating `classify()`, and the `ErrorClass` match here stays
+                // exhaustive automatically (3 fixed variants, no `_`).
+                if let PreValidationError::CachePoisoned { .. } = pre_err {
+                    // Cache poisoning is unrecoverable (RwLock poisoned by a
+                    // prior panic); retry will hit the same poison. Surface
+                    // as critical so the service can escalate via the
+                    // well-tested `FatalCacheCorruption` graceful-shutdown
+                    // path rather than the generic node-fault panic.
                     error!(
                         block.hash = ?block_hash,
                         error = ?pre_err,
@@ -934,12 +1060,20 @@ where
                         .await;
                     self.sync_state
                         .record_block_processing_error(pre_err.to_string());
+                    crate::metrics::record_block_pool_rejection("fatal_cache_corruption");
                     return Err(
                         CriticalBlockPoolError::FatalCacheCorruption(pre_err.to_string()).into(),
                     );
                 }
 
-                if matches!(pre_err, PreValidationError::ParentNotInCache { .. }) {
+                if let PreValidationError::ParentNotInCache { .. } = pre_err {
+                    // Parent missing from the in-memory block-tree cache due
+                    // to a local prune/reorg race. Peer is innocent. Evict
+                    // this block from cache so a re-pull (driven by a child
+                    // arriving and orphan-resolving) can re-stitch the chain;
+                    // unlike the generic SoftInternal path we do NOT park it
+                    // in cache, because nothing local will re-invoke
+                    // process_block on it.
                     warn!(
                         block.hash = ?block_hash,
                         error = ?pre_err,
@@ -955,28 +1089,70 @@ where
                         .await;
                     self.sync_state
                         .record_block_processing_error(pre_err.to_string());
+                    crate::metrics::record_block_pool_rejection("parent_not_in_cache");
                     return Err(
                         CriticalBlockPoolError::ParentNotInCache(pre_err.to_string()).into(),
                     );
                 }
 
-                if pre_err.is_internal_failure() {
-                    error!(
-                        block.hash = ?block_hash,
-                        error = ?pre_err,
-                        "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
-                    );
-                    // Keep the block in cache and clear `is_processing` so the next
-                    // gossip arrival (or orphan-resolve when a child arrives) re-runs
-                    // prevalidation. Removing would force a refetch round-trip even
-                    // though our local state is intact — the verifier crashed in an
-                    // isolated spawn_blocking thread, not in shared state.
-                    self.blocks_cache
-                        .change_block_processing_status(block_hash, false)
-                        .await;
-                    self.sync_state
-                        .record_block_processing_error(pre_err.to_string());
-                    return Err(CriticalBlockPoolError::OtherInternal(pre_err.to_string()).into());
+                // Exhaustive match — no `_` wildcard. If `ErrorClass` gains a
+                // new variant the compiler forces us to decide the dispatch
+                // here rather than silently peer-attributing a local fault
+                // (or vice versa).
+                match pre_err.classify() {
+                    ErrorClass::NodeFault => {
+                        // Node fault (verifier panic, DB I/O, local arithmetic
+                        // bug, internal channel dead, OS clock failure, local
+                        // cache mutation failure): the fault is in this node,
+                        // not the peer's block. Retrying will hit the same
+                        // fault. Panic so `setup_panic_hook` converts to a
+                        // graceful SIGINT and the supervisor restarts the node
+                        // clean. Same never-mislabel rationale as the VDF
+                        // stall watchdog: a node fault tells us nothing about
+                        // block validity, and either misclassification forks
+                        // us off the network.
+                        panic!(
+                            "block pool: prevalidation hit a node fault (block={:?}, error={}); aborting node — see PreValidationError::is_node_fault for rationale",
+                            block_hash, pre_err
+                        );
+                    }
+                    ErrorClass::SoftInternal => {
+                        error!(
+                            block.hash = ?block_hash,
+                            error = ?pre_err,
+                            "Block pool: internal prevalidation failure (not peer-attributed); block validity is unknown, keeping in cache for retry"
+                        );
+                        // Keep the block in cache and clear `is_processing` so the next
+                        // gossip arrival (or orphan-resolve when a child arrives) re-runs
+                        // prevalidation. Removing would force a refetch round-trip even
+                        // though our local state is intact — the verifier crashed in an
+                        // isolated spawn_blocking thread, not in shared state.
+                        self.blocks_cache
+                            .change_block_processing_status(block_hash, false)
+                            .await;
+                        self.sync_state
+                            .record_block_processing_error(pre_err.to_string());
+                        crate::metrics::record_block_pool_rejection(
+                            "internal_prevalidation_failure",
+                        );
+                        // Route through `Advisory` so `GossipError::is_advisory()`
+                        // returns true and chain-sync's eviction (chain_sync.rs:461)
+                        // is skipped — the block stays in cache for the next
+                        // gossip arrival or orphan-resolve to retry. The intent
+                        // here was always "keep cached + clear is_processing",
+                        // but returning `Critical` defeated it via chain-sync's
+                        // non-advisory eviction path.
+                        return Err(BlockPoolError::Advisory(
+                            AdvisoryBlockPoolError::TransientInternal(pre_err.to_string()),
+                        ));
+                    }
+                    // Consensus rejection: peer's block is genuinely invalid.
+                    // Fall through to the outer error/remove/return path so
+                    // the existing `BlockError` reporting (which logs the
+                    // full `block_discovery_error`, not just `pre_err`)
+                    // remains the single point that handles peer-attributed
+                    // failures across all `BlockDiscoveryError` variants.
+                    ErrorClass::Consensus => {}
                 }
             }
 
@@ -992,6 +1168,7 @@ where
                 .await;
             self.sync_state
                 .record_block_processing_error(block_discovery_error.to_string());
+            crate::metrics::record_block_pool_rejection("block_validation_error");
             return Err(
                 CriticalBlockPoolError::BlockError(block_discovery_error.to_string()).into(),
             );
@@ -1170,21 +1347,98 @@ where
         self.blocks_cache.is_block_requested(block_hash).await
     }
 
-    pub(crate) async fn is_block_processing_or_processed(
+    /// Classify a gossip-arrived (or periodic-sync-pulled) block for
+    /// dedup purposes. Splits the prior boolean predicate into an
+    /// explicit state machine — see [`BlockDedupStatus`] — so callers
+    /// can act on the parked-but-out-of-cooldown case rather than
+    /// silently skipping a parked tip block whose only recovery path
+    /// would otherwise be LRU eviction (the parked-tip-stall hazard).
+    ///
+    /// Returning [`BlockDedupStatus::ParkedReadyForRetry`] has the side
+    /// effect of stamping the entry's `last_reprocess_at` to the
+    /// current monotonic time; a concurrent caller observing the same
+    /// entry will therefore see [`BlockDedupStatus::ParkedCoolingDown`]
+    /// for `REPROCESSING_COOLDOWN` before another retry is allowed.
+    /// This is what prevents a gossip storm from amplifying into a
+    /// reprocessing storm (the inner `process_block` `is_processing`
+    /// check also dedups concurrent reprocesses, but only after the
+    /// expensive send + spawn round-trip).
+    pub(crate) async fn dedup_status_for_gossip(
         &self,
         block_hash: &BlockHash,
         block_height: u64,
-    ) -> bool {
-        if self.blocks_cache.is_block_processing(block_hash).await {
-            return true;
+    ) -> BlockDedupStatus {
+        // Cache-resident entries (actively processing or parked after
+        // SoftInternal failure) take priority over the block-status
+        // provider: the block has already started traversing
+        // `process_block`, regardless of whether it has reached the
+        // tree yet.
+        if let Some(status) = self
+            .blocks_cache
+            .cache_dedup_status(block_hash, Instant::now())
+            .await
+        {
+            return status;
         }
         let status = self
             .block_status_provider
             .block_status(block_height, block_hash);
-        // A block that is in the tree pending validation has also been observed
-        // already; we do not want gossip handlers to re-enter `process_block`
-        // for it.
-        status.is_processed() || status.is_in_tree()
+        // Full "already-known locally" predicate: gossip handlers must not
+        // re-enter `process_block` for any block whose status we've already
+        // determined. The union covers two disjoint sets:
+        //   - `is_in_tree()` -> InTreePendingValidation |
+        //     ProcessedButCanBeReorganized | Finalized (in-memory tree, or
+        //     migrated into the index)
+        //   - `is_a_part_of_pruned_fork()` -> PartOfAPrunedFork (known to the
+        //     index at this height under a different canonical hash; would
+        //     re-classify as pruned on every gossip cycle if not short-
+        //     circuited here)
+        // Only `NotProcessed` returns Fresh — the one variant where
+        // `process_block` legitimately needs to run.
+        if status.is_in_tree() || status.is_a_part_of_pruned_fork() {
+            BlockDedupStatus::KnownInFlight
+        } else {
+            BlockDedupStatus::Fresh
+        }
+    }
+
+    /// Gossip-handler entry point that combines the dedup classification
+    /// with the side-effecting reprocess emit. Returns `true` when the
+    /// caller should skip the gossip arrival (already known) and `false`
+    /// only when the block is fresh and `process_block` should run.
+    ///
+    /// For [`BlockDedupStatus::ParkedReadyForRetry`] this sends an
+    /// `AttemptReprocessingBlock(hash)` to the chain-sync service —
+    /// the same recovery message used when a child arrives — so a
+    /// parked tip block (which has no child to trigger its
+    /// orphan-resolve) recovers from honest gossip re-arrivals or
+    /// periodic-sync re-pulls instead of waiting for LRU eviction.
+    pub(crate) async fn dedup_and_maybe_emit_reprocess(
+        &self,
+        block_hash: &BlockHash,
+        block_height: u64,
+    ) -> bool {
+        match self.dedup_status_for_gossip(block_hash, block_height).await {
+            BlockDedupStatus::Fresh => false,
+            BlockDedupStatus::KnownInFlight | BlockDedupStatus::ParkedCoolingDown => true,
+            BlockDedupStatus::ParkedReadyForRetry => {
+                debug!(
+                    block.hash = ?block_hash,
+                    block.height = block_height,
+                    "Block pool: re-emitting AttemptReprocessingBlock for parked SoftInternal block (gossip-driven recovery)"
+                );
+                match self.sync_service_sender.send(
+                    SyncChainServiceMessage::AttemptReprocessingBlock(*block_hash),
+                ) {
+                    Ok(()) => crate::metrics::record_block_pool_orphan_retry(),
+                    Err(err) => error!(
+                        "Block pool: failed to send AttemptReprocessingBlock for parked block {:?}: {:?}",
+                        block_hash, err
+                    ),
+                }
+                true
+            }
+        }
     }
 
     /// Inserts an execution payload into the internal cache so that it can be
@@ -1302,6 +1556,23 @@ where
     pub(crate) async fn get_cached_block(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.blocks_cache.get_block_cloned(block_hash).await
     }
+
+    /// Test-only: insert a block directly into the internal cache, then set
+    /// its `is_processing` flag. Lets tests exercise the parked-block
+    /// (`is_processing = false`) branch of `is_block_processing_or_processed`
+    /// without driving the full `process_block` flow.
+    #[cfg(test)]
+    pub(crate) async fn test_insert_block_into_cache(
+        &self,
+        block: Arc<SealedBlock>,
+        is_processing: bool,
+    ) {
+        let block_hash = block.header().block_hash;
+        self.blocks_cache.add_block(block, false).await;
+        self.blocks_cache
+            .change_block_processing_status(block_hash, is_processing)
+            .await;
+    }
 }
 
 fn check_block_status(
@@ -1318,6 +1589,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is already in tree pending validation",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ))
@@ -1327,6 +1599,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is already processed",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("already_processed");
             Err(BlockPoolError::Advisory(
                 AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
             ))
@@ -1336,6 +1609,7 @@ fn check_block_status(
                 "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
                 block_height, block_hash,
             );
+            crate::metrics::record_block_pool_rejection("try_reprocess_finalized");
             Err(CriticalBlockPoolError::TryingToReprocessFinalizedBlock(block_hash).into())
         }
         BlockStatus::PartOfAPrunedFork => {
@@ -1343,6 +1617,7 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is part of a pruned fork",
                 block_hash, block_height,
             );
+            crate::metrics::record_block_pool_rejection("part_of_pruned_fork");
             Err(CriticalBlockPoolError::ForkedBlock(block_hash).into())
         }
     }
@@ -1443,6 +1718,86 @@ mod tests {
             .expect("child1 should be stored in blocks cache");
         assert!(cached.is_processing);
         assert!(!cached.is_fast_tracking);
+    }
+
+    /// `add_block` must preserve `last_reprocess_at` across re-inserts
+    /// of the same block hash. The recovery flow for a SoftInternal
+    /// parked block is: gossip-driven retry → `dedup_status_for_gossip`
+    /// observes `ParkedReadyForRetry` and stamps `last_reprocess_at =
+    /// now` → `AttemptReprocessingBlock` fires → `process_block` calls
+    /// `add_block` again on the same hash. If `add_block` resets the
+    /// stamp to `None`, the 10s `REPROCESSING_COOLDOWN` no longer
+    /// survives across the retry: a concurrent gossip arrival during
+    /// reprocess would observe `ParkedReadyForRetry` again (because the
+    /// stamp is gone) and emit a SECOND reprocess message, reopening the
+    /// gossip-storm amplification path the per-block cooldown closed.
+    ///
+    /// This test pins the carry-forward behaviour. If a future
+    /// refactor of `add_block` regresses to `last_reprocess_at: None`,
+    /// the assertion fires.
+    #[test]
+    fn add_block_preserves_last_reprocess_at_across_reinsert() {
+        let mut cache = BlockCacheInner::new();
+        let parent = BlockHash::repeat_byte(0xDA);
+        let block = make_sealed_block(parent, 5, Default::default());
+        let block_hash = block.header().block_hash;
+
+        // First insert: production path mints `last_reprocess_at = None`.
+        cache.add_block(Arc::clone(&block), false);
+        assert!(
+            cache.blocks.peek(&block_hash).is_some(),
+            "block must be in cache after add_block"
+        );
+        assert!(
+            cache
+                .blocks
+                .peek(&block_hash)
+                .expect("just-inserted")
+                .last_reprocess_at
+                .is_none(),
+            "fresh insert must have no reprocess stamp"
+        );
+
+        // Park the entry (is_processing = false) so `cache_dedup_status`
+        // takes the parked-block branch and stamps `last_reprocess_at`.
+        cache.change_block_processing_status(block_hash, false);
+
+        let stamp_time = Instant::now();
+        let status = cache.cache_dedup_status(&block_hash, stamp_time);
+        assert!(
+            matches!(status, Some(BlockDedupStatus::ParkedReadyForRetry)),
+            "parked entry with no prior stamp must classify ReadyForRetry, got {status:?}"
+        );
+        assert_eq!(
+            cache
+                .blocks
+                .peek(&block_hash)
+                .expect("entry must still be present")
+                .last_reprocess_at,
+            Some(stamp_time),
+            "cache_dedup_status must atomically stamp `last_reprocess_at` when returning ReadyForRetry"
+        );
+
+        // Re-insert the same block (mirrors `process_block` re-entering
+        // `add_block` after `AttemptReprocessingBlock` fires). The new
+        // entry must carry the prior stamp forward, NOT reset to None.
+        cache.add_block(Arc::clone(&block), false);
+
+        let after_reinsert = cache
+            .blocks
+            .peek(&block_hash)
+            .expect("re-insert must keep entry present");
+        assert_eq!(
+            after_reinsert.last_reprocess_at,
+            Some(stamp_time),
+            "add_block re-insert must preserve `last_reprocess_at` so the \
+             reprocess cooldown survives across retries — resetting to None would \
+             reopen the gossip-storm amplification path"
+        );
+        assert!(
+            after_reinsert.is_processing,
+            "re-insert flips is_processing back to true (production semantics)"
+        );
     }
 
     #[test]

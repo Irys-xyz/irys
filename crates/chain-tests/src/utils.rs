@@ -3784,6 +3784,25 @@ pub enum BlockValidationOutcome {
     StoredOnNode(ChainState),
     /// Block was discarded with validation error details.
     Discarded(irys_actors::block_validation::ValidationError),
+    /// Harness observed the block disappear from the block tree without
+    /// receiving a corresponding `BlockStateUpdated { discarded: true }`
+    /// event. This is a property of the test harness's event-observation
+    /// loop, NOT a validation outcome — the block may have been discarded
+    /// for any reason that didn't traverse the event broadcaster.
+    NoDiscardEventObserved,
+    /// Harness exhausted its polling budget without seeing the block reach
+    /// a terminal state. Again, not a validation outcome — a harness
+    /// timeout. Tests that hit this should diagnose why the block stalled.
+    HarnessTimeout,
+    /// The harness's broadcast receiver lagged and dropped events. The
+    /// matching `BlockStateUpdated` for this block may have been among
+    /// the missed events, so the outcome is unknown. Surfacing this
+    /// distinct variant (instead of falling through to
+    /// `NoDiscardEventObserved`) lets tests detect channel overflow and
+    /// diagnose flakiness instead of silently treating lag as a
+    /// no-event-observed result. See the broadcast channel docs for
+    /// `RecvError::Lagged`.
+    ReceiverLagged { missed: u64 },
 }
 
 pub fn assert_validation_error(
@@ -3797,6 +3816,40 @@ pub fn assert_validation_error(
     }
 }
 
+/// Assert the LCA contract that `find_reorg_split` upholds on a [`ReorgEvent`]:
+/// `fork_parent` is the common parent of both divergent suffixes, so its hash is
+/// the `previous_block_hash` of each fork's first block and its height is one
+/// below them. A reorg always diverges on both sides, so empty forks are a
+/// contract violation that fails the assertion rather than being skipped.
+pub fn assert_reorg_event_lca_contract(reorg_event: &ReorgEvent) {
+    assert!(
+        !reorg_event.old_fork.is_empty() && !reorg_event.new_fork.is_empty(),
+        "a reorg must produce non-empty old_fork and new_fork",
+    );
+    let first_old = reorg_event.old_fork.first().expect("old_fork non-empty");
+    let first_new = reorg_event.new_fork.first().expect("new_fork non-empty");
+    assert_eq!(
+        reorg_event.fork_parent.block_hash,
+        first_old.header().previous_block_hash,
+        "fork_parent must be the previous_block_hash of old_fork[0]",
+    );
+    assert_eq!(
+        reorg_event.fork_parent.block_hash,
+        first_new.header().previous_block_hash,
+        "fork_parent must be the previous_block_hash of new_fork[0]",
+    );
+    assert_eq!(
+        reorg_event.fork_parent.height + 1,
+        first_old.header().height,
+        "fork_parent must be one height below old_fork[0]",
+    );
+    assert_eq!(
+        reorg_event.fork_parent.height + 1,
+        first_new.header().height,
+        "fork_parent must be one height below new_fork[0]",
+    );
+}
+
 #[diag_slow(state = format!("block_hash={}", block_hash))]
 pub async fn read_block_from_state(
     node_ctx: &IrysNodeCtx,
@@ -3807,14 +3860,88 @@ pub async fn read_block_from_state(
 
     // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
-        // Check for block state events (non-blocking)
-        while let Ok(event) = event_receiver.try_recv() {
-            if event.block_hash == *block_hash && event.discarded {
-                // Block was discarded, extract validation error from result
-                if let irys_actors::block_tree_service::ValidationResult::Invalid(error) =
-                    event.validation_result
-                {
-                    return BlockValidationOutcome::Discarded(error);
+        // Drain ready events explicitly so we can distinguish "no events
+        // pending" from "channel lagged past our slow polling cadence".
+        // The prior `while let Ok(..)` loop collapsed `Lagged` into the
+        // same exit as `Empty`, which silently lost the discard event
+        // when the channel overflowed.
+        loop {
+            match event_receiver.try_recv() {
+                Ok(event) => {
+                    if event.block_hash == *block_hash && event.discarded {
+                        // Block was discarded; extract the underlying
+                        // ValidationError from either dispatch arm.
+                        // `Invalid` carries consensus rejections (peer's
+                        // block is bad); `InternalFailure` carries
+                        // local/runtime issues including cancel reasons
+                        // like ParentMissing that route as internal. Both
+                        // surface to tests via
+                        // `BlockValidationOutcome::Discarded(error)` so
+                        // `assert_validation_error` works on either.
+                        match event.validation_result {
+                            irys_actors::block_tree_service::ValidationResult::Invalid(
+                                rejection,
+                            ) => {
+                                return BlockValidationOutcome::Discarded(rejection.err().clone());
+                            }
+                            irys_actors::block_tree_service::ValidationResult::InternalFailure(
+                                internal,
+                            ) => {
+                                return BlockValidationOutcome::Discarded(internal.err().clone());
+                            }
+                            irys_actors::block_tree_service::ValidationResult::Valid => {}
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                    // Re-poll block state BEFORE surfacing `ReceiverLagged`.
+                    // Under concurrent test load the broadcast channel can
+                    // overflow for reasons completely unrelated to
+                    // `block_hash` (a different block produced a burst of
+                    // events); returning eagerly here would turn a
+                    // successful validation into a phantom `ReceiverLagged`
+                    // failure. So we consult `block_tree_guard`: if it
+                    // already shows a terminal state for our block, the
+                    // discard event we "missed" was for someone else and
+                    // the validation outcome is recoverable. Only fall
+                    // through to `ReceiverLagged` when re-poll cannot
+                    // produce a definitive outcome either.
+                    let polled = {
+                        let read = node_ctx.block_tree_guard.read();
+                        read.get_block_and_status(block_hash)
+                            .into_iter()
+                            .map(|(_, state)| *state)
+                            .next()
+                    };
+                    match polled {
+                        // Terminal in-tree state — block survived
+                        // validation. The lag was unrelated to us.
+                        Some(chain_state)
+                            if !matches!(
+                                chain_state,
+                                ChainState::NotOnchain(BlockState::ValidationScheduled)
+                                    | ChainState::Validated(BlockState::ValidationScheduled)
+                            ) =>
+                        {
+                            return BlockValidationOutcome::StoredOnNode(chain_state);
+                        }
+                        // Block missing AND we'd previously seen it
+                        // scheduled — same recovery shape as the outer
+                        // poll's `NoDiscardEventObserved` path: we know it
+                        // was discarded, just can't recover the error.
+                        None if was_validation_scheduled => {
+                            return BlockValidationOutcome::NoDiscardEventObserved;
+                        }
+                        // Re-poll is non-definitive (still scheduled, or
+                        // unknown without prior scheduled sighting). The
+                        // discard event for `block_hash` truly may have
+                        // been among the missed messages — surface as
+                        // distinct so the test can diagnose the lag
+                        // instead of chasing a phantom failure.
+                        _ => return BlockValidationOutcome::ReceiverLagged { missed },
+                    }
                 }
             }
         }
@@ -3829,14 +3956,14 @@ pub async fn read_block_from_state(
         };
 
         let Some(chain_state) = result else {
-            // If we previously saw "validation scheduled" and now block status is None,
-            // it means the block was discarded
+            // If we previously saw "validation scheduled" and now block status
+            // is None, the block was discarded — but without the matching
+            // event the harness can't surface the underlying ValidationError.
+            // Tests that need to assert on a specific error must observe via
+            // `assert_validation_error`, which will treat this synthetic
+            // outcome as a panic (correct: no event = no assertion possible).
             if was_validation_scheduled {
-                return BlockValidationOutcome::Discarded(
-                    irys_actors::block_validation::ValidationError::Other(
-                        "Block was discarded without validation error event".to_string(),
-                    ),
-                );
+                return BlockValidationOutcome::NoDiscardEventObserved;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -3850,9 +3977,7 @@ pub async fn read_block_from_state(
             _ => return BlockValidationOutcome::StoredOnNode(chain_state),
         }
     }
-    BlockValidationOutcome::Discarded(irys_actors::block_validation::ValidationError::Other(
-        "Timeout waiting for block validation".to_string(),
-    ))
+    BlockValidationOutcome::HarnessTimeout
 }
 
 /// Wait for a [`BlockStateUpdated`] event matching `predicate`, with a timeout.

@@ -180,7 +180,7 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 
@@ -500,6 +500,8 @@ async fn should_gossip_execution_payloads() -> eyre::Result<()> {
         .wait_for_payload(&block.evm_block_hash)
         .await
         .expect("to wait for execution payload");
+    // `wait_for_payload` returns `Result` — `.expect()` on `Result` panics
+    // with the typed error, preserving the existing test semantics.
     // We compare the payloads because the execution data doesn't implement `PartialEq` directly
     assert_eq!(payload.payload, block_execution_data.payload);
 

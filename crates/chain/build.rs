@@ -20,6 +20,10 @@ fn main() {
         if !has_tag && sha.is_empty() {
             panic!("GIT_SHA must be non-empty when GIT_HAS_TAG is false");
         }
+        // Docker passes the full 40-char commit as GIT_SHA; truncate to 7 to match
+        // the git-detection path below (`--short=7`) and the 7-char short-hash
+        // contract documented on irys-types::init_version.
+        let sha = sha.get(..7).unwrap_or(sha);
         println!("cargo:rustc-env=GIT_SHA={sha}");
         println!("cargo:rustc-env=GIT_HAS_TAG={has_tag}");
         println!("cargo:rustc-env=GIT_DIRTY={dirty}");

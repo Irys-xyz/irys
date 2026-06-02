@@ -224,6 +224,44 @@ impl Config {
             );
         }
 
+        // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
+        // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
+        // (block_validation.rs) where the per-proof intersection loop picks
+        // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
+        // consensus-fork vector when `block_range` straddles multiple Submit
+        // slots.  The determinism fix lives on `fix/assigned-miners-determinism`
+        // and is a consensus rule change that must be coordinated with a
+        // network upgrade.  Under all currently-deployed configs the value is
+        // 0 and the non-deterministic path is vacuous; raising it without the
+        // determinism fix risks divergence between nodes.
+        //
+        // When the determinism fix lands and gets activated, REMOVE this guard
+        // (and the matching test in this file).  Until then this assert errs
+        // loudly at startup so a config bump can't silently activate the bug.
+        ensure!(
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees
+                == 0,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
+             until fix/assigned-miners-determinism lands — the current `get_assigned_ingress_proofs` \
+             impl picks `assigned_miners` via non-deterministic HashMap iteration when \
+             block_range intersects multiple Submit slots",
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees,
+        );
+        if let Some(ref fork) = self.consensus.hardforks.next_name_tbd {
+            ensure!(
+                fork.number_of_ingress_proofs_from_assignees == 0,
+                "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
+                 must be 0 until fix/assigned-miners-determinism lands — see frontier guard above",
+                fork.number_of_ingress_proofs_from_assignees,
+            );
+        }
+
         Ok(())
     }
 }
@@ -896,6 +934,111 @@ mod tests {
         assert_eq!(cfg, dec);
     }
 
+    /// Minimal-but-complete `NodeConfig` TOML fixture missing only the
+    /// `[metrics]` block; used by both `metrics_bind_ip_*` tests below.
+    /// Mirrors the fixture in `test_deserialize_config_from_toml`.
+    const TOML_WITHOUT_METRICS: &str = r#"
+        node_mode = "Genesis"
+        sync_mode = "Full"
+        base_directory = "~/.tmp/.irys"
+        consensus = "Testing"
+        mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        peer_filter_mode = "trusted_and_handshake"
+        genesis_peer_discovery_timeout_millis = 10000
+        stake_pledge_drives = false
+        initial_whitelist = ["127.0.0.1:8080"]
+        initial_stake_and_pledge_whitelist = [
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32",
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+        ]
+
+        [[trusted_peers]]
+        gossip = "127.0.0.1:8081"
+        api = "127.0.0.1:8080"
+
+        [trusted_peers.execution]
+        peering_tcp_addr = "127.0.0.1:30303"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+        [[oracles]]
+        type = "mock"
+        initial_price = 1.0
+        incremental_change = 0.00000000000001
+        smoothing_interval = 15
+
+        [storage]
+        num_writes_before_sync = 1
+
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
+
+        [gossip]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [packing.local]
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+
+        [cache]
+        cache_clean_lag = 2
+
+        [http]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [reth.network]
+        use_random_ports = true
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+
+        [vdf]
+        parallel_verification_thread_limit = 8
+        throttle = true
+
+        [mempool]
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
+        max_preheader_chunks_per_item= 64
+        max_preheader_data_path_bytes= 65536
+        max_invalid_items = 10_000
+        max_valid_items = 10_000
+        max_valid_chunks = 10000
+        max_valid_submit_txs = 3000
+        max_valid_commitment_addresses = 300
+        max_commitments_per_address = 20
+    "#;
+
+    #[test]
+    fn metrics_bind_ip_defaults_to_loopback() {
+        // Fixture omits the [metrics] section entirely — tests the
+        // #[serde(default)] fall-through for already-deployed configs.
+        let cfg: NodeConfig =
+            toml::from_str(TOML_WITHOUT_METRICS).expect("minimal config should deserialise");
+        assert_eq!(cfg.metrics.bind_ip, "127.0.0.1");
+    }
+
+    #[test]
+    fn metrics_bind_ip_overridable_via_toml() {
+        let toml = format!("{TOML_WITHOUT_METRICS}\n\n[metrics]\nbind_ip = \"10.0.0.5\"\n");
+        let cfg: NodeConfig =
+            toml::from_str(&toml).expect("config with explicit [metrics] should deserialise");
+        assert_eq!(cfg.metrics.bind_ip, "10.0.0.5");
+    }
+
     #[test]
     fn test_parse_testnet_config_template() {
         let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1126,6 +1269,62 @@ mod validate_tests {
             msg.contains("max_allowed_vdf_fork_steps"),
             "expected error about vdf fork steps, got: {msg}"
         );
+    }
+
+    /// Guard for `number_of_ingress_proofs_from_assignees`: the consensus
+    /// rule that consumes this value (`get_assigned_ingress_proofs`) only
+    /// became deterministic once `slot_ranges` switched to a `BTreeMap`.
+    /// Until that fix is gated behind a hardfork activation, the value MUST
+    /// stay `0` everywhere (no nondeterministic path is exercised because
+    /// the caller's clamp zeroes the requirement when the input is 0).
+    /// These tests pin both ensure! arms.
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 1;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("frontier.number_of_ingress_proofs_from_assignees"),
+            "expected frontier guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_next_name_tbd() {
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 1,
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("next_name_tbd.number_of_ingress_proofs_from_assignees"),
+            "expected next_name_tbd guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_assignee_proofs_zero_on_both_arms() {
+        // Default `NodeConfig::testing()` already pins both arms to 0; this
+        // asserts that the guard does NOT spuriously reject the happy path
+        // (e.g. by mishandling the `Option` arm when next_name_tbd is set).
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 0,
+            });
+        });
+        cfg.validate()
+            .expect("both arms set to 0 should pass the assignee-proofs guard");
     }
 
     #[rstest]

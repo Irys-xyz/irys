@@ -3039,11 +3039,18 @@ pub mod test_utils {
         let mut nodes: Vec<NodeTestContext<_, _>> = Vec::with_capacity(num_nodes.len());
 
         for (idx, producer) in num_nodes.iter().enumerate() {
-            let node_config = NodeConfig::new(chain_spec.clone())
+            let mut node_config = NodeConfig::new(chain_spec.clone())
                 .with_network(network_config.clone())
                 .with_unused_ports()
                 .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
                 .set_dev(is_dev);
+            // Reth's default `engine.cross_block_cache_size` is 4 GiB per node,
+            // which the payload processor allocates proportionally to once it
+            // starts executing payloads — so every test that mines even one
+            // block paid ~2.3 GB peak RSS for cache the test never used. A
+            // small cap fits any test's working set and drops per-test RSS by
+            // ~10×; we measured 2.3 GB → 226 MB on a single-block mining test.
+            node_config.engine.cross_block_cache_size = 64;
 
             let span = span!(Level::INFO, "node", idx);
             let _enter = span.enter();
