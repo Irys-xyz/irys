@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780422056028,
+  "lastUpdate": 1780424395508,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5551,6 +5551,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "60908709ecfc3922e6af3ed3e941f9ef1f1115f1",
+          "message": "feat(p2p): evict peers on chain_id (network) mismatch handshake rejection (#1437)\n\n* feat(p2p): evict peers on chain_id (network) mismatch handshake rejection\n\nA handshake rejected for a chain_id mismatch (mapped to NetworkMismatch) only\nrecorded a failed announcement and left the peer in the cache. The gossip data\nplane (check_peer_v*) trusts cache membership rather than handshake outcome, so\nthe rejected peer stayed fully trusted and the node kept exchanging gossip with\na different network.\n\nNow a NetworkMismatch handshake rejection evicts the peer from the in-memory\ncache (all lookup maps) and deletes it from the persistent peer DB, so a node\nre-announcing to its cached peers while on the wrong chain is isolated after the\nstartup announce round.\n\n- domain: PeerList::remove_peer_by_api_address removes a peer from the cache and\n  every index map, emitting PeerRemoved.\n- database: delete_peer_list_item removes a peer from the PeerListItems table.\n- p2p: evict_peer_on_network_mismatch wired into the outbound-announce rejection\n  path; no-op for any non-network rejection reason.\n\nIncludes a design doc covering the diagnosis and the larger follow-up\n(session-scoped handshake + authenticated handshake response).\n\n* fix(p2p): route chain-mismatch eviction delete through flush to avoid resurrect race\n\nevict_peer_on_network_mismatch deleted the peer in its own db.update_scoped\ntransaction, which raced with the periodic flush: if flush had already\nsnapshotted persistable_peers before the eviction removed the peer from the\ncache, flush's insert re-inserted the just-deleted peer, resurrecting it in the\nDB (reloaded on the next restart).\n\nMake flush the sole peer-DB writer. Eviction now removes the peer from the\nin-memory cache and stages its peer_id in PeerNetworkServiceState.pending_db_removals;\nflush drains the set and, within its single transaction, skips re-inserting any\nstaged peer and deletes them. The in-memory eviction stays immediate, so the\ngossip data plane stops trusting the peer at once.\n\n* fix(p2p): propagate flush DB errors and retry staged peer removals\n\nflush() discarded the inner transaction Result via `let _ =`, silently\ndropping insert/delete failures (it could even report success after a failed\ndelete), and it `mem::take`d pending_db_removals before the write so a failed\nflush lost the staged chain-mismatch eviction deletes entirely.\n\nFlatten the nested update_scoped result so inner PeerListServiceError values\npropagate, and re-stage removals (merge, to preserve evictions staged during\nthe lock-free write window) when the flush fails so the next flush retries.\nDeletes are idempotent, so the retry is safe.\n\n* fix(p2p): take flush peer snapshot and staged removals under one lock\n\nflush() snapshotted persistable_peers (peer-list lock) and drained\npending_db_removals (state lock) separately, so a concurrent NetworkMismatch\neviction could be observed half-applied and a just-evicted peer re-persisted.\n\nTake both under the same state lock, and perform the eviction's cache removal and\nremoval staging under that same lock, so flush always sees a consistent\n(snapshot, removals) pair. Lock ordering is state -> peer_list on both paths\n(peer-list methods never acquire the state lock), so no deadlock. The lock is\nreleased before the DB write; an eviction during that lock-free write can still\nre-persist a peer for one flush cycle, which is benign (the in-memory eviction is\nalready in effect and the next flush deletes it).\n\n* docs: reflect staged-removal flush design for chain-mismatch eviction\n\nThe near-term design's step 3 described an inline DB delete in the eviction path.\nThe implementation defers the delete: eviction removes the peer from the cache\nand stages its id in pending_db_removals (under the same state lock flush takes),\nand flush — the sole peer-DB writer — applies delete_peer_list_item in its\ntransaction. Update step 3 to match.\n\n* fix(p2p): record handshake rejections as failed, not successful, announcements\n\nannounce_yourself_to_address sent AnnouncementFinished{success:true} for any\ntransport-level Ok response, including PeerResponse::Rejected, so a rejection\n(e.g. NetworkMismatch) was cached in successful_announcements and suppressed\nfuture announce attempts as if it had succeeded.\n\nMove the success notification into the Accepted arm; the Rejected arm now reports\nsuccess:false, retry:false (terminal — re-announcing won't change the peer's\nmind) before evicting on NetworkMismatch and returning PeerHandshakeRejected.\n\n* test(domain): cover gossip-index clearance and PeerRemoved event on eviction\n\nremove_peer_by_api_address_clears_all_lookups now also asserts the gossip-address\nindex returns None after eviction and that a PeerRemoved event carrying the\nevicted peer_id is emitted (subscribed before the removal).",
+          "timestamp": "2026-06-02T19:03:22+01:00",
+          "tree_id": "b55921fb1fb630d966da7178ecbc08e012d704d8",
+          "url": "https://github.com/Irys-xyz/irys/commit/60908709ecfc3922e6af3ed3e941f9ef1f1115f1"
+        },
+        "date": 1780424393636,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01541,
+            "range": "± 0.000973",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.157739,
+            "range": "± 0.006252",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.546486,
+            "range": "± 0.050209",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.485021,
+            "range": "± 0.588344",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.081063,
+            "range": "± 0.005738",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.390771,
+            "range": "± 15.950145",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 989.852393,
+            "range": "± 14.003064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120406,
+            "range": "± 0.001273",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1240.338794,
+            "range": "± 77.524402",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1566.453597,
+            "range": "± 18.295209",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034984,
+            "range": "± 0.001999",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.71765,
+            "range": "± 1.391869",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.026712,
+            "range": "± 1.419742",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
