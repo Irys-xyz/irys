@@ -694,6 +694,13 @@ pub fn insert_peer_list_item<T: DbTxMut>(
     Ok(tx.put::<PeerListItems>(*peer_id, inner.into())?)
 }
 
+/// Deletes a peer from the persistent peer list. Returns `true` if a row was
+/// present. Used to evict a peer we can no longer peer with (e.g. a `chain_id`
+/// mismatch surfaced during a handshake) so it is not reloaded on restart.
+pub fn delete_peer_list_item<T: DbTxMut>(tx: &T, peer_id: &IrysPeerId) -> eyre::Result<bool> {
+    Ok(tx.delete::<PeerListItems>(*peer_id, None)?)
+}
+
 /// Gets all ingress proofs associated with a specific data_root
 ///
 pub fn ingress_proofs_by_data_root<TX: DbTx>(
@@ -1085,6 +1092,51 @@ mod tests {
         // check block is retrieved without its chunk
         block_header.poa.chunk = None;
         assert_eq!(result2, block_header);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_peer_list_item_removes_it() -> eyre::Result<()> {
+        use super::{delete_peer_list_item, insert_peer_list_item};
+        use crate::tables::PeerListItems;
+        use reth_db::transaction::DbTx as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let peer_id = irys_types::IrysPeerId::from([7_u8; 20]);
+        let peer = irys_types::PeerListItem {
+            peer_id,
+            mining_address: irys_types::IrysAddress::from([7_u8; 20]),
+            reputation_score: irys_types::PeerScore::new(irys_types::PeerScore::INITIAL),
+            response_time: 10,
+            address: irys_types::PeerAddress {
+                gossip: "127.0.0.1:8000".parse().unwrap(),
+                api: "127.0.0.1:9000".parse().unwrap(),
+                execution: irys_types::RethPeerInfo::default(),
+            },
+            last_seen: 0,
+            is_online: true,
+            protocol_version: irys_types::ProtocolVersion::default(),
+        };
+
+        db.update_eyre(|tx| insert_peer_list_item(tx, &peer_id, &peer))?;
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_some()))?,
+            "peer should be present after insert"
+        );
+
+        let deleted = db.update_eyre(|tx| delete_peer_list_item(tx, &peer_id))?;
+        assert!(deleted, "delete should report the row existed");
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))?,
+            "peer should be gone after delete"
+        );
         Ok(())
     }
 
