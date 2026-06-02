@@ -243,7 +243,7 @@ impl PeerNetworkServiceInner {
         };
 
         let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
-        let _ = db
+        let result = db
             .update_scoped(|tx| {
                 for (peer_id, peer) in persistable_peers.iter() {
                     // A peer staged for removal must not be re-persisted from a
@@ -258,9 +258,16 @@ impl PeerNetworkServiceInner {
                 }
                 Ok::<(), PeerListServiceError>(())
             })
-            .map_err(PeerListServiceError::Database)?;
+            .map_err(PeerListServiceError::Database)
+            .and_then(|inner| inner);
 
-        Ok(())
+        // A failed flush must not silently drop staged removals: re-stage them
+        // (merge, so evictions staged during the lock-free write survive) for the
+        // next flush to retry. Deletes are idempotent.
+        if result.is_err() {
+            self.state.lock().await.pending_db_removals.extend(removals);
+        }
+        result
     }
 
     fn increase_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreIncreaseReason) {
