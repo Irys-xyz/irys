@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780424395508,
+  "lastUpdate": 1780426791107,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5659,6 +5659,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "24f97ea779520956cc4fbc23ba044fd71e063865",
+          "message": "docs: route hotfixes through the release line, not master-first (#1440)\n\nHotfixes targeted code that is already deployed (the release line, which\nsits behind master), but the docs said to fix on master first and\ncherry-pick down. Develop a fix against ahead-of-production master code\nand it may not apply cleanly downward, and it drags the fix through\nunstable, unreleased work.\n\nInvert the direction for every fix path: originate the fix on\nrelease/<major>.x (the env-agnostic source of truth), bump the version\nthere, then backport (cherry-pick) up to master and merge forward to the\ndeployment branches. Distinguish three paths in RELEASE_PROCESS.md:\nshared-code (backport to master, reach every env), env-specific (commit\non the env branch, no backport - it would contaminate shared branches),\nand emergency (force straight to mainnet, then reconcile).\n\nApply the same story to the Process-in-Action narrative and to both\nRELEASE_PLAYBOOK.md tables (Phase B 'if testnet fails' and the quick\ndecision points). The normal feature-curation flow (master -> release)\nis unchanged.",
+          "timestamp": "2026-06-02T19:40:51+01:00",
+          "tree_id": "36c708e88ded25c9b85e080c9cf96b799404be7e",
+          "url": "https://github.com/Irys-xyz/irys/commit/24f97ea779520956cc4fbc23ba044fd71e063865"
+        },
+        "date": 1780426788731,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011839,
+            "range": "± 0.00008",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.11876,
+            "range": "± 0.001387",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.191431,
+            "range": "± 0.022499",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.987778,
+            "range": "± 0.191582",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074968,
+            "range": "± 0.000765",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 788.75127,
+            "range": "± 14.079835",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1069.0921,
+            "range": "± 25.671628",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120181,
+            "range": "± 0.000569",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1205.822501,
+            "range": "± 9.361914",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.575197,
+            "range": "± 20.28366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034149,
+            "range": "± 0.001156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.785229,
+            "range": "± 2.183321",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.823491,
+            "range": "± 1.709148",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
