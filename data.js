@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780407691768,
+  "lastUpdate": 1780422056028,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5443,6 +5443,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b6b5133e447054850b6226d0e2375b1ea38c2e2c",
+          "message": "docs(block_producer): correct test-budget mechanism narrative (#1438)\n\n* docs(block_producer): correct test-budget mechanism narrative\n\nFollow-up to #1436. The fix landed correct, but its comments, test names, and\ndescription attributed the duplicate-height production to \"two valid solutions\nbuilt on the same parent before the first was validated — a sibling.\"\n\nTracing the CI logs shows the real mechanism: the first height-3 block was\n*published* (consuming a budget slot), then failed prevalidation with\n`DuplicateTransaction` because it re-included a transaction already confirmed in\na recent block (the producer's mempool view hadn't caught up under fast mining),\nand was rebuilt at the same height. The parent-selection tracker is not at\nfault — it correctly reverts to the prior tip when a published block is rejected.\n\nComments and test names only; no behaviour change.\n\n* docs(block_producer): use consistent 'replacement' terminology in budget comment\n\nAddress review on #1438: the inline comment in the SolutionFound handler still\ncalled the rejected block a 'sibling', inconsistent with the 'same-height\nreplacement' wording used in the surrounding doc comments and tests. Reword it\n(and the lone remaining 'sibling' in a regression-test assertion) so the\nnarrative is consistent; still describes a published block failing its own\nprevalidation. Comments/test-message only; no behaviour change.",
+          "timestamp": "2026-06-02T18:24:09+01:00",
+          "tree_id": "65a1d4005c0288a766f6e4c68e3001801bff879f",
+          "url": "https://github.com/Irys-xyz/irys/commit/b6b5133e447054850b6226d0e2375b1ea38c2e2c"
+        },
+        "date": 1780422054160,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015308,
+            "range": "± 0.000283",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125799,
+            "range": "± 0.005085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.282258,
+            "range": "± 0.060547",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.101749,
+            "range": "± 0.253179",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075993,
+            "range": "± 0.001183",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 753.091946,
+            "range": "± 7.422324",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 982.234811,
+            "range": "± 8.727628",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119917,
+            "range": "± 0.003058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1218.857434,
+            "range": "± 108.484616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1545.777315,
+            "range": "± 9.943561",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03485,
+            "range": "± 0.001061",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.341872,
+            "range": "± 1.015887",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.237135,
+            "range": "± 2.834533",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
