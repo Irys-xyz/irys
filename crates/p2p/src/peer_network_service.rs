@@ -1045,19 +1045,13 @@ impl PeerNetworkService {
             PeerListServiceError::PostVersionError(e.to_string())
         });
 
+        // A transport-level Ok still carries either an Accepted or a Rejected
+        // handshake; only an Accepted is a real success. Defer the
+        // success/failure `AnnouncementFinished` notification to the match below
+        // so a rejection (e.g. NetworkMismatch) is never recorded in
+        // `successful_announcements`.
         let peer_response = match peer_response_result {
-            Ok(peer_response) => {
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: true,
-                        retry: false,
-                    }),
-                );
-                Ok(peer_response)
-            }
+            Ok(peer_response) => peer_response,
             Err(error) => {
                 debug!(
                     "Retrying to announce yourself to address {}: {:?}",
@@ -1072,12 +1066,23 @@ impl PeerNetworkService {
                         retry: true,
                     }),
                 );
-                Err(error)
+                return Err(error);
             }
-        }?;
+        };
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
+                // An accepted handshake is the only real success.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: true,
+                        retry: false,
+                    }),
+                );
+
                 // Only log mismatch if the version is not V1 - V1 peers have zero hash
                 if protocol_version != ProtocolVersion::V1 {
                     let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
@@ -1118,6 +1123,20 @@ impl PeerNetworkService {
                 Ok(())
             }
             PeerResponse::Rejected(rejected_response) => {
+                // A rejection is a terminal failure, not a success: report it so
+                // it is not cached in `successful_announcements` (which would
+                // suppress future announce attempts as if it had succeeded).
+                // retry=false because re-announcing won't change the peer's mind.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: false,
+                        retry: false,
+                    }),
+                );
+
                 // A chain_id mismatch (mapped to NetworkMismatch) means the peer
                 // is on a different network. The gossip data plane trusts cache
                 // membership, not handshake outcome, so we must evict the peer
