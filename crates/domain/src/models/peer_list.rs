@@ -1446,9 +1446,16 @@ mod tests {
         let (mining_addr, peer_id, peer) = create_test_peer(1);
         let api = peer.address.api;
         peer_list.add_or_update_peer(peer.clone(), true);
+        // Subscribe after the add so the only event we observe is the removal.
+        let mut events = peer_list.subscribe_to_peer_events();
 
         // Sanity: present via every lookup before eviction.
         assert!(peer_list.peer_by_api_address(api).is_some());
+        assert!(
+            peer_list
+                .peer_by_gossip_address(peer.address.gossip)
+                .is_some()
+        );
         assert!(peer_list.get_peer(&peer_id).is_some());
         assert!(peer_list.peer_by_mining_address(&mining_addr).is_some());
         assert_eq!(peer_list.peer_count(), 1);
@@ -1476,7 +1483,23 @@ mod tests {
             !peer_list.all_known_peers().contains(&peer.address),
             "peer must be gone from the known-peers cache"
         );
+        assert!(
+            peer_list
+                .peer_by_gossip_address(peer.address.gossip)
+                .is_none(),
+            "peer must be gone from the gossip-address index"
+        );
         assert_eq!(peer_list.peer_count(), 0);
+
+        match events.try_recv() {
+            Ok(PeerEvent::PeerRemoved {
+                peer: removed_peer, ..
+            }) => assert_eq!(
+                removed_peer.peer_id, peer_id,
+                "PeerRemoved must carry the evicted peer"
+            ),
+            other => panic!("expected a PeerRemoved event, got {other:?}"),
+        }
     }
 
     mod peer_list_scoring_tests {
