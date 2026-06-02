@@ -149,7 +149,25 @@ After the branches exist, follow [`RELEASE_PLAYBOOK.md`](./RELEASE_PLAYBOOK.md) 
 
 ## Hotfixes
 
-Hotfixes follow the same flow — fix on `master`, cherry-pick to `release/<major>.x`, merge forward to the appropriate `release/<env>/<major>.x` branch, tag, deploy. In an emergency, a hotfix can be applied directly to a deployment branch and deployed to its environment immediately, bypassing the normal master → release → deployment progression (use the `force` flag to skip the testnet-merge-base validation).
+Hotfixes **invert** the normal direction. The normal flow develops on `master` — which runs *ahead* of production, carrying unreleased work — and curates changes *down* into the release line. A hotfix targets code that is already **deployed**, i.e. the release line, which sits *behind* `master`. So the fix originates on the release line and is ported *up* to `master`, never developed on `master` first — that would build it against unstable, ahead-of-production code. Pick the path by where the bug lives.
+
+### Shared-code hotfix (must reach every environment)
+
+The bug is in code shared across environments. The fix routes through `release/<major>.x` — the env-agnostic source of truth and the only shared ancestor of both deployment branches.
+
+1. Branch off `release/<major>.x`, write the fix + a regression test, and pre-flight on **devnet**. (You may instead branch off a `release/<env>/<major>.x` to reproduce against exactly what's deployed — but the commit that *lands* must be the isolated, env-agnostic fix. If it won't apply to `release/<major>.x`, it's really an env-specific fix — see below.)
+2. Land the fix on `release/<major>.x` (cherry-pick the isolated fix commit if you developed off an env branch) and bump the PATCH version in `crates/chain/Cargo.toml` there — the canonical version source.
+3. **Backport to `master` (mandatory)** — otherwise the fix regresses the next time a release is cut from `master`. Cherry-pick the *named* commit(s) up to `master` (carry the version-bump commit too, to keep master's version mirroring the latest release; drop that hunk in the rare case master is already version-ahead). Cherry-pick the specific commits — do **not** merge, and do **not** later re-cherry-pick them downward (they now exist under two SHAs, so a range cherry-pick from `master` could re-apply and conflict).
+4. Merge `release/<major>.x` forward into `release/testnet/<major>.x`, dispatch the **Release** workflow as `testnet`, deploy, and endurance-test — testnet is the release candidate.
+5. After the testnet soak, merge `release/<major>.x` forward into `release/mainnet/<major>.x`, dispatch as `mainnet`, deploy.
+
+### Env-specific hotfix (one environment only)
+
+The bug is in environment-local code or config (chain IDs, bootstrap peers, env-only consensus divergence). The fix must **not** leave that environment, or it would contaminate the shared branches. Branch off the affected `release/<env>/<major>.x`, fix, and merge back into that same branch; bump the version on `release/<major>.x` (still the canonical source) and merge forward; dispatch the env's release. **No `master` backport** — the change is environment-local.
+
+### Emergency (skip testnet, straight to mainnet)
+
+Apply the fix directly to `release/mainnet/<major>.x` and dispatch with the `force` flag to skip the testnet-merge-base validation, bypassing the normal master → release → deployment progression. Once the fire is out, reconcile: port the fix to `release/<major>.x` and `master` so it isn't stranded on the deployment branch.
 
 ## Rollback
 
@@ -180,7 +198,7 @@ Starting from a new major version:
 3. Bump version in `crates/chain/Cargo.toml` on `release/1.x`, commit.
 4. Branch `release/testnet/1.x` from `release/1.x` (first time only). Apply any sticky testnet patches.
 5. Trigger the release workflow as `testnet` targeting a commit on `release/testnet/1.x` → validates, builds, pushes `testnet-1.0.0` tag + image to `irys-testnet`, updates `testnet-latest`, auto-publishes prerelease. Deploy to testnet.
-6. Validate on testnet. Fix issues via cherry-pick to `release/1.x` (if upstream) or direct commit to `release/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, repeat as needed. Earlier testnet versions are orphaned.
+6. Validate on testnet. Fix issues on `release/1.x` and backport (cherry-pick) to `master` (if upstream) or by direct commit to `release/testnet/1.x` (if env-specific), bump version on `release/1.x` and merge forward, tag `testnet-1.0.1`, repeat as needed. Earlier testnet versions are orphaned.
 7. Once stable, branch `release/mainnet/1.x` from `release/1.x` (first time only). Apply any sticky mainnet patches. Merge `release/1.x` forward.
 8. Trigger the release workflow as `mainnet` on a commit on `release/mainnet/1.x` whose `release/1.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-1.0.1` tag + image, updates `mainnet-latest`, creates draft release. Maintainer reviews and publishes. Deploy to mainnet.
 9. Future minor/patch releases continue on `release/1.x` and flow through the same deployment branches. A new `release/2.x` branch plus new `release/testnet/2.x` and `release/mainnet/2.x` are created when a major version bump is needed.

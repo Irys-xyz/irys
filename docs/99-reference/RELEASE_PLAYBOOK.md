@@ -110,7 +110,7 @@ Then deploy `irys-testnet:1.2.3` to testnet and validate.
 
 | Where the bug lives | What to do |
 |---|---|
-| Upstream code (would also affect mainnet) | Cherry-pick the fix from `master` to `release/1.x` → bump version to `1.2.4` → repeat Phase B |
+| Upstream code (would also affect mainnet) | Fix on `release/1.x` → bump version to `1.2.4` → backport (cherry-pick) to `master` → repeat Phase B |
 | Testnet-only (e.g. wrong bootstrap peer) | Commit the fix directly to `release/testnet/1.x` → bump `release/1.x` version to `1.2.4` and merge forward → repeat Phase B |
 
 Each iteration gets a new SemVer; earlier `testnet-1.2.X` tags are orphaned
@@ -287,7 +287,7 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 |---|---|
 | Where do I bump the version? | Only on `release/1.x`. Deployment branches inherit via merge. |
 | Cargo.toml conflicts during merge-forward? | Always resolve to `release/1.x`'s value. |
-| Bug found on testnet — where do I fix it? | Upstream code: `master` → cherry-pick to `release/1.x` → bump version → re-do Phase B. Env-specific: commit to the affected `release/<env>/1.x` + bump version on `release/1.x`. |
+| Bug found on testnet — where do I fix it? | Shared code: fix on `release/1.x` → bump version → backport (cherry-pick) to `master` → re-do Phase B. Env-specific: commit to the affected `release/<env>/1.x` + bump version on `release/1.x` (no master backport). |
 | Critical mainnet hotfix without testnet? | Dispatch with `force=true`. See [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). |
 | Wrong changelog scope on mainnet? | Edit the draft before publishing — nothing assumes the auto-generated text is final. |
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
