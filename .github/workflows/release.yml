@@ -1,0 +1,439 @@
+name: Release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type / environment'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+      version:
+        description: 'Semver version (e.g. 1.2.3)'
+        required: true
+        type: string
+      commit:
+        description: 'Commit SHA on a release/<env>/<major>.x branch'
+        required: true
+        type: string
+      force:
+        description: 'Skip testnet-tag validation check (emergency hotfixes only)'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Build and validate without tagging or publishing'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    name: validate release
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      contents: read
+    steps:
+      - name: Validate inputs
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if ! [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format: $INPUT_VERSION (expected: X.Y.Z)"
+            exit 1
+          fi
+          if ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid commit SHA: $INPUT_COMMIT (expected full 40-char SHA; abbreviated SHAs are not accepted by actions/checkout)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          # Credentials persisted (read-only token): the tag-existence and
+          # mainnet merge-base gates below must read authoritative tag state
+          # from origin, not stale local tags left on reused self-hosted runners.
+
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        uses: ./.github/actions/sync-tags
+
+      # Commit must exist, live on origin/release/<release_type>/<major>.x,
+      # and carry crates/chain version == inputs.version. require-release-tag is
+      # false here: this job mints the <env>-<version> tag, so it must not exist
+      # yet (checked separately below).
+      - name: Validate commit provenance
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: ${{ inputs.release_type }}
+          commit: ${{ inputs.commit }}
+          version: ${{ inputs.version }}
+
+      - name: Determine tag name
+        id: tag
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          echo "name=${INPUT_RELEASE_TYPE}-${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag does not already exist
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+
+      # A leftover GitHub release/draft with this tag name (e.g. from a prior
+      # partially-failed run) would only surface at `gh release create` in the
+      # publish phase — after the git tag and versioned image are already pushed,
+      # leaving an orphaned image. Catch it here, before the approval gate.
+      - name: Check no GitHub release/draft already uses this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::A GitHub release or draft named $TAG already exists. Delete it before re-running (it would collide with 'gh release create')."
+            exit 1
+          fi
+
+      - name: Validate testnet release exists with matching upstream (mainnet only)
+        if: inputs.release_type == 'mainnet' && !inputs.force
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          TESTNET_TAG="testnet-${INPUT_VERSION}"
+          if ! git rev-parse "refs/tags/$TESTNET_TAG" >/dev/null 2>&1; then
+            echo "::error::Testnet tag $TESTNET_TAG does not exist. Release to testnet first, or use force=true to override."
+            exit 1
+          fi
+
+          MAJOR="${INPUT_VERSION%%.*}"
+          RELEASE_BRANCH="origin/release/${MAJOR}.x"
+          if ! git rev-parse "$RELEASE_BRANCH" >/dev/null 2>&1; then
+            echo "::error::Release branch $RELEASE_BRANCH does not exist"
+            exit 1
+          fi
+
+          TESTNET_COMMIT=$(git rev-parse "refs/tags/$TESTNET_TAG^{commit}")
+          if ! TESTNET_BASE=$(git merge-base "$TESTNET_COMMIT" "$RELEASE_BRANCH"); then
+            echo "::error::No common ancestor between testnet tag $TESTNET_TAG and $RELEASE_BRANCH"
+            exit 1
+          fi
+          if ! MAINNET_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH"); then
+            echo "::error::No common ancestor between mainnet commit ${INPUT_COMMIT} and $RELEASE_BRANCH"
+            exit 1
+          fi
+          if [ "$TESTNET_BASE" != "$MAINNET_BASE" ]; then
+            echo "::error::Testnet tag $TESTNET_TAG and mainnet commit ${INPUT_COMMIT} have different $RELEASE_BRANCH ancestors"
+            echo "  testnet merge-base: $TESTNET_BASE"
+            echo "  mainnet merge-base: $MAINNET_BASE"
+            exit 1
+          fi
+          echo "Testnet tag $TESTNET_TAG validated (same upstream merge-base: $TESTNET_BASE)"
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
+
+  release:
+    name: build and publish
+    needs: validate
+    runs-on: [self-hosted, misc-runner]
+    # The job is gated by a GitHub Environment matching the release type.
+    # Configure required reviewers (etc.) on the `mainnet` environment in
+    # repo settings; leave `testnet` with no protection rules for the
+    # auto-publish flow. Both environments must exist or the workflow fails.
+    #
+    # dry-run resolves the environment to an empty string, which disables the
+    # gate: a dry-run publishes nothing, so it should not need a mainnet
+    # reviewer's approval — and must not park on the approval gate while holding
+    # the shared `release` concurrency slot, which would block real releases and
+    # rollbacks. (dry-run still runs in the `release` group so it can't race a
+    # real publish on a shared runner.)
+    #
+    # The expression is written `!dry_run && release_type || ''` (not
+    # `dry_run && '' || release_type`): GHA's `a && b || c` returns `c` whenever
+    # `b` is falsy, and '' is falsy, so the naive form would never select ''.
+    environment: ${{ !inputs.dry_run && inputs.release_type || '' }}
+    permissions:
+      packages: write
+      contents: write
+    env:
+      GIT_TAG: ${{ needs.validate.outputs.tag }}
+      DOCKER_TAG: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          # Credentials persisted (write token): the publish steps below push the
+          # release git tag and force-move <env>-latest, and the failure-cleanup
+          # steps delete/revert those tags on origin — all need the checkout's auth.
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Mirror local tags to origin so save_head reads the true previous
+      # <env>-latest position (and a stale local version tag can't survive).
+      - name: Sync tags from origin (local tags on reused runners can be stale)
+        uses: ./.github/actions/sync-tags
+
+      - name: Set image name
+        id: image
+        uses: ./.github/actions/image-name
+        with:
+          environment: ${{ inputs.release_type }}
+
+      - name: Start rootless Docker and log in to GHCR
+        uses: ./.github/actions/docker-setup
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Build phase: build image locally, no push yet ---
+
+      - name: Build Docker image
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ inputs.commit }}
+          has-tag: "true"
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ env.DOCKER_TAG }}
+
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: .config/cliff.toml
+          args: >-
+            --unreleased
+            --tag ${{ env.GIT_TAG }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT: /tmp/cliff-changelog.md
+          # Deliberately NOT setting GITHUB_REPO. That env var is what enables
+          # git-cliff's GitHub remote-data fetch (every commit + every closed PR via
+          # the API). We use none of it — the cliff.toml template references only
+          # local commit fields — and on a repo this size the fetch is slow and
+          # *panics* on a flaky/truncated API response (git-cliff changelog.rs:493 ->
+          # exit 101), which failed the release. git-cliff v2.13.1 (pinned by the
+          # action) does not auto-detect the repo from origin, so omitting GITHUB_REPO
+          # disables the fetch. The action still injects a token for its binary download.
+          #
+          # Bound the changelog to the previous release of THIS env: restrict the
+          # release-tag pattern to the env's own tags so --unreleased anchors to the
+          # last <env>-X.Y.Z (testnet-3.0.0 spans since testnet-0.2.0, not the newer
+          # mainnet-0.1.3). --ignore-tags only relabels "previous"; --tag-pattern moves
+          # the range. First release of an env (no prior tag) spans the full history.
+          GIT_CLIFF_TAG_PATTERN: ${{ inputs.release_type == 'mainnet' && '^mainnet-[0-9]+\.[0-9]+\.[0-9]+$' || '^testnet-[0-9]+\.[0-9]+\.[0-9]+$' }}
+          # Log each skipped/non-conventional commit (the "N commit(s) skipped due to
+          # parse error" warning) without the global -vv flood.
+          RUST_LOG: git_cliff_core=trace
+
+      # --- Publish phase: tag, push image, update head-tracking, create release ---
+      # If any step here fails, cleanup steps at the bottom delete pushed git tags.
+
+      - name: Push git tag
+        id: push_tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          # Drop any stale local tag left by a previously-failed run on this
+          # runner. Self-hosted runners reuse the workspace and checkout does
+          # not prune local-only tags, so a leftover would make `git tag -a`
+          # fail here even though the tag was never published to origin.
+          git tag -d "$GIT_TAG" 2>/dev/null || true
+          git tag -a "$GIT_TAG" -m "Release ${INPUT_VERSION} (${INPUT_RELEASE_TYPE})" "${INPUT_COMMIT}"
+          git push origin "$GIT_TAG"
+
+      # Per-version frozen snapshot branch, never rebased (unlike the trunk
+      # release/<env>/<major>.x branch). The <env>-<version> tag already keeps the
+      # released commit reachable and GC-safe; what this branch adds is *branch*
+      # reachability, which clears GitHub's "commit does not belong to any branch"
+      # flag on the release. Provenance on the rebuild path is proven by the
+      # <env>-<version> tag (see verify-commit-provenance), not this branch, so a
+      # missing or deleted frozen branch is cosmetic only.
+      - name: Push per-version release branch
+        id: push_branch
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          BRANCH="release/${INPUT_RELEASE_TYPE}/${INPUT_VERSION}"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          # Force-move any stale local branch left by a failed run on this reused
+          # runner, then push without --force. The branch is effectively write-once
+          # per (env, version): the validate job refuses an already-existing tag, so
+          # this step runs at most once per version. The non-force push is only a
+          # backstop — it refuses to clobber a divergent (non-fast-forward) remote
+          # branch; it is not itself the source of immutability.
+          git branch -f "$BRANCH" "${INPUT_COMMIT}"
+          git push origin "refs/heads/$BRANCH"
+
+      - name: Push Docker image
+        id: push_image
+        if: ${{ !inputs.dry_run }}
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          docker push "${IMAGE}:${DOCKER_TAG}"
+
+      # Head-tracking git tag is updated BEFORE the GH release create, so a
+      # failure in `gh release create` rolls everything (git tag + head git)
+      # back together. The Docker `:latest` retag is deferred to the very last
+      # step so a failure there leaves `:latest` on the previous release
+      # rather than on a release that we then rolled back.
+      - name: Save current head-tracking git tag position
+        id: save_head
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          HEAD_TAG="${INPUT_RELEASE_TYPE}-latest"
+          # --verify --quiet so a missing tag yields an empty string. Plain
+          # `git rev-parse "$HEAD_TAG"` echoes the literal tag name to stdout on a
+          # miss, which would make `prev` non-empty and send the failure-cleanup
+          # down the "restore previous" branch (leaving <env>-latest on the failed
+          # release) instead of deleting it — wrong on an environment's first release.
+          PREV=$(git rev-parse --verify --quiet "$HEAD_TAG" || true)
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "tag=${HEAD_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Update head-tracking git tag
+        id: head_git
+        if: ${{ !inputs.dry_run }}
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          HEAD_TAG="${INPUT_RELEASE_TYPE}-latest"
+          git tag -f "$HEAD_TAG" "${INPUT_COMMIT}"
+          git push -f origin "$HEAD_TAG"
+
+      # testnet auto-publishes a prerelease; mainnet ships a draft for manual
+      # review, with a Summary placeholder for the operator to fill in before
+      # publishing. Body (changelog + docker pull) is otherwise identical.
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ env.GIT_TAG }}
+          DOCKER_TAG: ${{ env.DOCKER_TAG }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+        run: |
+          {
+            if [ "$INPUT_RELEASE_TYPE" = "mainnet" ]; then
+              echo "## Summary"
+              echo ""
+              echo "<!-- Fill in release highlights, breaking changes, critical fixes -->"
+              echo ""
+            fi
+            echo "## Changes"
+            echo ""
+            cat /tmp/cliff-changelog.md
+            echo ""
+            echo "## Docker"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE_NAME}:${DOCKER_TAG}"
+            echo '```'
+          } > /tmp/release-body.md
+
+          if [ "$INPUT_RELEASE_TYPE" = "mainnet" ]; then
+            RELEASE_FLAG=--draft
+          else
+            RELEASE_FLAG=--prerelease
+          fi
+          gh release create "$RELEASE_FLAG" \
+            --title "${RELEASE_TAG}" \
+            --target "${INPUT_COMMIT}" \
+            -F /tmp/release-body.md \
+            "${RELEASE_TAG}"
+
+      # Moving Docker `:latest` is the last write of the release flow and is
+      # non-fatal: if it fails, the version-tagged image and the GH release
+      # are already published, so the operator can recover by re-running
+      # docker-retag.yml. Marked continue-on-error so we don't trigger the
+      # cleanup steps below (which would roll back the now-published release).
+      - name: Update head-tracking Docker tag
+        id: head_docker
+        if: ${{ !inputs.dry_run }}
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          docker tag "${IMAGE}:${DOCKER_TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+
+      - name: Warn if head-tracking Docker tag was not moved
+        if: ${{ !inputs.dry_run && steps.head_docker.outcome == 'failure' }}
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          DOCKER_TAG: ${{ env.DOCKER_TAG }}
+        run: |
+          echo "::warning::${IMAGE_NAME}:latest was NOT updated. Run docker-retag.yml with source_tag=${DOCKER_TAG} target_tag=latest to fix."
+
+      # --- Cleanup: runs on failure to remove orphaned git tags ---
+
+      - name: 'Cleanup: delete release git tag'
+        if: failure() && steps.push_tag.outcome == 'success'
+        run: |
+          echo "::warning::Cleaning up orphaned git tag $GIT_TAG"
+          git push origin --delete "$GIT_TAG" || true
+          git tag -d "$GIT_TAG" 2>/dev/null || true
+
+      - name: 'Cleanup: delete per-version release branch'
+        if: failure() && steps.push_branch.outcome == 'success'
+        env:
+          BRANCH: ${{ steps.push_branch.outputs.branch }}
+        run: |
+          echo "::warning::Cleaning up per-version release branch $BRANCH"
+          # Surface a failed remote delete instead of swallowing it. The snapshot is
+          # delete-protected by the 'release branches' ruleset and the bot is not a
+          # bypass actor, so a blocked delete leaves a stray branch that an admin must
+          # remove — fail loudly here rather than hide it behind `|| true`.
+          if ! git push origin --delete "$BRANCH"; then
+            echo "::error::Failed to delete stray release branch $BRANCH from origin. If it is protected by the 'release branches' ruleset (github-actions[bot] is not a bypass actor), an admin must delete it manually."
+            exit 1
+          fi
+          # Local-only hygiene on the reused runner; a missing local branch is benign.
+          git branch -D "$BRANCH" 2>/dev/null || true
+
+      - name: 'Cleanup: revert head-tracking git tag'
+        if: failure() && steps.head_git.outcome == 'success'
+        run: |
+          HEAD_TAG="${{ steps.save_head.outputs.tag }}"
+          PREV="${{ steps.save_head.outputs.prev }}"
+          if [ -n "$PREV" ]; then
+            echo "::warning::Restoring head-tracking git tag $HEAD_TAG to previous commit $PREV"
+            git tag -f "$HEAD_TAG" "$PREV"
+            git push -f origin "$HEAD_TAG"
+          else
+            echo "::warning::No previous head-tracking git tag $HEAD_TAG existed, deleting"
+            git push origin --delete "$HEAD_TAG" || true
+            git tag -d "$HEAD_TAG" 2>/dev/null || true
+          fi
+
+      - name: Tear down rootless Docker
+        if: always()
+        uses: ./.github/actions/docker-cleanup

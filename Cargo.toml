@@ -90,6 +90,7 @@ itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
 test-log = { version = "0.2", features = ["trace"] }
+tracing-test = "0.2"
 pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.13"
@@ -559,6 +560,7 @@ default.extend-ignore-re = [
   "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
   "(#|//)\\s*spellchecker:ignore-next-line\\n.*",                      # disable the next line: spellchecker:ignore-next-line
+  "\\bmis-",                                                           # allow the "mis-" prefix (mis-decode, mis-decoding); bare "mis" still flagged
 ]
 default.extend-words = { ratatui = "ratatui" }
 files.extend-exclude = ["ext/*", "fixtures/*", "**/fixtures/**/*.json"]

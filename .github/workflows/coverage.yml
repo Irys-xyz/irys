@@ -121,13 +121,50 @@ jobs:
           cp target/llvm-cov/lcov.info gh-pages-deploy/coverage/
           cp target/llvm-cov/history.json gh-pages-deploy/coverage/
 
+          # Stable entry point: /coverage/ -> /coverage/html/index.html
+          cat > gh-pages-deploy/coverage/index.html <<'EOF'
+          <!DOCTYPE html>
+          <meta charset="utf-8" />
+          <meta http-equiv="refresh" content="0; url=html/" />
+          <title>Coverage</title>
+          <p><a href="html/">Coverage report</a></p>
+          EOF
+
+          # Inject a coverage link into the benchmark dashboard index (idempotent).
+          # benchmark-action/github-action-benchmark only writes index.html when it
+          # does not exist, so the injected link persists across benchmark runs.
+          python3 << 'PYEOF'
+          from pathlib import Path
+          marker = "<!-- COVERAGE-LINK -->"
+          p = Path("gh-pages-deploy/index.html")
+          if not p.exists():
+              print("gh-pages index.html missing; skipping link injection")
+          else:
+              html = p.read_text()
+              if marker in html:
+                  print("Coverage link already present in index.html")
+              elif "</header>" not in html:
+                  print("No </header> in index.html; skipping link injection")
+              else:
+                  snippet = (
+                      f"      {marker}\n"
+                      '      <div class="header-item">\n'
+                      '        <strong class="header-label">Coverage:</strong>\n'
+                      '        <a href="coverage/" rel="noopener">view report</a>\n'
+                      '      </div>\n'
+                      '    '
+                  )
+                  p.write_text(html.replace("</header>", snippet + "</header>", 1))
+                  print("Injected coverage link into gh-pages index.html")
+          PYEOF
+
       - name: Push to gh-pages
         if: ${{ always() && hashFiles('target/llvm-cov/lcov.info') != '' }}
         run: |
           cd gh-pages-deploy
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add coverage/
+          git add coverage/ index.html
           if git diff --staged --quiet; then
             echo "No coverage changes to commit"
           else

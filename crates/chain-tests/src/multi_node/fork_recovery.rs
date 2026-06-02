@@ -1,4 +1,4 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, assert_reorg_event_lca_contract};
 use irys_chain::IrysNodeCtx;
 use irys_types::{DataLedger, DataTransaction, H256, NodeConfig, U256, UnixTimestamp};
 use reth::rpc::types::BlockNumberOrTag;
@@ -336,6 +336,10 @@ async fn heavy4_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     );
 
     assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
+
+    // fork_parent must be the LCA — the common parent of both divergent
+    // suffixes' first blocks. This is the contract find_reorg_split holds.
+    assert_reorg_event_lca_contract(&reorg_event);
 
     // Wind down test
     tokio::join!(genesis_node.stop(), peer1_node.stop(), peer2_node.stop());

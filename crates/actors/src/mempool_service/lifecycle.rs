@@ -42,9 +42,13 @@ impl Inner {
             .unwrap_or(&[]);
         let commitment_txids = block.commitment_tx_ids();
 
-        let all_data_txids: Vec<H256> = submit_txids
+        // Only term-ledger txids (Submit / OneYear / ThirtyDay) receive
+        // `included_height`. Publish txids are excluded here because Publish
+        // confirmation sets `promoted_height` (passed separately below), not
+        // `included_height`; the `included_height` for a Publish tx was already
+        // recorded at the time the tx was first confirmed in Submit.
+        let term_ledger_txids: Vec<H256> = submit_txids
             .iter()
-            .chain(publish_txids.iter())
             .chain(one_year_txids.iter())
             .chain(thirty_day_txids.iter())
             .copied()
@@ -52,7 +56,7 @@ impl Inner {
         if let Err(e) = self
             .mempool_state
             .apply_block_confirmed_updates(
-                &all_data_txids,
+                &term_ledger_txids,
                 commitment_txids,
                 publish_txids,
                 block.height,
@@ -76,9 +80,12 @@ impl Inner {
             return Ok(());
         }
 
-        // Update `CachedDataRoots` so that this block_hash is cached for each data_root.
-        // Track which roots were successfully cached so we only trigger proof generation
-        // for roots whose block_set was actually updated.
+        // Idempotently touch `CachedDataRoots` for each Submit-ledger tx in
+        // the confirmed block.  Authoritative block_set + expiry_height
+        // maintenance already happened atomically with the tip change in
+        // `BlockMigrationService::persist_metadata`; this loop only tracks
+        // which data_roots had a CDR row so the proof-generation
+        // notification below targets them.
         let mut confirmed_data_roots = Vec::new();
         for submit_tx in sealed_block
             .transactions()
@@ -91,23 +98,33 @@ impl Inner {
             }) {
                 Ok(()) => {
                     info!(
-                        "Successfully cached data_root {:?} for tx {:?}",
-                        data_root, submit_tx.id
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        incoming_block.height = block.height,
+                        "cached_data_root.write"
                     );
                     confirmed_data_roots.push(data_root);
                 }
                 Err(db_error) => {
                     error!(
-                        "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                        data_root, submit_tx.id, db_error
+                        %data_root,
+                        tx.id = %submit_tx.id,
+                        source = "block_confirmed",
+                        incoming_block.hash = %block.block_hash,
+                        error = ?db_error,
+                        "cached_data_root.write_failed"
                     );
                 }
             };
         }
 
-        // After block_set is populated for each confirmed data_root, notify the
-        // chunk ingress service to try generating ingress proofs. These will now
-        // pass the block_set gate since the block hash was just recorded above.
+        // Notify chunk ingress to try generating ingress proofs for the
+        // confirmed data_roots.  `persist_metadata` has already populated
+        // `block_set` so the cheap gate in
+        // `try_generate_ingress_proof_for_root` will pass; downstream
+        // validation/promotion paths still re-verify canonicality.
         if !confirmed_data_roots.is_empty()
             && let Err(e) = self.service_senders.chunk_ingress.send_traced(
                 ChunkIngressMessage::TryGenerateProofsForConfirmedRoots(confirmed_data_roots),
@@ -246,6 +263,39 @@ impl Inner {
                 Err(e)
             }
         }
+    }
+
+    /// Snapshot all pending Submit-ledger txs and count those whose `anchor`
+    /// does not resolve to any known block (canonical chain in the block
+    /// tree, or any block persisted in the DB).
+    ///
+    /// Used by the 30-second sweep that backs the
+    /// `irys.mempool.pending_submit_unresolvable_anchors` gauge. Errors from
+    /// `get_anchor_height` are swallowed (the per-tx error is logged); they
+    /// count as "resolvable" so a transient DB read failure cannot inflate
+    /// the alert metric.
+    pub async fn count_unresolvable_submit_anchors(&self) -> usize {
+        let txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
+        let mut unresolvable = 0_usize;
+        for tx in txs.values() {
+            match crate::anchor_validation::get_anchor_height(
+                &self.block_tree_read_guard,
+                &self.irys_db,
+                tx.anchor(),
+                false, // any known block is fine — we measure availability, not canonical inclusion
+            ) {
+                Ok(None) => unresolvable += 1,
+                Ok(Some(_)) => {}
+                Err(e) => {
+                    debug!(
+                        tx.id = %tx.id,
+                        error = %e,
+                        "anchor lookup failed during unresolvable-anchor sweep; treating as resolvable"
+                    );
+                }
+            }
+        }
+        unresolvable
     }
 
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
@@ -717,20 +767,46 @@ impl Inner {
 
         // 2. Re-post any reorged term ledger transactions through handle_tx_ingress_message so account balances and anchors are checked
         // 3. Filter out any invalidated transactions
+        //
+        // If re-ingress fails (other than Skipped), the tx is NOT in the mempool.
+        // BlockMigrationService already deleted its IrysDataTxMetadata row, so the
+        // CDR's txid_set still holds a tombstone entry.  The prune-loop pending-tx
+        // guard treats "txid_set entry with no metadata row" as "still pending", so
+        // the CDR + cached chunks + ingress proofs would be pinned indefinitely.
+        // Scrubbing the txid here closes that leak.  If the tx later becomes valid,
+        // fresh gossip naturally recreates the CDR entry.
+        let mut dropped_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
         for tx_id in orphaned_term_txs.iter() {
             if let Some(tx) = orphaned_term_tx_map.remove(tx_id) {
-                // TODO: handle errors better
-                // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
-                if let Err(e) = self
-                    .handle_data_tx_ingress_message_gossip(tx)
-                    .await
-                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", tx_id, &e))
-                {
-                    error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
+                let data_root = tx.data_root;
+                match self.handle_data_tx_ingress_message_gossip(tx).await {
+                    Ok(_) => {}
+                    Err(TxIngressError::Skipped) => {
+                        debug!("Orphaned tx {} already in mempool (Skipped)", tx_id);
+                    }
+                    Err(e) => {
+                        error!("Failed to re-submit orphaned tx {} {:?}", tx_id, &e);
+                        dropped_by_data_root
+                            .entry(data_root)
+                            .or_default()
+                            .push(*tx_id);
+                    }
                 }
             } else {
                 warn!("Unable to get orphaned tx {:?} from sealed blocks", tx_id)
             }
+        }
+        if !dropped_by_data_root.is_empty()
+            && let Err(e) = self.service_senders.chunk_cache.send_traced(
+                crate::cache_service::CacheServiceAction::PruneTxidsFromCachedDataRoots(
+                    dropped_by_data_root,
+                ),
+            )
+        {
+            warn!(
+                "Failed to send PruneTxidsFromCachedDataRoots after reorg re-ingress: {}",
+                e
+            );
         }
 
         // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, clear promotion state in mempool (promoted_height = None)
@@ -741,28 +817,16 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
-        // Clear included_height for orphaned publish transactions. Same
-        // contention semantics as the term-tx loop above.
-        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
-            match self
-                .mempool_state
-                .clear_data_tx_included_height(tx_id)
-                .await
-            {
-                Ok(true) => {
-                    tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        ?e,
-                        tx.id = %tx_id,
-                        "Mempool contention during publish-tx reorg cleanup; aborting"
-                    );
-                    return Ok(());
-                }
-            }
-        }
+        // NOTE: do NOT clear `included_height` for orphaned Publish txs here.
+        // `included_height` is owned by term-ledger confirmations (Submit /
+        // OneYear / ThirtyDay).  If only the Publish-promotion is orphaned
+        // (the underlying Submit is on a shared ancestor and still
+        // canonical), clearing `included_height` would undo a still-valid
+        // confirmation.  The term-tx loop above is responsible for clearing
+        // `included_height` whenever the term confirmation itself is
+        // orphaned; the Publish-orphan path only needs to clear
+        // `promoted_height`, which the next loop (`mark_unpromoted_in_mempool`)
+        // does.
 
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {

@@ -16,4 +16,5 @@ pub mod price;
 pub mod proxy;
 pub mod storage;
 pub mod supply;
+pub mod tip;
 pub mod tx;

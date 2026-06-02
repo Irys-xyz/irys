@@ -219,6 +219,12 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
 
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
+    /// Listener bound to `gossip_port` at construction and held open until
+    /// `run_service` consumes it. Holding it across that gap eliminates the
+    /// TOCTOU window where a parallel test could claim the port between
+    /// allocation and re-bind (previously an `AddrInUse` panic). `None` once
+    /// `run_service` has taken it.
+    gossip_listener: Option<TcpListener>,
     pub api_port: u16,
     pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
@@ -252,7 +258,7 @@ impl GossipServiceTestFixture {
             .prefix("gossip_test_fixture")
             .with_tracing()
             .build();
-        let gossip_port = random_free_port();
+        let (gossip_listener, gossip_port) = bind_random_free_port();
         let api_port = random_free_port();
 
         warn!("Random port for gossip: {}", gossip_port);
@@ -323,6 +329,12 @@ impl GossipServiceTestFixture {
         let execution_payload_provider = ExecutionPayloadCache::new(
             peer_list.clone(),
             RethBlockProvider::Mock(mocked_execution_payloads),
+            Duration::from_millis(
+                config
+                    .node_config
+                    .sync
+                    .execution_payload_wait_timeout_millis,
+            ),
         );
 
         let vdf_state_stub =
@@ -364,6 +376,7 @@ impl GossipServiceTestFixture {
         Self {
             _temp_dir: temp_dir,
             gossip_port,
+            gossip_listener: Some(gossip_listener),
             api_port,
             execution: RethPeerInfo::default(),
             db,
@@ -401,12 +414,13 @@ impl GossipServiceTestFixture {
             tokio::runtime::Handle::current(),
         );
         info!("Starting gossip service on port {}", self.gossip_port);
-        let gossip_listener = TcpListener::bind(
-            format!("127.0.0.1:{}", self.gossip_port)
-                .parse::<SocketAddr>()
-                .expect("Valid address"),
-        )
-        .expect("To bind");
+        // Reuse the listener bound at construction rather than re-binding the
+        // port number, which races other parallel tests (see
+        // `bind_random_free_port`).
+        let gossip_listener = self
+            .gossip_listener
+            .take()
+            .expect("gossip listener already consumed by a prior run_service call");
 
         let mempool_stub = self.mempool_stub.clone();
 
@@ -515,6 +529,17 @@ fn random_free_port() -> u16 {
     // Bind to 127.0.0.1:0 lets the OS assign a random free port.
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
     listener.local_addr().expect("to get a port").port()
+}
+
+/// Bind an ephemeral port and return the listener **together with** its number,
+/// keeping the socket open. Unlike `random_free_port`, which drops its listener
+/// before returning and leaves a window for another parallel test to claim the
+/// port before we re-bind it (observed in CI as an `AddrInUse` panic), callers
+/// that will later bind the port hold this listener across that gap.
+fn bind_random_free_port() -> (TcpListener, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
+    let port = listener.local_addr().expect("to get a port").port();
+    (listener, port)
 }
 
 /// # Panics
@@ -996,8 +1021,16 @@ pub(crate) fn data_handler_stub(
         internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
         block_status_provider: block_status_provider_mock,
     };
-    let execution_payload_cache =
-        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+    let execution_payload_cache = ExecutionPayloadCache::new(
+        peer_list_guard.clone(),
+        reth_block_mock_provider,
+        Duration::from_millis(
+            config
+                .node_config
+                .sync
+                .execution_payload_wait_timeout_millis,
+        ),
+    );
     let chunk_ingress =
         irys_actors::chunk_ingress_service::facade::ChunkIngressFacadeImpl::from(&service_senders);
     // Keep the chunk_ingress receiver alive so the channel remains open.
@@ -1029,7 +1062,7 @@ pub(crate) fn data_handler_stub(
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(
-            Duration::from_millis(100000),
+            Duration::from_secs(5),
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
@@ -1063,8 +1096,16 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let mempool_state = AtomicMempoolState::new(state);
     let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
-    let execution_payload_cache =
-        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+    let execution_payload_cache = ExecutionPayloadCache::new(
+        peer_list_guard.clone(),
+        reth_block_mock_provider,
+        Duration::from_millis(
+            config
+                .node_config
+                .sync
+                .execution_payload_wait_timeout_millis,
+        ),
+    );
 
     let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db);
@@ -1084,7 +1125,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         block_pool,
         cache: Arc::new(GossipCache::new()),
         gossip_client: GossipClient::with_circuit_breaker_config(
-            Duration::from_millis(100000),
+            Duration::from_secs(5),
             IrysAddress::repeat_byte(2),
             IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),

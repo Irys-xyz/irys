@@ -22,10 +22,20 @@ pub enum BinaryError {
     Timeout { duration: Duration, context: String },
 }
 
+/// Distinguishes binaries built from the "old" ref vs the "new" ref so the
+/// cluster can pick the matching base-config template per node. Using an enum
+/// rather than the `label` string keeps callsites obviously exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryKind {
+    Old,
+    New,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedBinary {
     pub path: PathBuf,
     pub label: String,
+    pub kind: BinaryKind,
     pub git_rev: String,
     /// Path to the git worktree used to build this binary, if one was created.
     /// The worktree directory is intentionally preserved (never removed) for
@@ -85,12 +95,13 @@ impl BinaryResolver {
 
     pub async fn resolve_new(&self) -> Result<ResolvedBinary, BinaryError> {
         let git_ref = std::env::var("IRYS_NEW_REF").unwrap_or_else(|_| CURRENT_REF.to_owned());
-        self.resolve_binary("IRYS_BINARY_NEW", "new", &git_ref)
+        self.resolve_binary("IRYS_BINARY_NEW", "new", BinaryKind::New, &git_ref)
             .await
     }
 
     pub async fn resolve_old(&self, git_ref: &str) -> Result<ResolvedBinary, BinaryError> {
-        self.resolve_binary("IRYS_BINARY_OLD", "old", git_ref).await
+        self.resolve_binary("IRYS_BINARY_OLD", "old", BinaryKind::Old, git_ref)
+            .await
     }
 
     /// Shared resolution logic: check env override, then build from the
@@ -99,26 +110,32 @@ impl BinaryResolver {
         &self,
         env_binary_var: &str,
         label: &str,
+        kind: BinaryKind,
         git_ref: &str,
     ) -> Result<ResolvedBinary, BinaryError> {
-        if let Some(binary) = self.try_env_override(env_binary_var, label)? {
+        if let Some(binary) = self.try_env_override(env_binary_var, label, kind)? {
             return Ok(binary);
         }
         if git_ref == CURRENT_REF {
-            self.resolve_current(label).await
+            self.resolve_current(label, kind).await
         } else {
-            self.resolve_from_ref(git_ref, label).await
+            self.resolve_from_ref(git_ref, label, kind).await
         }
     }
 
     /// Build a binary from the current working tree. Skips the rev-keyed
     /// cache — cargo's own fingerprinting decides whether to rebuild.
-    async fn resolve_current(&self, label: &str) -> Result<ResolvedBinary, BinaryError> {
+    async fn resolve_current(
+        &self,
+        label: &str,
+        kind: BinaryKind,
+    ) -> Result<ResolvedBinary, BinaryError> {
         tracing::info!(label, "resolving binary from current working tree");
         let built = self.cargo_build(&self.repo_root).await?;
         Ok(ResolvedBinary {
             path: built,
             label: label.to_owned(),
+            kind,
             git_rev: "current".to_owned(),
             worktree_path: None,
         })
@@ -129,6 +146,7 @@ impl BinaryResolver {
         &self,
         git_ref: &str,
         label: &str,
+        kind: BinaryKind,
     ) -> Result<ResolvedBinary, BinaryError> {
         validate_git_ref(git_ref)?;
 
@@ -138,13 +156,13 @@ impl BinaryResolver {
 
         if cached.exists() {
             let worktree = wt_path.exists().then_some(wt_path);
-            return Ok(resolved(label, rev, cached, worktree));
+            return Ok(resolved(label, kind, rev, cached, worktree));
         }
 
         let _lock = self.acquire_build_lock(&rev).await?;
         if cached.exists() {
             let worktree = wt_path.exists().then_some(wt_path);
-            return Ok(resolved(label, rev, cached, worktree));
+            return Ok(resolved(label, kind, rev, cached, worktree));
         }
 
         self.ensure_worktree(git_ref, &rev, &wt_path).await?;
@@ -152,7 +170,7 @@ impl BinaryResolver {
 
         tracing::info!(path = %wt_path.display(), "worktree kept; cleanup deferred to test teardown");
 
-        Ok(resolved(label, rev, cached, Some(wt_path)))
+        Ok(resolved(label, kind, rev, cached, Some(wt_path)))
     }
 
     /// Ensure a worktree exists at `wt_path` checked out at the commit
@@ -208,6 +226,7 @@ impl BinaryResolver {
         &self,
         env_var: &str,
         label: &str,
+        kind: BinaryKind,
     ) -> Result<Option<ResolvedBinary>, BinaryError> {
         let Ok(raw) = std::env::var(env_var) else {
             return Ok(None);
@@ -216,7 +235,13 @@ impl BinaryResolver {
         if !path.is_file() {
             return Err(BinaryError::NotFound { path });
         }
-        Ok(Some(resolved(label, "env-override".into(), path, None)))
+        Ok(Some(resolved(
+            label,
+            kind,
+            "env-override".into(),
+            path,
+            None,
+        )))
     }
 
     fn cached_binary_path(&self, rev: &str) -> PathBuf {
@@ -480,6 +505,7 @@ impl BinaryResolver {
 
 fn resolved(
     label: &str,
+    kind: BinaryKind,
     git_rev: String,
     path: PathBuf,
     worktree_path: Option<PathBuf>,
@@ -487,6 +513,7 @@ fn resolved(
     ResolvedBinary {
         path,
         label: label.to_owned(),
+        kind,
         git_rev,
         worktree_path,
     }

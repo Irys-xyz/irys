@@ -7,12 +7,13 @@ use crate::{
 };
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
-use eyre::{OptionExt as _, ensure, eyre};
-use irys_database::{cached_data_root_by_data_root, tx_header_by_txid_canonical};
+use eyre::ensure;
+use irys_database::{
+    canonical_promoted_height, canonical_submit_height, tables::MigratedBlockHashes,
+};
 use irys_domain::{
-    BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
-    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
-    HardforkConfigExt as _,
+    BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
+    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
@@ -21,7 +22,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
-use irys_types::{BlockHash, LedgerChunkRange};
+use irys_types::{BlockHash, EvmBlockHash, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
@@ -45,14 +46,55 @@ use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
+use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 use tracing::{Instrument as _, debug, error, info, warn};
+
+/// Classification of an error variant's failure mode. Drives whether the
+/// block is removed from cache as a consensus rejection (`Consensus`),
+/// parked as soft-internal pending passive prune+re-gossip recovery
+/// (`SoftInternal`), or whether the node must abort + restart
+/// (`NodeFault`).
+///
+/// SAFETY-CRITICAL: see the enum-level safety doc on `PreValidationError`
+/// / `ValidationError`. Misclassification can attribute a local failure to
+/// the peer (or vice versa) and corrupt consensus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Strict subset of internal: local fault, retry will hit the same
+    /// fault. Must abort + supervisor restart.
+    NodeFault,
+    /// Local condition (eviction race, missing snapshot), recoverable
+    /// via passive depth-prune + fresh gossip re-entering the prevalidate
+    /// path. Block stays in cache.
+    SoftInternal,
+    /// Peer's block is genuinely invalid. Discard the block and (where
+    /// applicable) the peer.
+    Consensus,
+}
+
+impl ErrorClass {
+    pub fn is_node_fault(self) -> bool {
+        match self {
+            Self::NodeFault => true,
+            Self::SoftInternal => false,
+            Self::Consensus => false,
+        }
+    }
+    pub fn is_internal_failure(self) -> bool {
+        match self {
+            Self::NodeFault => true,
+            Self::SoftInternal => true,
+            Self::Consensus => false,
+        }
+    }
+}
 
 /// SAFETY-CRITICAL: variants in this enum are returned from `prevalidate_block`
 /// and used by callers to decide whether a block is consensus-invalid. Local
@@ -66,8 +108,20 @@ use tracing::{Instrument as _, debug, error, info, warn};
 /// validation variant.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
+    /// Local lookup failure during the PoA-anchored `block_bounds` binary
+    /// search. Construction sites in `get_block_bounds` /
+    /// `get_block_bounds_at_height` pre-check peer-supplied offsets against
+    /// the chain max and reject out-of-range / inactive-ledger cases first
+    /// (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`), and the
+    /// walk-off-tree fallback returns `PoAOffCanonicalAncestor` when a
+    /// side-fork ancestor falls below the migration boundary; by the time
+    /// this variant is constructed the failure is a local-index
+    /// inconsistency (empty index, MDBX I/O, missing predecessor that
+    /// should be present). Classified as `is_node_fault` — retry will hit
+    /// the same broken state.
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
+
     #[error("block signature is not valid")]
     BlockSignatureInvalid,
     #[error("Cascade hardfork not configured but term ledger tx {tx_id} was found")]
@@ -121,6 +175,25 @@ pub enum PreValidationError {
     PoAChunkOffsetOutOfDataChunksBounds,
     #[error("PoA chunk offset out of block bounds")]
     PoAChunkOffsetOutOfBlockBounds,
+    /// Peer-supplied PoA references a ledger id that the local chain has
+    /// no committed chunks for. Consensus-invalid (the chain hasn't
+    /// activated that ledger yet, or the peer is on a different fork).
+    /// Distinct from `BlockBoundsLookupError` so the latter only carries
+    /// genuine local lookup failures.
+    #[error("PoA ledger {ledger_id} inactive in local chain")]
+    PoALedgerInactive { ledger_id: u32 },
+    /// Peer-supplied block's ancestor chain references `ancestor_hash` at
+    /// `height` that is not the canonical block at that height. The
+    /// canonical-index PoA-bounds walk in
+    /// `get_data_poa_bounds_with_block_tree_fallback` falls off the
+    /// bottom of `block_tree`'s window and consults `MigratedBlockHashes`
+    /// to gate trust in the height-keyed canonical index; a mismatch here
+    /// means the peer's parent lineage branched below the migration
+    /// boundary (a side-fork the local node has long abandoned). Peer-
+    /// attributable Consensus: the local chain has nothing to validate
+    /// against.
+    #[error("PoA ancestor {ancestor_hash} at height {height} is off the local canonical chain")]
+    PoAOffCanonicalAncestor { ancestor_hash: H256, height: u64 },
     #[error("PoA chunk offset out of tx bounds")]
     PoAChunkOffsetOutOfTxBounds,
     #[error("Missing partition assignment for partition hash {partition_hash}")]
@@ -219,8 +292,6 @@ pub enum PreValidationError {
     ParentEpochSnapshotNotFound { block_hash: BlockHash },
     #[error("Failed to extract data ledgers: {0}")]
     DataLedgerExtractionFailed(String),
-    #[error("Failed to fetch transactions: {0}")]
-    TransactionFetchFailed(String),
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
@@ -345,21 +416,349 @@ pub enum PreValidationError {
 }
 
 impl PreValidationError {
-    /// Returns true for unrecoverable cache corruption (the block tree
-    /// `RwLock` was poisoned by a prior caller's panic). The cache is
-    /// corrupt; retry will hit the same poison. Caller should escalate
-    /// rather than silently dropping.
-    pub fn is_fatal_corruption(&self) -> bool {
-        matches!(self, Self::CachePoisoned { .. })
+    /// Single source of truth for failure-mode classification. Drives both
+    /// `is_node_fault()` and `is_internal_failure()`.
+    ///
+    /// Node faults (`NodeFault`) are local failures whose retry will hit the
+    /// same fault (verifier panic, MDBX I/O, local arithmetic bug, poisoned
+    /// lock, internal channel dead, local cache mutation, OS clock).
+    /// Consensus-safe response: abort + supervisor restart — running on with
+    /// an undefined-state local failure risks forking off the network with
+    /// silent data-level errors.
+    ///
+    /// Soft-internal failures (`SoftInternal`) are local but peer-innocent
+    /// (pruning/eviction races); recovery is passive via depth-prune + fresh
+    /// gossip re-entering the prevalidate path.
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without classifying it here is a
+    /// compile error by design: silently defaulting to `Consensus` would
+    /// peer-attribute a local fault (or vice versa) and corrupt consensus.
+    pub fn classify(&self) -> ErrorClass {
+        match self {
+            // === Node faults (must abort + restart) ===
+            // Verifier-thread panic captured by spawn_blocking.
+            Self::InternalTaskJoin(_)
+            // Local MDBX I/O failure during prevalidation lookups.
+            | Self::DatabaseError { .. }
+            // Local channel/actor failure when querying historical inclusions.
+            | Self::PreviousTxInclusionsFailed(_)
+            // Local in-memory block-tree cache mutation failure.
+            | Self::AddBlockFailed { .. }
+            | Self::UpdateCacheForScheduledValidationError(_)
+            // Local validation-service channel is dead.
+            | Self::ValidationServiceUnreachable
+            // OS clock failure.
+            | Self::SystemTimeError(_)
+            // Local arithmetic on locally-derived inputs (height * block_time);
+            // the peer-supplied reward is checked separately via RewardMismatch.
+            | Self::RewardCurveError(_)
+            // Local arithmetic with local config inputs; per-tx fee comparisons
+            // use the separate Insufficient*Fee variants.
+            | Self::FeeCalculationFailed(_)
+            // Local snapshot computation; has no real failure path today, but
+            // if it ever fires it's a local bug, not a consensus failure.
+            | Self::EmaSnapshotError(_)
+            // PoA-anchored block-bounds lookup failure: caller pre-checks
+            // peer-supplied offsets against the chain max
+            // (`PoAChunkOffsetOutOfBlockBounds`) and peer-supplied ledger ids
+            // against the parent's indexed item (`PoALedgerInactive`), so by
+            // the time this variant is constructed the failure is a local
+            // index inconsistency (empty index, DB I/O, missing predecessor).
+            | Self::BlockBoundsLookupError(_)
+            // Block-tree RwLock poisoned by a prior panic. Local corruption —
+            // callers short-circuit this variant ahead of the generic
+            // node-fault panic so it routes to the graceful shutdown path
+            // (see `block_pool::process_block`'s dispatch table).
+            | Self::CachePoisoned { .. } => ErrorClass::NodeFault,
+
+            // === Soft internal (peer innocent, retry via passive prune+re-gossip) ===
+            // Parent missing from the in-memory block-tree cache due to a
+            // local prune/reorg race. Peer is innocent.
+            Self::ParentNotInCache { .. }
+            // Local snapshot store missing the requested block's EMA / parent's
+            // epoch snapshot — eviction-race against a parent depth-prune.
+            // Peer-innocent; fresh gossip re-entry resolves once the snapshot
+            // window catches up.
+            | Self::BlockEmaSnapshotNotFound { .. }
+            | Self::ParentEpochSnapshotNotFound { .. } => ErrorClass::SoftInternal,
+
+            // === Consensus rejections (peer's block is bad) ===
+            Self::AssignedProofCountMismatch { .. }
+            | Self::BlockSignatureInvalid
+            | Self::CascadeNotConfigured { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CumulativeDifficultyMismatch { .. }
+            | Self::DataLedgerExtractionFailed(_)
+            | Self::DifficultyMismatch { .. }
+            | Self::DuplicateIngressProofSigner { .. }
+            | Self::EmaMismatch
+            | Self::HeightInvalid { .. }
+            | Self::IngressProofCountMismatch { .. }
+            | Self::IngressProofMismatch { .. }
+            | Self::IngressProofSignatureInvalid(_)
+            | Self::IngressProofsMissing
+            | Self::InsufficientPermFee { .. }
+            | Self::InsufficientTermFee { .. }
+            | Self::InvalidDataLedgersLength { .. }
+            | Self::InvalidEpochSnapshot { .. }
+            | Self::InvalidIngressProof { .. }
+            | Self::InvalidLedgerId { .. }
+            | Self::InvalidLedgerIdForTx { .. }
+            | Self::InvalidPermFeeStructure { .. }
+            | Self::InvalidPromotionDataSizeMismatch { .. }
+            | Self::InvalidPromotionPath { .. }
+            | Self::InvalidTermFeeStructure { .. }
+            | Self::InvalidTransactionSignature(_)
+            | Self::LastDiffTimestampMismatch { .. }
+            | Self::LastEpochHashMismatch { .. }
+            | Self::LedgerIdInvalid { .. }
+            | Self::MerkleProofInvalid(_)
+            | Self::MissingTransactions(_)
+            | Self::OraclePriceInvalid
+            | Self::PartitionAssignmentMissing { .. }
+            | Self::PartitionAssignmentSlotIndexMissing { .. }
+            | Self::PartitionAssignmentSlotIndexTooLarge { .. }
+            | Self::PoACapacityChunkMismatch { .. }
+            | Self::PoAChunkHashMismatch { .. }
+            | Self::PoAChunkMissing
+            | Self::PoAChunkOffsetOutOfBlockBounds
+            | Self::PoAChunkOffsetOutOfDataChunksBounds
+            | Self::PoAChunkOffsetOutOfTxBounds
+            | Self::PoADataPartitionExpired { .. }
+            | Self::PoALedgerInactive { .. }
+            | Self::PoAOffCanonicalAncestor { .. }
+            | Self::PreviousCumulativeDifficultyMismatch { .. }
+            | Self::PreviousSolutionHashMismatch { .. }
+            | Self::PublishLedgerProofCountMismatch { .. }
+            | Self::PublishTxAlreadyIncluded { .. }
+            | Self::PublishTxMissingPriorSubmit { .. }
+            | Self::PublishTxProofLengthMismatch
+            | Self::RewardMismatch { .. }
+            | Self::SolutionHashBelowDifficulty { .. }
+            | Self::SolutionHashLinkInvalid { .. }
+            | Self::SubmitTxAlreadyIncluded { .. }
+            | Self::SubmitTxHasPromotedHeight { .. }
+            | Self::TermLedgerExpiryMismatch { .. }
+            | Self::TermLedgerTxHasPermFee { .. }
+            | Self::TimestampOlderThanParent { .. }
+            | Self::TimestampTooFarInFuture { .. }
+            | Self::TooManyCommitmentTxs { .. }
+            | Self::TooManyDataTxs { .. }
+            | Self::TransactionIdMismatch { .. }
+            | Self::TxFoundInMultipleBlocks { .. }
+            | Self::TxInMultipleLedgers { .. }
+            | Self::UnexpectedCommitmentTransactions
+            | Self::UnstakedIngressProofSigner { .. }
+            | Self::VDFCheckpointsInvalid(_)
+            | Self::VDFPreviousOutputMismatch { .. } => ErrorClass::Consensus,
+        }
     }
 
-    /// Returns true for variants representing local/runtime failures (verifier
-    /// panics, transient task-join errors, etc.) that must NEVER be attributed
-    /// to the peer or used to mark a block as consensus-invalid. See the enum
-    /// safety-critical doc for the full invariant. Grow this method as new
-    /// non-consensus variants are added.
+    pub fn is_node_fault(&self) -> bool {
+        self.classify().is_node_fault()
+    }
+
     pub fn is_internal_failure(&self) -> bool {
-        matches!(self, Self::InternalTaskJoin(_))
+        self.classify().is_internal_failure()
+    }
+
+    /// Per-variant snake_case label for the
+    /// `irys.block.pre_validation_failed_total{reason}` counter and used by
+    /// [`ValidationError::metric_label`] when delegating the `PreValidation`
+    /// arm. Bounded-cardinality (capped at enum size).
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without labelling it here is a
+    /// compile error by design: silently routing through a generic
+    /// `"invalid"` would mask per-stage node-fault rates. Mirrors the
+    /// SAFETY pattern documented on [`PreValidationError::classify`].
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::BlockBoundsLookupError(_) => "block_bounds_lookup",
+            Self::BlockSignatureInvalid => "block_signature_invalid",
+            Self::CascadeNotConfigured { .. } => "cascade_not_configured",
+            Self::CumulativeDifficultyMismatch { .. } => "cumulative_difficulty_mismatch",
+            Self::DifficultyMismatch { .. } => "difficulty_mismatch",
+            Self::EmaMismatch => "ema_mismatch",
+            Self::EmaSnapshotError(_) => "ema_snapshot_error",
+            Self::IngressProofsMissing => "ingress_proofs_missing",
+            Self::IngressProofSignatureInvalid(_) => "ingress_proof_signature_invalid",
+            Self::InvalidPromotionDataSizeMismatch { .. } => "promotion_data_size_mismatch",
+            Self::LastDiffTimestampMismatch { .. } => "last_diff_timestamp_mismatch",
+            Self::LedgerIdInvalid { .. } => "ledger_id_invalid",
+            Self::MerkleProofInvalid(_) => "merkle_proof_invalid",
+            Self::OraclePriceInvalid => "oracle_price_invalid",
+            Self::UpdateCacheForScheduledValidationError(_) => "update_cache_scheduled_validation",
+            Self::PoACapacityChunkMismatch { .. } => "poa_capacity_chunk_mismatch",
+            Self::PoAChunkHashMismatch { .. } => "poa_chunk_hash_mismatch",
+            Self::PoAChunkMissing => "poa_chunk_missing",
+            Self::PoAChunkOffsetOutOfDataChunksBounds => "poa_chunk_offset_out_of_data_bounds",
+            Self::PoAChunkOffsetOutOfBlockBounds => "poa_chunk_offset_out_of_block_bounds",
+            Self::PoALedgerInactive { .. } => "poa_ledger_inactive",
+            Self::PoAOffCanonicalAncestor { .. } => "poa_off_canonical_ancestor",
+            Self::PoAChunkOffsetOutOfTxBounds => "poa_chunk_offset_out_of_tx_bounds",
+            Self::PartitionAssignmentMissing { .. } => "partition_assignment_missing",
+            Self::PartitionAssignmentSlotIndexMissing { .. } => "partition_slot_index_missing",
+            Self::PartitionAssignmentSlotIndexTooLarge { .. } => "partition_slot_index_too_large",
+            Self::PoADataPartitionExpired { .. } => "poa_data_partition_expired",
+            Self::PreviousCumulativeDifficultyMismatch { .. } => "prev_cumulative_diff_mismatch",
+            Self::PreviousSolutionHashMismatch { .. } => "prev_solution_hash_mismatch",
+            Self::RewardCurveError(_) => "reward_curve_error",
+            Self::RewardMismatch { .. } => "reward_mismatch",
+            Self::SolutionHashBelowDifficulty { .. } => "solution_hash_below_difficulty",
+            Self::SolutionHashLinkInvalid { .. } => "solution_hash_link_invalid",
+            Self::SystemTimeError(_) => "system_time_error",
+            Self::TermLedgerExpiryMismatch { .. } => "term_ledger_expiry_mismatch",
+            Self::TimestampOlderThanParent { .. } => "timestamp_older_than_parent",
+            Self::TimestampTooFarInFuture { .. } => "timestamp_too_far_in_future",
+            Self::ValidationServiceUnreachable => "validation_service_unreachable",
+            Self::InternalTaskJoin(_) => "internal_task_join",
+            Self::VDFCheckpointsInvalid(_) => "vdf_checkpoints_invalid",
+            Self::VDFPreviousOutputMismatch { .. } => "vdf_prev_output_mismatch",
+            Self::HeightInvalid { .. } => "height_invalid",
+            Self::LastEpochHashMismatch { .. } => "last_epoch_hash_mismatch",
+            Self::PublishTxMissingPriorSubmit { .. } => "publish_tx_missing_prior_submit",
+            Self::PublishTxAlreadyIncluded { .. } => "publish_tx_already_included",
+            Self::InvalidPromotionPath { .. } => "invalid_promotion_path",
+            Self::SubmitTxAlreadyIncluded { .. } => "submit_tx_already_included",
+            Self::TxFoundInMultipleBlocks { .. } => "tx_in_multiple_blocks",
+            Self::TxInMultipleLedgers { .. } => "tx_in_multiple_ledgers",
+            Self::PublishTxProofLengthMismatch => "publish_tx_proof_length_mismatch",
+            Self::BlockEmaSnapshotNotFound { .. } => "block_ema_snapshot_not_found",
+            Self::ParentEpochSnapshotNotFound { .. } => "parent_epoch_snapshot_not_found",
+            Self::DataLedgerExtractionFailed(_) => "data_ledger_extraction_failed",
+            Self::PreviousTxInclusionsFailed(_) => "prev_tx_inclusions_failed",
+            Self::InvalidLedgerIdForTx { .. } => "invalid_ledger_id_for_tx",
+            Self::InvalidLedgerId { .. } => "invalid_ledger_id",
+            Self::FeeCalculationFailed(_) => "fee_calculation_failed",
+            Self::InsufficientPermFee { .. } => "insufficient_perm_fee",
+            Self::InsufficientTermFee { .. } => "insufficient_term_fee",
+            Self::InvalidTermFeeStructure { .. } => "invalid_term_fee_structure",
+            Self::InvalidPermFeeStructure { .. } => "invalid_perm_fee_structure",
+            Self::SubmitTxHasPromotedHeight { .. } => "submit_tx_has_promoted_height",
+            Self::TermLedgerTxHasPermFee { .. } => "term_ledger_tx_has_perm_fee",
+            Self::PublishLedgerProofCountMismatch { .. } => "publish_ledger_proof_count_mismatch",
+            Self::IngressProofCountMismatch { .. } => "ingress_proof_count_mismatch",
+            Self::AssignedProofCountMismatch { .. } => "assigned_proof_count_mismatch",
+            Self::InvalidIngressProof { .. } => "invalid_ingress_proof",
+            Self::IngressProofMismatch { .. } => "ingress_proof_mismatch",
+            Self::DuplicateIngressProofSigner { .. } => "duplicate_ingress_proof_signer",
+            Self::UnstakedIngressProofSigner { .. } => "unstaked_ingress_proof_signer",
+            Self::DatabaseError { .. } => "database_error",
+            Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
+            Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
+            Self::MissingTransactions(_) => "missing_transactions",
+            Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
+            Self::InvalidTransactionSignature(_) => "invalid_tx_signature",
+            Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
+            Self::UnexpectedCommitmentTransactions => "unexpected_commitment_txs",
+            Self::InvalidDataLedgersLength { .. } => "invalid_data_ledgers_length",
+            Self::AddBlockFailed { .. } => "add_block_failed",
+            Self::CachePoisoned { .. } => "cache_poisoned",
+            Self::ParentNotInCache { .. } => "parent_not_in_cache",
+        }
+    }
+}
+
+/// Why a block validation task was cancelled before producing a verdict.
+///
+/// The [`ValidationCancelReason::IS_INTERNAL`] constant is `true` for all
+/// variants; `ValidationError::ValidationCancelled` always routes through
+/// `ValidationResult::InternalFailure` (validity unknown, retry plausible).
+///
+/// All reasons are local-side outcomes that say nothing about the peer's
+/// block. Every variant routes through `IS_INTERNAL = true` →
+/// `InternalFailure` so the peer is never blamed for a "we moved on" event.
+/// Historically `HeightDifference` and `ChannelClosed` returned `false`
+/// here under the older rationale that "the block can never become
+/// canonical, so discard rather than retry" — that rationale conflated
+/// "block is bad" with "we're not pursuing it any more". Discard still
+/// happens (the block is removed from cache), but it is no longer recorded
+/// as a consensus rejection in metrics / logs / any future peer-scoring
+/// code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationCancelReason {
+    /// Canonical tip moved past this block by more than `block_tree_depth`.
+    /// The block can never become canonical, but its validity is unknown —
+    /// our tip simply advanced past it while validation was in flight.
+    /// Routes through `IS_INTERNAL = true` so the block discards as a
+    /// soft local outcome rather than peer-attributed Invalid.
+    HeightDifference,
+    /// Parent block absent from the in-memory block tree during the
+    /// parent-wait stage. The parent's absence is never peer-attributable:
+    /// either the block_pool failed to gate the child on its parent, the
+    /// parent was depth-pruned past `block_tree_depth`, or the parent was
+    /// proactively removed by the soft-`InternalFailure` handler. In every
+    /// case the cause is local, so this routes through `IS_INTERNAL = true`
+    /// → `ValidationResult::InternalFailure` (child removed on the soft path
+    /// alongside its parent; fresh gossip can re-enter if/when the parent
+    /// returns).
+    ParentMissing,
+    /// Block-state broadcast channel closed (typically during node shutdown).
+    /// A shutdown is a local event, not a statement about the peer's block.
+    /// Routes through `IS_INTERNAL = true` so shutdown-induced discards
+    /// never poison consensus-rejection metrics.
+    ChannelClosed,
+    /// Concurrent-stage `JoinError::Cancelled` recurred for the same block
+    /// past the per-block retry cap (`MAX_CONCURRENT_CANCEL_RETRIES`) in the
+    /// validation-service result loop. A single cancel is a Tokio hiccup we
+    /// transparently requeue; sustained recurrence for the same block means
+    /// something local keeps tearing the task down (poisoned runtime, a
+    /// sibling-worker panic loop, a watchdog edge case) and re-running it
+    /// will likely just burn cycles. Routes through `IS_INTERNAL = true`
+    /// so the block parks rather than being peer-attributed — the validity
+    /// of the child block is still unknown, the cancellation said nothing
+    /// about it. Recovery is fresh gossip re-entry (same lane as other
+    /// SoftInternal parks) once the local condition clears.
+    RepeatedCancellation,
+    /// PoA `spawn_blocking` handle was externally aborted (typically by the
+    /// outer-stage cancel arm of `validate_block` tearing down the PoA stage
+    /// because a sibling stage produced a verdict first, or by the runtime
+    /// during shutdown). Local, peer-innocent. Distinct from `ChannelClosed`
+    /// so operator logs and the `validation_cancelled` metric can tell the
+    /// two apart instead of conflating "broadcast channel closed at shutdown"
+    /// with "PoA blocking task aborted mid-flight".
+    PoAAborted,
+}
+
+impl ValidationCancelReason {
+    /// All variants are local-side outcomes. `HeightDifference`,
+    /// `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
+    /// `PoAAborted` — none are statements about the peer's block.
+    ///
+    /// SAFETY CRITICAL: adding a new variant that classifies as Consensus
+    /// REQUIRES changing this constant to a method and re-auditing every
+    /// caller. The compile-time tripwire below (`_exhaustive_check`) catches
+    /// accidental new variants — a new variant must add an arm there, which
+    /// forces the author to re-evaluate `IS_INTERNAL`.
+    pub const IS_INTERNAL: bool = true;
+}
+
+// Compile-time tripwire: if anyone adds a new variant they must update
+// this match (and re-evaluate IS_INTERNAL above).
+const _: fn() = || {
+    fn _exhaustive_check(reason: ValidationCancelReason) {
+        match reason {
+            ValidationCancelReason::HeightDifference => {}
+            ValidationCancelReason::ParentMissing => {}
+            ValidationCancelReason::ChannelClosed => {}
+            ValidationCancelReason::RepeatedCancellation => {}
+            ValidationCancelReason::PoAAborted => {} // New variant? Update IS_INTERNAL above before adding an arm here.
+        }
+    }
+};
+
+impl std::fmt::Display for ValidationCancelReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeightDifference => write!(f, "height difference"),
+            Self::ParentMissing => write!(f, "parent missing"),
+            Self::ChannelClosed => write!(f, "channel closed"),
+            Self::RepeatedCancellation => write!(f, "repeated cancellation"),
+            Self::PoAAborted => write!(f, "poa aborted"),
+        }
     }
 }
 
@@ -370,9 +769,14 @@ pub enum ValidationError {
     #[error("Pre-validation failed: {0}")]
     PreValidation(#[from] PreValidationError),
 
-    /// Validation was cancelled due to block tree state changes
+    /// Validation was cancelled before producing a verdict.
+    ///
+    /// The `reason` sub-variant determines whether the cancellation is
+    /// treated as an internal/runtime failure (validity unknown, retry
+    /// plausible) or as a "give up and discard" outcome — see
+    /// [`ValidationCancelReason::IS_INTERNAL`].
     #[error("Validation cancelled: {reason}")]
-    ValidationCancelled { reason: String },
+    ValidationCancelled { reason: ValidationCancelReason },
 
     /// A validation task panicked unexpectedly
     #[error("Validation task panicked: {task}: {details}")]
@@ -386,21 +790,78 @@ pub enum ValidationError {
     #[error("Seed data invalid: {0}")]
     SeedDataInvalid(String),
 
-    /// Execution layer (Reth) validation failed
+    /// Execution layer (Reth) rejected the payload — consensus rejection
+    /// (the block's payload is genuinely invalid: bad state root, structure
+    /// mismatch, etc., reported by reth as `PayloadStatusEnum::Invalid`).
+    /// Distinct from [`Self::ExecutionLayerTransportFailed`], which is a
+    /// local-EL transport hiccup and must NOT be peer-attributed.
     #[error("Execution layer validation failed: {0}")]
     ExecutionLayerFailed(String),
 
-    /// Recall range validation failed
+    /// Local reth engine RPC transport failure during payload submission
+    /// (engine HTTP client unreachable, request error, etc.). This is a
+    /// node-level fault — the EL is broken on this node, not the peer's
+    /// block. Classified as `is_node_fault()` so the handler aborts and
+    /// the supervisor restarts the node clean.
+    #[error("Execution layer transport failure: {0}")]
+    ExecutionLayerTransportFailed(String),
+
+    /// Recall range validation failed (consensus mismatch — peer-attributable).
     #[error("Recall range validation failed: {0}")]
     RecallRangeInvalid(String),
 
-    /// Shadow transaction validation failed
+    /// Local VDF state did not yet contain the steps required for recall-range
+    /// validation. The block's validity is unknown — the node simply hasn't
+    /// caught up to the block's VDF position yet. Classified as SoftInternal
+    /// (block parks in cache; re-validate once VDF state advances).
+    #[error("Recall range VDF steps unavailable: {0}")]
+    RecallRangeStepsUnavailable(String),
+
+    /// Shadow transaction validation failed (consensus rejection — the
+    /// peer's payload doesn't match the expected shadow transactions, has
+    /// invalid structure, or carries a treasury mismatch). Construction
+    /// is reserved for genuine consensus mismatches — local DB/mempool/
+    /// snapshot failures during shadow-tx *generation* route through
+    /// `ShadowTxNodeFault` (hard faults) or early-return typed errors.
     #[error("Shadow transaction validation failed: {0}")]
     ShadowTransactionInvalid(String),
 
-    /// Failed to fetch commitment transactions from mempool or database
-    #[error("Failed to fetch commitment transactions: {0}")]
-    CommitmentTransactionFetchFailed(String),
+    /// A hard local I/O failure inside the shadow-tx generation pipeline
+    /// (block-header DB read, MDBX corruption, lock poisoning, etc.).
+    /// Retry cannot help — the DB itself is broken on this node, not the
+    /// peer's block — so it is classified as `is_node_fault()` to abort
+    /// + supervisor-restart rather than accumulating known-bad blocks
+    /// in cache.
+    #[error("Shadow transaction generation node fault: {0}")]
+    ShadowTxNodeFault(String),
+
+    /// The local `ExecutionPayloadCache` could not deliver the payload
+    /// for this block's `evm_block_hash` before the wait completed.
+    /// `ExecutionPayloadCache::wait_for_payload` collapses two distinct
+    /// `ExecutionPayloadWaitError` variants into this single classified
+    /// error (the diagnostic distinction lives in the variant, logged
+    /// at the conversion site):
+    ///   - `ReceiverDisrupted` — the `payload_senders` LRU evicted our
+    ///     slot under heavy catch-up sync
+    ///     (>`PAYLOAD_RECEIVERS_CAPACITY = 1000` concurrent waiters in
+    ///     flight), or an explicit `remove_payload_from_cache` for the
+    ///     same hash.
+    ///   - `WaitTimeout` — the bounded
+    ///     `sync.execution_payload_wait_timeout_millis` elapsed before
+    ///     the payload arrived (peer advertised the header but never
+    ///     served the EVM payload). Caps the previously LRU-bounded
+    ///     (effectively unbounded under low load) wait.
+    ///
+    /// Both are local cache / wait disruption — the node is healthy,
+    /// the EL is fine, the peer's block may simply be unreachable.
+    /// Classified as a soft internal failure (block parks in cache,
+    /// retry via fresh gossip re-entry). Specifically NOT a node
+    /// fault: panicking here on every cache eviction or timeout would
+    /// self-DoS healthy nodes during catch-up. Distinct from
+    /// `ExecutionLayerTransportFailed`, which covers genuine local-EL
+    /// RPC transport failures (those remain a node fault).
+    #[error("Execution payload wait disrupted by local cache (evm_block_hash {evm_block_hash})")]
+    ExecutionPayloadCacheEvicted { evm_block_hash: EvmBlockHash },
 
     /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
     #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
@@ -452,15 +913,43 @@ pub enum ValidationError {
         signer: IrysAddress,
     },
 
-    /// Parent commitment snapshot not found
+    /// Parent commitment snapshot not found at validation entry.
+    ///
+    /// Classified as internal: this is an eviction race against the in-memory
+    /// snapshot window — the parent's snapshot may have been there moments
+    /// before we looked. Validity is unknown; the block stays in cache. There
+    /// is no automatic re-scheduler today — recovery is passive (depth-prune
+    /// → fresh gossip re-enters the prevalidate path).
     #[error("Parent commitment snapshot missing for block {block_hash}")]
     ParentCommitmentSnapshotMissing { block_hash: H256 },
 
-    /// Parent epoch snapshot not found
+    /// Parent epoch snapshot not found at validation entry.
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`].
     #[error("Parent epoch snapshot missing for block {block_hash}")]
     ParentEpochSnapshotMissing { block_hash: H256 },
 
-    /// Parent block not found in block tree
+    /// Parent EMA snapshot not found at validation entry.
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`].
+    #[error("Parent EMA snapshot missing for block {block_hash}")]
+    ParentEmaSnapshotMissing { block_hash: H256 },
+
+    /// Parent block not found in block tree at validation entry (looked up
+    /// during seed-data validation, before the parent-wait stage).
+    ///
+    /// Classified as internal: the parent could have been present a moment
+    /// ago and got evicted just before we looked. The block's validity is
+    /// genuinely unknown. Recovery is passive (cache entry persists until
+    /// depth-pruning evicts it, then fresh gossip re-enters the prevalidate
+    /// path); no automatic re-scheduler today.
+    ///
+    /// Construction site is prevalidation-time. The cancellation-time analog
+    /// is [`ValidationCancelReason::ParentMissing`], which fires from inside
+    /// the parent-wait stage; both classify as internal because neither
+    /// "parent absent from cache" condition is peer-attributable.
     #[error("Parent block {block_hash} not found in block tree")]
     ParentBlockMissing { block_hash: H256 },
 
@@ -479,10 +968,403 @@ pub enum ValidationError {
     /// Commitment transaction in wrong order
     #[error("Commitment transaction at position {position} in wrong order")]
     CommitmentWrongOrder { position: usize },
+}
 
-    /// Generic validation error for edge cases
-    #[error("Validation failed: {0}")]
-    Other(String),
+impl ValidationError {
+    /// Single source of truth for failure-mode classification. Drives both
+    /// `is_node_fault()` and `is_internal_failure()`. See
+    /// [`PreValidationError::classify`] for the rationale.
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below — no
+    /// `_` wildcard. Adding a new variant without classifying it here is a
+    /// compile error by design: silently defaulting would peer-attribute a
+    /// local fault (or vice versa) and corrupt consensus.
+    pub fn classify(&self) -> ErrorClass {
+        match self {
+            // Delegate to PreValidationError's classifier.
+            Self::PreValidation(e) => e.classify(),
+            // Task panic is always a node fault: a verifier thread crashed.
+            Self::TaskPanicked { .. } => ErrorClass::NodeFault,
+            // Local reth engine RPC transport failure — the EL is broken
+            // on this node, not the peer's block. Abort + supervisor restart.
+            Self::ExecutionLayerTransportFailed(_) => ErrorClass::NodeFault,
+            // Hard local I/O failure inside shadow-tx generation (block-header
+            // DB read, MDBX corruption, etc.) — retry cannot help, the DB is
+            // broken on this node.
+            Self::ShadowTxNodeFault(_) => ErrorClass::NodeFault,
+
+            // Cancellation classification is sub-variant-dependent; delegate
+            // so a future retry-plausible reason doesn't silently become a
+            // node fault — that decision should be explicit at the reason
+            // site. All current cancellation reasons (`HeightDifference`,
+            // `ParentMissing`, `ChannelClosed`, `RepeatedCancellation`,
+            // `PoAAborted`) are local-side outcomes and route to
+            // `SoftInternal` — the `IS_INTERNAL` const documents the
+            // invariant and the compile-time tripwire enforces it. No
+            // cancellation reason ever peer-attributes the child block.
+            Self::ValidationCancelled { .. } => {
+                if ValidationCancelReason::IS_INTERNAL {
+                    ErrorClass::SoftInternal
+                } else {
+                    ErrorClass::Consensus
+                }
+            }
+            // Prevalidation-time parent/snapshot lookups: eviction races, not
+            // node faults. Recovery is passive via depth-prune + re-gossip.
+            // The cancellation-time `ValidationCancelReason::ParentMissing`
+            // routes via `ValidationCancelled` above — see the doc on
+            // `Self::ParentBlockMissing` for the distinction.
+            Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentEmaSnapshotMissing { .. }
+            | Self::ParentBlockMissing { .. } => ErrorClass::SoftInternal,
+            // Local `ExecutionPayloadCache` tore down the wait receiver
+            // (LRU eviction under sync load, or explicit cache removal).
+            // The node is healthy and the EL is fine — cache is just
+            // saturated. Block parks in cache for retry. See the variant
+            // doc for the full rationale.
+            Self::ExecutionPayloadCacheEvicted { .. } => ErrorClass::SoftInternal,
+            // Local VDF state hasn't caught up to the block's step position.
+            // Not peer-attributable — the block may be valid once VDF catches
+            // up. Block parks in cache for passive retry.
+            Self::RecallRangeStepsUnavailable(_) => ErrorClass::SoftInternal,
+
+            // Consensus rejections — peer's block is genuinely bad.
+            Self::VdfValidationFailed(_)
+            | Self::SeedDataInvalid(_)
+            | Self::ExecutionLayerFailed(_)
+            | Self::RecallRangeInvalid(_)
+            | Self::ShadowTransactionInvalid(_)
+            | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CommitmentTypeNotAllowed { .. }
+            | Self::CommitmentOrderingFailed(_)
+            | Self::CommitmentSnapshotRejected { .. }
+            | Self::UnpledgePartitionNotOwned { .. }
+            | Self::EpochCommitmentMismatch { .. }
+            | Self::EpochExtraCommitment { .. }
+            | Self::EpochMissingCommitment { .. }
+            | Self::CommitmentWrongOrder { .. } => ErrorClass::Consensus,
+        }
+    }
+
+    pub fn is_node_fault(&self) -> bool {
+        self.classify().is_node_fault()
+    }
+
+    pub fn is_internal_failure(&self) -> bool {
+        self.classify().is_internal_failure()
+    }
+
+    /// Most-specific label for per-stage metric recording. Distinguishes
+    /// `node_fault` (local-state corruption / EL transport failure → abort
+    /// + supervisor restart) from `internal_error` (soft-internal: block
+    /// parks in cache for retry) from `invalid` (peer-attributable
+    /// consensus rejection), so dashboards can isolate local-fault rates
+    /// from peer-fault rates.
+    ///
+    /// The overall-result `label_for` closure at the dispatch site in
+    /// `block_validation_task.rs` collapses `node_fault` and
+    /// `internal_error` back to its default (`"invalid"` for
+    /// `Invalid` / `"internal_error"` for `InternalFailure`) so the
+    /// production-dashboard labels for the overall metric do not change.
+    ///
+    /// SAFETY: every variant MUST appear explicitly in the match below —
+    /// no `_` wildcard. Adding a new variant without labelling it here is
+    /// a compile error by design.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Self::ValidationCancelled { .. } => "cancelled",
+            Self::TaskPanicked { .. } => "panicked",
+            // node-fault variants — distinct from generic "invalid" so
+            // dashboards can isolate local-state corruption from
+            // peer-attributable rejections.
+            Self::ShadowTxNodeFault(_) | Self::ExecutionLayerTransportFailed(_) => "node_fault",
+            // soft-internal — block parks for retry, not a peer fault.
+            Self::ExecutionPayloadCacheEvicted { .. }
+            | Self::ParentBlockMissing { .. }
+            | Self::ParentCommitmentSnapshotMissing { .. }
+            | Self::ParentEpochSnapshotMissing { .. }
+            | Self::ParentEmaSnapshotMissing { .. }
+            | Self::RecallRangeStepsUnavailable(_) => "internal_error",
+            // Per-variant snake_case tag — pre-validation may surface
+            // node-fault, soft-internal, or peer-attributable rejections;
+            // the generic `"invalid"` would undercount local-state corruption
+            // at this stage.
+            Self::PreValidation(e) => e.metric_reason(),
+            // consensus rejections — all remaining variants.
+            Self::VdfValidationFailed(_)
+            | Self::SeedDataInvalid(_)
+            | Self::ExecutionLayerFailed(_)
+            | Self::RecallRangeInvalid(_)
+            | Self::ShadowTransactionInvalid(_)
+            | Self::CommitmentValueInvalid { .. }
+            | Self::CommitmentVersionInvalid { .. }
+            | Self::CommitmentTypeNotAllowed { .. }
+            | Self::CommitmentOrderingFailed(_)
+            | Self::CommitmentSnapshotRejected { .. }
+            | Self::UnpledgePartitionNotOwned { .. }
+            | Self::EpochCommitmentMismatch { .. }
+            | Self::EpochExtraCommitment { .. }
+            | Self::EpochMissingCommitment { .. }
+            | Self::CommitmentWrongOrder { .. } => "invalid",
+        }
+    }
+}
+
+#[cfg(test)]
+mod metric_label_tests {
+    //! Regression tests for the granular per-stage
+    //! [`ValidationError::metric_label`] partitioning. The overall metric
+    //! collapses these back to `"invalid"` / `"internal_error"` via the
+    //! dispatch-site `label_for` closure, but per-stage call sites surface
+    //! the granular labels so dashboards can isolate local-fault rates from
+    //! peer-attributable rejections.
+
+    use super::*;
+    use crate::shadow_tx_generator::ShadowTxGenError;
+
+    /// Each category of `ValidationError` maps to a distinct per-stage
+    /// label. This is the load-bearing test that adding a new variant must
+    /// be classified (the match in `metric_label()` has no `_` wildcard).
+    #[test]
+    fn metric_label_distinguishes_node_fault_from_consensus() {
+        // cancelled — `ValidationCancelled` regardless of sub-reason.
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+            ValidationCancelReason::RepeatedCancellation,
+            ValidationCancelReason::PoAAborted,
+        ] {
+            let err = ValidationError::ValidationCancelled { reason };
+            assert_eq!(
+                err.metric_label(),
+                "cancelled",
+                "ValidationCancelled (reason {:?}) must label as 'cancelled'",
+                reason,
+            );
+        }
+
+        // panicked — verifier thread crashed.
+        let err = ValidationError::TaskPanicked {
+            task: "poa".into(),
+            details: "boom".into(),
+        };
+        assert_eq!(err.metric_label(), "panicked");
+
+        // node_fault — local-state corruption / EL transport failure.
+        let err = ValidationError::ShadowTxNodeFault("db corrupted".into());
+        assert_eq!(err.metric_label(), "node_fault");
+        let err = ValidationError::ExecutionLayerTransportFailed("rpc down".into());
+        assert_eq!(err.metric_label(), "node_fault");
+
+        // internal_error — soft-internal: block parks for retry.
+        let err = ValidationError::ParentBlockMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentCommitmentSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentEpochSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ParentEmaSnapshotMissing {
+            block_hash: H256::zero(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::ExecutionPayloadCacheEvicted {
+            evm_block_hash: Default::default(),
+        };
+        assert_eq!(err.metric_label(), "internal_error");
+        let err = ValidationError::RecallRangeStepsUnavailable("steps unavailable".into());
+        assert_eq!(err.metric_label(), "internal_error");
+
+        // invalid — consensus-rejection variants (peer-attributable).
+        let err = ValidationError::ShadowTransactionInvalid("bad treasury".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::ExecutionLayerFailed("state root mismatch".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::VdfValidationFailed("step mismatch".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::SeedDataInvalid("bad seed".into());
+        assert_eq!(err.metric_label(), "invalid");
+        let err = ValidationError::RecallRangeInvalid("out of range".into());
+        assert_eq!(err.metric_label(), "invalid");
+
+        // PreValidation — delegates to the inner variant's `metric_reason()`
+        // so dashboards can isolate node-fault / soft-internal / consensus
+        // failures at the pre-validation stage.
+        // Spot-check one variant from each `ErrorClass`:
+        //   * NodeFault — `DatabaseError` (local MDBX I/O failure).
+        let err = ValidationError::PreValidation(PreValidationError::DatabaseError {
+            error: "mdbx i/o".into(),
+        });
+        assert_eq!(err.metric_label(), "database_error");
+        //   * SoftInternal — `ParentNotInCache` (reorg/prune race; peer innocent).
+        let err = ValidationError::PreValidation(PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        });
+        assert_eq!(err.metric_label(), "parent_not_in_cache");
+        //   * Consensus — `MerkleProofInvalid` (peer-attributable).
+        let err =
+            ValidationError::PreValidation(PreValidationError::MerkleProofInvalid("bad".into()));
+        assert_eq!(err.metric_label(), "merkle_proof_invalid");
+    }
+
+    /// `PreValidationError::metric_reason` returns a distinct snake_case tag
+    /// per variant; the match has no `_` wildcard so adding a new variant
+    /// without tagging it is a compile error. Spot-check one representative
+    /// from each `ErrorClass` (NodeFault / SoftInternal / Consensus) — the
+    /// rest is covered by the compile-time exhaustiveness check.
+    #[test]
+    fn pre_validation_metric_reason_exhaustive_coverage() {
+        // NodeFault — local MDBX I/O.
+        let err = PreValidationError::DatabaseError {
+            error: "mdbx i/o".into(),
+        };
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "database_error");
+
+        // NodeFault — block-bounds local-index inconsistency.
+        let err = PreValidationError::BlockBoundsLookupError("empty index".into());
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "block_bounds_lookup");
+
+        // NodeFault — verifier-thread panic captured by spawn_blocking.
+        let err = PreValidationError::InternalTaskJoin("panicked".into());
+        assert_eq!(err.classify(), ErrorClass::NodeFault);
+        assert_eq!(err.metric_reason(), "internal_task_join");
+
+        // SoftInternal — parent missing from in-memory cache due to prune/reorg race.
+        let err = PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        };
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert_eq!(err.metric_reason(), "parent_not_in_cache");
+
+        // Consensus — peer-attributable merkle proof failure.
+        let err = PreValidationError::MerkleProofInvalid("bad".into());
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert_eq!(err.metric_reason(), "merkle_proof_invalid");
+
+        // Consensus — peer-supplied ledger id inactive in the local chain.
+        let err = PreValidationError::PoALedgerInactive { ledger_id: 99 };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert_eq!(err.metric_reason(), "poa_ledger_inactive");
+    }
+
+    /// Regression coverage for the snapshot-treasury-underflow routing:
+    /// the `SnapshotTreasuryUnderflow` sub-variant of `ShadowTxGenError`
+    /// routes through `ShadowTxNodeFault`, which must produce the
+    /// `node_fault` per-stage label so dashboards see local-snapshot
+    /// corruption separately from peer-attributable rejections.
+    #[test]
+    fn metric_label_for_snapshot_treasury_underflow_is_node_fault() {
+        // Mirror the routing used inside
+        // `shadow_tx_gen_error_dispatch_tests::classify_shadow_err` so the
+        // assertion stays in lockstep with the production classifier.
+        let err = match ShadowTxGenError::SnapshotTreasuryUnderflow(
+            "cannot pay 10 from balance 5".into(),
+        ) {
+            ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+                ValidationError::ShadowTxNodeFault(format!("snapshot treasury underflow: {s}"))
+            }
+            other => panic!("unexpected ShadowTxGenError variant: {other:?}"),
+        };
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        assert_eq!(
+            err.metric_label(),
+            "node_fault",
+            "SnapshotTreasuryUnderflow must surface as 'node_fault' per-stage label",
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_range_error_tests {
+    use super::*;
+
+    #[test]
+    fn recall_range_error_is_internal() {
+        let steps_err = RecallRangeError::StepsUnavailable(eyre::eyre!("steps missing"));
+        assert!(steps_err.is_internal(), "StepsUnavailable must be internal");
+
+        let mismatch_err = RecallRangeError::Mismatch(eyre::eyre!("range mismatch"));
+        assert!(!mismatch_err.is_internal(), "Mismatch must not be internal");
+    }
+
+    #[test]
+    fn validation_error_recall_range_steps_unavailable_is_soft_internal() {
+        let err = ValidationError::RecallRangeStepsUnavailable("no steps".into());
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert!(err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "internal_error");
+    }
+
+    #[test]
+    fn validation_error_recall_range_invalid_is_consensus() {
+        let err = ValidationError::RecallRangeInvalid("mismatch".into());
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(!err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "invalid");
+    }
+}
+
+impl ValidationError {
+    /// Stable, bounded-cardinality label for the
+    /// `irys.block.pre_validation_failed_total{reason}` /
+    /// `irys.block.validation_failed_total{reason}` counters.  The caller
+    /// chooses which counter to increment based on
+    /// [`ValidationError::is_pre_validation`]; this method only returns the
+    /// tag.  Delegates to [`PreValidationError::metric_reason`] for the
+    /// pre-validation variant; other variants get a coarse tag matching the
+    /// variant name.
+    pub fn metric_reason(&self) -> &'static str {
+        match self {
+            Self::PreValidation(inner) => inner.metric_reason(),
+            Self::ValidationCancelled { .. } => "validation_cancelled",
+            Self::TaskPanicked { .. } => "task_panicked",
+            Self::VdfValidationFailed(_) => "vdf_validation_failed",
+            Self::SeedDataInvalid(_) => "seed_data_invalid",
+            Self::ExecutionLayerFailed(_) => "execution_layer_failed",
+            Self::RecallRangeInvalid(_) => "recall_range_invalid",
+            Self::ShadowTransactionInvalid(_) => "shadow_tx_invalid",
+            Self::CommitmentValueInvalid { .. } => "commitment_value_invalid",
+            Self::CommitmentVersionInvalid { .. } => "commitment_version_invalid",
+            Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
+            Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
+            Self::CommitmentSnapshotRejected { .. } => "commitment_snapshot_rejected",
+            Self::UnpledgePartitionNotOwned { .. } => "unpledge_partition_not_owned",
+            Self::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
+            Self::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
+            Self::ParentBlockMissing { .. } => "parent_block_missing",
+            Self::EpochCommitmentMismatch { .. } => "epoch_commitment_mismatch",
+            Self::EpochExtraCommitment { .. } => "epoch_extra_commitment",
+            Self::EpochMissingCommitment { .. } => "epoch_missing_commitment",
+            Self::CommitmentWrongOrder { .. } => "commitment_wrong_order",
+            Self::ExecutionLayerTransportFailed(_) => "execution_layer_transport_failed",
+            Self::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
+            Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
+            Self::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
+            Self::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+        }
+    }
+
+    /// Returns true for the pre-validation variant so callers can route to
+    /// `irys.block.pre_validation_failed_total` vs.
+    /// `irys.block.validation_failed_total` without re-matching the enum.
+    pub fn is_pre_validation(&self) -> bool {
+        matches!(self, Self::PreValidation(_))
+    }
 }
 
 /// Full pre-validation steps for a block
@@ -1193,32 +2075,7 @@ pub fn height_is_valid(
 #[cfg(test)]
 mod prevalidation_error_classification_tests {
     use super::*;
-
-    /// `CachePoisoned` is unrecoverable — retry will hit the same poisoned
-    /// lock. Caller must escalate, not silently drop.
-    #[test]
-    fn cache_poisoned_is_fatal_corruption() {
-        let err = PreValidationError::CachePoisoned { at: "test_site" };
-        assert!(
-            err.is_fatal_corruption(),
-            "CachePoisoned must surface as fatal corruption"
-        );
-    }
-
-    /// Genuine validation failures and `ParentNotInCache` are terminal —
-    /// retrying gives the same answer (or, for `ParentNotInCache`, no retry
-    /// mechanism re-invokes process_block once is_processing is flipped back).
-    #[test]
-    fn non_corruption_errors_are_not_fatal_corruption() {
-        assert!(!PreValidationError::BlockSignatureInvalid.is_fatal_corruption());
-        assert!(
-            !PreValidationError::ParentNotInCache {
-                parent_hash: H256::zero(),
-                expected_height: 0,
-            }
-            .is_fatal_corruption()
-        );
-    }
+    use rstest::rstest;
 
     /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
     /// must classify as internal so callers route it away from peer-attributed
@@ -1227,7 +2084,6 @@ mod prevalidation_error_classification_tests {
     fn internal_task_join_is_internal_failure() {
         let err = PreValidationError::InternalTaskJoin("panic".to_string());
         assert!(err.is_internal_failure());
-        assert!(!err.is_fatal_corruption());
     }
 
     /// Consensus-validation variants must NOT classify as internal.
@@ -1237,6 +2093,571 @@ mod prevalidation_error_classification_tests {
         assert!(
             !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
+    }
+
+    /// Every `ValidationCancelReason` is a local-side outcome and routes
+    /// through `InternalFailure`. None are peer-attributable, so
+    /// `IS_INTERNAL` is `true` and the wrapping
+    /// `ValidationError::ValidationCancelled` is an
+    /// `is_internal_failure()`.
+    ///
+    /// One case per `ValidationCancelReason` variant so per-variant failures
+    /// surface as distinct nextest reports (matches the repo convention used
+    /// by `is_parent_ready_chain_state_dispatch` /
+    /// `block_status_returns_in_tree_pending_validation`).
+    #[rstest]
+    #[case::height_difference(ValidationCancelReason::HeightDifference)]
+    #[case::channel_closed(ValidationCancelReason::ChannelClosed)]
+    #[case::parent_missing(ValidationCancelReason::ParentMissing)]
+    #[case::repeated_cancellation(ValidationCancelReason::RepeatedCancellation)]
+    #[case::poa_aborted(ValidationCancelReason::PoAAborted)]
+    fn validation_cancel_reason_classifier_dispatch(#[case] reason: ValidationCancelReason) {
+        // IS_INTERNAL is a const — verified at compile time by the tripwire below.
+        // `ValidationError::is_internal_failure` must route through IS_INTERNAL.
+        assert!(
+            ValidationError::ValidationCancelled { reason }.is_internal_failure(),
+            "ValidationError::ValidationCancelled {{ reason: {:?} }}.is_internal_failure()",
+            reason,
+        );
+    }
+
+    /// Expected `ValidationResult` shape for a given `ValidationCancelReason`
+    /// after round-tripping through `From<ValidationError>`.
+    ///
+    /// Every cancel reason routes to `InternalFailureSoft`. Retained as
+    /// an enum (rather than a single assertion) to preserve the
+    /// per-variant rstest case structure — adding a new variant that must
+    /// land on a different shape stays mechanically expressible without a
+    /// churn.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExpectedRoundtripShape {
+        /// Soft internal failure (not a node fault). The block discards from
+        /// cache but is NOT peer-attributed as consensus-rejected.
+        InternalFailureSoft,
+    }
+
+    /// Round-trip: every `ValidationCancelReason` must land on
+    /// `ValidationResult::InternalFailure(_)` via the
+    /// `From<ValidationError> for ValidationResult` dispatcher. No cancel
+    /// reason peer-attributes the block as `Invalid`.
+    ///
+    /// One case per `ValidationCancelReason` variant so per-variant failures
+    /// surface as distinct nextest reports.
+    #[rstest]
+    #[case::height_difference(
+        ValidationCancelReason::HeightDifference,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::channel_closed(
+        ValidationCancelReason::ChannelClosed,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::parent_missing(
+        ValidationCancelReason::ParentMissing,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::repeated_cancellation(
+        ValidationCancelReason::RepeatedCancellation,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    #[case::poa_aborted(
+        ValidationCancelReason::PoAAborted,
+        ExpectedRoundtripShape::InternalFailureSoft
+    )]
+    fn validation_cancel_reason_roundtrip_through_dispatcher(
+        #[case] reason: ValidationCancelReason,
+        #[case] expected: ExpectedRoundtripShape,
+    ) {
+        use crate::block_tree_service::ValidationResult;
+
+        let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
+        match (expected, &result) {
+            (
+                ExpectedRoundtripShape::InternalFailureSoft,
+                ValidationResult::InternalFailure(inner),
+            ) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "{:?} is a soft cancel — must NOT be a node fault",
+                    reason,
+                );
+                assert!(
+                    matches!(
+                        inner.err(),
+                        ValidationError::ValidationCancelled { reason: cancel_reason }
+                            if *cancel_reason == reason
+                    ),
+                    "inner ValidationCancelled reason must round-trip identically; got {:?}",
+                    inner.err(),
+                );
+            }
+            (expected, actual) => panic!(
+                "reason {:?} round-tripped to {:?}, expected shape {:?}",
+                reason, actual, expected,
+            ),
+        }
+    }
+
+    /// Local/runtime variants (DB I/O, channel failure, OS clock, internal
+    /// arithmetic, cache mutation) must classify as internal so block_pool
+    /// does not peer-attribute or record the block as invalid.
+    #[test]
+    fn local_runtime_variants_are_internal_failures() {
+        assert!(
+            PreValidationError::DatabaseError {
+                error: "mdbx".to_string()
+            }
+            .is_internal_failure()
+        );
+        assert!(
+            PreValidationError::PreviousTxInclusionsFailed("ch".to_string()).is_internal_failure()
+        );
+        assert!(
+            PreValidationError::AddBlockFailed {
+                block_hash: H256::zero(),
+                reason: "x".to_string(),
+            }
+            .is_internal_failure()
+        );
+        assert!(
+            PreValidationError::UpdateCacheForScheduledValidationError(H256::zero())
+                .is_internal_failure()
+        );
+        assert!(PreValidationError::ValidationServiceUnreachable.is_internal_failure());
+        assert!(PreValidationError::SystemTimeError("clk".to_string()).is_internal_failure());
+        assert!(PreValidationError::RewardCurveError("ovf".to_string()).is_internal_failure());
+        assert!(PreValidationError::FeeCalculationFailed("ovf".to_string()).is_internal_failure());
+        assert!(PreValidationError::EmaSnapshotError("ema".to_string()).is_internal_failure());
+        assert!(
+            PreValidationError::BlockBoundsLookupError("db gone".to_string()).is_internal_failure()
+        );
+        assert!(
+            PreValidationError::CachePoisoned { at: "test" }.is_internal_failure(),
+            "CachePoisoned is a local corruption, must not be peer-attributed"
+        );
+        assert!(
+            PreValidationError::ParentNotInCache {
+                parent_hash: H256::zero(),
+                expected_height: 0,
+            }
+            .is_internal_failure(),
+            "ParentNotInCache is a local prune/reorg race, must not be peer-attributed"
+        );
+    }
+
+    /// Peer-supplied PoA referencing a ledger that the local chain has no
+    /// committed chunks for is consensus-invalid, NOT internal. Guards against
+    /// the regression where the PoA short-circuit's previous formulation fell
+    /// through to BlockBoundsLookupError (now classified internal).
+    #[test]
+    fn poa_ledger_inactive_is_not_internal_failure() {
+        assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_internal_failure());
+    }
+
+    /// Genuine node faults (panic, DB I/O, local arithmetic, channel dead,
+    /// OS clock, local cache mutation, poisoned lock) must classify as
+    /// `is_node_fault()` so handlers abort the node instead of leaving the
+    /// block in cache for a retry that will hit the same fault.
+    #[test]
+    fn node_fault_variants_classify_as_node_fault() {
+        let cases: &[PreValidationError] = &[
+            PreValidationError::InternalTaskJoin("panic".to_string()),
+            PreValidationError::DatabaseError {
+                error: "mdbx".to_string(),
+            },
+            PreValidationError::PreviousTxInclusionsFailed("ch".to_string()),
+            PreValidationError::AddBlockFailed {
+                block_hash: H256::zero(),
+                reason: "x".to_string(),
+            },
+            PreValidationError::UpdateCacheForScheduledValidationError(H256::zero()),
+            PreValidationError::ValidationServiceUnreachable,
+            PreValidationError::SystemTimeError("clk".to_string()),
+            PreValidationError::RewardCurveError("ovf".to_string()),
+            PreValidationError::FeeCalculationFailed("ovf".to_string()),
+            PreValidationError::EmaSnapshotError("ema".to_string()),
+            PreValidationError::BlockBoundsLookupError("db gone".to_string()),
+            PreValidationError::CachePoisoned { at: "test" },
+        ];
+        for err in cases {
+            assert!(err.is_node_fault(), "{:?} must classify as node fault", err);
+            assert!(
+                err.is_internal_failure(),
+                "{:?} node-fault must also be internal-failure (strict subset)",
+                err
+            );
+        }
+    }
+
+    /// Pruning/eviction races are `is_internal_failure()` but must NOT be
+    /// node faults — they're recoverable via passive depth-prune + re-gossip,
+    /// and aborting the node on every race would defeat the recovery path.
+    #[test]
+    fn eviction_race_variants_are_not_node_faults() {
+        let cases: &[PreValidationError] = &[PreValidationError::ParentNotInCache {
+            parent_hash: H256::zero(),
+            expected_height: 0,
+        }];
+        for err in cases {
+            assert!(
+                !err.is_node_fault(),
+                "{:?} is an eviction race, must not classify as node fault",
+                err
+            );
+            assert!(
+                err.is_internal_failure(),
+                "{:?} must still be internal-failure (peer is innocent)",
+                err
+            );
+        }
+    }
+
+    /// The PoA-anchored `BlockBoundsLookupError` retains `is_node_fault =
+    /// true`: caller pre-checks at
+    /// `get_data_poa_bounds_with_block_tree_fallback` rule out the
+    /// peer-attributable cases (`PoAChunkOffsetOutOfBlockBounds`,
+    /// `PoALedgerInactive`, `PoAOffCanonicalAncestor`) before this variant
+    /// is constructible, so the remaining failure modes are genuine
+    /// local-index breakage.
+    #[test]
+    fn block_bounds_lookup_error_retains_node_fault_classification() {
+        let err = PreValidationError::BlockBoundsLookupError("local index broken".to_string());
+        assert!(
+            err.is_node_fault(),
+            "PoA-anchored BlockBoundsLookupError must remain a node fault — \
+             callers pre-filter all peer-attributable cases before it can fire",
+        );
+        assert!(
+            err.is_internal_failure(),
+            "BlockBoundsLookupError node-fault must also be internal-failure (strict subset)",
+        );
+    }
+
+    /// Consensus-validation variants must NOT classify as node faults — they
+    /// indicate a bad block, not a node problem. Aborting on these would
+    /// hand a DoS vector to any peer who sends a bad block.
+    #[test]
+    fn consensus_variants_are_not_node_faults() {
+        assert!(!PreValidationError::BlockSignatureInvalid.is_node_fault());
+        assert!(!PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_node_fault());
+        assert!(!PreValidationError::PoALedgerInactive { ledger_id: 99 }.is_node_fault());
+    }
+
+    /// `PoAOffCanonicalAncestor` is raised when the PoA-bounds walk falls off
+    /// the bottom of `block_tree` to a `prev_hash` that does not match the
+    /// canonical block at that height (per `MigratedBlockHashes`). The peer's
+    /// parent lineage branched below the migration boundary — peer-
+    /// attributable Consensus, never a node fault.
+    #[test]
+    fn poa_off_canonical_ancestor_is_consensus_not_node_fault() {
+        let err = PreValidationError::PoAOffCanonicalAncestor {
+            ancestor_hash: H256::zero(),
+            height: 7,
+        };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(
+            !err.is_node_fault(),
+            "PoAOffCanonicalAncestor must not be a node fault — peer's side-fork below \
+             migration boundary is a consensus rejection, not local state"
+        );
+        assert!(
+            !err.is_internal_failure(),
+            "PoAOffCanonicalAncestor is a peer-attributable Consensus rejection",
+        );
+        assert_eq!(err.metric_reason(), "poa_off_canonical_ancestor");
+    }
+
+    /// `ValidationError::TaskPanicked` is a node fault (verifier thread
+    /// crashed); cancellations and parent-missing races are not.
+    #[test]
+    fn validation_error_node_fault_dispatch() {
+        assert!(
+            ValidationError::TaskPanicked {
+                task: "poa".to_string(),
+                details: "x".to_string(),
+            }
+            .is_node_fault()
+        );
+
+        for reason in [
+            ValidationCancelReason::HeightDifference,
+            ValidationCancelReason::ParentMissing,
+            ValidationCancelReason::ChannelClosed,
+            ValidationCancelReason::RepeatedCancellation,
+            ValidationCancelReason::PoAAborted,
+        ] {
+            assert!(
+                !ValidationError::ValidationCancelled { reason }.is_node_fault(),
+                "cancellation reason {:?} must not be a node fault",
+                reason
+            );
+        }
+
+        assert!(
+            !ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentEpochSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentEmaSnapshotMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::ParentBlockMissing {
+                block_hash: H256::zero(),
+            }
+            .is_node_fault()
+        );
+
+        // PreValidation delegation.
+        assert!(
+            ValidationError::PreValidation(PreValidationError::DatabaseError {
+                error: "mdbx".to_string(),
+            })
+            .is_node_fault()
+        );
+        assert!(
+            !ValidationError::PreValidation(PreValidationError::BlockSignatureInvalid)
+                .is_node_fault()
+        );
+
+        // Local cache evicted the payload-wait receiver under sync load
+        // — soft internal failure, NOT a node fault. The earlier
+        // `ExecutionPayloadUnavailable` variant misclassified this as a
+        // fault and self-DoS'd healthy nodes during catch-up; the
+        // replacement variant must route to `InternalFailure` so the
+        // block parks in cache for retry instead of panicking the node.
+        let cache_evicted = ValidationError::ExecutionPayloadCacheEvicted {
+            evm_block_hash: Default::default(),
+        };
+        assert!(
+            !cache_evicted.is_node_fault(),
+            "ExecutionPayloadCacheEvicted is local saturation, must NOT be a node fault — \
+             panicking here would self-DoS healthy nodes under catch-up sync load",
+        );
+        assert!(
+            cache_evicted.is_internal_failure(),
+            "ExecutionPayloadCacheEvicted is a soft local failure, must be internal",
+        );
+        // Round-trip through the From dispatcher: must land on
+        // InternalFailure with the wrapped `is_node_fault() == false`
+        // (so `send_validation_result`'s panic-guard does NOT fire).
+        let result: ValidationResult = cache_evicted.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    !inner.is_node_fault(),
+                    "ExecutionPayloadCacheEvicted wrapped in InternalFailure must NOT \
+                     report is_node_fault() = true — that would re-introduce the panic loop",
+                );
+            }
+            other => panic!(
+                "ExecutionPayloadCacheEvicted must round-trip to InternalFailure, got {:?}",
+                other,
+            ),
+        }
+
+        // Hard local I/O failure inside shadow-tx generation — node
+        // fault. Routing as `is_node_fault()` is what makes a corrupt
+        // MDBX / failed parent-header DB read abort+restart rather
+        // than letting unprovable-but-not-bad blocks accumulate in the
+        // validation cache.
+        let shadow_node_fault = ValidationError::ShadowTxNodeFault("mdbx I/O".to_string());
+        assert!(shadow_node_fault.is_node_fault());
+        assert!(
+            shadow_node_fault.is_internal_failure(),
+            "node-fault must also be internal-failure (strict subset)",
+        );
+        let result: ValidationResult = shadow_node_fault.into();
+        assert!(matches!(result, ValidationResult::InternalFailure(_)));
+    }
+
+    /// `ShadowTxNodeFault` routes to `InternalFailure` (validity unknown) and
+    /// must preserve `is_node_fault() == true` on the wrapped inner error
+    /// so the `InternalFailureError::is_node_fault()` accessor — used by the
+    /// validation-result handler to trigger panic+restart — fires for genuine
+    /// local DB corruption.
+    #[test]
+    fn shadow_tx_node_fault_roundtrip_preserves_classification() {
+        // Hard local fault: round-trip must land in InternalFailure AND the
+        // wrapped error must still classify as a node fault.
+        let hard = ValidationError::ShadowTxNodeFault("mdbx".to_string());
+        assert!(
+            hard.is_node_fault(),
+            "ShadowTxNodeFault must be a node fault"
+        );
+        assert!(
+            hard.is_internal_failure(),
+            "node-fault must also be internal-failure (strict subset)",
+        );
+        let hard_result: ValidationResult = hard.into();
+        match hard_result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "inner InternalFailureError must preserve is_node_fault() = true \
+                     so the handler triggers panic+restart on a corrupt MDBX read",
+                );
+                assert!(
+                    matches!(inner.err(), ValidationError::ShadowTxNodeFault(_)),
+                    "wrapped variant must remain ShadowTxNodeFault, got {:?}",
+                    inner.err(),
+                );
+            }
+            other => panic!(
+                "ShadowTxNodeFault must round-trip to InternalFailure, got {:?}",
+                other
+            ),
+        }
+    }
+}
+
+/// Tests for the typed-error → `ValidationError` dispatch used inside
+/// `generate_expected_shadow_transactions`. These tests exercise the
+/// production `classify_shadow_tx_gen_err` and `classify_commitment_refund_err`
+/// functions directly — they are NOT a copy of the mapping. If the
+/// production mapping drifts (e.g. a future variant is added and
+/// misclassified), these assertions fail at test time, not in production.
+///
+/// SAFETY: the mappings are the single point where producer-side typed
+/// failures are translated to validator-side `ValidationResult` semantics.
+/// Misclassifying e.g. `TreasuryArithmetic` as a node fault would cause a
+/// validator to panic+restart on every peer block with bad fees — a DoS
+/// vector. Misclassifying `SnapshotInvariant` as consensus would
+/// peer-attribute a local corruption.
+#[cfg(test)]
+mod shadow_tx_gen_error_dispatch_tests {
+    use super::*;
+    use crate::block_tree_service::ValidationResult;
+    use crate::commitment_refunds::CommitmentRefundError;
+    use crate::shadow_tx_generator::ShadowTxGenError;
+
+    /// `SnapshotInvariant` → `ShadowTxNodeFault` → `InternalFailure` with
+    /// `is_node_fault() == true`. Triggers panic+restart so a corrupted
+    /// local snapshot can't silently keep producing/validating bad blocks.
+    #[test]
+    fn snapshot_invariant_maps_to_node_fault() {
+        let err =
+            classify_shadow_tx_gen_err(ShadowTxGenError::SnapshotInvariant("bad iter type".into()));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "must preserve node-fault classification"
+                );
+            }
+            other => panic!("SnapshotInvariant must route to InternalFailure, got {other:?}"),
+        }
+    }
+
+    /// `SnapshotTreasuryUnderflow` → `ShadowTxNodeFault` → node-fault
+    /// `InternalFailure`. The deduction amount in the payout helper is
+    /// derived from a local snapshot (expired-ledger payout or
+    /// commitment-refund); an underflow means our snapshot disagrees with
+    /// the inherited treasury, which two honest nodes cannot reach. Must
+    /// route to node fault (loud restart) — never to consensus rejection
+    /// (silent canonical-fork).
+    #[test]
+    fn snapshot_treasury_underflow_maps_to_node_fault() {
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::SnapshotTreasuryUnderflow(
+            "cannot pay 10 from balance 5".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        // The wrapping prefix must be present so logs distinguish
+        // snapshot-treasury underflows from other snapshot invariants.
+        assert!(
+            err.to_string().contains("snapshot treasury underflow"),
+            "must carry the snapshot-treasury-underflow prefix for log disambiguation: {err}",
+        );
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(
+                    inner.is_node_fault(),
+                    "must preserve node-fault classification"
+                );
+            }
+            other => panic!(
+                "SnapshotTreasuryUnderflow must route to InternalFailure(node-fault), got {other:?}",
+            ),
+        }
+    }
+
+    /// `TreasuryArithmetic` → `ShadowTransactionInvalid` → `Invalid`. The
+    /// peer's block carries fees whose arithmetic over/underflows; this is
+    /// a structural defect of the peer's block, not a local fault. Routes
+    /// as consensus rejection — block gets peer-attributed.
+    #[test]
+    fn treasury_arithmetic_maps_to_consensus() {
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::TreasuryArithmetic(
+            "overflow adding term_fee_treasury".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
+        assert!(
+            !err.is_node_fault(),
+            "consensus rejection must NOT be a node fault"
+        );
+        let result: ValidationResult = err.into();
+        assert!(
+            matches!(result, ValidationResult::Invalid(_)),
+            "TreasuryArithmetic must route to Invalid (consensus rejection)",
+        );
+    }
+
+    /// `Structural` (e.g. publish-ledger tx missing perm_fee, or a fee
+    /// constructor rejecting peer-supplied values) → `ShadowTransactionInvalid`
+    /// → `Invalid`. Peer-attributable.
+    #[test]
+    fn structural_maps_to_consensus() {
+        let err = classify_shadow_tx_gen_err(ShadowTxGenError::Structural(
+            "publish ledger tx missing perm_fee".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTransactionInvalid(_)));
+        assert!(!err.is_node_fault());
+        let result: ValidationResult = err.into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+    }
+
+    /// `CommitmentRefundError::SnapshotInvariant` → `ShadowTxNodeFault` →
+    /// node-fault `InternalFailure`. A snapshot whose unpledge has
+    /// `pledge_count_before_executing == 0` is internally inconsistent;
+    /// retry can't heal it.
+    #[test]
+    fn commitment_refund_snapshot_invariant_maps_to_node_fault() {
+        let err = classify_commitment_refund_err(CommitmentRefundError::SnapshotInvariant(
+            "pledge_count_before_executing = 0".into(),
+        ));
+        assert!(matches!(err, ValidationError::ShadowTxNodeFault(_)));
+        assert!(err.is_node_fault());
+        // The wrapping prefix "commitment refund invariant:" must be present
+        // so logs distinguish refund-derived faults from shadow-tx-generator
+        // faults.
+        assert!(
+            err.to_string().contains("commitment refund invariant"),
+            "must carry the refund-invariant prefix for log disambiguation: {err}",
+        );
+        let result: ValidationResult = err.into();
+        match result {
+            ValidationResult::InternalFailure(inner) => {
+                assert!(inner.is_node_fault());
+            }
+            other => panic!(
+                "CommitmentRefundError must route to InternalFailure(node-fault), got {other:?}",
+            ),
+        }
     }
 }
 
@@ -1263,12 +2684,424 @@ mod height_tests {
     }
 }
 
+/// C1 REGRESSION TEST MODULE
+///
+/// Pins the fix for the C1 vulnerability in
+/// `get_data_poa_bounds_with_block_tree_fallback`: for a non-canonical
+/// lineage whose ancestry descends below `block_tree`'s window, the
+/// previous height-only canonical-index fallback either returned wrong-fork
+/// bounds or escalated to `BlockBoundsLookupError` → `NodeFault` →
+/// remote-triggerable panic. After the fix, the walk gates the canonical-
+/// index fallback on `MigratedBlockHashes[prev_height] == prev_hash` and
+/// returns `PoAOffCanonicalAncestor` (peer-attributable Consensus) when the
+/// predecessor is off-canonical.
+#[cfg(test)]
+mod c1_side_fork_regression_tests {
+    use super::*;
+    use irys_domain::{
+        BlockIndex, BlockMetadata, BlockState, BlockTree, ChainState, EmaSnapshot,
+        dummy_epoch_snapshot,
+    };
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_testing_utils::new_mock_signed_header;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        BlockBody, BlockHash, BlockIndexItem, DataLedger, DataTransactionLedger, DbSyncMode, H256,
+        H256List, IrysBlockHeader, LedgerIndexItem, SealedBlock,
+    };
+    use std::sync::{Arc, RwLock};
+    use std::time::SystemTime;
+
+    /// Build a `DataTransactionLedger` entry with the given `total_chunks`
+    /// and a freshly-randomised `tx_root`. The `tx_root` randomisation is
+    /// load-bearing: under C1, the buggy fallback returns the *canonical*
+    /// block's `tx_root` at the anchor height. If the side-fork's `tx_root`
+    /// equalled canonical's, we wouldn't catch the wrong-fork output.
+    fn ledger_with_total(ledger: DataLedger, total_chunks: u64) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id: ledger.into(),
+            tx_root: H256::random(),
+            tx_ids: H256List::new(),
+            total_chunks,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }
+    }
+
+    /// Build a synthetic side-fork header at the given height with the
+    /// given `previous_block_hash` and Submit total. The header is signed
+    /// so `SealedBlock::new` accepts it.
+    fn side_fork_header(
+        height: u64,
+        previous_block_hash: BlockHash,
+        submit_total_chunks: u64,
+    ) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.height = height;
+        h.previous_block_hash = previous_block_hash;
+        // Replace the default ledgers with explicit Submit/Publish totals so
+        // the side fork's data ledger is distinguishable from canonical.
+        h.data_ledgers = vec![
+            ledger_with_total(DataLedger::Publish, 0),
+            ledger_with_total(DataLedger::Submit, submit_total_chunks),
+        ];
+        h.test_sign(); // re-signs after mutation
+        h
+    }
+
+    /// Directly inject `header` into `block_tree.blocks` (the field is
+    /// `pub`), bypassing `add_common`'s parent-presence check. This is the
+    /// only way to construct the C1 scenario in a unit test: a side-fork
+    /// block whose `previous_block_hash` points outside `block_tree`'s
+    /// window. In production this state arises when migration prunes the
+    /// side fork's ancestors out of `block_tree`.
+    fn inject_block(tree: &mut BlockTree, header: IrysBlockHeader) {
+        let block_hash = header.block_hash;
+        let body = BlockBody {
+            block_hash,
+            ..Default::default()
+        };
+        let sealed = Arc::new(
+            SealedBlock::new(header.clone(), body)
+                .expect("synthetic side-fork block must seal successfully"),
+        );
+        let entry = BlockMetadata {
+            block: sealed,
+            chain_state: ChainState::NotOnchain(BlockState::ValidBlock),
+            timestamp: SystemTime::now(),
+            children: std::collections::HashSet::new(),
+            epoch_snapshot: dummy_epoch_snapshot(),
+            commitment_snapshot: Arc::new(CommitmentSnapshot::default()),
+            ema_snapshot: EmaSnapshot::genesis(&header),
+        };
+        tree.blocks.insert(block_hash, entry);
+    }
+
+    /// C1 REGRESSION TEST
+    ///
+    /// The side-fork PoA must NEVER produce `BlockBoundsLookupError`
+    /// (NodeFault) and must NEVER produce a successful return rooted on
+    /// canonical-chain bounds at the anchor height. After the fix, the
+    /// expected outcome is `PoAOffCanonicalAncestor` (peer-attributable
+    /// Consensus) because `MigratedBlockHashes[prev_height]` does not
+    /// match the side fork's `phantom_parent_hash`.
+    ///
+    /// Pre-fix failure mode (for reference): returned
+    /// `Ok(BlockBounds { start_chunk_offset: 20, end_chunk_offset: 30,
+    /// tx_root: <side_fork's> })` — the height-only fallback at
+    /// `curr_height - 1 = 1` sourced `prev_total = 20` from the canonical
+    /// chain, then combined that canonical-derived start with the side
+    /// fork's own `(curr_total, tx_root)` to produce silently wrong-fork
+    /// bounds. The other failure shape (when the chosen offset exceeded
+    /// the canonical anchor's `anchor_max`) was `BlockBoundsLookupError`
+    /// → NodeFault → remote-triggerable panic.
+    #[test]
+    fn c1_side_fork_below_block_tree_window_must_not_node_fault() {
+        // --- Build a 2-block canonical chain in block_index ----------------
+        // Heights 0, 1. Genesis Submit total = 10. Canonical height 1
+        // Submit total = 20. The canonical block at height 1 has a hash
+        // DIFFERENT from any side-fork block.
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("c1_side_fork_regression")
+            .build();
+        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+            tmp_dir.path(),
+            DbSyncMode::UtterlyNoSync,
+        )
+        .expect("open db");
+        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+
+        let canonical_genesis_hash = BlockHash::random();
+        let canonical_h1_hash = BlockHash::random();
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: canonical_genesis_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 10,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                0,
+            )
+            .expect("push genesis index item");
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: canonical_h1_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 20,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                1,
+            )
+            .expect("push canonical h1 index item");
+
+        // --- Build a block_tree containing the side-fork block S -----------
+        // S is at height 2, its `previous_block_hash` is a phantom hash
+        // (NOT in block_tree, NOT in block_index) — simulating an ancestor
+        // that has been pruned out of block_tree's window. S claims a
+        // Submit total_chunks = 30 (the side fork's actual chain has more
+        // submit chunks than canonical at height 1).
+        let consensus_config = ConsensusConfig::testing();
+        let genesis_for_tree = new_mock_signed_header();
+        let mut tree = BlockTree::new(&genesis_for_tree, consensus_config);
+
+        let phantom_parent_hash = BlockHash::random();
+        let side_fork_block = side_fork_header(2, phantom_parent_hash, 30);
+        let side_fork_hash = side_fork_block.block_hash;
+        let side_fork_submit_tx_root =
+            side_fork_block.data_ledgers[DataLedger::Submit as usize].tx_root;
+        inject_block(&mut tree, side_fork_block);
+
+        // --- Call the helper with the side-fork's parent identity ----------
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        // Pick an offset in the gap between canonical height-1's Submit
+        // total (20) and the side fork's claimed total (30). The walk-back
+        // from S → phantom_parent_hash is None, so the fallback fires at
+        // `curr_height - 1 = 1`. With MigratedBlockHashes empty (no canonical
+        // entry written), the canonicality gate observes
+        // `MigratedBlockHashes[1] = None != Some(phantom_parent_hash)` and
+        // returns `PoAOffCanonicalAncestor` (peer-attributable Consensus).
+        // Pre-fix code returned `BlockBoundsLookupError` (NodeFault → panic)
+        // because canonical height 1's Submit total was 20 < 25.
+        let ledger_chunk_offset: u64 = 25;
+        let result = get_data_poa_bounds_with_block_tree_fallback(
+            &block_index_guard,
+            &block_tree_guard,
+            &db,
+            side_fork_hash,
+            2,
+            DataLedger::Submit,
+            ledger_chunk_offset,
+        );
+
+        // --- Assertions ----------------------------------------------------
+        // After C1 fix: result must be EITHER (a) a clean consensus-class
+        // rejection (`PoAChunkOffsetOutOfBlockBounds` / similar peer-
+        // attributable variant), OR (b) an explicit "off canonical lineage"
+        // outcome. It must NEVER be `BlockBoundsLookupError` (NodeFault),
+        // and it must NEVER be `Ok(_)` with bounds rooted on canonical
+        // (silent wrong-fork validation).
+        match result {
+            Err(PreValidationError::BlockBoundsLookupError(msg)) => {
+                panic!(
+                    "C1: side-fork PoA escalated to BlockBoundsLookupError (NodeFault → panic). \
+                     A peer can remote-trigger node restart by gossiping a side-fork with \
+                     out-of-range PoA offset. Error message: {msg}",
+                );
+            }
+            Ok(bb) => {
+                // The side-fork's predecessor at `curr_height - 1 = 1` is
+                // `phantom_parent_hash` — NOT `canonical_h1_hash`. Any
+                // `Ok(_)` here is wrong-fork: the production walk sourced
+                // `prev_total` from canonical block_index at height 1
+                // (whose hash is `canonical_h1_hash`), then combined that
+                // canonical-derived start with the side fork's own
+                // `curr_total` / `tx_root` from S. Two honest peers with
+                // different local views would disagree about whether
+                // `ledger_chunk_offset` is in-range, breaking fork
+                // determinism. The side-fork's tx_root in the result
+                // confirms the Frankenstein nature of the bounds —
+                // canonical start + side-fork end + side-fork tx_root.
+                let _ = side_fork_submit_tx_root;
+                let _ = canonical_h1_hash;
+                panic!(
+                    "C1: side-fork PoA silently produced wrong-fork bounds. The walk-back from \
+                     S → phantom_parent_hash hit the C1 fallback at curr_height - 1 = 1 and \
+                     sourced prev_total from the CANONICAL block_index entry at height 1 — \
+                     even though the side fork's ancestor at that height is phantom_parent_hash, \
+                     not canonical_h1_hash. Returned BlockBounds \
+                     {{ height: {}, start: {}, end: {}, tx_root: {} }}. After the C1 fix this \
+                     must return an `Err` (off-lineage or out-of-bounds), never Ok.",
+                    bb.height, bb.start_chunk_offset, bb.end_chunk_offset, bb.tx_root,
+                );
+            }
+            Err(other) => {
+                // Expected outcome after the C1 fix: `PoAOffCanonicalAncestor`
+                // carrying the phantom parent hash + its height. Any other
+                // non-NodeFault variant is also acceptable in principle (e.g.
+                // `PoAChunkOffsetOutOfBlockBounds`), but the canonicality-gate
+                // path returns `PoAOffCanonicalAncestor` deterministically.
+                assert!(
+                    !other.is_node_fault(),
+                    "C1: side-fork PoA produced a node-fault error {other:?}. \
+                     After the fix this must be a non-node-fault outcome.",
+                );
+                match &other {
+                    PreValidationError::PoAOffCanonicalAncestor {
+                        ancestor_hash,
+                        height,
+                    } => {
+                        assert_eq!(
+                            *ancestor_hash, phantom_parent_hash,
+                            "PoAOffCanonicalAncestor must carry the side fork's \
+                             phantom parent hash (the off-canonical ancestor)",
+                        );
+                        assert_eq!(
+                            *height, 1,
+                            "PoAOffCanonicalAncestor must carry prev_height = 1 \
+                             (the height at which the canonical gate failed)",
+                        );
+                    }
+                    _ => {
+                        panic!("C1: expected PoAOffCanonicalAncestor after the fix, got {other:?}",)
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod perm_fee_threshold_tests {
+    use super::*;
+    use irys_types::U256;
+    use rstest::rstest;
+
+    fn tx_id() -> H256 {
+        H256::from_slice(&[0xab; 32])
+    }
+
+    /// `perm_fee` well above the expected threshold is accepted.
+    #[test]
+    fn above_threshold_is_ok() {
+        let expected = U256::from(1_000_u64);
+        let actual = Some(BoundedFee::new(U256::from(2_000_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_ok());
+    }
+
+    /// Boundary: `actual == expected` is accepted. The comparison uses strict
+    /// less-than, mirroring the original inlined check in `validate_publish_price`.
+    #[test]
+    fn at_threshold_is_ok() {
+        let expected = U256::from(1_000_u64);
+        let actual = Some(BoundedFee::new(U256::from(1_000_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_ok());
+    }
+
+    /// `actual = expected - 1` is rejected and carries the expected/actual
+    /// values verbatim.
+    #[test]
+    fn just_below_threshold_is_err_with_fields() {
+        let expected = U256::from(1_000_u64);
+        let actual_amount = U256::from(999_u64);
+        let actual = Some(BoundedFee::new(actual_amount));
+        let id = tx_id();
+        let err = check_perm_fee_sufficient(id, actual, expected)
+            .expect_err("below-threshold perm_fee must be rejected");
+        match err {
+            PreValidationError::InsufficientPermFee {
+                tx_id: got_id,
+                expected: got_expected,
+                actual: got_actual,
+            } => {
+                assert_eq!(got_id, id);
+                assert_eq!(got_expected, expected);
+                assert_eq!(got_actual, actual_amount);
+            }
+            other => panic!("expected InsufficientPermFee, got {other:?}"),
+        }
+    }
+
+    /// `perm_fee == 0` (explicit) against a non-zero expected is rejected.
+    #[test]
+    fn zero_perm_fee_is_err() {
+        let expected = U256::from(1_u64);
+        let actual = Some(BoundedFee::zero());
+        let err = check_perm_fee_sufficient(tx_id(), actual, expected)
+            .expect_err("zero perm_fee must be rejected against non-zero expected");
+        assert!(matches!(
+            err,
+            PreValidationError::InsufficientPermFee { .. }
+        ));
+    }
+
+    /// Missing `perm_fee` (`None`) is treated as zero — rejected against a
+    /// non-zero expected. Preserves the `unwrap_or(BoundedFee::zero())`
+    /// behaviour of the inlined check.
+    #[test]
+    fn missing_perm_fee_is_err() {
+        let expected = U256::from(1_u64);
+        let err = check_perm_fee_sufficient(tx_id(), None, expected)
+            .expect_err("missing perm_fee must be rejected against non-zero expected");
+        match err {
+            PreValidationError::InsufficientPermFee { actual, .. } => {
+                assert_eq!(actual, U256::zero());
+            }
+            other => panic!("expected InsufficientPermFee, got {other:?}"),
+        }
+    }
+
+    /// Expected threshold of zero accepts anything, including missing perm_fee.
+    #[rstest]
+    #[case::missing(None)]
+    #[case::zero(Some(BoundedFee::zero()))]
+    #[case::large(Some(BoundedFee::new(U256::MAX)))]
+    fn zero_expected_accepts_anything(#[case] actual: Option<BoundedFee>) {
+        assert!(check_perm_fee_sufficient(tx_id(), actual, U256::zero()).is_ok());
+    }
+
+    /// Extreme low (1) against a high expected is rejected.
+    #[test]
+    fn extreme_low_perm_fee_is_err() {
+        let expected = U256::from(u128::MAX);
+        let actual = Some(BoundedFee::new(U256::from(1_u64)));
+        assert!(check_perm_fee_sufficient(tx_id(), actual, expected).is_err());
+    }
+}
+
+/// Inner error type for [`recall_recall_range_is_valid`], distinguishing a
+/// local VDF-state gap from a genuine consensus mismatch.
+#[derive(Debug, Error)]
+pub enum RecallRangeError {
+    /// Local VDF state doesn't yet contain the requested steps.
+    /// Local-state issue — re-validate after VDF catches up.
+    #[error("local VDF steps unavailable: {0}")]
+    StepsUnavailable(eyre::Report),
+    /// Recall range in the block does not match the computed range.
+    /// Consensus mismatch — peer-attributable.
+    #[error("recall range mismatch: {0}")]
+    Mismatch(eyre::Report),
+}
+
+impl RecallRangeError {
+    /// Returns `true` when the error reflects a local node-side condition
+    /// (VDF state hasn't caught up) rather than a peer-attributable defect.
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::StepsUnavailable(_))
+    }
+}
+
 /// Returns Ok if the vdf recall range in the block is valid
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
-) -> eyre::Result<()> {
+) -> Result<(), RecallRangeError> {
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
     let reset_step_number = irys_efficient_sampling::reset_step_number(
@@ -1279,16 +3112,20 @@ pub async fn recall_recall_range_is_valid(
         "Validating recall ranges steps from: {} to: {}",
         reset_step_number, block.vdf_limiter_info.global_step_number
     );
-    let steps = steps_guard.read().get_steps(ii(
-        reset_step_number,
-        block.vdf_limiter_info.global_step_number,
-    ))?;
+    let steps = steps_guard
+        .read()
+        .get_steps(ii(
+            reset_step_number,
+            block.vdf_limiter_info.global_step_number,
+        ))
+        .map_err(RecallRangeError::StepsUnavailable)?;
     irys_efficient_sampling::recall_range_is_valid(
         (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
         num_recall_ranges_in_partition as usize,
         &steps,
         &block.poa.partition_hash,
     )
+    .map_err(RecallRangeError::Mismatch)
 }
 
 pub fn get_recall_range(
@@ -1310,6 +3147,276 @@ pub fn get_recall_range(
     )
 }
 
+/// Resolve PoA chunk bounds for a data-PoA at `parent_height`, falling back
+/// to `block_tree` when `block_index` doesn't yet have the parent (the
+/// un-migrated window between canonical tip and `tip - block_migration_depth`).
+///
+/// Returns `BlockBounds` for the block that introduced the chunk at
+/// `ledger_chunk_offset`: `start_chunk_offset` is the predecessor's total
+/// chunks at this ledger, `end_chunk_offset` is the introducing block's total,
+/// and `tx_root` is the introducing block's tx_root for the ledger.
+///
+/// ## Lock ordering
+/// Acquires `block_tree.read()` before `block_index.read()` when both are
+/// needed mid-fallback. Mirrors the writer order in
+/// `block_tree_service::on_block_validation_finished` and the reader order in
+/// `p2p::block_pool::fcu_markers`, so this helper cannot deadlock against either.
+///
+/// ## Invariants the fallback relies on
+/// - `block_tree_depth > block_migration_depth` (config-enforced in
+///   `Config::validate`). Walking backwards from `parent_block_hash`, we
+///   are guaranteed to reach the migrated portion before running out of
+///   block_tree entries.
+fn ledger_entry_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<(u64, H256)> {
+    header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == ledger as u32)
+        .map(|l| (l.total_chunks, l.tx_root))
+}
+
+/// Gate a `block_index` lookup on `prev_hash` being the canonical block at
+/// `prev_height` according to `MigratedBlockHashes`.  Returns `Ok(())` when
+/// the hash matches; `Err(PoAOffCanonicalAncestor)` on mismatch;
+/// `Err(BlockBoundsLookupError)` on any MDBX failure.
+fn assert_canonical_via_migrated_hashes(
+    db: &DatabaseProvider,
+    prev_hash: BlockHash,
+    prev_height: u64,
+) -> Result<(), PreValidationError> {
+    let canonical_at_height = db
+        .view(|tx| tx.get::<MigratedBlockHashes>(prev_height))
+        .map_err(|e| {
+            PreValidationError::BlockBoundsLookupError(format!(
+                "MigratedBlockHashes view failed at height {prev_height}: {e}"
+            ))
+        })?
+        .map_err(|e| {
+            PreValidationError::BlockBoundsLookupError(format!(
+                "MigratedBlockHashes read failed at height {prev_height}: {e}"
+            ))
+        })?;
+    if canonical_at_height != Some(prev_hash) {
+        return Err(PreValidationError::PoAOffCanonicalAncestor {
+            ancestor_hash: prev_hash,
+            height: prev_height,
+        });
+    }
+    Ok(())
+}
+
+fn get_data_poa_bounds_with_block_tree_fallback(
+    block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    parent_block_hash: BlockHash,
+    parent_height: u64,
+    ledger: DataLedger,
+    ledger_chunk_offset: u64,
+) -> Result<BlockBounds, PreValidationError> {
+    // Fast path: parent is migrated. Identical disambiguation to the prior
+    // implementation — offsets past chain-max and ledger-not-active are
+    // consensus-invalid, lookup failures past those checks are local.
+    //
+    // The hash-mismatch fall-through below is load-bearing in release builds:
+    // `block_index.get_item(parent_height)` returns the *canonical* indexed
+    // item, which may not be the peer's claimed parent. A peer-submitted block
+    // whose `parent_block_hash` is a non-canonical sibling at a migrated
+    // `parent_height` would otherwise have its PoA bounds computed against
+    // the canonical anchor — wrong fork. `block_tree`'s reorg-abort backstop
+    // fires later, but the PoA verdict would already have been derived from
+    // a fork-mismatched view. Fall through to the block_tree walk on
+    // mismatch so the bounds are anchored on the supplied parent.
+    {
+        let index = block_index_guard.read();
+        if let Some(parent_item) = index.get_item(parent_height)
+            && parent_item.block_hash == parent_block_hash
+        {
+            match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
+                Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
+                    return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+                }
+                None => {
+                    return Err(PreValidationError::PoALedgerInactive {
+                        ledger_id: ledger as u32,
+                    });
+                }
+                Some(_) => {}
+            }
+            return index
+                .get_block_bounds_at_height(
+                    ledger,
+                    LedgerChunkOffset::from(ledger_chunk_offset),
+                    parent_height,
+                )
+                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+        }
+        // Either the index doesn't have parent_height yet (un-migrated window)
+        // or the indexed canonical at parent_height differs from the supplied
+        // parent (non-canonical fork crossing the migration boundary). Either
+        // way, fall through to the block_tree walk which anchors on the
+        // supplied `parent_block_hash`. Drop the index lock first to keep
+        // the tree-then-index ordering when we re-enter for older history.
+    }
+
+    // Fallback path: walk the parent chain in block_tree until we find the
+    // block whose [prev_total, curr_total) range contains ledger_chunk_offset.
+    // If the walk falls off the bottom of block_tree before finding the
+    // chunk, delegate the remainder to block_index's binary search (older
+    // history is always indexed).
+    let tree = block_tree_guard.read();
+
+    // Anchor: parent's data_ledgers[ledger].total_chunks defines the upper
+    // bound on which offsets are in-range for the chain ending at this parent.
+    let parent_header =
+        tree.get_block(&parent_block_hash)
+            .ok_or(PreValidationError::ParentNotInCache {
+                parent_hash: parent_block_hash,
+                expected_height: parent_height,
+            })?;
+    let (parent_total, parent_tx_root) =
+        ledger_entry_in(parent_header, ledger).ok_or(PreValidationError::PoALedgerInactive {
+            ledger_id: ledger as u32,
+        })?;
+    if ledger_chunk_offset >= parent_total {
+        return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
+    }
+
+    // Walk backwards: at each step `curr` is the candidate introducing block.
+    // We accept it when `prev_total <= offset < curr_total`.
+    let mut curr: &IrysBlockHeader = parent_header;
+    let mut curr_total: u64 = parent_total;
+    let mut curr_tx_root: H256 = parent_tx_root;
+
+    loop {
+        let prev_hash = curr.previous_block_hash;
+        let curr_height = curr.height;
+
+        // prev_total for the predecessor of `curr`:
+        //  - genesis (curr_height == 0): no predecessor, prev_total = 0
+        //  - predecessor in block_tree: read its data_ledgers entry
+        //    (missing entry ⇒ ledger introduced at `curr`, prev_total = 0)
+        //  - predecessor not in block_tree: read from block_index
+        //    (block_tree_depth > block_migration_depth guarantees this is
+        //    always indexed; missing entry for this ledger ⇒ ledger not yet
+        //    introduced at that height, prev_total = 0)
+        let prev_total: u64 = if curr_height == 0 {
+            0
+        } else if let Some(prev_header) = tree.get_block(&prev_hash) {
+            ledger_entry_in(prev_header, ledger)
+                .map(|(total, _)| total)
+                .unwrap_or(0)
+        } else {
+            // Predecessor is below block_tree's window. The height-keyed
+            // `block_index` is canonical-only, so consulting it for `prev_hash`'s
+            // ledger totals is safe ONLY when `prev_hash` is the canonical block
+            // at this height; otherwise the walk has descended onto a side-fork
+            // ancestor and the canonical totals would attribute the WRONG
+            // block's chunks (the original C1 vulnerability). Gate the lookup
+            // via `MigratedBlockHashes[prev_height]`.
+            let prev_height = curr_height - 1;
+            assert_canonical_via_migrated_hashes(db, prev_hash, prev_height)?;
+            // `prev_hash` is canonical at `prev_height`. Inline `Result` block
+            // so `None` from `get_item` propagates as `BlockBoundsLookupError`
+            // (node fault) rather than silently collapsing to `prev_total = 0`
+            // like a missing ledger entry.
+            let lookup: Result<u64, PreValidationError> = {
+                let index = block_index_guard.read();
+                match index.get_item(prev_height) {
+                    // `None` here violates the invariant documented above:
+                    // `block_tree_depth > block_migration_depth` guarantees
+                    // predecessors below `block_tree`'s window are always
+                    // indexed. Surface as a node fault instead of producing
+                    // a consensus-valid `BlockBounds` rooted at offset 0 on
+                    // a corrupted node.
+                    None => Err(PreValidationError::BlockBoundsLookupError(format!(
+                        "block_index missing item at height {prev_height} (invariant violated: \
+                         block_tree_depth > block_migration_depth guarantees this is \
+                         always indexed; predecessor of block at height {curr_height} unreachable)",
+                    ))),
+                    // `Some(item)` but no matching ledger entry is legitimate:
+                    // the ledger had not yet been introduced at that height.
+                    Some(item) => Ok(item
+                        .ledgers
+                        .iter()
+                        .find(|l| l.ledger == ledger)
+                        .map(|l| l.total_chunks)
+                        .unwrap_or(0)),
+                }
+            };
+            lookup?
+        };
+
+        if ledger_chunk_offset >= prev_total {
+            // Found: chunk falls in [prev_total, curr_total) for `curr`.
+            // `curr_tx_root` was set when we descended into `curr` (or
+            // initially from the parent header) — it always reflects the
+            // tx_root of the block we're returning.
+            return Ok(BlockBounds {
+                height: curr_height,
+                ledger,
+                start_chunk_offset: prev_total,
+                end_chunk_offset: curr_total,
+                tx_root: curr_tx_root,
+            });
+        }
+
+        // Descend to predecessor. We already proved `ledger_chunk_offset <
+        // parent_total` above, so genesis is unreachable here in well-formed
+        // data — but guard against logic errors anyway.
+        if curr_height == 0 {
+            return Err(PreValidationError::BlockBoundsLookupError(format!(
+                "chunk offset {} not located in chain ending at parent {} (height {})",
+                ledger_chunk_offset, parent_block_hash, parent_height
+            )));
+        }
+
+        match tree.get_block(&prev_hash) {
+            Some(prev_header) => {
+                // We only reach here when `prev_total > 0`. Since `prev_total`
+                // was sourced from `ledger_entry_in(prev_header, ledger)` in
+                // the same loop iteration, the entry must exist with a real
+                // tx_root. Re-look it up and trust it — no defensive defaults
+                // that could silently surface H256::zero() as
+                // `MerkleProofInvalid` (peer attribution) for a local-state
+                // inconsistency.
+                let (prev_total_check, prev_tx_root) = ledger_entry_in(prev_header, ledger).expect(
+                    "predecessor must have ledger entry: prev_total > 0 was sourced from it",
+                );
+                debug_assert_eq!(
+                    prev_total, prev_total_check,
+                    "ledger_entry_in must be stable across re-lookups within a single loop iteration"
+                );
+                curr_total = prev_total_check;
+                curr_tx_root = prev_tx_root;
+                curr = prev_header;
+            }
+            None => {
+                // Predecessor is below block_tree's window — delegate the
+                // remainder of the search to block_index's binary search,
+                // anchored at (curr_height - 1). The binary search is HEIGHT-
+                // keyed and resolves through the canonical chain, so it is
+                // only safe to trust when `prev_hash` is the canonical block
+                // at that height. Otherwise the walk has descended onto an
+                // abandoned side-fork ancestor and the canonical bounds would
+                // be for the WRONG block (the C1 vulnerability prior to this
+                // fix). Gate via `MigratedBlockHashes[prev_height]`.
+                let prev_height = curr_height - 1;
+                assert_canonical_via_migrated_hashes(db, prev_hash, prev_height)?;
+                drop(tree);
+                let index = block_index_guard.read();
+                return index
+                    .get_block_bounds_at_height(
+                        ledger,
+                        LedgerChunkOffset::from(ledger_chunk_offset),
+                        prev_height,
+                    )
+                    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+            }
+        }
+    }
+}
+
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
@@ -1318,10 +3425,13 @@ pub fn get_recall_range(
     config.entropy_packing_iterations = ?config.entropy_packing_iterations,
     config.chunk_size = ?config.chunk_size
 ), err)]
-
 pub fn poa_is_valid(
     poa: &PoaData,
     block_index_guard: &BlockIndexReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    parent_block_hash: BlockHash,
+    parent_height: u64,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
     miner_address: &IrysAddress,
@@ -1360,10 +3470,39 @@ pub fn poa_is_valid(
         let ledger = DataLedger::try_from(ledger_id)
             .map_err(|_| PreValidationError::LedgerIdInvalid { ledger_id })?;
 
-        let bb = block_index_guard
-            .read()
-            .get_block_bounds(ledger, LedgerChunkOffset::from(ledger_chunk_offset))
-            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
+        // Disambiguate at source so the BlockBoundsLookupError variant below
+        // only carries genuine local failures (empty index, DB I/O):
+        //  - offset past chain-max for this ledger at parent's height
+        //                                                  → consensus-invalid
+        //  - ledger absent from the parent's indexed item → consensus-invalid
+        //    (the chain has no committed data for it yet, or the peer is on
+        //    a different fork)
+        //
+        // Anchored on the parent (`parent_height` / `parent_block_hash`)
+        // rather than the local tip so that two honest peers on the same
+        // fork produce identical pre-validation outcomes regardless of how
+        // far their local indices have advanced past `parent_height`. The
+        // bounds lookup is likewise anchored on the parent so the search
+        // never consults blocks beyond the parent — if we instead fell
+        // through to a latest-tip lookup, the local-tip dependency would
+        // re-enter through the back door.
+        //
+        // When the parent is too recent to be in the block_index yet (the
+        // un-migrated window between canonical tip and
+        // tip - block_migration_depth), we fall back to walking the parent
+        // chain in `block_tree`. The config invariant
+        // `block_tree_depth > block_migration_depth` guarantees that the
+        // un-migrated window always lives in `block_tree`; older history
+        // is always in `block_index`.
+        let bb = get_data_poa_bounds_with_block_tree_fallback(
+            block_index_guard,
+            block_tree_guard,
+            db,
+            parent_block_hash,
+            parent_height,
+            ledger,
+            ledger_chunk_offset,
+        )?;
         if !(bb.start_chunk_offset..bb.end_chunk_offset).contains(&ledger_chunk_offset) {
             return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
         };
@@ -1456,7 +3595,21 @@ pub fn poa_is_valid(
 
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
-/// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
+///
+/// The caller is responsible for fetching `execution_data` (via
+/// `ExecutionPayloadCache::wait_for_payload`) so that a local cache
+/// disruption can be surfaced as the typed soft variant
+/// (`ValidationError::ExecutionPayloadCacheEvicted`) instead of being
+/// stringified into `ShadowTransactionInvalid`.
+///
+/// Returns a typed [`ValidationError`] on failure so the caller can
+/// dispatch local/runtime failures to `InternalFailure` and genuine
+/// consensus mismatches (`ShadowTransactionInvalid`) to `Invalid`.
+/// Payload-structure rejections and the actual-vs-expected match are
+/// consensus; downstream lookups inside
+/// [`generate_expected_shadow_transactions`] surface their own typed
+/// errors (eviction races, local DB/mempool failures) for accurate
+/// classification.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
@@ -1464,28 +3617,25 @@ pub async fn shadow_transactions_are_valid(
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
-    payload_provider: ExecutionPayloadCache,
+    execution_data: &ExecutionData,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<ExecutionData> {
-    // 1. Get the execution payload for validation
-    let execution_data = payload_provider
-        .wait_for_payload(&block.evm_block_hash)
-        .in_current_span()
-        .await
-        .ok_or_eyre("reth execution payload never arrived")?;
+) -> Result<(), ValidationError> {
+    // Helper: payload-structure rejections are always consensus.
+    fn reject(msg: impl Into<String>) -> ValidationError {
+        ValidationError::ShadowTransactionInvalid(msg.into())
+    }
 
     let ExecutionData { payload, sidecar } = execution_data.clone();
 
     let ExecutionPayload::V3(payload_v3) = payload else {
-        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+        return Err(reject("irys-reth expects that all payloads are of v3 type"));
     };
-    ensure!(
-        payload_v3.withdrawals().is_empty(),
-        "withdrawals must always be empty"
-    );
+    if !payload_v3.withdrawals().is_empty() {
+        return Err(reject("withdrawals must always be empty"));
+    }
 
     // Reject any blob gas usage in the payload
     if payload_v3.blob_gas_used != 0 {
@@ -1495,7 +3645,7 @@ pub async fn shadow_transactions_are_valid(
             payload.blob_gas_used = payload_v3.blob_gas_used,
             "Rejecting block: blob_gas_used must be zero",
         );
-        eyre::bail!("block has non-zero blob_gas_used which is disabled");
+        return Err(reject("block has non-zero blob_gas_used which is disabled"));
     }
     if payload_v3.excess_blob_gas != 0 {
         tracing::debug!(
@@ -1504,7 +3654,9 @@ pub async fn shadow_transactions_are_valid(
             payload.excess_blob_gas = payload_v3.excess_blob_gas,
             "Rejecting block: excess_blob_gas must be zero",
         );
-        eyre::bail!("block has non-zero excess_blob_gas which is disabled");
+        return Err(reject(
+            "block has non-zero excess_blob_gas which is disabled",
+        ));
     }
 
     // Reject any block that carries blob sidecars (EIP-4844).
@@ -1518,7 +3670,9 @@ pub async fn shadow_transactions_are_valid(
             block.versioned_hashes_len = versioned_hashes.len(),
             "Rejecting block: EIP-4844 blobs/sidecars are not supported",
         );
-        eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
+        return Err(reject(
+            "block contains EIP-4844 blobs/sidecars which are disabled",
+        ));
     }
     // Requests are disabled: reject if any present or if header-level requests hash is set.
     if let Some(requests) = sidecar.requests()
@@ -1530,7 +3684,9 @@ pub async fn shadow_transactions_are_valid(
             block.versioned_hashes_len = requests.len(),
             "Rejecting block: EIP-7685 requests which are disabled",
         );
-        eyre::bail!("block contains EIP-7685 requests which are disabled");
+        return Err(reject(
+            "block contains EIP-7685 requests which are disabled",
+        ));
     }
     // Note: `requests_hash` may be present even when the requests list is empty.
     // Do not reject on presence of the hash alone; only non-empty requests are disallowed.
@@ -1539,12 +3695,15 @@ pub async fn shadow_transactions_are_valid(
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
     let block_timestamp_sec: u128 = block.timestamp_secs().as_secs().into();
-    ensure!(
-        payload_timestamp == block_timestamp_sec,
-        "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
-    );
+    if payload_timestamp != block_timestamp_sec {
+        return Err(reject(format!(
+            "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
+        )));
+    }
 
-    let evm_block: Block = payload_v3.try_into_block()?;
+    let evm_block: Block = payload_v3
+        .try_into_block()
+        .map_err(|e| reject(format!("payload conversion failed: {e}")))?;
 
     // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
     if evm_block.header.requests_hash.is_some() {
@@ -1553,7 +3712,9 @@ pub async fn shadow_transactions_are_valid(
             block.evm_block_hash = %block.evm_block_hash,
             "Rejecting block: EIP-7685 requests_hash present which is disabled",
         );
-        eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
+        return Err(reject(
+            "block contains EIP-7685 requests_hash which is disabled",
+        ));
     }
 
     // 2. Enforce that no EIP-4844 (blob) transactions are present in the block
@@ -1564,15 +3725,18 @@ pub async fn shadow_transactions_are_valid(
                 block.evm_block_hash = %block.evm_block_hash,
                 "Rejecting block: contains EIP-4844 transaction which is disabled",
             );
-            eyre::bail!("block contains EIP-4844 transaction which is disabled");
+            return Err(reject(
+                "block contains EIP-4844 transaction which is disabled",
+            ));
         }
     }
 
-    // 3. Extract shadow transactions from the beginning of the block lazily
+    // 3. Extract shadow transactions from the beginning of the block lazily.
+    // Per-item errors here (signer recovery, miner mismatch, malformed
+    // shadow tx) are payload-level → consensus.
     let txs_slice = &evm_block.body.transactions;
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
-        // Verify signer for each yielded shadow tx (must be the miner)
         let (stx, tx_ref) = res?;
         let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
         ensure!(
@@ -1582,7 +3746,11 @@ pub async fn shadow_transactions_are_valid(
         Ok(stx)
     });
 
-    // 3. Generate expected shadow transactions
+    // 4. Generate expected shadow transactions. This call returns a
+    // typed `ValidationError`; local/runtime failures (eviction races,
+    // DB I/O, etc.) surface as `is_internal_failure` variants and are
+    // propagated unchanged, while peer-attributable structural failures
+    // (e.g. missing publish ledger) surface as `ShadowTransactionInvalid`.
     let expected_txs = generate_expected_shadow_transactions(
         config,
         block_tree_guard,
@@ -1596,11 +3764,11 @@ pub async fn shadow_transactions_are_valid(
     )
     .await?;
 
-    // 4. Validate they match
-    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)?;
+    // 5. Validate they match — any error here is a consensus mismatch.
+    validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
+        .map_err(|e| reject(e.to_string()))?;
 
-    // 5. Return the execution data for reuse
-    Ok(execution_data)
+    Ok(())
 }
 
 /// Lazily extract all leading shadow transactions from a block's transactions using a streaming iterator.
@@ -1645,6 +3813,28 @@ fn extract_leading_shadow_txs(
     })
 }
 
+/// Typed error from [`submit_payload_to_reth`]. Distinguishes local EL
+/// transport failures (node fault) from genuine consensus rejections of
+/// the payload, so the caller can dispatch the correct
+/// `ValidationResult` variant instead of bucketing every failure as
+/// `Invalid`.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitPayloadError {
+    /// Local engine-RPC transport failure (HTTP client unreachable, request
+    /// failed mid-flight, etc.). The local EL is broken, not the peer's
+    /// block — classify as node fault.
+    #[error("local reth engine transport failure: {0}")]
+    LocalTransport(String),
+    /// Payload structure rejected before submission (non-V3 payload,
+    /// missing versioned hashes). Consensus rejection.
+    #[error("payload structure invalid: {0}")]
+    PayloadStructure(String),
+    /// Reth's engine returned `PayloadStatusEnum::Invalid` for the payload.
+    /// Consensus rejection — the block is genuinely bad.
+    #[error("reth rejected payload: {0}")]
+    PayloadRejected(String),
+}
+
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(level = "trace", skip_all, err, fields(
@@ -1656,20 +3846,34 @@ pub async fn submit_payload_to_reth(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     execution_data: ExecutionData,
-) -> eyre::Result<()> {
+) -> Result<(), SubmitPayloadError> {
     let ExecutionData { payload, sidecar } = execution_data;
 
     let ExecutionPayload::V3(payload_v3) = payload else {
-        eyre::bail!("irys-reth expects that all payloads are of v3 type");
+        return Err(SubmitPayloadError::PayloadStructure(
+            "irys-reth expects that all payloads are of v3 type".to_string(),
+        ));
     };
 
     let versioned_hashes = sidecar
         .versioned_hashes()
-        .ok_or_eyre("version hashes must be present")?
+        .ok_or_else(|| {
+            SubmitPayloadError::PayloadStructure("version hashes must be present".to_string())
+        })?
         .clone();
 
     // Submit to reth execution layer
     let engine_api_client = reth_adapter.inner.engine_http_client();
+    // Observability for stuck `Syncing`: log a `warn` at the first minute and
+    // again every five minutes thereafter. `Syncing` from `new_payload_v4`
+    // means reth's EL is missing predecessors — distinct from "reth currently
+    // validating", which blocks the single call instead of cycling through
+    // `Syncing`. No timeout is applied here because we can't cleanly bound
+    // "expected catch-up under load" without false positives; if this fires
+    // in practice we'll revisit (option B/C in REVIEW.md).
+    const SYNCING_WARN_FIRST_AT: u32 = 60;
+    const SYNCING_WARN_REPEAT_EVERY: u32 = 300;
+    let mut syncing_iters: u32 = 0;
     loop {
         let payload_status = engine_api_client
             .new_payload_v4(
@@ -1678,16 +3882,32 @@ pub async fn submit_payload_to_reth(
                 block.previous_block_hash.into(),
                 RequestsOrHash::Requests(Requests::new(vec![])),
             )
-            .await?;
+            .await
+            .map_err(|e| SubmitPayloadError::LocalTransport(e.to_string()))?;
         match payload_status.status {
             alloy_rpc_types_engine::PayloadStatusEnum::Invalid { validation_error } => {
-                return Err(eyre::Report::msg(validation_error));
+                return Err(SubmitPayloadError::PayloadRejected(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
-                tracing::debug!(
-                    "syncing extra blocks to validate payload {:?}",
-                    payload_v3.payload_inner.payload_inner.block_num_hash()
-                );
+                syncing_iters = syncing_iters.saturating_add(1);
+                if syncing_iters == SYNCING_WARN_FIRST_AT
+                    || (syncing_iters > SYNCING_WARN_FIRST_AT
+                        && (syncing_iters - SYNCING_WARN_FIRST_AT)
+                            .is_multiple_of(SYNCING_WARN_REPEAT_EVERY))
+                {
+                    tracing::warn!(
+                        block.hash = %block.block_hash,
+                        block.height = block.height,
+                        syncing_iters,
+                        "submit_payload_to_reth: reth has been Syncing for {}s — pinning this validation slot",
+                        syncing_iters
+                    );
+                } else {
+                    tracing::debug!(
+                        "syncing extra blocks to validate payload {:?}",
+                        payload_v3.payload_inner.payload_inner.block_num_hash()
+                    );
+                }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -1696,6 +3916,10 @@ pub async fn submit_payload_to_reth(
                 break;
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Accepted => {
+                // Irys CL drives canonicality via `update_forkchoice_full`
+                // separately. `Accepted` here means reth deemed the payload
+                // structurally valid but on a side chain from reth's POV —
+                // that is fine at this stage; fork-choice is updated later.
                 tracing::info!("accepted a side-chain (fork) payload");
                 break;
             }
@@ -1705,7 +3929,88 @@ pub async fn submit_payload_to_reth(
     Ok(())
 }
 
-/// Generates expected shadow transactions
+/// Classify a [`ShadowTxGenError`] into the appropriate
+/// [`ValidationError`] variant.
+///
+/// `ShadowTxGenerator::new` and its iteration operate on already-loaded
+/// local data (parent block, snapshots, mempool-resolved txs). The typed
+/// `ShadowTxGenError` distinguishes failure classes so each lands on the
+/// correct `ValidationResult`. The audited invariant (see
+/// `ShadowTxGenError` doc) is:
+///   - `SnapshotInvariant` / `SnapshotTreasuryUnderflow` → node fault.
+///     Snapshot invariant: local state is internally inconsistent.
+///     Snapshot treasury underflow: a snapshot-derived deduction amount
+///     itself underflows the inherited treasury — two honest nodes
+///     cannot reach this, so loud restart over silent canonical-fork.
+///   - `TreasuryArithmetic` / `Structural` → consensus rejection.
+///     Treasury arithmetic: a peer-supplied operand (fee, reward,
+///     ingress-proof reward) over/underflows the running balance. Even
+///     when prior snapshot-derived deductions ran first, those inputs
+///     are deterministic from canonical, so every honest validator with
+///     the same parent reaches the same running balance — the block is
+///     peer-attributably bad. Misclassifying this as node fault would
+///     let one crafted epoch block crash every validator simultaneously.
+///   - `Soft` → soft internal (existing retry-plausible fallback).
+///
+/// SAFETY: this mapping is the single point where producer-side typed
+/// failures are translated to validator-side `ValidationResult` semantics.
+/// Misclassifying e.g. `TreasuryArithmetic` as a node fault would cause a
+/// validator to panic+restart on every peer block with bad fees — a DoS
+/// vector. Misclassifying `SnapshotInvariant` as consensus would
+/// peer-attribute a local corruption.
+pub(crate) fn classify_shadow_tx_gen_err(
+    e: crate::shadow_tx_generator::ShadowTxGenError,
+) -> ValidationError {
+    use crate::shadow_tx_generator::ShadowTxGenError;
+    match e {
+        ShadowTxGenError::SnapshotInvariant(s) => ValidationError::ShadowTxNodeFault(s),
+        ShadowTxGenError::SnapshotTreasuryUnderflow(s) => {
+            ValidationError::ShadowTxNodeFault(format!("snapshot treasury underflow: {s}"))
+        }
+        ShadowTxGenError::TreasuryArithmetic(s) => {
+            ValidationError::ShadowTransactionInvalid(format!("treasury arithmetic: {s}"))
+        }
+        ShadowTxGenError::Structural(s) => ValidationError::ShadowTransactionInvalid(s),
+    }
+}
+
+/// Classify a [`CommitmentRefundError`] into the appropriate
+/// [`ValidationError`] variant.
+///
+/// Commitment-refund derivation operates on the parent's commitment
+/// snapshot — purely local state. Any failure here is a snapshot-invariant
+/// violation: the local state is internally inconsistent and retry cannot
+/// heal it. Routes to node fault (loud abort+restart) rather than
+/// peer-attributing to consensus.
+///
+/// The `commitment refund invariant:` prefix is load-bearing for log
+/// disambiguation between refund-derived faults and shadow-tx-generator
+/// faults.
+pub(crate) fn classify_commitment_refund_err(
+    e: crate::commitment_refunds::CommitmentRefundError,
+) -> ValidationError {
+    use crate::commitment_refunds::CommitmentRefundError;
+    match e {
+        CommitmentRefundError::SnapshotInvariant(s) => {
+            ValidationError::ShadowTxNodeFault(format!("commitment refund invariant: {s}"))
+        }
+    }
+}
+
+/// Generates expected shadow transactions.
+///
+/// Returns a typed [`ValidationError`] on failure:
+/// - parent/snapshot lookup races surface as `ParentBlockMissing`
+///   (internal, retry-plausible);
+/// - peer-supplied structural failures (e.g. missing publish ledger)
+///   surface as `ShadowTransactionInvalid` (consensus rejection);
+/// - hard local I/O failures (DB reads, MDBX corruption) surface as
+///   `ShadowTxNodeFault` (internal + node-fault → abort+restart);
+/// - other local computation / mempool / snapshot-arithmetic failures
+///   surface as `ShadowTxNodeFault` (hard fault, abort+restart).
+///
+/// The caller's existing `.into()` dispatch handles routing each variant
+/// to the correct `ValidationResult`.
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions(
     config: &Config,
@@ -1717,15 +4022,38 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> eyre::Result<Vec<ShadowTransaction>> {
-    // Look up previous block to get EVM hash
+) -> Result<Vec<ShadowTransaction>, ValidationError> {
+    // Helpers: classify common failure shapes.
+    let parent_hash = block.previous_block_hash;
+    let parent_missing = || ValidationError::ParentBlockMissing {
+        block_hash: parent_hash,
+    };
+    // Hard local I/O failures (DB reads, MDBX corruption) where retry
+    // cannot help — DB is broken on this node. Triggers node-fault
+    // abort+restart rather than accumulating in cache.
+    fn node_fault(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTxNodeFault(err.to_string())
+    }
+    fn consensus(err: impl std::fmt::Display) -> ValidationError {
+        ValidationError::ShadowTransactionInvalid(err.to_string())
+    }
+
+    // Look up previous block to get EVM hash. The two failure shapes
+    // are distinct: a DB I/O error from the in-memory-miss fallback
+    // (`db.view_eyre`) is a hard node-local fault — retry cannot heal
+    // a broken MDBX — so route through `node_fault` to trigger
+    // abort+restart. A `None` result is the eviction race against the
+    // in-memory window and surfaces as `ParentBlockMissing` (internal,
+    // retry-plausible via depth-prune + re-gossip). Either way this
+    // is not a consensus statement about the block.
     let prev_block = crate::block_tree_service::get_block_header(
         block_tree_guard,
         db,
         block.previous_block_hash,
         false,
-    )?
-    .ok_or_eyre("Previous block not found")?;
+    )
+    .map_err(node_fault)?
+    .ok_or_else(parent_missing)?;
 
     // Calculate is_epoch_block early since it's needed for multiple checks
     let is_epoch_block = block
@@ -1744,12 +4072,14 @@ async fn generate_expected_shadow_transactions(
     let one_year_txs = transactions.get_ledger_txs(DataLedger::OneYear).to_vec();
     let thirty_day_txs = transactions.get_ledger_txs(DataLedger::ThirtyDay).to_vec();
 
-    // Use pre-fetched publish ledger transactions with proofs from block header
+    // Use pre-fetched publish ledger transactions with proofs from block header.
+    // `extract_data_ledgers` validates peer-supplied structure → consensus.
     let cascade_active = config
         .consensus
         .hardforks
         .is_cascade_active_for_epoch(&parent_epoch_snapshot);
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)?;
+    let (publish_ledger, _submit_ledger) =
+        extract_data_ledgers(block, cascade_active).map_err(consensus)?;
     let publish_ledger_with_txs = PublishLedgerWithTxs {
         txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
         proofs: publish_ledger.proofs.clone(),
@@ -1758,7 +4088,28 @@ async fn generate_expected_shadow_transactions(
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
 
-    // Calculate expired ledger fees for epoch blocks
+    // Calculate expired ledger fees for epoch blocks. Every input to
+    // `calculate_expired_ledger_fees` is locally derived (parent epoch
+    // snapshot, validator-computed block height, local block index, local
+    // mempool, local DB) — the peer supplies nothing that flows into this
+    // computation. The function produces what the validator EXPECTS the
+    // peer's shadow txs to look like; the peer-vs-expected comparison
+    // happens downstream in `generate_expected_shadow_transactions`.
+    //
+    // Consequence: every failure path here is a node-side fault.
+    //   - MDBX I/O failure (block-header / data-tx reads) → NodeFault.
+    //   - Local snapshot / index inconsistency (e.g. expired partition
+    //     hash with no matching assignment in `parent_epoch_snapshot`)
+    //     → still NodeFault: two honest nodes cannot disagree on local
+    //     snapshot state, and retry cannot heal it. Same rationale as
+    //     `ShadowTxGenError::SnapshotInvariant`.
+    //   - Internal arithmetic in `aggregate_balance_deltas` over local
+    //     data → NodeFault (a bug in our own code, not the peer's block).
+    //
+    // There is no peer-attributable failure mode here, so the blanket
+    // `node_fault` mapping is the correct classification — NOT something
+    // to "split into DB-vs-logic" later. (A prior TODO here suggested
+    // that split; on audit it was speculative and the TODO was removed.)
     let expired_ledger_fees = if is_epoch_block {
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1772,7 +4123,8 @@ async fn generate_expected_shadow_transactions(
             true, // expect txs to be promoted — return perm fee refund if not
         )
         .in_current_span()
-        .await?;
+        .await
+        .map_err(node_fault)?;
 
         // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
         let cascade_active = config
@@ -1793,7 +4145,8 @@ async fn generate_expected_shadow_transactions(
                     false, // no promotion for these ledgers
                 )
                 .in_current_span()
-                .await?;
+                .await
+                .map_err(node_fault)?;
                 result.merge(delta);
             }
         }
@@ -1803,13 +4156,16 @@ async fn generate_expected_shadow_transactions(
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
 
-    // Compute commitment refund events for epoch blocks from parent's commitment snapshot
+    // Compute commitment refund events for epoch blocks from parent's commitment snapshot.
+    // Failures here are snapshot-invariant violations — local state is
+    // internally inconsistent and retry can't heal it → node fault.
     let commitment_refund_events: Vec<crate::block_producer::UnpledgeRefundEvent> =
         if is_epoch_block {
             crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
                 &parent_commitment_snapshot,
                 &config.consensus,
-            )?
+            )
+            .map_err(classify_commitment_refund_err)?
         } else {
             Vec::new()
         };
@@ -1817,11 +4173,33 @@ async fn generate_expected_shadow_transactions(
         crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
             &parent_commitment_snapshot,
             &config.consensus,
-        )?
+        )
+        .map_err(classify_commitment_refund_err)?
     } else {
         Vec::new()
     };
 
+    // Deterministic block-invariant: peer-attributable. See
+    // `ShadowTransactionInvalid` doc — a tx in the publish ledger that also
+    // has a perm_fee refund scheduled is a structural inconsistency in the
+    // peer's block (promoted txs must not receive refunds). Routed here
+    // (rather than only inside `ShadowTxGenerator::new`) so violations
+    // surface as consensus rejection rather than soft-internal
+    // `ShadowTxNodeFault` for invariant violations. The constructor keeps an identical guard
+    // as defence-in-depth for non-validation callers.
+    for tx in &publish_ledger_with_txs.txs {
+        for (refund_tx_id, _, _) in &expired_ledger_fees.user_perm_fee_refunds {
+            if tx.id == *refund_tx_id {
+                return Err(consensus(format!(
+                    "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
+                     Promoted transactions should not receive refunds.",
+                    tx.id
+                )));
+            }
+        }
+    }
+
+    // Classification rationale: see `classify_shadow_tx_gen_err` doc.
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1840,25 +4218,25 @@ async fn generate_expected_shadow_transactions(
         &unstake_refund_events,
         &parent_epoch_snapshot,
     )
-    .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
+    .map_err(classify_shadow_tx_gen_err)?;
 
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
-        let metadata = result?;
+        let metadata = result.map_err(classify_shadow_tx_gen_err)?;
         shadow_txs_vec.push(metadata.shadow_tx);
     }
 
     // Get final treasury balance after processing all transactions
     let expected_treasury = shadow_tx_generator.treasury_balance();
 
-    // Validate that the block's treasury matches the expected value
-    ensure!(
-        block.treasury == expected_treasury,
-        "Treasury mismatch: expected {} but found {} at block height {}",
-        expected_treasury,
-        block.treasury,
-        block.height
-    );
+    // Treasury mismatch is a peer-attributable consensus rejection — the
+    // peer's block claims a treasury value we can prove wrong.
+    if block.treasury != expected_treasury {
+        return Err(consensus(format!(
+            "Treasury mismatch: expected {} but found {} at block height {}",
+            expected_treasury, block.treasury, block.height
+        )));
+    }
 
     Ok(shadow_txs_vec)
 }
@@ -1930,10 +4308,11 @@ pub fn is_seed_data_valid(
             "Seed data is invalid. Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
         );
-        ValidationResult::Invalid(ValidationError::SeedDataInvalid(format!(
+        ValidationError::SeedDataInvalid(format!(
             "Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
-        )))
+        ))
+        .into()
     }
 }
 
@@ -2189,6 +4568,28 @@ pub fn calculate_term_storage_base_network_fee(
     )
 }
 
+/// Validates that a transaction's `perm_fee` meets the minimum expected amount.
+///
+/// Extracted from `validate_publish_price` so the threshold comparison can be
+/// unit-tested directly. Behaviour is byte-identical to the inlined check:
+/// a missing `perm_fee` is treated as zero, and the comparison is strict
+/// less-than (so `actual == expected` is accepted as sufficient).
+pub(crate) fn check_perm_fee_sufficient(
+    tx_id: H256,
+    actual_perm_fee: Option<BoundedFee>,
+    expected: U256,
+) -> Result<(), PreValidationError> {
+    let actual = actual_perm_fee.unwrap_or(BoundedFee::zero());
+    if actual < expected {
+        return Err(PreValidationError::InsufficientPermFee {
+            tx_id,
+            expected,
+            actual: actual.get(),
+        });
+    }
+    Ok(())
+}
+
 /// Validates pricing for a transaction targeting the Publish ledger (Submit→Publish promotion path).
 /// Checks both term_fee and perm_fee meet minimums, and that fee distribution structures are valid.
 fn validate_publish_price(
@@ -2224,14 +4625,8 @@ fn validate_publish_price(
     .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
     // Validate perm_fee is at least the expected amount
+    check_perm_fee_sufficient(tx.id, tx.perm_fee, expected_perm_fee.amount)?;
     let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
-    if actual_perm_fee < expected_perm_fee.amount {
-        return Err(PreValidationError::InsufficientPermFee {
-            tx_id: tx.id,
-            expected: expected_perm_fee.amount,
-            actual: actual_perm_fee.get(),
-        });
-    }
 
     // Validate term_fee is at least the expected amount
     let actual_term_fee = tx.term_fee;
@@ -2384,7 +4779,8 @@ pub async fn data_txs_are_valid(
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
     transactions: &BlockTransactions,
-    cascade_active: bool,
+    parent_epoch_snapshot: Arc<EpochSnapshot>,
+    parent_ema_snapshot: Arc<EmaSnapshot>,
 ) -> Result<(), PreValidationError> {
     // Extract transaction slices from BlockTransactions
     let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
@@ -2443,22 +4839,16 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Get the parent block's EMA snapshot for fee calculations
-    let block_ema = block_tree_guard
-        .read()
-        .get_ema_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::BlockEmaSnapshotNotFound {
-            block_hash: block.previous_block_hash,
-        })?;
-
-    // Get the parent block's epoch snapshot for ingress proof validation
-    // (avoids race condition from calling canonical_epoch_snapshot() mid-validation)
-    let parent_epoch_snapshot = block_tree_guard
-        .read()
-        .get_epoch_snapshot(&block.previous_block_hash)
-        .ok_or(PreValidationError::ParentEpochSnapshotNotFound {
-            block_hash: block.previous_block_hash,
-        })?;
+    // Cascade activation is derived from the parent epoch snapshot the
+    // caller fetched — single source of truth. The previous `cascade_active`
+    // bool parameter computed it from a separate snapshot read, which gave
+    // two reads where only one was authoritative; the reads always agreed
+    // (same parent hash, immutable `Arc<EpochSnapshot>`) but the bool was a
+    // footgun for any future caller computing it from a stale snapshot.
+    let cascade_active = config
+        .consensus
+        .hardforks
+        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
 
     // Extract publish ledger for ingress proofs validation
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)
@@ -2526,7 +4916,15 @@ pub async fn data_txs_are_valid(
         );
     }
 
-    // Step 3: Check past inclusions only for non-promoted txs
+    // Step 3: Check past inclusions only for non-promoted txs.
+    //
+    // Walk depth is `tx_anchor_expiry_depth`: anchor-expiry semantics
+    // bound any legitimate prior inclusion of `block`'s txs to within
+    // this window of `block`, regardless of how deep reorgs go (see the
+    // docblock on `get_previous_tx_inclusions` for the derivation).
+    // Deeper reorg support changes which chain the block tree buffers,
+    // not where on `block`'s chain a tx with a given anchor can have
+    // been included.
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
@@ -2550,21 +4948,120 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // check the db — constrained to canonical chain at or before the parent
+                        // Past Submit inclusion was not in the historical scan
+                        // window — fall back to the fork-aware canonical-
+                        // height getters in `irys_database`.
+                        //
+                        // `canonical_submit_height` is sufficient evidence of
+                        // prior Submit: the structural pre-pass guarantees
+                        // `tx.ledger_id == Publish`, and term ledgers reject
+                        // `ledger_id == Publish`, so the only term ledger
+                        // that could have produced an `included_height` is
+                        // Submit.  An MDBX I/O failure is a local fault that
+                        // we surface as `BlockBoundsLookupError` (classified
+                        // as `NodeFault`, so the caller aborts rather than
+                        // peer-attributing the local DB error).
+                        //
+                        // Defense-in-depth `canonical_promoted_height`
+                        // rejection.  Under the current invariants this is
+                        // effectively unreachable for legitimate prior
+                        // promotions: anchor expiry forces any legitimate
+                        // prior Publish of a tx in `block` to lie within
+                        // `tx_anchor_expiry_depth` of `block` (see
+                        // `get_previous_tx_inclusions`'s derivation), so the
+                        // parent walk above would have surfaced it as
+                        // `Found { historical: Publish, current: Publish }`
+                        // before we reach `Searching`.  The check is kept
+                        // as a safety net against a future bug that lets a
+                        // prior promotion escape the walk.
+                        //
+                        // FORK-AWARENESS CAVEAT (reorg-readiness): the
+                        // rejection's `block_hash` is taken from
+                        // `MigratedBlockHashes[promoted_height]`, which today
+                        // is fork-invariant past `block_migration_depth`
+                        // (deeper reorgs are aborted, so migrated rows are
+                        // irreversibly canonical from every chain's
+                        // perspective).  When deeper reorgs land, MBH past
+                        // migration_depth becomes a LOCAL-canonical view
+                        // that can disagree with `block`'s chain — this
+                        // check would then report `PublishTxAlreadyIncluded`
+                        // for a tx that isn't actually promoted on
+                        // `block`'s chain.
+                        // The same invariant change breaks
+                        // `canonical_promoted_height` / `canonical_submit_height`:
+                        // their "MBH-verified ⇒ canonical" contracts rely on
+                        // `block_migration_depth` being the absolute reorg
+                        // ceiling.  Audit this arm and those helpers (and
+                        // every site that consumes them, e.g. tx_selector's
+                        // prior-Submit fallback) together when changing
+                        // that invariant.
                         let parent_height = block.height.saturating_sub(1);
-                        if let Ok(Some(_header)) =
-                            tx_header_by_txid_canonical(&ro_tx, &tx.id, parent_height)
-                        {
-                            warn!(
-                                "had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth",
-                                &_header, &tx.id, &tx
-                            );
-                        } else {
-                            // Publish tx with no past inclusion - INVALID
+
+                        let submit_lookup =
+                            canonical_submit_height(&ro_tx, &tx.id, parent_height).map_err(|e| {
+                                error!(
+                                    "canonical_submit_height DB error for tx {}: {}",
+                                    &tx.id, &e
+                                );
+                                PreValidationError::BlockBoundsLookupError(format!(
+                                    "canonical_submit_height failed for tx {} during prior-Submit check: {}",
+                                    tx.id, e
+                                ))
+                            })?;
+                        if submit_lookup.is_none() {
+                            // Publish tx with no canonical prior Submit - INVALID
                             return Err(PreValidationError::PublishTxMissingPriorSubmit {
                                 tx_id: tx.id,
                             });
                         }
+
+                        let promoted_lookup =
+                            canonical_promoted_height(&ro_tx, &tx.id, parent_height).map_err(
+                                |e| {
+                                    error!(
+                                        "canonical_promoted_height DB error for tx {}: {}",
+                                        &tx.id, &e
+                                    );
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "canonical_promoted_height failed for tx {} during prior-Publish check: {}",
+                                        tx.id, e
+                                    ))
+                                },
+                            )?;
+                        if let Some(promoted_height) = promoted_lookup {
+                            // `canonical_promoted_height` already attested
+                            // `MBH[promoted_height] = Some` inside this
+                            // snapshot; a missing row on re-read would mean
+                            // MDBX returned a different value for the same
+                            // key within one read tx — cross-table
+                            // corruption, surfaced as NodeFault.
+                            let promoted_block_hash = ro_tx
+                                .get::<MigratedBlockHashes>(promoted_height)
+                                .map_err(|e| {
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "MigratedBlockHashes read failed for promoted_height {} of tx {}: {}",
+                                        promoted_height, tx.id, e
+                                    ))
+                                })?
+                                .ok_or_else(|| {
+                                    PreValidationError::BlockBoundsLookupError(format!(
+                                        "snapshot-inconsistent MigratedBlockHashes: \
+                                         canonical_promoted_height attested MBH[{}] = Some, \
+                                         but a re-read returned None (tx {})",
+                                        promoted_height, tx.id
+                                    ))
+                                })?;
+                            return Err(PreValidationError::PublishTxAlreadyIncluded {
+                                tx_id: tx.id,
+                                block_hash: promoted_block_hash,
+                            });
+                        }
+
+                        warn!(
+                            tx.id = %tx.id,
+                            parent_height,
+                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index"
+                        );
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
@@ -2572,7 +5069,7 @@ pub async fn data_txs_are_valid(
                             tx,
                             block.height,
                             timestamp_secs,
-                            &block_ema,
+                            &parent_ema_snapshot,
                             config,
                         )?;
                         debug!("Transaction {} is new in Submit ledger", tx.id);
@@ -2584,7 +5081,7 @@ pub async fn data_txs_are_valid(
                             *ledger_current,
                             block.height,
                             timestamp_secs,
-                            &block_ema,
+                            &parent_ema_snapshot,
                             config,
                         )?;
                         debug!(
@@ -2610,7 +5107,7 @@ pub async fn data_txs_are_valid(
                                         tx,
                                         block.height,
                                         timestamp_secs,
-                                        &block_ema,
+                                        &parent_ema_snapshot,
                                         config,
                                     )?;
                                 }
@@ -2705,6 +5202,7 @@ pub async fn data_txs_are_valid(
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
                 tx_header,
+                block.height.saturating_sub(1),
                 block_tree_guard,
                 db,
                 config,
@@ -3137,11 +5635,50 @@ enum TxInclusionState {
     },
 }
 
+/// Walks `block_under_validation`'s ancestors via the block tree (DB fallback
+/// for tree-evicted headers), updating each entry in `tx_ids` with the
+/// inclusion state found on this chain.
+///
+/// **Fork-awareness contract.**  This walk is the validator's fork-aware
+/// source for prior inclusions of `block_under_validation`'s txs.  It is
+/// both *sufficient* and *tight*: every legitimate prior inclusion of any
+/// tx in `block_under_validation` necessarily lies within
+/// `tx_anchor_expiry_depth` blocks of `block_under_validation`, and no
+/// legitimate prior inclusion can lie outside it.
+///
+/// **Derivation of the bound.**  For any tx in `block_under_validation`
+/// with signed anchor `A`:
+///   * `block_under_validation.height ≤ A + tx_anchor_expiry_depth` —
+///     `block_under_validation` itself must include the tx with an
+///     unexpired anchor.
+///   * Any prior canonical inclusion `I` of that tx has the *same* `A`
+///     (the tx_id is derived from the signed payload, which includes the
+///     anchor — re-anchoring produces a different tx_id), and must also
+///     satisfy `I ≤ A + tx_anchor_expiry_depth`.
+///   * Combined: `I ∈ [block_under_validation.height − tx_anchor_expiry_depth,
+///     block_under_validation.height − 1]`.
+///
+/// Note that `I ≥ 1` is implicit: `build_unsigned_irys_genesis_block`
+/// constructs height 0 with `tx_ids = H256List::new()` for every data ledger,
+/// so no tx can have a prior inclusion at genesis.  The loop below relies on
+/// that fact to short-circuit at `block.1 == 0` without inspecting genesis.
+///
+/// So `walk_depth = tx_anchor_expiry_depth` covers exactly the reachable
+/// range of any prior inclusion `block_under_validation` could have.
+/// Walking deeper does no harm but is wasted work; walking shallower
+/// (e.g. `block_migration_depth`) would leave a legitimate-inclusion
+/// window uncovered and would force the DB fallback to bear correctness
+/// responsibility it isn't structurally equipped for (see the
+/// `Searching { ledger_current: Publish }` arm in `data_txs_are_valid`).
+///
+/// The bound is independent of reorg depth: deeper reorgs change which
+/// chain `block_tree` buffers but not where on `block_under_validation`'s
+/// chain a tx with a given anchor can have been included.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,
-    anchor_expiry_depth: u64,
+    walk_depth: u64,
     service_senders: &ServiceSenders,
     db: &DatabaseProvider,
 ) -> eyre::Result<()> {
@@ -3158,15 +5695,13 @@ async fn get_previous_tx_inclusions(
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
-    let min_anchor_height = block_under_validation
-        .height
-        .saturating_sub(anchor_expiry_depth);
+    let walk_min_height = block_under_validation.height.saturating_sub(walk_depth);
 
     let mut block = (
         block_under_validation.block_hash,
         block_under_validation.height,
     );
-    while block.1 >= min_anchor_height {
+    while block.1 >= walk_min_height {
         // Stop if we've reached the genesis block
         if block.1 == 0 {
             break;
@@ -3193,24 +5728,24 @@ async fn get_previous_tx_inclusions(
             None => {
                 let header = db
                     .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "database returned error fetching parent block header {}",
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "db.view failed fetching parent block {}: {e}",
                             &block.0
-                        )
-                    })
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "db view error while fetching parent block header {}",
+                        ))
+                    })?
+                    .map_err(|e| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "block_header_by_hash failed for {}: {e}",
                             &block.0
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "to find the parent block header {} in the database",
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        PreValidationError::BlockBoundsLookupError(format!(
+                            "parent block {} not found in database",
                             &block.0
-                        )
-                    });
+                        ))
+                    })?;
                 update_states(&header)?;
                 (header.previous_block_hash, header.height.saturating_sub(1))
             }
@@ -3293,9 +5828,17 @@ fn merge_same_block_historical_ledgers(
     }
 }
 
+/// Resolves the canonical Submit-ledger range a tx contributed to at or
+/// before `parent_height` via `tx_inclusion::find_canonical_ledger_range`
+/// (parent-anchored + `ChainState::Onchain`-filtered), then intersects it
+/// against each ingress proof author's Submit-ledger slot assignments.
+/// Parent-deterministic: two honest peers on the same fork produce
+/// identical `(assigned_proofs, assigned_miners)` regardless of which
+/// other forks they've witnessed.
 pub fn get_assigned_ingress_proofs(
     tx_proofs: &[IngressProof],
     tx_header: &DataTransactionHeader,
+    parent_height: u64,
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     config: &Config,
@@ -3305,57 +5848,35 @@ pub fn get_assigned_ingress_proofs(
     let mut assigned_proofs = Vec::new();
     let mut assigned_miners = 0;
 
-    //  a) Get the block hashes from the cached data_root (invariant across all proofs)
-    let block_hashes = db
-        .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
-        .map_err(|e| PreValidationError::DatabaseError {
-            error: format!(
-                "Failed to open DB read tx for data_root {} (tx_id {}): {}",
-                tx_header.data_root, tx_header.id, e
-            ),
-        })?
-        .map_err(|e| PreValidationError::DatabaseError {
-            error: format!(
-                "DB query failed for data_root {} (tx_id {}): {}",
-                tx_header.data_root, tx_header.id, e
-            ),
-        })?
-        .ok_or_else(|| PreValidationError::DatabaseError {
-            error: format!(
-                "CachedDataRoot not found for data_root {} (tx_id {})",
-                tx_header.data_root, tx_header.id
-            ),
-        })?
-        .block_set;
+    //  a) Get the canonical Submit-ledger range this tx contributed to at or
+    //     before `parent_height`. Replaces the historical
+    //     `CachedDataRoots.block_set` lookup, which retained reorg'd-out
+    //     hashes and could produce stale `BlockBoundsLookupError`.
+    //     Peer-attributable PoA cases are pre-filtered at source;
+    //     `BlockBoundsLookupError` is routed as `NodeFault`, so a local
+    //     canonical-metadata `Err` here panics + restarts rather than
+    //     peer-attributing.
+    let block_range = crate::tx_inclusion::find_canonical_ledger_range(
+        &tx_header.id,
+        parent_height,
+        config.consensus.block_migration_depth,
+        block_tree,
+        db,
+    )
+    .map_err(|e| {
+        PreValidationError::BlockBoundsLookupError(format!(
+            "find_canonical_ledger_range failed for tx {} (data_root {}): {}",
+            tx_header.id, tx_header.data_root, e
+        ))
+    })?;
 
-    // Empty block_set is valid for single-block promotion: the data_root hasn't
-    // been included in any confirmed block yet.  With no block_ranges, no proofs
-    // will be classified as "assigned" and assigned_miners stays 0.  The caller
-    // clamps expected_assigned_proofs to 0, so all proofs count as unassigned and
-    // only the total-proof-count gate applies.
-    if block_hashes.is_empty() {
+    // No canonical confirmation at or before parent_height (single-block
+    // promotion or unconfirmed).  Preserve historical semantics: no proofs are
+    // classified as "assigned" and assigned_miners stays 0, so the caller's
+    // clamp leaves only the total-proof-count gate applicable.
+    let Some(block_range) = block_range else {
         return Ok((vec![], 0));
-    }
-
-    //  b) Get the submit ledger offset intervals for each of the blocks (invariant across all proofs)
-    let mut block_ranges = Vec::new();
-    for block_hash in block_hashes.iter() {
-        match get_ledger_range(block_hash, block_tree, db) {
-            Ok(Some(block_range)) => block_ranges.push(block_range),
-            Ok(None) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "get_ledger_range returned None for block {}, assigned_miners would remain unset (tx_id {})",
-                    block_hash, tx_header.id
-                )));
-            }
-            Err(e) => {
-                return Err(PreValidationError::BlockBoundsLookupError(format!(
-                    "Failed to get ledger range for block {}: {}",
-                    block_hash, e
-                )));
-            }
-        }
-    }
+    };
 
     // Loop through all the ingress proofs for the published transaction and pre-validate them
     for ingress_proof in tx_proofs.iter() {
@@ -3372,8 +5893,18 @@ pub fn get_assigned_ingress_proofs(
         //  c) Get the slots the proof address is assigned to store
         let slot_indexes = get_submit_ledger_slot_assignments(&proof_address, epoch_snapshot);
 
-        // d) Get the ledger ranges of the slot indexes
-        let slot_ranges: HashMap<usize, LedgerChunkRange> = slot_indexes
+        // d) Get the ledger ranges of the slot indexes.
+        //
+        // `BTreeMap` (not `HashMap`) so iteration order in (f) is deterministic
+        // across nodes.  When `block_range` intersects multiple Submit slots,
+        // the `break`-on-first-intersection picks `assigned_miners` from
+        // whichever slot iterates first; HashMap order would let two honest
+        // nodes pick different `assigned_miners` and produce divergent
+        // ingress-proof acceptance decisions.  Currently vacuous because
+        // `Config::validate` pins `number_of_ingress_proofs_from_assignees == 0`
+        // (see `crates/types/src/config/mod.rs`), but switching the container
+        // here removes the fork landmine the guard masks.
+        let slot_ranges: BTreeMap<usize, LedgerChunkRange> = slot_indexes
             .iter()
             .map(|index| {
                 let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
@@ -3391,16 +5922,9 @@ pub fn get_assigned_ingress_proofs(
         let slot_address_counts = get_submit_ledger_slot_addresses(&slot_indexes, epoch_snapshot);
 
         //  f) are there any intersections of block and slot ranges?
-        let mut is_intersected = false;
-        for block_range in &block_ranges {
-            for (slot_index, slot_range) in &slot_ranges {
-                if block_range.intersection(slot_range).is_some() {
-                    is_intersected = true;
-                    assigned_miners = *slot_address_counts.get(slot_index).unwrap();
-                    break;
-                }
-            }
-            if is_intersected {
+        for (slot_index, slot_range) in &slot_ranges {
+            if block_range.intersection(slot_range).is_some() {
+                assigned_miners = *slot_address_counts.get(slot_index).unwrap();
                 assigned_proofs.push(ingress_proof.clone());
                 break;
             }
@@ -3408,59 +5932,6 @@ pub fn get_assigned_ingress_proofs(
     }
 
     Ok((assigned_proofs, assigned_miners))
-}
-
-fn get_ledger_range(
-    hash: &H256,
-    block_tree: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-) -> eyre::Result<Option<LedgerChunkRange>> {
-    let block = match get_block_by_hash(hash, block_tree, db)? {
-        Some(b) => b,
-        None => return Ok(None),
-    };
-    let prev_block_hash = block.previous_block_hash;
-
-    let block_total_chunks = block.data_ledgers[DataLedger::Submit].total_chunks;
-
-    if block.height == 0 {
-        if block_total_chunks == 0 {
-            return Ok(None);
-        }
-        Ok(Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(0),
-            LedgerChunkOffset::from(block_total_chunks - 1),
-        ))))
-    } else {
-        let prev_block = match get_block_by_hash(&prev_block_hash, block_tree, db)? {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
-        if block_total_chunks < prev_total_chunks {
-            return Err(eyre::eyre!(
-                "Block {} has total_chunks ({}) < prev block total_chunks ({}), data corruption",
-                hash,
-                block_total_chunks,
-                prev_total_chunks
-            ));
-        }
-        if block_total_chunks == 0 || block_total_chunks == prev_total_chunks {
-            return Ok(None);
-        }
-        Ok(Some(LedgerChunkRange(ii(
-            LedgerChunkOffset::from(prev_total_chunks),
-            LedgerChunkOffset::from(block_total_chunks - 1),
-        ))))
-    }
-}
-
-fn get_block_by_hash(
-    hash: &H256,
-    block_tree: &BlockTreeReadGuard,
-    db: &DatabaseProvider,
-) -> eyre::Result<Option<IrysBlockHeader>> {
-    crate::block_tree_service::get_block_header(block_tree, db, *hash, false)
 }
 
 fn get_submit_ledger_slot_assignments(
@@ -3471,7 +5942,7 @@ fn get_submit_ledger_slot_assignments(
     partition_assignments.retain(|pa| pa.ledger_id == Some(DataLedger::Submit.into()));
     partition_assignments
         .iter()
-        .map(|pa| pa.slot_index.unwrap())
+        .map(|pa| pa.slot_index.expect("Submit-ledger partition assignment must have slot_index — invariant from epoch_snapshot"))
         .collect()
 }
 
@@ -3505,7 +5976,10 @@ mod tests {
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
     use irys_database::db::IrysDatabaseExt as _;
-    use irys_domain::{BlockIndex, EpochSnapshot, block_index_guard::BlockIndexReadGuard};
+    use irys_domain::{
+        BlockIndex, BlockTree, EpochSnapshot, block_index_guard::BlockIndexReadGuard,
+    };
+    use irys_testing_utils::new_mock_signed_header;
     use irys_testing_utils::tempfile::TempDir;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -3513,8 +5987,22 @@ mod tests {
         DbSyncMode, H256, H256List, IrysAddress, IrysBlockHeaderV1, NodeConfig, Signature, U256,
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
     use tracing::{debug, info};
+
+    /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
+    /// `block_index` fast path of `poa_is_valid` — the helper's fallback is
+    /// unreachable when `parent_height` is present in the index, so the
+    /// tree's contents don't matter, only that the guard is constructible.
+    /// (`BlockTree::new` validates the genesis signature, so we need a signed
+    /// mock header rather than the unsigned `new_mock_header`.)
+    fn dummy_block_tree_guard(consensus_config: &ConsensusConfig) -> BlockTreeReadGuard {
+        let genesis = new_mock_signed_header();
+        BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+            &genesis,
+            consensus_config.clone(),
+        ))))
+    }
 
     fn ledger_with_tx(ledger_id: DataLedger, tx_id: H256) -> DataTransactionLedger {
         DataTransactionLedger {
@@ -3829,8 +6317,9 @@ mod tests {
         let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
         assert!(
             matches!(
-                is_valid,
-                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+                &is_valid,
+                ValidationResult::Invalid(rejection)
+                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
             ),
             "Seed data should be invalid due to wrong reset frequency"
         );
@@ -3842,8 +6331,9 @@ mod tests {
 
         assert!(
             matches!(
-                is_valid,
-                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+                &is_valid,
+                ValidationResult::Invalid(rejection)
+                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
             ),
             "Seed data should be invalid with random seeds"
         );
@@ -3980,9 +6470,21 @@ mod tests {
             "end_chunk_offset should be 9, tx has 9 chunks"
         );
 
+        // Parent-anchored pre-check: the indexed block sits at `height`
+        // (just pushed above), so anchoring on its height lets the
+        // pre-check use the same view of total_chunks the rest of the
+        // test exercises (the chunks the PoA references were committed
+        // by this block). The block_tree fallback in `poa_is_valid` is
+        // unreachable here because `height` is in `block_index`; the dummy
+        // guard exists only to satisfy the signature.
+        let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            &block_tree_guard,
+            context.block_index.db(),
+            H256::zero(),
+            height,
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
@@ -4223,9 +6725,19 @@ mod tests {
             "end_chunk_offset should be 9, tx has 9 chunks"
         );
 
+        // See parent-anchor comment in `poa_test`: use the just-pushed
+        // block's height so the pre-check sees the same `total_chunks`
+        // the rest of the assertions exercise. The block_tree fallback in
+        // `poa_is_valid` is unreachable here because `height` is in
+        // `block_index`; the dummy guard exists only to satisfy the signature.
+        let block_tree_guard = dummy_block_tree_guard(&context.consensus_config);
         let poa_valid = poa_is_valid(
             &poa,
             &block_index_guard,
+            &block_tree_guard,
+            context.block_index.db(),
+            H256::zero(),
+            height,
             &context.epoch_snapshot,
             &context.consensus_config,
             &context.miner_address,
@@ -4440,6 +6952,454 @@ mod tests {
         } else {
             panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
         }
+    }
+
+    /// Integration check for `get_assigned_ingress_proofs`: with a tx
+    /// canonically confirmed via `IrysDataTxMetadata`+`MigratedBlockHashes`,
+    /// the function looks up the Submit-ledger range via
+    /// `tx_inclusion::find_canonical_ledger_range` and returns successfully.
+    ///
+    /// Locks in the canonical-trust-root lookup: validation must derive
+    /// Submit ranges from `IrysDataTxMetadata` + `MigratedBlockHashes` (which
+    /// only retain canonical state) rather than from
+    /// `CachedDataRoots.block_set` (which historically retained orphaned
+    /// hashes across reorgs and could surface a stale `BlockBoundsLookupError`
+    /// once the block_tree purged those blocks).  `block_set` is now only a
+    /// cheap "ever-confirmed?" hint maintained atomically with tip changes
+    /// by `BlockMigrationService::persist_metadata`.
+    #[test_log::test(tokio::test)]
+    async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
+        use crate::tx_inclusion;
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height,
+            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Build a two-block canonical chain.  h1 includes tx_id in Submit.
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        // Persist block headers + mark both heights migrated to canonical.
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        // Write the canonical tx metadata so the migrated-path lookup succeeds.
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        // Empty BlockTree + default EpochSnapshot are sufficient since
+        // the tx is found via the migrated-metadata path and no proofs
+        // are passed (so partition assignments are unused).
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let epoch_snapshot = EpochSnapshot::default();
+
+        // Sanity: helper resolves the canonical range directly.
+        let direct = tx_inclusion::find_canonical_ledger_range(
+            &tx_id,
+            5,
+            config.consensus.block_migration_depth,
+            &block_tree_guard,
+            &db,
+        )?;
+        assert!(
+            direct.is_some(),
+            "test setup error: helper should resolve migrated tx"
+        );
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        assert!(assigned.is_empty());
+        assert_eq!(miners, 0);
+
+        Ok(())
+    }
+
+    /// Same setup as `assigned_ingress_proofs_uses_canonical_tx_metadata`,
+    /// but with a deliberately-corrupt [`CachedDataRoot`] row alongside the
+    /// canonical metadata: `block_set` filled with random hashes that point
+    /// nowhere, `txid_set` augmented with stale txids that do not match the
+    /// canonical tx, and a bogus `data_size`.  Asserts the validation lookup
+    /// is unaffected — `get_assigned_ingress_proofs` returns the same
+    /// `(vec![], 0)` as the no-CDR case because
+    /// `tx_inclusion::find_canonical_ledger_range` derives canonical truth
+    /// from `IrysDataTxMetadata` + `MigratedBlockHashes` and never reads
+    /// `CachedDataRoots`.  Regression guard against a future refactor
+    /// accidentally re-introducing a CDR read into the validation path.
+    #[test_log::test(tokio::test)]
+    async fn corrupt_cdr_does_not_affect_assigned_ingress_proofs() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _,
+            db_cache::CachedDataRoot,
+            insert_tx_header, open_or_create_db, set_data_tx_included_height,
+            tables::{CachedDataRoots, IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+            UnixTimestamp,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        // Inject a deliberately-corrupt CachedDataRoot:
+        //   - block_set points at random hashes that resolve to nothing
+        //   - txid_set contains stale txids alongside the canonical tx
+        //   - data_size is bogus and marked "confirmed"
+        // Any of these, if the validation path were silly enough to consult
+        // them, would change the returned range / corrupt the assignment.
+        let corrupt_cdr = CachedDataRoot {
+            data_size: u64::MAX,
+            data_size_confirmed: true,
+            txid_set: vec![H256::random(), tx_id, H256::random()],
+            block_set: vec![H256::random(), H256::random(), H256::random()],
+            expiry_height: Some(0),
+            cached_at: UnixTimestamp::from_secs(0),
+        };
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<CachedDataRoots>(data_root, corrupt_cdr)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+        let epoch_snapshot = EpochSnapshot::default();
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            &[],
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+        // Identical result to the no-CDR case in
+        // `assigned_ingress_proofs_uses_canonical_tx_metadata` — proof that
+        // the corrupt CDR was not consulted.
+        assert!(assigned.is_empty());
+        assert_eq!(miners, 0);
+
+        Ok(())
+    }
+
+    /// Proof-bearing complement to `assigned_ingress_proofs_uses_canonical_tx_metadata`.
+    /// The earlier test exits before the per-proof loop because it passes
+    /// `&[]`, so the intersection / classification path at the bottom of
+    /// `get_assigned_ingress_proofs` is unexercised.  Here we:
+    ///   - run the same canonical-metadata setup so the helper resolves
+    ///     `block_range = [10, 24]` (h1's Submit added chunks 10..=24),
+    ///   - register one signer to Submit slot 1 (chunks `[10, 20)` under
+    ///     `ConsensusConfig::testing().num_chunks_in_partition = 10`, so the
+    ///     slot range intersects the block range),
+    ///   - feed one ingress proof signed by that signer for the same
+    ///     `data_root`,
+    /// and assert the proof is classified as assigned with `assigned_miners == 1`.
+    /// This covers the loop-body and slot-intersection code paths that the
+    /// empty-proof tests skip.
+    #[test_log::test(tokio::test)]
+    async fn assigned_ingress_proofs_classifies_intersecting_proof() -> eyre::Result<()> {
+        use crate::tx_inclusion;
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height,
+            tables::{IrysBlockHeaders, IrysTables, MigratedBlockHashes},
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::ingress::generate_ingress_proof;
+        use irys_types::partition::PartitionAssignment;
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
+            irys::IrysSigner,
+        };
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::RwLock;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let consensus = ConsensusConfig::testing();
+
+        // Canonical setup: same as the sibling tests.  h1 adds chunks 10..=24
+        // to the Submit ledger, so the helper resolves the range [10, 24].
+        let tx_id = H256::random();
+        let data_root = H256::random();
+
+        let mut h0 = IrysBlockHeader::new_mock_header();
+        h0.height = 0;
+        h0.previous_block_hash = H256::zero();
+        h0.cumulative_diff = U256::from(0);
+        h0.data_ledgers[DataLedger::Submit as usize].total_chunks = 10;
+        h0.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![]);
+        h0.test_sign();
+
+        let mut h1 = IrysBlockHeader::new_mock_header();
+        h1.height = 1;
+        h1.previous_block_hash = h0.block_hash;
+        h1.cumulative_diff = U256::from(1);
+        h1.data_ledgers[DataLedger::Submit as usize].total_chunks = 25;
+        h1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        h1.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(h0.block_hash, h0.clone().into())?;
+            tx.put::<IrysBlockHeaders>(h1.block_hash, h1.clone().into())?;
+            tx.put::<MigratedBlockHashes>(0, h0.block_hash)?;
+            tx.put::<MigratedBlockHashes>(1, h1.block_hash)?;
+            Ok(())
+        })??;
+
+        let header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: tx_id,
+                data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update(|tx| -> eyre::Result<()> {
+            insert_tx_header(tx, &header)?;
+            set_data_tx_included_height(tx, &tx_id, 1)?;
+            Ok(())
+        })??;
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = H256::zero();
+        genesis.cumulative_diff = U256::from(0);
+        genesis.test_sign();
+        let tree = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        // Sanity: helper resolves [10, 24] as expected.
+        let resolved = tx_inclusion::find_canonical_ledger_range(
+            &tx_id,
+            5,
+            config.consensus.block_migration_depth,
+            &block_tree_guard,
+            &db,
+        )?
+        .ok_or_else(|| eyre::eyre!("test setup error: range should resolve"))?;
+        assert_eq!(u64::from(resolved.start()), 10);
+        assert_eq!(u64::from(resolved.end()), 24);
+
+        // Register one signer to Submit slot 1 = chunks [10, 20).  That
+        // overlaps the block range [10, 24], so the proof must classify.
+        let signer = IrysSigner::random_signer(&consensus);
+        let mut epoch_snapshot = EpochSnapshot::default();
+        let assignment = PartitionAssignment {
+            partition_hash: H256::random(),
+            miner_address: signer.address(),
+            ledger_id: Some(DataLedger::Submit as u32),
+            slot_index: Some(1),
+        };
+        epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .insert(assignment.partition_hash, assignment);
+
+        // One ingress proof for the canonical data_root, signed by the
+        // miner registered to the intersecting slot above.
+        let chunk_bytes: [u8; 32] = [0; 32];
+        let proof = generate_ingress_proof(
+            &signer,
+            data_root,
+            std::iter::once(Ok::<_, eyre::Report>(chunk_bytes.as_slice())),
+            consensus.chain_id,
+            H256::zero(),
+        )?;
+
+        let (assigned, miners) = get_assigned_ingress_proofs(
+            std::slice::from_ref(&proof),
+            &header,
+            /* parent_height */ 5,
+            &block_tree_guard,
+            &db,
+            &config,
+            &epoch_snapshot,
+        )?;
+
+        assert_eq!(
+            assigned.len(),
+            1,
+            "the proof should be classified as assigned"
+        );
+        assert_eq!(
+            assigned[0], proof,
+            "the returned proof should be the one we passed in"
+        );
+        assert_eq!(
+            miners, 1,
+            "exactly one miner registered to the intersecting slot"
+        );
+
+        Ok(())
+    }
+
+    /// `DatabaseError` must classify as `NodeFault`, not `Consensus`.
+    /// Regression guard: if the arm ever reverts to collapsing DB errors into a
+    /// peer-attributed variant, `classify()` will return `Consensus` and this
+    /// test will catch it.
+    #[test]
+    fn database_error_is_node_fault() {
+        let err = PreValidationError::DatabaseError {
+            error: "MDBX: I/O error".to_string(),
+        };
+        assert_eq!(
+            err.classify(),
+            ErrorClass::NodeFault,
+            "DatabaseError must be NodeFault"
+        );
+        assert!(err.is_node_fault(), "is_node_fault() must return true");
+        assert!(
+            !matches!(err.classify(), ErrorClass::Consensus),
+            "DatabaseError must not be Consensus"
+        );
     }
 }
 

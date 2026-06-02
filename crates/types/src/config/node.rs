@@ -189,6 +189,12 @@ pub struct NodeConfig {
     #[serde(default)]
     pub mempool: MempoolNodeConfig,
 
+    /// Metrics endpoint configuration. Default keeps the Reth Prometheus
+    /// listener on the host loopback; deployments expose it via an
+    /// mTLS-terminating reverse proxy rather than binding `0.0.0.0`.
+    #[serde(default = "default_metrics_config")]
+    pub metrics: MetricsConfig,
+
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
 
@@ -728,6 +734,16 @@ pub struct SyncConfig {
     /// best-effort. Does not apply to the genesis branch, which uses
     /// `NodeConfig::genesis_peer_discovery_timeout_millis`.
     pub peer_wait_timeout_millis: u64,
+    /// Bounded wait used by `ExecutionPayloadCache::wait_for_sealed_block`
+    /// to cap how long the validation pipeline blocks on a payload that
+    /// may never arrive (peer advertised the block header but never
+    /// served the EVM payload). Sized to exceed the ~50s budget of the
+    /// payload-request retry loop so the request side completes first
+    /// under normal conditions; tripping this timeout maps to the soft
+    /// `ValidationError::ExecutionPayloadCacheEvicted` (block parks for
+    /// retry, NOT a node fault).
+    #[serde(default = "default_execution_payload_wait_timeout_millis")]
+    pub execution_payload_wait_timeout_millis: u64,
 }
 
 impl Default for SyncConfig {
@@ -743,8 +759,19 @@ impl Default for SyncConfig {
             // Production: require 3 active+online peers before chain sync proceeds.
             min_active_peers: 3,
             peer_wait_timeout_millis: 20_000,
+            execution_payload_wait_timeout_millis: default_execution_payload_wait_timeout_millis(),
         }
     }
+}
+
+/// Default `execution_payload_wait_timeout_millis`. 60s exceeds the ~50s
+/// budget of the 10×5s payload-request retry loop in
+/// `ExecutionPayloadCache::request_payload_from_the_network` so the
+/// request side completes first under normal conditions; the timeout
+/// only fires when a peer advertises a header but never serves the
+/// payload.
+fn default_execution_payload_wait_timeout_millis() -> u64 {
+    60_000
 }
 
 /// Default for `peer_filter_mode` when the field is not present in the provided TOML.
@@ -765,6 +792,31 @@ fn default_network_defaults() -> NetworkDefaults {
         public_ip: "127.0.0.1".to_string(),
         bind_ip: "0.0.0.0".to_string(),
     }
+}
+
+/// # Metrics Configuration
+///
+/// Settings for the Reth-internal Prometheus endpoint. Defaults constrain
+/// the listener to localhost; production deployments front it with an
+/// mTLS-terminating reverse proxy and never need to expose this port
+/// directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MetricsConfig {
+    /// Bind address for the Reth Prometheus endpoint (port 9001).
+    pub bind_ip: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            bind_ip: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+fn default_metrics_config() -> MetricsConfig {
+    MetricsConfig::default()
 }
 
 /// # VDF (Verifiable Delay Function) Configuration
@@ -1120,6 +1172,7 @@ impl NodeConfig {
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
+            metrics: MetricsConfig::default(),
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 8,
@@ -1145,6 +1198,13 @@ impl NodeConfig {
                 // `genesis_peer_discovery_timeout_millis` so handshake has
                 // the same headroom on both branches.
                 peer_wait_timeout_millis: 10_000,
+                // Short wait timeout for tests: the production default
+                // (60s) would let `wait_for_sealed_block` hang a failing
+                // test for nearly a minute before surfacing
+                // `WaitTimeout`. 5s keeps the timeout long enough that
+                // it does not fire on a healthy in-process fast path
+                // while still bounding pathological waits.
+                execution_payload_wait_timeout_millis: 5_000,
                 ..SyncConfig::default()
             },
             run_mode: RunMode::Test,
@@ -1294,6 +1354,7 @@ impl NodeConfig {
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
+            metrics: MetricsConfig::default(),
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
@@ -1524,5 +1585,14 @@ mod run_mode_tests {
         let cfg = super::SyncConfig::default();
         assert_eq!(cfg.min_active_peers, 3, "production default expected");
         assert_eq!(cfg.peer_wait_timeout_millis, 20_000);
+    }
+
+    #[test]
+    fn test_config_uses_short_payload_wait_timeout() {
+        let cfg = super::NodeConfig::testing();
+        assert_eq!(
+            cfg.sync.execution_payload_wait_timeout_millis, 5_000,
+            "test config must use the short 5s payload wait so integration tests don't hang 60s on the prod default"
+        );
     }
 }
