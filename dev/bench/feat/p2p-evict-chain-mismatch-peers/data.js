@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780350333480,
+  "lastUpdate": 1780407462645,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5335,6 +5335,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "9dd1ecf13a572eabbf7c7c2dd7534af6cf63676b",
+          "message": "feat(p2p): evict peers on chain_id (network) mismatch handshake rejection",
+          "timestamp": "2026-06-01T21:24:51Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1437/commits/9dd1ecf13a572eabbf7c7c2dd7534af6cf63676b"
+        },
+        "date": 1780407461634,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015291,
+            "range": "± 0.00114",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.159634,
+            "range": "± 0.006973",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.302999,
+            "range": "± 0.142359",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.345664,
+            "range": "± 0.503705",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078892,
+            "range": "± 0.001514",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 786.740705,
+            "range": "± 12.836121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 990.536007,
+            "range": "± 13.608616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119599,
+            "range": "± 0.004856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.310972,
+            "range": "± 104.013542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1544.524658,
+            "range": "± 14.012238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034482,
+            "range": "± 0.001966",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.346432,
+            "range": "± 1.03471",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.866815,
+            "range": "± 2.078293",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
