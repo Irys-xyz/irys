@@ -146,17 +146,22 @@ pub struct BlockProducerService {
     /// Enforces block production limits during testing.
     ///
     /// Counts **canonical height increments** the test still wants, NOT the raw
-    /// number of blocks produced. The distinction matters because autonomous
-    /// test mining (`start_mining()` + multiple partitions + fast VDF) can
-    /// produce two blocks on the same parent before the first is validated and
-    /// becomes the canonical tip — a duplicate-height sibling. Counting that
-    /// sibling against the budget would stop production one height short of the
-    /// target and deadlock `mine_blocks`/`wait_for_block_at_height`. See
+    /// number of blocks produced. The distinction matters because a block
+    /// consumes its budget slot when it is *published* (below), but a published
+    /// block can still fail prevalidation and be discarded — then rebuilt at the
+    /// same height. Under fast autonomous test mining (`start_mining()` +
+    /// multiple partitions + fast VDF) this is observable: the producer can
+    /// build a block that re-includes a transaction already confirmed in a
+    /// recent block (its mempool view hasn't caught up), which fails
+    /// prevalidation with `DuplicateTransaction`; the replacement is produced at
+    /// the same height. Counting both productions would stop one height short of
+    /// the target and deadlock `mine_blocks`/`wait_for_block_at_height`. See
     /// `highest_test_block_height_produced`.
     blocks_remaining_for_test: Option<u64>,
     /// Highest block height already produced under the test budget. Used to
     /// decrement `blocks_remaining_for_test` only when production advances to a
-    /// new height, so a duplicate-height sibling does not consume the budget.
+    /// new height, so a second block produced at an already-seen height (a
+    /// rejected block's same-height replacement) does not consume the budget.
     highest_test_block_height_produced: Option<u64>,
 }
 
@@ -404,11 +409,14 @@ impl BlockProducerService {
 
                     // The test budget counts canonical height increments, not raw
                     // blocks produced. Only spend a budget slot when this block
-                    // advances to a height we haven't produced before; a
-                    // duplicate-height sibling (two solutions built on the same
-                    // parent before the first was validated) must not consume the
-                    // budget, or production would stop one height short of the
-                    // target and deadlock the waiting helper.
+                    // advances to a height we haven't produced before. A block
+                    // published at an already-seen height is the same-height
+                    // replacement for an earlier block that was published
+                    // (spending a slot here) and then rejected at its own
+                    // prevalidation, e.g. for re-including an already-confirmed tx
+                    // under fast mining. That replacement must not consume a
+                    // second slot, or production stops one height short of the
+                    // target and deadlocks the waiting helper.
                     if let Some(remaining) = self.blocks_remaining_for_test {
                         let (highest, remaining) = apply_test_budget_after_production(
                             self.highest_test_block_height_produced,
@@ -1846,11 +1854,13 @@ fn choose_oracle_price(
 /// The budget (`blocks_remaining_for_test`) counts **canonical height
 /// increments** the test still wants, not the raw number of blocks produced.
 /// A budget slot is consumed only when the produced block advances to a height
-/// not produced before in this mining phase. A duplicate-height sibling — two
-/// solutions built on the same parent before the first became the canonical
-/// tip, which autonomous test mining can generate under load — must not consume
-/// a slot, or production stops one height short of the target and deadlocks
-/// `mine_blocks`/`wait_for_block_at_height`.
+/// not produced before in this mining phase. A second block produced at an
+/// already-seen height must not consume a slot: it is the replacement for a
+/// block that was published (and counted) but then rejected at prevalidation —
+/// under fast autonomous test mining the producer can build a block that
+/// re-includes an already-confirmed transaction, which fails prevalidation and
+/// is rebuilt at the same height. Counting both would stop production one height
+/// short of the target and deadlock `mine_blocks`/`wait_for_block_at_height`.
 ///
 /// Returns the updated `(highest_height_produced, blocks_remaining)`.
 fn apply_test_budget_after_production(
@@ -1934,9 +1944,10 @@ mod test_budget_tests {
     }
 
     #[test]
-    fn duplicate_height_sibling_does_not_consume_a_slot() {
-        // Already produced height 3; a sibling at height 3 must not spend budget
-        // and must not lower the high-water mark.
+    fn replacement_at_same_height_does_not_consume_a_slot() {
+        // Already produced height 3; a second block published at height 3 (the
+        // replacement for a rejected one) must not spend budget and must not
+        // lower the high-water mark.
         let (highest, remaining) = apply_test_budget_after_production(Some(3), 4, 3);
         assert_eq!(highest, Some(3));
         assert_eq!(remaining, 4);
@@ -1950,13 +1961,15 @@ mod test_budget_tests {
     }
 
     /// Replays the exact CI deadlock: `mine_blocks(6)` from height 1 (target 7)
-    /// where height 3 is produced twice (a sibling). With height-increment
-    /// accounting the budget reaches 0 only after height 7 is produced, so the
-    /// waiting helper observes the target. Counting the sibling (the old
-    /// behaviour) would exhaust the budget at height 6 and hang.
+    /// where height 3 is produced twice — the first published block was rejected
+    /// at prevalidation (duplicate tx) and rebuilt at the same height. With
+    /// height-increment accounting the budget reaches 0 only after height 7 is
+    /// produced, so the waiting helper observes the target. Counting both
+    /// height-3 productions (the old behaviour) would exhaust the budget at
+    /// height 6 and hang.
     #[test]
-    fn sibling_burst_still_reaches_target_height() {
-        // produced heights in order, including one duplicate at height 3
+    fn rejected_and_replaced_block_still_reaches_target_height() {
+        // produced heights in order, including the rejected-then-replaced height 3
         let produced = [2_u64, 3, 3, 4, 5, 6, 7];
         let mut highest = None;
         let mut remaining = 6_u64;
@@ -1974,7 +1987,7 @@ mod test_budget_tests {
 
         assert_eq!(
             max_height_reached_while_budget_positive, 7,
-            "must reach the target height (1 + 6) despite the sibling"
+            "must reach the target height (1 + 6) despite the rejected-and-replaced height 3"
         );
         assert_eq!(remaining, 0, "budget fully spent exactly at the target");
         assert_eq!(highest, Some(7));
