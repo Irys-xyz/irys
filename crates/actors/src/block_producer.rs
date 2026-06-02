@@ -410,10 +410,11 @@ impl BlockProducerService {
                     // The test budget counts canonical height increments, not raw
                     // blocks produced. Only spend a budget slot when this block
                     // advances to a height we haven't produced before. A block
-                    // published at an already-seen height — the replacement for a
-                    // sibling that was published (decrementing here) but then
-                    // rejected at prevalidation, e.g. for re-including an
-                    // already-confirmed tx under fast mining — must not consume a
+                    // published at an already-seen height is the same-height
+                    // replacement for an earlier block that was published
+                    // (spending a slot here) and then rejected at its own
+                    // prevalidation, e.g. for re-including an already-confirmed tx
+                    // under fast mining. That replacement must not consume a
                     // second slot, or production stops one height short of the
                     // target and deadlocks the waiting helper.
                     if let Some(remaining) = self.blocks_remaining_for_test {
@@ -1986,7 +1987,7 @@ mod test_budget_tests {
 
         assert_eq!(
             max_height_reached_while_budget_positive, 7,
-            "must reach the target height (1 + 6) despite the sibling"
+            "must reach the target height (1 + 6) despite the rejected-and-replaced height 3"
         );
         assert_eq!(remaining, 0, "budget fully spent exactly at the target");
         assert_eq!(highest, Some(7));
