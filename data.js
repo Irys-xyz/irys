@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780485690705,
+  "lastUpdate": 1780496257172,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5875,6 +5875,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000148,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "38f81f1dfb1ea2bc3fdbae2896453da146be0f22",
+          "message": "feat(chain): VDF throughput check at node startup (#1424)\n\nRun a single VDF step benchmark before the node fully starts. Three\noutcomes based on the configured sha_1s_difficulty and block_time:\n\n- Full efficiency: CPU completes a VDF step within the 1s target.\n  Node starts normally.\n- Reduced efficiency: CPU keeps up with block production but VDF\n  steps take longer than 1s, reducing mining competitiveness. Logs\n  a warning with the efficiency percentage and suggests a faster CPU.\n- Cannot keep up: CPU is too slow to complete enough VDF steps within\n  the block time. Logs an error and aborts startup before spinning\n  up Reth, the block tree, or any services.\n\nAll thresholds are derived from consensus config (sha_1s_difficulty,\nblock_time, num_checkpoints_in_vdf_step) — no hardcoded values.",
+          "timestamp": "2026-06-03T07:00:23-07:00",
+          "tree_id": "0508604822be66b851aa6f2ac77d80ff5fba4afb",
+          "url": "https://github.com/Irys-xyz/irys/commit/38f81f1dfb1ea2bc3fdbae2896453da146be0f22"
+        },
+        "date": 1780496255044,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015363,
+            "range": "± 0.000797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154161,
+            "range": "± 0.011381",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 2.036843,
+            "range": "± 1.246836",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.446179,
+            "range": "± 0.547609",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078851,
+            "range": "± 0.000729",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 774.96835,
+            "range": "± 26.702077",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.883887,
+            "range": "± 10.724306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.132277,
+            "range": "± 0.00328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1355.158729,
+            "range": "± 100.339669",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1637.486164,
+            "range": "± 136.309274",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033881,
+            "range": "± 0.001532",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.763441,
+            "range": "± 2.43662",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.379444,
+            "range": "± 1.536658",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
