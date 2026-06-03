@@ -66,6 +66,7 @@ use irys_vdf::{
     VdfStep,
     state::{AtomicVdfState, VdfStateReadonly},
     vdf::run_vdf,
+    vdf_sha,
 };
 use reth::{
     chainspec::ChainSpec,
@@ -819,6 +820,81 @@ impl IrysNode {
                 "Using blocks: {}, threads per block: {}",
                 &gpu_config.blocks, &gpu_config.threads_per_block
             );
+        }
+
+        // VDF throughput check — verify this CPU can keep up with the chain's
+        // VDF difficulty before committing to a full startup.
+        // Skipped when sha_1s_difficulty is low (test configs use ~1000).
+        if self.config.vdf.sha_1s_difficulty >= 1_000_000 {
+            let vdf_config = &self.config.vdf;
+            let hashes_per_step = vdf_config.sha_1s_difficulty;
+            let num_checkpoints = vdf_config.num_checkpoints_in_vdf_step;
+            let iterations_per_checkpoint = vdf_config.num_iterations_per_checkpoint();
+            let block_time_secs = self.config.consensus.difficulty_adjustment.block_time;
+            // VDF target: 1 step per second, so steps_per_block == block_time
+            let steps_per_block = block_time_secs;
+            let target_step_ms = 1_000_u128;
+            let target_block_ms = block_time_secs as u128 * 1_000;
+
+            // Run a single VDF step and measure wall-clock time
+            let mut seed = H256::random();
+            let salt = U256::from(1_u64);
+            let mut checkpoints = vec![H256::default(); num_checkpoints];
+
+            let start = std::time::Instant::now();
+            vdf_sha(
+                salt,
+                &mut seed,
+                num_checkpoints,
+                iterations_per_checkpoint,
+                &mut checkpoints,
+            );
+            let elapsed = start.elapsed();
+            let hashes_per_sec = (hashes_per_step as f64 / elapsed.as_secs_f64()) as u64;
+
+            let step_duration_secs = elapsed.as_secs_f64();
+            let step_duration_ms = elapsed.as_millis();
+            let block_duration_ms = step_duration_ms * steps_per_block as u128;
+
+            // Mining efficiency: how much of each VDF step window is available
+            // for mining. If a step takes 1.5s instead of the 1.0s target,
+            // the miner receives seeds late and loses 33% of mining time.
+            let mining_efficiency = (1.0 / step_duration_secs).min(1.0);
+            let efficiency_pct = (mining_efficiency * 100.0) as u32;
+
+            info!(
+                "VDF benchmark: {hashes_per_sec} H/s, {hashes_per_step} hashes/step, \
+                 {step_duration_ms}ms/step (target {target_step_ms}ms), \
+                 {block_duration_ms}ms/block (target {target_block_ms}ms), \
+                 {steps_per_block} steps/block, \
+                 mining efficiency {efficiency_pct}%"
+            );
+
+            if block_duration_ms > target_block_ms {
+                let ratio = block_duration_ms as f64 / target_block_ms as f64;
+                error!(
+                    "This CPU cannot keep up with the chain. \
+                     VDF requires {hashes_per_step} hashes/step ({steps_per_block} steps/block), \
+                     but this CPU only manages {hashes_per_sec} H/s. \
+                     Block would take {block_duration_ms}ms vs {target_block_ms}ms target \
+                     ({ratio:.1}x too slow). The node will fall behind and be unable to \
+                     validate blocks."
+                );
+                return Err(eyre::eyre!(
+                    "VDF throughput check failed: {hashes_per_sec} H/s, need \
+                     {hashes_per_step} hashes/step to keep up with {block_time_secs}s blocks."
+                ));
+            } else if efficiency_pct < 100 {
+                warn!(
+                    "VDF step takes {step_duration_ms}ms (target {target_step_ms}ms). \
+                     Mining will operate at {efficiency_pct}% efficiency. \
+                     VDF difficulty is {hashes_per_step} hashes/step but this CPU achieves \
+                     {hashes_per_sec} H/s. Consider a CPU with faster sequential SHA-256 \
+                     performance."
+                );
+            } else {
+                info!("VDF throughput OK: mining at full efficiency");
+            }
         }
 
         let runtime_handle = self.runtime_handle.unwrap_or_else(Handle::current);
