@@ -166,6 +166,22 @@ impl ChunkMigrationServiceInner {
 
         let block_height = block.height;
 
+        // Guard against stale BlockMigrated messages from orphaned forks.
+        // After a deep reorg, recover_from_network_partition truncates the block index,
+        // but previously-enqueued chunk migration messages may still arrive. Skip them
+        // if the block is no longer in the canonical index.
+        match block_index.get_item(block_height) {
+            Some(item) if item.block_hash == block.block_hash => {}
+            _ => {
+                tracing::warn!(
+                    block_height,
+                    block_hash = %block.block_hash,
+                    "skipping chunk migration for block no longer in block index (likely orphaned by reorg)"
+                );
+                return Ok(());
+            }
+        }
+
         // Process transactions in the order the block encodes them
         // (`block.data_ledgers: Vec<…>`), not HashMap iteration order. The
         // block producer encodes the Vec as Publish → Submit → [OneYear,

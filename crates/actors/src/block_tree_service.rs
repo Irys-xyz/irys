@@ -11,6 +11,7 @@ use crate::{
 };
 use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
     BlockState, BlockTree, BlockTreeReadGuard, ChainState, ReorgSplit, ReorgTips,
     block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
@@ -49,6 +50,7 @@ pub enum BlockTreeServiceMessage {
         block_hash: H256,
         validation_result: ValidationResult,
     },
+    SetStorageModulesGuard(StorageModulesReadGuard),
 }
 
 /// `BlockDiscoveryActor` listens for discovered blocks & validates them.
@@ -474,6 +476,10 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .instrument(tracing::info_span!(parent: &parent_span, "block_tree.validation_finished", block.hash = %block_hash))
                     .await?;
+            }
+            BlockTreeServiceMessage::SetStorageModulesGuard(guard) => {
+                self.block_migration_service
+                    .set_storage_modules_guard(guard);
             }
         }
         Ok(())
@@ -1043,27 +1049,24 @@ impl BlockTreeServiceInner {
                     // old_fork_blocks excludes the fork point (common ancestor), so a
                     // migrated block is orphaned only when the fork is strictly deeper
                     // than migration_depth.
-                    //
-                    // This is an unrecoverable divergence: the FCU + downstream migration
-                    // path cannot un-migrate already-finalised blocks. Aborting the reorg
-                    // returns Err, which propagates up through handle_message → start()
-                    // and triggers the spawn wrapper's controlled-shutdown path
-                    // (ServiceSet detects the exit and lifecycle runs ordered shutdown).
-                    let migration_depth = self.config.consensus.block_migration_depth;
-                    if let Err(e) = validate_reorg_within_migration_depth(
-                        old_fork_blocks.len(),
-                        migration_depth,
-                        fork_height,
-                    ) {
+                    if old_fork_blocks.len() as u32 > self.config.consensus.block_migration_depth {
                         error!(
-                            reorg_depth = old_fork_blocks.len(),
-                            migration_depth,
+                            fork_depth = old_fork_blocks.len(),
+                            new_fork_depth = new_fork_blocks.len(),
                             fork_height,
-                            fork_hash = %fork_hash,
-                            new_tip = %block_hash,
-                            "reorg depth exceeds migration depth — already-migrated block would be reverted; aborting reorg to trigger controlled shutdown",
+                            current_height = arc_block.height,
+                            "NETWORK PARTITION RECOVERY: this node was isolated from the network \
+                             and fell behind the canonical chain. Deep reorg rolling back {} \
+                             migrated blocks. Investigate peer connectivity — check firewall \
+                             rules, network routes, and gossip health between this node and \
+                             its peers.",
+                            old_fork_blocks.len() as u32
+                                - self.config.consensus.block_migration_depth,
                         );
-                        return Err(e);
+                        // Roll back blocks migrated on the minority fork before
+                        // proceeding with the new canonical chain.
+                        self.block_migration_service
+                            .recover_from_network_partition(fork_height)?;
                     }
 
                     metrics::record_reorg();

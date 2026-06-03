@@ -691,7 +691,7 @@ impl StorageModule {
     /// # Note
     /// If a submodule has no intervals after filtering, a default `Uninitialized` interval
     /// is created spanning the submodule's entire range to ensure consistency.
-    fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
+    pub fn write_intervals_to_submodules(&self) -> eyre::Result<()> {
         let intervals = self.intervals.read().unwrap();
 
         // Loop though each of the submodule ranges
@@ -1407,7 +1407,11 @@ impl StorageModule {
         submodule.db.view(fetch_from_db)?
     }
 
-    pub(crate) fn cut_then_insert_interval_if_touching(
+    pub fn intervals(&self) -> &Arc<RwLock<StorageIntervals>> {
+        &self.intervals
+    }
+
+    pub fn cut_then_insert_interval_if_touching(
         intervals: &mut StorageIntervals,
         chunk_offset: PartitionChunkOffset,
         chunk_type: ChunkType,
@@ -1624,7 +1628,7 @@ impl StorageModule {
     /// Internal utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
     /// StorageModule)
-    fn make_range_partition_relative(
+    pub fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
     ) -> eyre::Result<PartitionChunkRange> {
