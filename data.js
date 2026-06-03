@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780496257172,
+  "lastUpdate": 1780497157456,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -5983,6 +5983,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000118,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b099906678361388b24ddef86e589da54018f40f",
+          "message": "feat: Network partition recovery: deep reorg support + integration tests (#1405)\n\n* fix(error): log when a reorg is passed the migration boundary\n\n* fix(storage): map OneYear/ThirtyDay ledgers to storage modules and migrate their chunks\n\nmap_storage_modules_to_partition_assignments() only processed Publish,\nSubmit, and Capacity partitions — OneYear and ThirtyDay assignments\nexisted in the epoch snapshot but were never forwarded to the\nStorageModuleService.\n\non_block_migrated() only extracted Submit and Publish ledger transactions\nduring chunk migration, so OneYear and ThirtyDay chunks were never\nwritten to storage modules.\n\n* feat(block-tree): recover from network partition on deep reorg\n\nWhen a reorg exceeds block_migration_depth, blocks have already been\nmigrated to the block index with chunks assigned to storage module\npartitions. recover_from_network_partition() handles this by:\n\n1. Collecting orphaned block chunk ranges, tx data_roots, and rewards\n2. Clearing ChunkPathHashesByOffset and DataRootInfosByDataRoot entries\n   for orphaned offsets/transactions only (preserving common ancestor data)\n3. Marking orphaned offsets as Uninitialized so repacking can proceed\n4. Truncating the block index to the fork point\n5. Rolling back supply state cumulative_emitted\n\nThe normal migration path then re-processes the new canonical chain.\n\n* fix: Guard against stale BlockMigrated messages from orphaned forks.\n\n* test: network partition recovery test\n\n* fix(block-pool): allow deep reorg candidates through gossip\n\nThe block pool previously rejected all blocks at already-indexed heights\nwith different hashes as PartOfAPrunedFork. This prevented gossip-based\ndelivery of competing fork blocks during deep reorgs, forcing callers to\nbypass the block pool entirely via send_full_block.\n\nThe block tree already handles deep reorgs correctly via\nrecover_from_network_partition — the block pool was the only barrier.\n\nChange block_status() to classify blocks at indexed heights with\ndifferent hashes based on proximity to the latest index:\n- In the tree already → ProcessedButCanBeReorganized (fork in progress)\n- Within block_tree_depth → NotProcessed (potential deep reorg candidate)\n- Beyond block_tree_depth → PartOfAPrunedFork (DoS protection)\n\nThis resolves the TODO: \"this needs to handle migrated block reorgs\".\n\n* test(partition-recovery): switch to gossip delivery for reorg\n\nReplace send_full_block with gossip_block_to_peers for delivering the\npeer's fork blocks to genesis. This exercises the real P2P code path\nthat production nodes use when reconnecting after a network partition:\ngossip header → pull block body → pull ETH payload → validate → reorg.\n\nRemove the manual data tx/chunk pre-ingestion since the gossip pull\nmechanism handles block body (including tx headers) automatically.\n\n* test: partition assignment rollback on epoch boundary reorg\n\nAdds heavy4_partition_recovery_epoch_boundary which verifies that\npartition assignments are correctly rolled back when a reorg crosses\nan epoch boundary where each fork processed different pledge\ncommitments. Tracks the specific affected storage module through the\nreorg and asserts it gets reassigned to a canonical partition with\nEntropy intervals from re-packing.\n\n* style: fix formatting after merge\n\n* fix: clarify pledge comment in epoch boundary test\n\n* feat(block-tree): log error-level alert on network partition recovery\n\nOperators and monitoring agents need a clear signal when a node recovers\nfrom a network partition. This adds an ERROR log with structured fields\n(fork_depth, new_fork_depth, fork_height, current_height) and actionable\nguidance to investigate peer connectivity.\n\n* test: add multi-epoch reorg and deep recovery integration tests\n\nTwo new tests based on Codex security review findings:\n\n- partition_recovery_multi_epoch: reorg crossing 2 epoch boundaries,\n  verifies epoch snapshot correctness, partition assignment rollback\n  across multiple epochs, and continued mining after reorg.\n\n- partition_recovery_deep: deep reorg triggering recover_from_network_partition\n  with block_migration_depth=1, verifies block index consistency, supply\n  state rollback/re-migration, chain linkage across recovery boundary,\n  and continued block production.\n\n* refactor(tests): merge deep recovery checks into partition_recovery test\n\nRemove the redundant partition_recovery_deep test and add its unique\nchecks (block index hash verification, chain linkage across recovery\nboundary, continued mining + supply state after recovery) to the\nexisting heavy4_network_partition_recovery test.",
+          "timestamp": "2026-06-03T07:01:05-07:00",
+          "tree_id": "ef8d62c78f34a971ef39d24710024d04a7d2cb87",
+          "url": "https://github.com/Irys-xyz/irys/commit/b099906678361388b24ddef86e589da54018f40f"
+        },
+        "date": 1780497155313,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011884,
+            "range": "± 0.000095",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125076,
+            "range": "± 0.005322",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.207439,
+            "range": "± 0.055238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.278709,
+            "range": "± 0.276389",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075332,
+            "range": "± 0.001191",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 759.691921,
+            "range": "± 9.980727",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.047977,
+            "range": "± 1.360388",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119734,
+            "range": "± 0.000294",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1219.420358,
+            "range": "± 115.093159",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1561.091954,
+            "range": "± 6.892762",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.036193,
+            "range": "± 0.000956",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 213.843736,
+            "range": "± 5.559356",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.093242,
+            "range": "± 14.189331",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
