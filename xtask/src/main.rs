@@ -577,14 +577,18 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
-            cmd!(sh, "cargo clippy --workspace --tests --locked {args...}").remove_and_run()?;
+            cmd!(
+                sh,
+                "cargo clippy --workspace --tests --all-targets --locked {args...}"
+            )
+            .remove_and_run()?;
         }
         Commands::Fmt {
             check_only: only_check,
             args,
         } => {
             if only_check {
-                cmd!(sh, "cargo fmt --check {args...}").remove_and_run()?;
+                cmd!(sh, "cargo fmt --all --check {args...}").remove_and_run()?;
             } else {
                 println!("cargo fmt & clippy fix");
                 cmd!(sh, "cargo fmt --all").remove_and_run()?;
@@ -594,7 +598,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
                 cmd!(
                     sh,
-                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests {args...}"
+                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests --all-targets {args...}"
                 )
                 .remove_and_run()?;
             }
