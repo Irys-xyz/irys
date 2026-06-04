@@ -1,13 +1,15 @@
+pub mod conventions;
 pub mod error;
 pub mod metrics;
 pub mod routes;
+pub mod trace;
 
 use actix_cors::Cors;
 use actix_web::{
-    App, HttpResponse, HttpServer,
+    App, HttpServer,
     dev::{HttpServiceFactory, Server},
-    error::InternalError,
-    web::{self, JsonConfig, Redirect},
+    middleware::from_fn,
+    web::{self, Redirect},
 };
 use irys_actors::{
     block_tree_service::BlockTreeLifecycleTimestamps,
@@ -32,7 +34,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_actix_web::TracingLogger;
 
 use crate::routes::anchor;
@@ -203,22 +205,18 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
         App::new()
             .app_data(state.clone())
             .app_data(web::Data::new(awc_client))
-            .app_data(
-                JsonConfig::default()
-                    .limit(1024 * 1024) // Set JSON payload limit to 1MB
-                    .error_handler(|err, req| {
-                        warn!("JSON decode error for req {} - {}", &req.path(), &err);
-                        let error_message = format!("JSON decode/parse error: {}", err);
-                        InternalError::from_response(
-                            err,
-                            HttpResponse::BadRequest().body(error_message),
-                        )
-                        .into()
-                    }),
-            )
+            // Extractor failures (body/path/query) render as RFC 9457 problem+json.
+            .app_data(conventions::json_error_config())
+            .app_data(conventions::path_error_config())
+            .app_data(conventions::query_error_config())
             // not a permanent redirect, so we can redirect to the highest API version
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
+            // Unmatched routes render as a 404 problem+json.
+            .default_service(web::route().to(conventions::route_not_found))
+            // Innermost wrap: runs inside TracingLogger's span so trace ids are
+            // available, and backstops any non-problem error response.
+            .wrap(from_fn(conventions::normalize_problem))
             .wrap(Cors::permissive())
             .wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
