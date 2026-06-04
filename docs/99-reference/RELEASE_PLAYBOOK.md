@@ -99,10 +99,11 @@ The workflow will:
 
 1. Verify the commit is on `release/testnet/<major>.x`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
-3. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
-4. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
-5. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.
-6. As the final, non-fatal step, retag and push `irys-testnet:latest` (a failure here leaves `:latest` on the previous release rather than rolling back the published one — see [`RELEASE_PROCESS.md` § Atomicity](./RELEASE_PROCESS.md#atomicity)).
+3. Verify the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside) had a fully passing CI run. Skipped with `force=true` or `dry_run=true`.
+4. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
+5. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
+6. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.
+7. As the final, non-fatal step, retag and push `irys-testnet:latest` (a failure here leaves `:latest` on the previous release rather than rolling back the published one — see [`RELEASE_PROCESS.md` § Atomicity](./RELEASE_PROCESS.md#atomicity)).
 
 Then deploy `irys-testnet:1.2.3` to testnet and validate.
 
@@ -291,13 +292,14 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 | Critical mainnet hotfix without testnet? | Dispatch with `force=true`. See [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). |
 | Wrong changelog scope on mainnet? | Edit the draft before publishing — nothing assumes the auto-generated text is final. |
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
-| Want to test the workflow without publishing? | Dispatch with `dry_run=true`. Validates and builds; skips tag/image push and GH Release creation, and runs without the environment approval gate (so a mainnet dry-run needs no reviewer and won't block a queued real release). |
+| Want to test the workflow without publishing? | Dispatch with `dry_run=true`. Validates and builds; skips tag/image push and GH Release creation, skips the release-base CI gate, and runs without the environment approval gate (so a mainnet dry-run needs no reviewer and won't block a queued real release). |
 
 ## Hotfixes and emergencies
 
 For the abbreviated path (skip testnet, deploy direct to mainnet), see
 [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). The same
-phases apply; you use `force=true` to bypass the testnet-merge-base check.
+phases apply; you use `force=true` to bypass the testnet-merge-base check and the
+release-base CI gate.
 
 ## Rollback
 
@@ -313,6 +315,10 @@ provenance, version match, the **real Docker build**, and changelog generation �
 then skips every mutating step: no git tag, no image push, no `latest` move, no
 GitHub Release. Use it to prove the workflow and the build are healthy before a
 real cut, or after changing the workflow itself.
+
+A dry-run also skips the release-base CI gate (it can run before `release/<major>.x`
+exists — the setup below branches only the `release/<env>/<major>.x` branch from
+`master`), so it does not require the merge-base commit to have a passing CI run.
 
 A dry-run resolves its `environment` to empty, so it does **not** wait on the
 `testnet`/`mainnet` approval gate and does **not** require those Environments to

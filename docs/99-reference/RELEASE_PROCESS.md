@@ -62,7 +62,7 @@ release/<major>.x  (canonical version source; never deployed directly)
 
 1. Work merges into `master`. Devnet builds from `release/devnet` (merged forward from `master` on demand).
 2. When ready to release, cherry-pick changes from `master` into `release/<major>.x`, bump the version in `crates/chain/Cargo.toml`, and stabilize.
-3. Merge `release/<major>.x` forward into `release/testnet/<major>.x`. Apply any per-release testnet patches as additional commits. Trigger the **Release** workflow as `testnet` → validates, builds, pushes `testnet-X.Y.Z` git tag, pushes image to `irys-testnet:X.Y.Z`, updates `testnet-latest` (both Docker and git), creates auto-published prerelease. Deploy to testnet.
+3. Merge `release/<major>.x` forward into `release/testnet/<major>.x`. Apply any per-release testnet patches as additional commits. Trigger the **Release** workflow as `testnet` → validates (including that the commit's `release/<major>.x` merge-base had a fully passing CI run), builds, pushes `testnet-X.Y.Z` git tag, pushes image to `irys-testnet:X.Y.Z`, updates `testnet-latest` (both Docker and git), creates auto-published prerelease. Deploy to testnet.
 4. After testnet validation, merge `release/<major>.x` forward into `release/mainnet/<major>.x`. Apply any per-release mainnet patches as additional commits. Trigger the **Release** workflow as `mainnet` on a commit whose `release/<major>.x` merge-base matches the testnet release's → validates, builds, pushes `mainnet-X.Y.Z` git tag, pushes image to `irys-mainnet:X.Y.Z`, updates `mainnet-latest`, creates **draft** release. A maintainer reviews the notes and publishes.
 
 ### Atomicity
@@ -167,7 +167,7 @@ The bug is in environment-local code or config (chain IDs, bootstrap peers, env-
 
 ### Emergency (skip testnet, straight to mainnet)
 
-Apply the fix directly to `release/mainnet/<major>.x` and dispatch with the `force` flag to skip the testnet-merge-base validation, bypassing the normal master → release → deployment progression. Once the fire is out, reconcile: port the fix to `release/<major>.x` and `master` so it isn't stranded on the deployment branch.
+Apply the fix directly to `release/mainnet/<major>.x` and dispatch with the `force` flag to skip the testnet-merge-base validation and the release-base CI gate, bypassing the normal master → release → deployment progression. Once the fire is out, reconcile: port the fix to `release/<major>.x` and `master` so it isn't stranded on the deployment branch.
 
 ## Rollback
 
@@ -214,3 +214,4 @@ Deployment-specific patches (e.g., chain IDs, bootstrap peer addresses, env-spec
 - Patches that should apply to multiple envs go on `release/<major>.x`, not on individual deployment branches.
 - Patches that change protocol behavior should never be env-specific. Env patches are for env-bound values only.
 - The testnet ↔ mainnet validation in the release workflow enforces that both commits share the same `release/<major>.x` merge-base — i.e. same upstream code, only env-patches differ.
+- The release workflow also requires that `release/<major>.x` merge-base to have had a fully passing CI run (defense-in-depth on top of branch protection). `force=true` bypasses this for emergency hotfixes; `dry_run=true` skips it. Note this gates the upstream merge-base, not the env-patch commits on the deployment branch — keep env patches to env-bound values only (per the rule above) so untested protocol behavior cannot ride in via a deployment-branch patch.
