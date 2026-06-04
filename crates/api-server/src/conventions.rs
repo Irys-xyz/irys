@@ -44,7 +44,7 @@ pub fn json_error_config() -> JsonConfig {
         })
 }
 
-/// Path extractor config: unparseable path params become a `Problem`.
+/// Path extractor config: unparsable path params become a `Problem`.
 pub fn path_error_config() -> PathConfig {
     PathConfig::default().error_handler(|err, _req| {
         ApiError::InvalidPathParameter {
@@ -54,7 +54,7 @@ pub fn path_error_config() -> PathConfig {
     })
 }
 
-/// Query extractor config: unparseable query params become a `Problem`.
+/// Query extractor config: unparsable query params become a `Problem`.
 pub fn query_error_config() -> QueryConfig {
     QueryConfig::default().error_handler(|err, _req| {
         ApiError::InvalidQueryParameter {
