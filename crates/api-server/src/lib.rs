@@ -2,7 +2,7 @@ pub mod conventions;
 pub mod error;
 pub mod metrics;
 pub mod routes;
-pub mod trace;
+mod trace;
 
 use actix_cors::Cors;
 use actix_web::{

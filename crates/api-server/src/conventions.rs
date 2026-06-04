@@ -16,7 +16,7 @@ use actix_web::{
     error::Error,
     http::{
         StatusCode,
-        header::{CONTENT_TYPE, HeaderName, HeaderValue},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, TRANSFER_ENCODING},
     },
     middleware::Next,
     web::{JsonConfig, PathConfig, QueryConfig},
@@ -93,12 +93,20 @@ where
         .and_then(|v| v.to_str().ok());
 
     if should_synthesize_problem(status, content_type) {
-        let (req, _discarded) = res.into_parts();
+        let (req, discarded) = res.into_parts();
         let problem = problem_from_status(status, current_trace_id());
         let body = serde_json::to_string(&problem).unwrap_or_default();
         let mut response = HttpResponse::build(status)
             .content_type(PROBLEM_JSON)
             .body(body);
+        // Preserve protocol-significant headers from the replaced response
+        // (e.g. Allow on a 405); body-descriptive headers are superseded by
+        // the synthesized body.
+        for (name, value) in discarded.headers() {
+            if name != CONTENT_TYPE && name != CONTENT_LENGTH && name != TRANSFER_ENCODING {
+                response.headers_mut().append(name.clone(), value.clone());
+            }
+        }
         stamp_traceparent(response.headers_mut(), traceparent);
         return Ok(ServiceResponse::new(req, response));
     }
@@ -263,6 +271,39 @@ mod tests {
         // The reth JSON-RPC error must survive verbatim, not be replaced.
         assert_eq!(body["error"]["code"], -32600);
         assert!(body.get("type").is_none(), "must not be a Problem");
+    }
+
+    #[actix_web::test]
+    async fn middleware_preserves_protocol_headers_when_synthesizing() {
+        // A 405 must keep its Allow header (RFC 9110) even though the body is
+        // replaced with a synthesized Problem.
+        async fn text_405() -> HttpResponse {
+            HttpResponse::MethodNotAllowed()
+                .insert_header(("allow", "GET, HEAD"))
+                .content_type("text/plain")
+                .body("method not allowed")
+        }
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(normalize_problem))
+                .route("/m", web::get().to(text_405)),
+        )
+        .await;
+        let resp = test::call_service(&app, test::TestRequest::get().uri("/m").to_request()).await;
+
+        assert_eq!(resp.status().as_u16(), 405);
+        assert_eq!(
+            resp.headers().get("allow").and_then(|v| v.to_str().ok()),
+            Some("GET, HEAD"),
+            "protocol headers must survive body synthesis"
+        );
+        assert!(
+            content_type(&resp).starts_with("application/problem+json"),
+            "ct={}",
+            content_type(&resp)
+        );
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "METHOD_NOT_ALLOWED");
     }
 }
 

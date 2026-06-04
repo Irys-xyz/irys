@@ -12,7 +12,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 ///
 /// Returns the all-zero invalid id (`"00000000000000000000000000000000"`) when
 /// no OTEL trace is active — e.g. in tests with no telemetry pipeline.
-pub fn current_trace_id() -> String {
+pub(crate) fn current_trace_id() -> String {
     let context = Span::current().context();
     let span = context.span();
     let span_context = span.span_context();
@@ -25,7 +25,7 @@ pub fn current_trace_id() -> String {
 
 /// The active request's `traceparent` header value (W3C Trace Context), if a
 /// valid trace is active. `None` when there is no telemetry pipeline.
-pub fn current_traceparent() -> Option<String> {
+pub(crate) fn current_traceparent() -> Option<String> {
     let context = Span::current().context();
     let span = context.span();
     let span_context = span.span_context();
