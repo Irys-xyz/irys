@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780576114574,
+  "lastUpdate": 1780582098537,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6199,6 +6199,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000007",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "09718282e7adbcff36c7d02e4c344657cdcd80d8",
+          "message": "fix: backport CI hardening and tooling fixes from gateway (#1444)\n\n* ci: harden workflows with least-privilege tokens and injection-safe refs\n\nBackported from the gateway repo's shared CI setup:\n\n- drop persisted git credentials on all checkouts that don't need them\n  (the rust.yml gate keeps them — it does authenticated git fetches);\n  submodules in cargo-check clone anonymously (both are public)\n- explicit least-privilege permissions + per-ref concurrency on\n  conventional-pr; pull-requests:read on rust.yml for the gate's PR\n  description/association API queries\n- pass PR base/head refs to the gate script via env vars instead of\n  interpolating them into the script body (branch names may contain\n  shell metacharacters)\n- guard the associated-PRs jq query against non-array API error\n  responses so the gate doesn't hard-fail on permission hiccups\n- bump gate checkout to actions/checkout@v4\n\n* fix(nextest-monitor): skip CPU sampling under heaptrack, log stats-dir read errors\n\nBackported from the gateway repo:\n\n- when heap profiling, the monitored pid belongs to heaptrack rather\n  than the test binary, so CPU samples measured the profiler; gate CPU\n  monitoring on !heap_profile, mirroring the existing RSS behavior\n- AggregatedStats::load_or_default swallowed every stats-dir read error\n  via unwrap_or_default; keep the NotFound -> empty default but log\n  other IO errors, since they mean stats data is silently being lost\n\n* chore: lint all targets in xtask clippy/fmt, bump rustfmt edition to 2024\n\nBackported from the gateway repo:\n\n- xtask clippy (and clippy --fix) now pass --all-targets, picking up\n  benches and examples that were previously unlinted; matches the\n  documented pre-push check in CLAUDE.md and propagates to local-checks\n- xtask fmt --check now passes --all for parity with the fix path\n- rustfmt.toml edition 2021 -> 2024, matching the workspace edition;\n  verified no formatting churn (cargo fmt --all --check passes)\n\n* fix(xtask): shell-quote flaky runner args, stop masking pipeline failures\n\nBackported from the gateway repo:\n\n- shell-quote all args interpolated into the bash -c command lines of\n  the flaky runner (args with spaces/metacharacters were re-split or\n  executed by the shell)\n- set -o pipefail so a cargo-flake failure is no longer masked by tee's\n  exit status; `cargo xtask flaky --save` now exits nonzero when flaky\n  tests are found (flaky.yml already tolerates this via set +e +\n  continue-on-error)\n- only fall back to plain tee when the `script` binary is actually\n  missing — with pipefail, a genuine test failure also surfaces as an\n  error, and rerunning the whole flaky suite on it would be expensive\n- route the bash -c invocations through remove_ring_env_vars like the\n  other cargo invocations\n- generate_nextest_config: fail fast on configs with an `experimental`\n  key missing \"wrapper-scripts\" instead of warning and emitting a\n  config nextest rejects (unreachable with our checked-in nextest.toml)",
+          "timestamp": "2026-06-04T14:53:21+01:00",
+          "tree_id": "19b370d3a200025c6da1579bf8f1d1a591138afb",
+          "url": "https://github.com/Irys-xyz/irys/commit/09718282e7adbcff36c7d02e4c344657cdcd80d8"
+        },
+        "date": 1780582097516,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.014833,
+            "range": "± 0.00011",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155141,
+            "range": "± 0.007197",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.56032,
+            "range": "± 0.047112",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.481933,
+            "range": "± 0.33328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082999,
+            "range": "± 0.001172",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 817.325943,
+            "range": "± 31.50565",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 975.203851,
+            "range": "± 5.408295",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118488,
+            "range": "± 0.002075",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1202.299594,
+            "range": "± 83.132347",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1538.28661,
+            "range": "± 14.671171",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034513,
+            "range": "± 0.002087",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.737986,
+            "range": "± 0.9648",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.821148,
+            "range": "± 1.296459",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
