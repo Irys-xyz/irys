@@ -108,10 +108,21 @@ impl AggregatedStats {
     }
 
     /// Load stats from the `.d/` directory, returning empty default if it
-    /// doesn't exist yet.
+    /// doesn't exist yet. Other IO errors are logged rather than silently
+    /// swallowed, since they indicate stats data is being lost.
     pub fn load_or_default(path: &Path) -> Self {
         let dir = stats_dir(path);
-        let mut tests = parse_stats_dir(&dir).unwrap_or_default();
+        let mut tests = match parse_stats_dir(&dir) {
+            Ok(tests) => tests,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                eprintln!(
+                    "[nextest-monitor] warning: failed to read stats dir {}: {e}",
+                    dir.display()
+                );
+                Vec::new()
+            }
+        };
         tests.sort_by_key(|t| t.started_at);
         AggregatedStats { tests }
     }

@@ -218,10 +218,12 @@ pub fn generate_nextest_config(
     if !config_content.contains("experimental") {
         config_content.push_str("experimental = [\"wrapper-scripts\"]\n\n");
     } else if !config_content.contains("wrapper-scripts") {
-        // Need to modify existing experimental line - this is tricky
-        // For now, just add it and hope TOML merges correctly or warn the user
-        eprintln!(
-            "Warning: existing config has 'experimental' key - you may need to add 'wrapper-scripts' manually"
+        // Injecting run-wrapper without the experimental flag produces a config
+        // nextest rejects — fail fast instead of generating a broken config.
+        eyre::bail!(
+            "nextest config at {NEXTEST_CONFIG_PATH} has an `experimental` key without \
+             \"wrapper-scripts\"; add \"wrapper-scripts\" to it so xtask can inject the \
+             monitoring run-wrapper"
         );
     }
 

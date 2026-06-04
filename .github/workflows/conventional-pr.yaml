@@ -2,6 +2,14 @@ name: Ensure Conventional Commit message
 
 on: pull_request
 
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: conventional-pr-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ensure-CC:
     runs-on: ubuntu-latest
