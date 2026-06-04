@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780497157456,
+  "lastUpdate": 1780576114574,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6091,6 +6091,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "897cfe3b9a2f5c519896bcf8b5350b82dacab2cf",
+          "message": "feat(release): gate releases on green CI for the release/<major>.x merge-base (#1443)\n\nThe validate job verified provenance, version, and tag freshness, but never\nthat the code being released passed CI — that rested entirely on deployment-\nbranch protection at PR-merge time. Add a defense-in-depth gate: resolve the\nrelease/<major>.x merge-base of the release commit (the substantive upstream\ncode, env-patches aside) and require its CI to be fully green via a new\nrequire-green-ci composite action.\n\nA commit is fully green when it has at least one successful check run (or a\ngreen combined commit status), nothing still running, and no failed/cancelled/\ntimed-out conclusions; skipped/neutral are non-blocking, matching GitHub's\nrequired-status-check semantics. A commit with no CI results at all is a hard\nfailure — absence of a run is not proof of a passing run.\n\nThe gate applies to both testnet and mainnet releases. force=true (emergency\nhotfixes) bypasses it; dry_run=true skips it because the documented dry-run\nsetup may run before release/<major>.x exists. The validate job gains\nchecks:read and statuses:read to query the APIs.",
+          "timestamp": "2026-06-04T13:09:43+01:00",
+          "tree_id": "e645b40597d2c82c1607193ef543429059dedc7f",
+          "url": "https://github.com/Irys-xyz/irys/commit/897cfe3b9a2f5c519896bcf8b5350b82dacab2cf"
+        },
+        "date": 1780576112649,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012565,
+            "range": "± 0.000547",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123029,
+            "range": "± 0.00382",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.258368,
+            "range": "± 0.028677",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.333035,
+            "range": "± 0.145859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078045,
+            "range": "± 0.000717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 782.931373,
+            "range": "± 22.669294",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1021.354058,
+            "range": "± 39.033722",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.151246,
+            "range": "± 0.038507",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1391.015851,
+            "range": "± 111.302717",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1670.372911,
+            "range": "± 113.688208",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035609,
+            "range": "± 0.004105",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 214.293601,
+            "range": "± 2.183736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.772097,
+            "range": "± 3.627279",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000007",
             "unit": "ms/iter"
           }
         ]
