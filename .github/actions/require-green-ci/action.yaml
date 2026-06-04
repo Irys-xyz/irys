@@ -1,0 +1,107 @@
+name: "Require green CI"
+description: >-
+  Fails unless a commit has a fully passing CI result. The release workflow uses
+  this to gate a release on the release/<major>.x merge-base — the substantive
+  upstream code being shipped — having passed CI, as defense-in-depth on top of
+  branch protection. A commit is "fully green" when:
+    - it has at least one successful check run (or a green combined commit
+      status), proving CI actually ran; AND
+    - no check run is still running, and none concluded failure / cancelled /
+      timed_out / action_required / stale / startup_failure; AND
+    - the combined legacy commit status (if any contexts exist) is success.
+  A commit with no CI results at all is a hard failure — absence of a run is not
+  proof of a passing run. skipped/neutral check runs are treated as non-blocking,
+  matching GitHub's own required-status-check semantics. The caller must pass a
+  token with checks:read and statuses:read.
+
+inputs:
+  commit:
+    description: "Full commit SHA to verify CI status for."
+    required: true
+  github-token:
+    description: "Token with checks:read and statuses:read on this repo."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Require green CI for commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ inputs.commit }}
+      run: |
+        set -euo pipefail
+        if [ -z "${SHA}" ]; then
+          echo "::error::require-green-ci: empty commit input"
+          exit 1
+        fi
+
+        # GitHub Actions jobs surface as "check runs"; external CI / bots surface
+        # as legacy "commit statuses". A fully passing CI result must satisfy both.
+        # filter=latest (the API default) collapses re-runs to the most recent run
+        # per check name, so a red run that was later re-run green is not counted.
+        runs_tsv=$(gh api --paginate \
+          "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
+          -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')
+
+        fail=0
+        successes=0
+        total_runs=0
+        if [ -n "${runs_tsv}" ]; then
+          while IFS=$'\t' read -r name status conclusion; do
+            [ -z "${name}" ] && continue
+            total_runs=$((total_runs + 1))
+            if [ "${status}" != "completed" ]; then
+              echo "::error::Check '${name}' has not completed (status=${status}); CI is still running on ${SHA}."
+              fail=1
+              continue
+            fi
+            case "${conclusion}" in
+              success)
+                successes=$((successes + 1))
+                ;;
+              skipped|neutral)
+                # Non-blocking, mirrors GitHub's required-status-check semantics.
+                ;;
+              *)
+                echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}."
+                fail=1
+                ;;
+            esac
+          done <<< "${runs_tsv}"
+        fi
+
+        # Combined legacy status: the .state field is aggregated server-side across
+        # every context, so one read is authoritative regardless of context count.
+        status_state=$(gh api "repos/${REPO}/commits/${SHA}/status" -q '.state')
+        status_total=$(gh api "repos/${REPO}/commits/${SHA}/status" -q '.total_count')
+        if [ "${status_total}" -gt 0 ]; then
+          if [ "${status_state}" = "success" ]; then
+            successes=$((successes + 1))
+          else
+            echo "::error::Combined commit status for ${SHA} is '${status_state}' (expected success)."
+            fail=1
+          fi
+        fi
+
+        if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ]; then
+          echo "::error::No CI check runs or commit statuses found for ${SHA}. Cannot prove the release base passed CI. (Emergency hotfixes can bypass with force=true.)"
+          exit 1
+        fi
+
+        if [ "${fail}" -ne 0 ]; then
+          echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
+          exit 1
+        fi
+
+        # Every check was skipped/neutral and no green status exists: CI never
+        # actually ran (e.g. a #disable-ci gate short-circuit), so there is no
+        # passing run to stand behind.
+        if [ "${successes}" -eq 0 ]; then
+          echo "::error::No successful CI result for ${SHA} (all checks skipped/neutral, no green status). Cannot prove a real CI run passed. (Emergency hotfixes can bypass with force=true.)"
+          exit 1
+        fi
+
+        echo "CI for ${SHA} is fully green (${successes} successful result(s) across ${total_runs} check run(s))."
