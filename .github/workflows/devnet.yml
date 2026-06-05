@@ -1,0 +1,97 @@
+name: Devnet Build
+
+concurrency:
+  group: devnet
+  cancel-in-progress: true
+
+# Restrictive default; each job sets the scopes it actually needs.
+permissions: {}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Commit SHA on release/devnet (defaults to HEAD of the branch)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    name: build and push devnet image
+    runs-on: [self-hosted, misc-runner]
+    # Gated by the `devnet` GitHub Environment for consistency with the other
+    # publishing workflows. devnet has no protection rules (builds on demand),
+    # but routing through the environment honors any rules added later.
+    environment: devnet
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Validate inputs
+        env:
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          if [ -n "$INPUT_COMMIT" ] && ! [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid commit SHA: $INPUT_COMMIT (expected full 40-char SHA; abbreviated SHAs are not accepted by actions/checkout)"
+            exit 1
+          fi
+
+      # GHA expressions have no ternary; the && / || idiom below works because
+      # the truthy branch is non-empty when the condition is true, so the ||
+      # fallback only fires when inputs.commit is empty.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.commit != '' && inputs.commit || 'release/devnet' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve commit
+        id: resolve
+        run: |
+          SHA=$(git rev-parse HEAD)
+          # 7-char short SHA to match the version metadata embedded by
+          # crates/chain/build.rs (it truncates GIT_SHA to 7), so the devnet
+          # image tag equals the SHA the running binary reports.
+          SHORT=$(echo "$SHA" | cut -c1-7)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate commit is on release/devnet
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: devnet
+          commit: ${{ steps.resolve.outputs.sha }}
+
+      - name: Set image name
+        id: image
+        uses: ./.github/actions/image-name
+        with:
+          environment: devnet
+
+      - name: Start rootless Docker and log in to GHCR
+        uses: ./.github/actions/docker-setup
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        uses: ./.github/actions/docker-build
+        with:
+          commit: ${{ steps.resolve.outputs.sha }}
+          has-tag: "false"
+          image: ${{ steps.image.outputs.name }}
+          tag: ${{ steps.resolve.outputs.short }}
+
+      - name: Tag and push images
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          SHORT_SHA: ${{ steps.resolve.outputs.short }}
+        run: |
+          docker tag "${IMAGE}:${SHORT_SHA}" "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHORT_SHA}"
+          docker push "${IMAGE}:latest"
+
+      - name: Tear down rootless Docker
+        if: always()
+        uses: ./.github/actions/docker-cleanup

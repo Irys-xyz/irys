@@ -2,6 +2,9 @@ name: Rust Checks
 
 permissions:
   contents: read
+  # the gate job queries the "PRs associated with commit" / PR description
+  # APIs, which need pull-requests read access on private repos
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
@@ -29,7 +32,9 @@ jobs:
     outputs:
       should-run: ${{ steps.set-output.outputs.should-run }} # register we have some output other actions should reference
     steps:
-      - uses: actions/checkout@v3
+      # NOTE: the gate intentionally keeps persisted credentials — the
+      # "Check if CI should run" step does authenticated `git fetch` calls.
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Need full history for comparison
         # this script checks whether we should run on the current commit, based on:
@@ -42,6 +47,10 @@ jobs:
         id: set-output
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # pass branch refs via env rather than interpolating them into the
+          # script body — branch names may contain shell metacharacters
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           # default to running
           SHOULD_RUN=true
@@ -82,9 +91,12 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" && "$SHOULD_RUN" == "true" ]]; then
             # Find any PRs associated with this commit
             COMMIT_SHA="${{ github.event.after }}"
+            # `if type == "array"` guards against API error objects (e.g. missing
+            # token permissions return {"message": ...}, which `.[].number` would
+            # choke on and fail the whole gate)
             ASSOCIATED_PRS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/commits/$COMMIT_SHA/pulls" | \
-              jq --raw-output '.[].number')
+              jq --raw-output 'if type == "array" then .[].number else empty end')
 
             if [[ -n "$ASSOCIATED_PRS" ]]; then
               echo "Found PRs associated with this commit: $ASSOCIATED_PRS"
@@ -123,8 +135,8 @@ jobs:
 
             # Only perform branch comparison check if we haven't already decided to skip
             if [[ "$SHOULD_RUN" == "true" ]]; then
-              git fetch origin ${{ github.event.pull_request.base.ref }}:base_branch
-              git fetch origin ${{ github.event.pull_request.head.ref }}:head_branch
+              git fetch origin "$BASE_REF:base_branch"
+              git fetch origin "$HEAD_REF:head_branch"
 
               # check if base branch has commits that head branch doesn't have (so we can test against the auto merge)
               AHEAD_COMMITS=$(git rev-list --count head_branch..base_branch)
@@ -140,6 +152,16 @@ jobs:
 
           # always run on the default branch
           if [[ "${{ github.ref }}" == "refs/heads/${{ github.event.repository.default_branch }}" ]]; then
+            SHOULD_RUN=true
+          fi
+
+          # always run on release branches
+          if [[ "${{ github.ref }}" == refs/heads/release/* ]]; then
+            SHOULD_RUN=true
+          fi
+
+          # always run on deployment branches (testnet/mainnet/devnet carry env patches)
+          if [[ "${{ github.ref }}" == refs/heads/deployment/* ]]; then
             SHOULD_RUN=true
           fi
 
@@ -163,6 +185,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -185,6 +208,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -210,6 +234,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -227,6 +252,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -249,6 +275,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -274,6 +301,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
@@ -293,6 +321,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: crate-ci/typos@v1.29.7
         with:
           files: .

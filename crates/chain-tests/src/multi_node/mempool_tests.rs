@@ -29,7 +29,7 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 #[tokio::test]
-async fn pending_chunks_test() -> eyre::Result<()> {
+async fn heavy3_pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -963,6 +963,10 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     );
 
     assert_eq!(reorg_event.new_tip, *new_fork.last().unwrap());
+
+    // fork_parent must be the LCA — the common parent of both divergent
+    // suffixes' first blocks. This is the contract find_reorg_split holds.
+    assert_reorg_event_lca_contract(&reorg_event);
 
     assert!(
         reorg_block.data_ledgers[DataLedger::Submit]

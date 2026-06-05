@@ -180,7 +180,7 @@ async fn should_not_resend_recently_seen_data() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_should_broadcast_chunk_data() -> eyre::Result<()> {
+async fn heavy3_should_broadcast_chunk_data() -> eyre::Result<()> {
     let mut fixture1 = GossipServiceTestFixture::new();
     let mut fixture2 = GossipServiceTestFixture::new();
 

@@ -1,0 +1,49 @@
+name: "Start rootless Docker and log in to GHCR"
+description: "Starts dockerd-rootless on the runner and authenticates to ghcr.io. Pair with docker-cleanup in an `if: always()` step."
+
+inputs:
+  registry:
+    description: "Container registry to authenticate against."
+    required: false
+    default: "ghcr.io"
+  username:
+    # NOTE: do not embed a literal Actions expression in this description — the
+    # action manifest loader evaluates expressions even inside description text,
+    # and the github context is unavailable at load time, so it fails the whole
+    # action to load. Refer to contexts by name only (e.g. github.actor).
+    description: "Username for `docker login`. Callers must pass this explicitly (e.g. github.actor); composite-action input defaults do not reliably expand expressions."
+    required: true
+  password:
+    description: "Token piped to `docker login` via stdin. Must be a secret."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Start rootless Docker
+      shell: bash
+      run: |
+        # Defensive reset before starting. This runner is reused for sequential
+        # jobs; a prior job that crashed or was killed may have skipped
+        # docker-cleanup, leaving a rootless daemon + images/data/socket behind.
+        # Each runner instance is its own container, so no concurrent job shares
+        # this state — wiping it here is safe and guarantees a clean start (and a
+        # leftover healthy daemon would otherwise make `docker info` succeed
+        # against the previous job's dirty state).
+        pkill -f dockerd-rootless.sh || true
+        sleep 2
+        if [ -n "${XDG_RUNTIME_DIR:-}" ]; then rm -rf "${XDG_RUNTIME_DIR}"/docker* || true; fi
+        rm -rf ~/.local/share/docker/* || true
+
+        dockerd-rootless.sh &
+        timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done' \
+          || { echo "::error::Docker daemon did not start within 30 seconds"; exit 1; }
+
+    - name: Log in to ${{ inputs.registry }}
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        USERNAME: ${{ inputs.username }}
+        PASSWORD: ${{ inputs.password }}
+      run: |
+        echo "${PASSWORD}" | docker login "${REGISTRY}" --username "${USERNAME}" --password-stdin

@@ -189,6 +189,12 @@ pub struct NodeConfig {
     #[serde(default)]
     pub mempool: MempoolNodeConfig,
 
+    /// Metrics endpoint configuration. Default keeps the Reth Prometheus
+    /// listener on the host loopback; deployments expose it via an
+    /// mTLS-terminating reverse proxy rather than binding `0.0.0.0`.
+    #[serde(default = "default_metrics_config")]
+    pub metrics: MetricsConfig,
+
     /// Specifies which consensus rules the node follows
     pub consensus: ConsensusOptions,
 
@@ -788,6 +794,31 @@ fn default_network_defaults() -> NetworkDefaults {
     }
 }
 
+/// # Metrics Configuration
+///
+/// Settings for the Reth-internal Prometheus endpoint. Defaults constrain
+/// the listener to localhost; production deployments front it with an
+/// mTLS-terminating reverse proxy and never need to expose this port
+/// directly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MetricsConfig {
+    /// Bind address for the Reth Prometheus endpoint (port 9001).
+    pub bind_ip: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            bind_ip: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+fn default_metrics_config() -> MetricsConfig {
+    MetricsConfig::default()
+}
+
 /// # VDF (Verifiable Delay Function) Configuration
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
@@ -1141,6 +1172,7 @@ impl NodeConfig {
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
+            metrics: MetricsConfig::default(),
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 8,
@@ -1322,6 +1354,7 @@ impl NodeConfig {
                 max_control_plane_concurrent_tasks: 4,
                 chunk_writer_buffer_size: 4096,
             },
+            metrics: MetricsConfig::default(),
 
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,

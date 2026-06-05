@@ -175,3 +175,10 @@ number_of_ingress_proofs_from_assignees = 0
 # one_year_epoch_length = 365       # epochs per OneYear term (default: 365)
 # thirty_day_epoch_length = 30      # epochs per ThirtyDay term (default: 30)
 # annual_cost_per_gb = 0.028        # USD/GB/year override (default: 0.028)
+
+# Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
+# listener to the host loopback; deployments expose it externally only via
+# an mTLS-terminating reverse proxy. See the ansible repo's
+# shared/tasks/install_reth_proxy.yml if you need to expose it.
+[metrics]
+bind_ip = "127.0.0.1"

@@ -276,10 +276,13 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
 
     // Skip RSS monitoring when heap profiling to avoid measuring heaptrack's overhead
     let effective_monitor_memory = monitor_memory && !heap_profile;
+    // Skip CPU monitoring too — under heaptrack, `pid` refers to heaptrack
+    // itself, so CPU samples would measure the profiler rather than the test
+    let effective_monitor_cpu = monitor_cpu && !heap_profile;
 
-    let monitoring_enabled = monitor_cpu || effective_monitor_memory;
+    let monitoring_enabled = effective_monitor_cpu || effective_monitor_memory;
 
-    let mut cpu_monitor = monitor_cpu.then(|| CpuMonitor::new(pid));
+    let mut cpu_monitor = effective_monitor_cpu.then(|| CpuMonitor::new(pid));
     let memory_monitor = effective_monitor_memory.then(|| MemoryMonitor::new(pid));
 
     // Writes a minimal stats entry the moment SIGTERM is detected, so the test
@@ -391,7 +394,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
     let exit_code = status.code();
     let passed = !timed_out && exit_code == Some(0);
 
-    let cpu_stats = monitor_cpu.then(|| calculate_cpu_stats(&cpu_samples, duration_ms));
+    let cpu_stats = effective_monitor_cpu.then(|| calculate_cpu_stats(&cpu_samples, duration_ms));
     let mem_stats =
         effective_monitor_memory.then(|| calculate_memory_stats(&memory_samples, duration_ms));
 
@@ -413,7 +416,7 @@ fn run_with_monitoring(config: MonitorConfig<'_>) -> std::io::Result<i32> {
         time_above_2t_ms: cpu_stats.as_ref().map(|s| s.time_above_2t_ms),
         time_above_3t_ms: cpu_stats.as_ref().map(|s| s.time_above_3t_ms),
         time_above_4t_ms: cpu_stats.as_ref().map(|s| s.time_above_4t_ms),
-        cpu_samples: (record_samples && monitor_cpu).then_some(cpu_samples),
+        cpu_samples: (record_samples && effective_monitor_cpu).then_some(cpu_samples),
         peak_rss_bytes: mem_stats.as_ref().map(|s| s.peak_rss_bytes),
         avg_rss_bytes: mem_stats.as_ref().map(|s| s.avg_rss_bytes),
         p50_rss_bytes: mem_stats.as_ref().map(|s| s.p50_rss_bytes),

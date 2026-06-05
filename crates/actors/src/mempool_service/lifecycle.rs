@@ -265,6 +265,39 @@ impl Inner {
         }
     }
 
+    /// Snapshot all pending Submit-ledger txs and count those whose `anchor`
+    /// does not resolve to any known block (canonical chain in the block
+    /// tree, or any block persisted in the DB).
+    ///
+    /// Used by the 30-second sweep that backs the
+    /// `irys.mempool.pending_submit_unresolvable_anchors` gauge. Errors from
+    /// `get_anchor_height` are swallowed (the per-tx error is logged); they
+    /// count as "resolvable" so a transient DB read failure cannot inflate
+    /// the alert metric.
+    pub async fn count_unresolvable_submit_anchors(&self) -> usize {
+        let txs = self.mempool_state.all_valid_submit_ledgers_cloned().await;
+        let mut unresolvable = 0_usize;
+        for tx in txs.values() {
+            match crate::anchor_validation::get_anchor_height(
+                &self.block_tree_read_guard,
+                &self.irys_db,
+                tx.anchor(),
+                false, // any known block is fine — we measure availability, not canonical inclusion
+            ) {
+                Ok(None) => unresolvable += 1,
+                Ok(Some(_)) => {}
+                Err(e) => {
+                    debug!(
+                        tx.id = %tx.id,
+                        error = %e,
+                        "anchor lookup failed during unresolvable-anchor sweep; treating as resolvable"
+                    );
+                }
+            }
+        }
+        unresolvable
+    }
+
     /// Validates a given anchor for *EXPIRY* DO NOT USE FOR REGULAR ANCHOR VALIDATION
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm

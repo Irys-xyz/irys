@@ -543,10 +543,13 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         // - `Completed`: a terminal handoff state. Between
         //   `record_vdf_task_progress(Completed)` and `poll_vdf` collecting the
         //   `JoinHandle` is one select-loop round-trip — microseconds in normal
-        //   operation. If the task sits in `Completed` for 15 s, the validation
-        //   service's own select loop is starved (or the JoinHandle is
-        //   wedged), which is exactly the operational condition the watchdog
-        //   exists to surface.
+        //   operation. A long gap means the select loop was starved, but if the
+        //   handle has already *finished* the result is ready to collect and the
+        //   loop has demonstrably resumed (we are running this watchdog), so the
+        //   `is_finished()` guard below exempts it rather than aborting a valid,
+        //   already-computed result and crashing a recovered node. Only a task
+        //   wedged before its handle finishes — the genuine deadlock/poison case
+        //   the watchdog exists to surface — trips the abort.
         if matches!(
             stage,
             VdfTaskStage::WaitPrevStep | VdfTaskStage::WaitFinalCatchUp
@@ -560,6 +563,20 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .elapsed();
         if stalled_for < hard_timeout {
+            return None;
+        }
+
+        // A finished handle is not wedged: the task ran to completion and its
+        // result is sitting ready for the next `poll_vdf` round-trip. Under
+        // CI/CPU starvation the select loop can be delayed past `hard_timeout`
+        // *between* completion and collection — the very fact that we are
+        // executing this watchdog proves the loop has resumed. Aborting here
+        // would store `Cancelled` on (and then discard) a valid, already-computed
+        // validation result and crash a node that has recovered. The watchdog
+        // targets tasks that never finish — deadlocks, poisoned locks, runaway
+        // loops — and those keep `is_finished()` false and still trip the abort
+        // below. See design/docs/vdf-validation-stall-detection.md.
+        if current.handle.is_finished() {
             return None;
         }
 
@@ -1566,6 +1583,56 @@ mod tests {
         assert!(
             join_error.is_cancelled(),
             "watchdog abort should cancel the JoinHandle"
+        );
+    }
+
+    /// Regression test for the CI flake where the watchdog force-aborted (and
+    /// panicked on) a VDF task whose handle had already finished — the select
+    /// loop was just starved past `hard_timeout` before `poll_vdf` could reap
+    /// the completed result. A finished handle must be treated as not-stalled:
+    /// `abort_stalled_current` returns `None` and leaves the cancel signal
+    /// untouched so the valid result survives to the next `poll_vdf`.
+    #[tokio::test]
+    async fn test_abort_stalled_current_skips_finished_handle() {
+        let mut scheduler = VdfScheduler::new(tokio::runtime::Handle::current());
+        let priority = BlockPriorityMeta {
+            height: 1,
+            state: BlockPriority::Canonical,
+            vdf_step_count: 1,
+        };
+        let (mut running_task, cancel) = make_running_vdf_task(priority);
+
+        // Drive the handle to a finished state. Abort + await is just the
+        // cheapest way to make `is_finished()` true here; it stands in for a
+        // task that completed normally and is awaiting collection.
+        running_task.handle.abort();
+        let _ = (&mut running_task.handle).await;
+        assert!(
+            running_task.handle.is_finished(),
+            "precondition: handle must be finished",
+        );
+
+        // Make it look stale: last progress well past the watchdog timeout.
+        *running_task
+            .last_progress_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+        running_task
+            .stage_signal
+            .store(VdfTaskStage::Completed as u8, Ordering::Relaxed);
+        scheduler.current = Some(running_task);
+
+        assert!(
+            scheduler
+                .abort_stalled_current(Duration::from_secs(5))
+                .is_none(),
+            "watchdog must not abort a task whose handle has already finished",
+        );
+        assert_eq!(
+            cancel.load(Ordering::Relaxed),
+            CancelEnum::Continue as u8,
+            "cancel signal must be left untouched so the completed result survives",
         );
     }
 

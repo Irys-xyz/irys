@@ -5057,7 +5057,7 @@ dependencies = [
 
 [[package]]
 name = "irys-chain"
-version = "3.0.0"
+version = "3.0.2"
 dependencies = [
  "actix-web",
  "alloy-contract",
@@ -5348,7 +5348,10 @@ name = "irys-multiversion-tests"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hex",
  "irys-testing-utils",
+ "irys-types",
+ "k256",
  "nix",
  "proptest",
  "reqwest 0.12.28",

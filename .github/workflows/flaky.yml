@@ -50,6 +50,7 @@ jobs:
         with:
           fetch-depth: 1
           clean: true  # Always start with clean workspace
+          persist-credentials: false
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo

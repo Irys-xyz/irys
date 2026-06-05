@@ -9,6 +9,8 @@ irys_utils::define_metrics! {
     counter REORGS("irys.block_tree.reorgs_total", "Chain reorganization events");
     gauge REORG_DEPTH("irys.block_tree.latest_reorg_depth", "Depth of the most recent reorg (blocks discarded from the canonical chain). Mirrors Reth's reth_blockchain_tree_latest_reorg_depth for side-by-side comparison.");
     gauge CANONICAL_TIP_HEIGHT("irys.block_tree.canonical_tip_height", "Height of the canonical chain tip");
+    gauge BLOCK_TREE_LAST_REORG_AT_MS("irys.block_tree.last_reorg_at_ms", "Unix ms of most recent reorg observed by block-tree service");
+    gauge BLOCK_TREE_LAST_BLOCK_AT_MS("irys.block_tree.last_block_at_ms", "Unix ms of most recent canonical advance observed by block-tree service");
     gauge VDF_PENDING("irys.validation.vdf_pending", "Pending VDF validation tasks (labelled by priority class)");
     gauge CONCURRENT_ACTIVE("irys.validation.concurrent_active", "Active concurrent validation tasks");
     gauge VALIDATION_QUEUE_OLDEST_AGE_MS("irys.validation.queue_oldest_age_ms", "Age of the oldest pending VDF task in milliseconds");
@@ -27,6 +29,7 @@ irys_utils::define_metrics! {
     gauge PACKING_SEMAPHORE_AVAILABLE("irys.packing.semaphore_available", "Available packing semaphore permits");
     counter DATA_TX_INGESTED("irys.mempool.data_tx_ingested_total", "Data transactions ingested into mempool");
     counter DATA_TX_UNFUNDED("irys.mempool.data_tx_unfunded_total", "Data transactions rejected due to insufficient funds");
+    gauge MEMPOOL_PENDING_SUBMIT_UNRESOLVABLE_ANCHORS("irys.mempool.pending_submit_unresolvable_anchors", "Count of pending Submit-txs whose anchor block is not resolvable locally (periodic sweep, ~30s lag)");
     counter CACHED_DATA_ROOT_EVICTED("irys.cache.cached_data_root_evicted_total", "CachedDataRoots entries evicted by prune_data_root_cache");
     counter BLOCK_PRE_VALIDATION_FAILED("irys.block.pre_validation_failed_total", "Block pre-validation failures by reason (labelled)");
     counter BLOCK_VALIDATION_FAILED("irys.block.validation_failed_total", "Block full-validation failures (post pre-validation) by reason (labelled)");
@@ -125,6 +128,14 @@ pub(crate) fn record_reorg_depth(depth: u64) {
 
 pub(crate) fn record_canonical_tip_height(height: u64) {
     CANONICAL_TIP_HEIGHT.record(height, &[]);
+}
+
+pub(crate) fn record_block_tree_last_block_at_ms(ms: i64) {
+    BLOCK_TREE_LAST_BLOCK_AT_MS.record(u64::try_from(ms).unwrap_or(0), &[]);
+}
+
+pub(crate) fn record_block_tree_last_reorg_at_ms(ms: i64) {
+    BLOCK_TREE_LAST_REORG_AT_MS.record(u64::try_from(ms).unwrap_or(0), &[]);
 }
 
 /// Record a snapshot of the validation queue. `vdf_pending_by_priority` MUST
@@ -254,6 +265,13 @@ pub(crate) fn record_data_tx_unfunded() {
     DATA_TX_UNFUNDED.add(1, &[]);
 }
 
+/// Update `irys.mempool.pending_submit_unresolvable_anchors` from the
+/// 30-second anchor-resolution sweep. Negative counts (impossible in
+/// practice) are clamped at zero.
+pub(crate) fn set_anchor_unresolvable(count: i64) {
+    MEMPOOL_PENDING_SUBMIT_UNRESOLVABLE_ANCHORS.record(u64::try_from(count).unwrap_or(0), &[]);
+}
+
 pub(crate) fn record_cached_data_root_evicted() {
     CACHED_DATA_ROOT_EVICTED.add(1, &[]);
 }
@@ -284,4 +302,20 @@ pub(crate) fn record_soft_internal_discard(reason: &'static str) {
 
 pub(crate) fn record_soft_internal_recovered(reason: &'static str) {
     SOFT_INTERNAL_RECOVERED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+#[cfg(test)]
+mod anchor_gauge_tests {
+    use super::*;
+
+    #[test]
+    fn set_anchor_unresolvable_does_not_panic() {
+        // OTel gauges expose no `.get()` for read-back; this is a panic-free
+        // smoke test confirming the helper accepts both zero and non-zero
+        // counts. End-to-end verification happens via the `/metrics` scrape
+        // at deploy time.
+        set_anchor_unresolvable(0);
+        set_anchor_unresolvable(42);
+        set_anchor_unresolvable(-1); // exercise the clamp path
+    }
 }

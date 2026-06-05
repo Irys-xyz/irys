@@ -4,8 +4,8 @@ use eyre::{Report, Result as EyreResult};
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::insert_peer_list_item;
 use irys_database::reth_db::DatabaseError;
+use irys_database::{delete_peer_list_item, insert_peer_list_item};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
@@ -58,6 +58,11 @@ struct PeerNetworkServiceState {
     currently_running_announcements: HashSet<SocketAddr>,
     successful_announcements: Cache<SocketAddr, AnnouncementFinishedMessage>,
     failed_announcements: HashMap<SocketAddr, AnnouncementFinishedMessage>,
+    /// Peers evicted on a chain/network mismatch, staged for deletion by the
+    /// next `flush`. Routing the delete through `flush` (the sole peer-DB
+    /// writer) keeps it from racing with the snapshot insert and resurrecting
+    /// the peer.
+    pending_db_removals: HashSet<IrysPeerId>,
     gossip_client: GossipClient,
     chain_id: u64,
     peer_address: PeerAddress,
@@ -199,6 +204,7 @@ impl PeerNetworkServiceInner {
                 .time_to_live(SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL)
                 .build(),
             failed_announcements: HashMap::new(),
+            pending_db_removals: HashSet::new(),
             gossip_client: GossipClient::new(
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
@@ -224,22 +230,52 @@ impl PeerNetworkServiceInner {
     }
 
     async fn flush(&self) -> Result<(), PeerListServiceError> {
-        let db = {
-            let state = self.state.lock().await;
-            state.db.clone()
+        // `flush` is the sole peer-DB writer: it both persists the current peer
+        // set and applies removals staged by `evict_peer_on_network_mismatch`.
+        // Doing the delete here (rather than in a standalone transaction) keeps
+        // it from racing with the snapshot insert below and resurrecting a peer.
+        //
+        // Snapshot the peers and drain the staged removals under the *same* state
+        // lock so the two are mutually consistent. Evictions also serialize on
+        // this lock (see the handshake-rejection path), so flush never observes a
+        // half-applied eviction — a peer removed from the cache but whose delete
+        // is not yet staged, or vice versa. The lock is released before the
+        // lock-free DB write; an eviction landing during that write can still
+        // re-persist a peer for one flush cycle, which is benign: the in-memory
+        // eviction is already in effect and the next flush deletes it.
+        let (db, persistable_peers, removals) = {
+            let mut state = self.state.lock().await;
+            let db = state.db.clone();
+            let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
+            let removals = std::mem::take(&mut state.pending_db_removals);
+            (db, persistable_peers, removals)
         };
 
-        let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
-        let _ = db
+        let result = db
             .update_scoped(|tx| {
                 for (peer_id, peer) in persistable_peers.iter() {
+                    // A peer staged for removal must not be re-persisted from a
+                    // snapshot that predated its eviction.
+                    if removals.contains(peer_id) {
+                        continue;
+                    }
                     insert_peer_list_item(tx, peer_id, peer).map_err(PeerListServiceError::from)?;
+                }
+                for peer_id in &removals {
+                    delete_peer_list_item(tx, peer_id).map_err(PeerListServiceError::from)?;
                 }
                 Ok::<(), PeerListServiceError>(())
             })
-            .map_err(PeerListServiceError::Database)?;
+            .map_err(PeerListServiceError::Database)
+            .and_then(|inner| inner);
 
-        Ok(())
+        // A failed flush must not silently drop staged removals: re-stage them
+        // (merge, so evictions staged during the lock-free write survive) for the
+        // next flush to retry. Deletes are idempotent.
+        if result.is_err() {
+            self.state.lock().await.pending_db_removals.extend(removals);
+        }
+        result
     }
 
     fn increase_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreIncreaseReason) {
@@ -803,7 +839,8 @@ impl PeerNetworkService {
                                 ));
                             }
                             RejectionReason::InvalidCredentials
-                            | RejectionReason::ProtocolMismatch => {
+                            | RejectionReason::ProtocolMismatch
+                            | RejectionReason::ChainIdMismatch => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rejected data request {:?} with {:?}",
@@ -1008,19 +1045,13 @@ impl PeerNetworkService {
             PeerListServiceError::PostVersionError(e.to_string())
         });
 
+        // A transport-level Ok still carries either an Accepted or a Rejected
+        // handshake; only an Accepted is a real success. Defer the
+        // success/failure `AnnouncementFinished` notification to the match below
+        // so a rejection (e.g. NetworkMismatch) is never recorded in
+        // `successful_announcements`.
         let peer_response = match peer_response_result {
-            Ok(peer_response) => {
-                send_message_and_log_error(
-                    &sender,
-                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
-                        peer_api_address: api_address,
-                        peer_gossip_address: gossip_address,
-                        success: true,
-                        retry: false,
-                    }),
-                );
-                Ok(peer_response)
-            }
+            Ok(peer_response) => peer_response,
             Err(error) => {
                 debug!(
                     "Retrying to announce yourself to address {}: {:?}",
@@ -1035,12 +1066,23 @@ impl PeerNetworkService {
                         retry: true,
                     }),
                 );
-                Err(error)
+                return Err(error);
             }
-        }?;
+        };
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
+                // An accepted handshake is the only real success.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: true,
+                        retry: false,
+                    }),
+                );
+
                 // Only log mismatch if the version is not V1 - V1 peers have zero hash
                 if protocol_version != ProtocolVersion::V1 {
                     let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
@@ -1080,11 +1122,72 @@ impl PeerNetworkService {
                 }
                 Ok(())
             }
-            PeerResponse::Rejected(rejected_response) => Err(
-                PeerListServiceError::PeerHandshakeRejected(rejected_response),
-            ),
+            PeerResponse::Rejected(rejected_response) => {
+                // A rejection is a terminal failure, not a success: report it so
+                // it is not cached in `successful_announcements` (which would
+                // suppress future announce attempts as if it had succeeded).
+                // retry=false because re-announcing won't change the peer's mind.
+                send_message_and_log_error(
+                    &sender,
+                    PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
+                        peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
+                        success: false,
+                        retry: false,
+                    }),
+                );
+
+                // A chain_id mismatch (mapped to NetworkMismatch) means the peer
+                // is on a different network. The gossip data plane trusts cache
+                // membership, not handshake outcome, so we must evict the peer
+                // rather than leave it cached and trusted. The DB delete is
+                // staged for `flush` (the sole peer-DB writer) so it cannot race
+                // with the snapshot insert and resurrect the peer.
+                //
+                // Remove from the cache and stage the delete under the same state
+                // lock `flush` takes, so flush never observes a half-applied
+                // eviction (cache-removed but not staged, or vice versa).
+                {
+                    let mut state = inner.state.lock().await;
+                    if let Some(peer_id) =
+                        evict_peer_on_network_mismatch(&peer_list, api_address, &rejected_response)
+                    {
+                        state.pending_db_removals.insert(peer_id);
+                    }
+                }
+                Err(PeerListServiceError::PeerHandshakeRejected(
+                    rejected_response,
+                ))
+            }
         }
     }
+}
+
+/// On a terminal network-membership rejection (a `chain_id` mismatch is surfaced
+/// as [`RejectionReason::NetworkMismatch`]), evict the peer from the in-memory
+/// cache and return its id so the caller can stage it for deletion by `flush`.
+/// The gossip data plane (`check_peer_v*`) trusts cache membership rather than
+/// handshake outcome, so a peer we can no longer peer with must be removed from
+/// the cache — not merely left un-handshaked. The DB delete is deferred to
+/// `flush` (the sole peer-DB writer) so it cannot race with the snapshot insert
+/// and resurrect the peer. Returns `None` for any other rejection reason.
+fn evict_peer_on_network_mismatch(
+    peer_list: &PeerList,
+    api_address: SocketAddr,
+    rejected: &RejectedResponse,
+) -> Option<IrysPeerId> {
+    if !matches!(
+        rejected.reason,
+        irys_types::version::RejectionReason::NetworkMismatch
+    ) {
+        return None;
+    }
+    let removed = peer_list.remove_peer_by_api_address(&api_address)?;
+    warn!(
+        "Evicted peer {} (mining {}) after its handshake was rejected with NetworkMismatch",
+        api_address, removed.mining_address
+    );
+    Some(removed.peer_id)
 }
 
 pub fn spawn_peer_network_service(
@@ -1244,6 +1347,128 @@ mod tests {
         fn peer_list(&self) -> PeerList {
             self.inner.peer_list()
         }
+    }
+
+    fn build_peer_list(config: &Config, db: &DatabaseProvider) -> PeerList {
+        let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
+        PeerList::new(
+            config,
+            db,
+            sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list")
+    }
+
+    #[test]
+    async fn network_mismatch_rejection_evicts_from_cache_and_returns_id() {
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (db, _cache_dir) = open_db(temp_dir.path());
+        let peer_list = build_peer_list(&config, &db);
+
+        let (_mining, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        let peer_id = peer.peer_id;
+        let api = peer.address.api;
+        peer_list.add_or_update_peer(peer, true);
+        assert!(peer_list.peer_by_api_address(api).is_some());
+
+        let rejected = RejectedResponse {
+            reason: irys_types::version::RejectionReason::NetworkMismatch,
+            message: None,
+            retry_after: None,
+        };
+        let evicted = evict_peer_on_network_mismatch(&peer_list, api, &rejected);
+
+        assert_eq!(
+            evicted,
+            Some(peer_id),
+            "a chain/network-mismatch rejection should evict the peer and return its id for staged DB removal"
+        );
+        assert!(
+            peer_list.peer_by_api_address(api).is_none(),
+            "the peer should be removed from the cache"
+        );
+    }
+
+    #[test]
+    async fn non_network_rejection_retains_peer() {
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (db, _cache_dir) = open_db(temp_dir.path());
+        let peer_list = build_peer_list(&config, &db);
+
+        let (_mining, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        let api = peer.address.api;
+        peer_list.add_or_update_peer(peer, true);
+
+        let rejected = RejectedResponse {
+            reason: irys_types::version::RejectionReason::InternalError,
+            message: None,
+            retry_after: None,
+        };
+        let evicted = evict_peer_on_network_mismatch(&peer_list, api, &rejected);
+
+        assert!(
+            evicted.is_none(),
+            "a non-network rejection must not evict the peer"
+        );
+        assert!(
+            peer_list.peer_by_api_address(api).is_some(),
+            "a non-network rejection must not evict the peer from the cache"
+        );
+    }
+
+    #[test]
+    async fn flush_deletes_pending_removals_without_resurrecting() {
+        use irys_database::reth_db::transaction::DbTx as _;
+
+        let temp_dir = TempDirBuilder::new().build();
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let harness = TestHarness::new(temp_dir.path(), config);
+        let peer_list = harness.peer_list();
+        let db = harness.inner.state.lock().await.db.clone();
+
+        let (_mining, peer) = create_test_peer(
+            "0x1234567890123456789012345678901234567890",
+            8080,
+            true,
+            None,
+        );
+        let peer_id = peer.peer_id;
+        // The peer is still in the cache (so the flush snapshot includes it) and
+        // also staged for removal — exactly the race where an eviction lands
+        // after the snapshot is taken but before the write. Flush must delete it,
+        // not resurrect it from the snapshot.
+        peer_list.add_or_update_peer(peer.clone(), true);
+        db.update_scoped(|tx| insert_peer_list_item(tx, &peer_id, &peer))
+            .expect("db tx")
+            .expect("insert peer");
+        harness
+            .inner
+            .state
+            .lock()
+            .await
+            .pending_db_removals
+            .insert(peer_id);
+
+        harness.inner.flush().await.expect("flush");
+
+        assert!(
+            db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))
+                .unwrap(),
+            "a peer staged for removal must be deleted by flush and not re-inserted from the snapshot"
+        );
     }
 
     #[test]

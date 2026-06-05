@@ -613,7 +613,14 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
 #[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
-    let (_tmp_dir, config) = create_test_config();
+    // Use a small block_tree_depth so that old blocks (height ~2) fall outside
+    // the reorg range relative to the latest index height (~10).
+    let (_tmp_dir, config) = {
+        let (tmp_dir, config) = create_test_config();
+        let mut node_config = config.node_config.clone();
+        node_config.consensus.get_mut().block_tree_depth = 3;
+        (tmp_dir, Config::new(node_config, config.peer_id))
+    };
 
     let MockedServices {
         block_status_provider_mock,
@@ -698,7 +705,14 @@ async fn should_warn_about_mismatches_for_very_old_block() {
 
 #[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
-    let (_tmp_dir, config) = create_test_config();
+    // Use a small block_tree_depth so that old blocks (height ~2) fall outside
+    // the reorg range relative to the latest index height (~10).
+    let (_tmp_dir, config) = {
+        let (tmp_dir, config) = create_test_config();
+        let mut node_config = config.node_config.clone();
+        node_config.consensus.get_mut().block_tree_depth = 3;
+        (tmp_dir, Config::new(node_config, config.peer_id))
+    };
 
     let MockedServices {
         block_status_provider_mock,
@@ -1193,18 +1207,28 @@ fn setup_part_of_a_pruned_fork(
     config: &Config,
 ) -> (irys_types::BlockHash, u64) {
     let genesis = services.block_status_provider_mock.genesis_header();
-    let chain = BlockStatusProvider::produce_mock_chain(1, Some(&genesis), &config.consensus);
-    let canonical = &chain[0];
-    // Push a canonical block at height 1 into both index and tree.
-    services
-        .block_status_provider_mock
-        .add_block_to_index_and_tree_for_testing(canonical);
-    // A *different* hash at the same height represents a side-fork tip whose
-    // canonical-position block has been migrated. `block_status` returns
-    // `PartOfAPrunedFork` for this hash.
+    // The canonical chain must be deeper than `max_reorg_depth`
+    // (= `block_tree_depth`) so a competing block at a low height lands
+    // *beyond* reorg range. Within reorg range `block_status` deliberately
+    // returns `NotProcessed` (not `PartOfAPrunedFork`) so deep-reorg
+    // candidates can re-enter `process_block` via gossip; only a fork tip too
+    // old to be a valid reorg candidate classifies as `PartOfAPrunedFork`.
+    let depth = config.consensus.block_tree_depth + 2;
+    let chain = BlockStatusProvider::produce_mock_chain(depth, Some(&genesis), &config.consensus);
+    // Push the whole canonical chain into both index and tree so the latest
+    // indexed height is `depth`, well past `max_reorg_depth` above height 1.
+    for block in &chain {
+        services
+            .block_status_provider_mock
+            .add_block_to_index_and_tree_for_testing(block);
+    }
+    let canonical_low = &chain[0];
+    // A *different* hash at the low (now-pruned) height represents a side-fork
+    // tip whose canonical-position block has been migrated and is too old to
+    // be a valid reorg candidate. `block_status` returns `PartOfAPrunedFork`.
     let pruned_fork_tip = irys_types::BlockHash::repeat_byte(0xAA);
-    assert_ne!(pruned_fork_tip, canonical.block_hash);
-    (pruned_fork_tip, canonical.height)
+    assert_ne!(pruned_fork_tip, canonical_low.block_hash);
+    (pruned_fork_tip, canonical_low.height)
 }
 
 fn setup_not_processed(

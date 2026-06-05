@@ -1,0 +1,25 @@
+name: "Resolve GHCR image name"
+description: "Derives the lowercase ghcr.io/<owner>/irys-<environment> image name and exposes it as the `name` output."
+
+inputs:
+  environment:
+    description: "Environment / image-stream suffix (devnet, testnet, mainnet)."
+    required: true
+
+outputs:
+  name:
+    description: "Full image name, e.g. ghcr.io/owner/irys-testnet."
+    value: ${{ steps.derive.outputs.name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Derive image name
+      id: derive
+      shell: bash
+      env:
+        OWNER: ${{ github.repository_owner }}
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        OWNER_LOWER=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+        echo "name=ghcr.io/${OWNER_LOWER}/irys-${ENVIRONMENT}" >> "$GITHUB_OUTPUT"

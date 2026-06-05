@@ -30,7 +30,7 @@ pub async fn get_node_info(
     let max_diff = block_tree.read().get_max_cumulative_difficulty_block();
 
     Ok(NodeInfo {
-        version: "0.0.1".into(),
+        version: irys_types::get_version().to_string(),
         peer_count: u64::try_from(peer_list.peer_count())?,
         chain_id,
         height: latest.height(),

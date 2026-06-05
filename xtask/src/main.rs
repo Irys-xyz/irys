@@ -123,6 +123,25 @@ enum Commands {
         /// When omitted, tries "debug-release" then falls back to "release".
         #[clap(long)]
         profile: Option<String>,
+        /// Path to a TOML base-config template used to generate configs for
+        /// nodes running the OLD binary. Falls back to the bundled
+        /// `fixtures/base-config.toml` when omitted. Useful when the old ref
+        /// has a different `NodeConfig` schema than HEAD.
+        #[clap(long)]
+        base_config_old: Option<String>,
+        /// Path to a TOML base-config template used to generate configs for
+        /// nodes running the NEW binary. Falls back to the bundled
+        /// `fixtures/base-config.toml` when omitted.
+        #[clap(long)]
+        base_config_new: Option<String>,
+        /// Path to a TOML run-config file with cross-version comparison
+        /// knobs (field-rename aliases, skip lists, fields to keep at
+        /// default during signing). Used to make the harness apply to
+        /// arbitrary OLD↔NEW spans without hardcoding any particular
+        /// version pair's quirks. See
+        /// `crates/tooling/multiversion-tests/src/run_config.rs`.
+        #[clap(long)]
+        run_config: Option<String>,
         /// Remove the target/multiversion directory before running
         #[clap(long, default_value_t = false)]
         clean: bool,
@@ -558,14 +577,18 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Clippy { args } => {
             println!("cargo clippy");
-            cmd!(sh, "cargo clippy --workspace --tests --locked {args...}").remove_and_run()?;
+            cmd!(
+                sh,
+                "cargo clippy --workspace --tests --all-targets --locked {args...}"
+            )
+            .remove_and_run()?;
         }
         Commands::Fmt {
             check_only: only_check,
             args,
         } => {
             if only_check {
-                cmd!(sh, "cargo fmt --check {args...}").remove_and_run()?;
+                cmd!(sh, "cargo fmt --all --check {args...}").remove_and_run()?;
             } else {
                 println!("cargo fmt & clippy fix");
                 cmd!(sh, "cargo fmt --all").remove_and_run()?;
@@ -575,7 +598,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 let _rustflags_guard = sh.push_env("RUSTFLAGS", "-D warnings");
                 cmd!(
                     sh,
-                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests {args...}"
+                    "cargo clippy --fix --allow-dirty --allow-staged --workspace --tests --all-targets {args...}"
                 )
                 .remove_and_run()?;
             }
@@ -676,6 +699,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             test_targets,
             filter,
             profile,
+            base_config_old,
+            base_config_new,
+            run_config,
             clean,
             clean_data,
             args,
@@ -738,6 +764,35 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             }
             if let Some(ref p) = profile {
                 sh.set_var("IRYS_BUILD_PROFILE", p);
+            }
+            let base_config_old = base_config_old
+                .map(|p| {
+                    std::fs::canonicalize(&p).map_err(|e| {
+                        eyre::eyre!("base_config_old: failed to canonicalize `{p}`: {e}")
+                    })
+                })
+                .transpose()?;
+            let base_config_new = base_config_new
+                .map(|p| {
+                    std::fs::canonicalize(&p).map_err(|e| {
+                        eyre::eyre!("base_config_new: failed to canonicalize `{p}`: {e}")
+                    })
+                })
+                .transpose()?;
+            if let Some(ref path) = base_config_old {
+                sh.set_var("IRYS_BASE_CONFIG_OLD", path);
+            }
+            if let Some(ref path) = base_config_new {
+                sh.set_var("IRYS_BASE_CONFIG_NEW", path);
+            }
+            let run_config = run_config
+                .map(|p| {
+                    std::fs::canonicalize(&p)
+                        .map_err(|e| eyre::eyre!("run_config: failed to canonicalize `{p}`: {e}"))
+                })
+                .transpose()?;
+            if let Some(ref path) = run_config {
+                sh.set_var("IRYS_TEST_RUN_CONFIG", path);
             }
             sh.set_var("IRYS_RUN_ID", &run_id);
 
@@ -890,26 +945,37 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 )
                 .remove_and_run()?;
 
-                // Use script command to preserve TTY and tee to save output
+                // Shell-quote each arg — these strings are interpreted by
+                // `bash -c`, so unquoted args with spaces/metacharacters
+                // would be re-split or executed
+                let quoted_args = command_args
+                    .iter()
+                    .map(|a| shell_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let quoted_output = shell_quote(&output_file);
+
+                // Use script command to preserve TTY and tee to save output.
+                // `set -o pipefail` so a cargo/script failure isn't masked by
+                // tee's (successful) exit status. Commands go through
+                // remove_ring_env_vars like every other cargo invocation here.
                 // Handle different script syntax between platforms
                 let script_result = if cfg!(target_os = "macos") {
                     // macOS script syntax
                     let script_command = format!(
-                        "script -q /dev/stdout cargo {} | tee -a '{}'",
-                        command_args.join(" "),
-                        output_file
+                        "set -o pipefail; script -q /dev/stdout cargo {quoted_args} | tee -a {quoted_output}"
                     );
-                    cmd!(sh, "bash -c {script_command}")
+                    remove_ring_env_vars(cmd!(sh, "bash -c {script_command}"))
                         .env("RUST_BACKTRACE", "1")
                         .run()
                 } else if cfg!(target_os = "linux") {
-                    // Linux script syntax
+                    // Linux script syntax (-c takes the whole command as one
+                    // argument, so quote the assembled cargo invocation again)
+                    let inner = shell_quote(&format!("cargo {quoted_args}"));
                     let script_command = format!(
-                        "script -q -e -c 'cargo {}' /dev/stdout | tee -a '{}'",
-                        command_args.join(" "),
-                        output_file
+                        "set -o pipefail; script -q -e -c {inner} /dev/stdout | tee -a {quoted_output}"
                     );
-                    cmd!(sh, "bash -c {script_command}")
+                    remove_ring_env_vars(cmd!(sh, "bash -c {script_command}"))
                         .env("RUST_BACKTRACE", "1")
                         .run()
                 } else {
@@ -918,26 +984,26 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                         "Warning: script command may not be available on this platform, progress bars may not display correctly"
                     );
                     let tee_command = format!(
-                        "cargo {} 2>&1 | tee -a '{}'",
-                        command_args.join(" "),
-                        output_file
+                        "set -o pipefail; cargo {quoted_args} 2>&1 | tee -a {quoted_output}"
                     );
-                    cmd!(sh, "bash -c {tee_command}")
+                    remove_ring_env_vars(cmd!(sh, "bash -c {tee_command}"))
                         .env("RUST_BACKTRACE", "1")
                         .run()
                 };
 
-                // If script command fails, fallback to basic tee
-                if script_result.is_err() {
+                // If the `script` command itself is unavailable, fall back to
+                // basic tee. Only retry in that case — with pipefail a cargo
+                // failure also surfaces here, and rerunning the whole flaky
+                // suite on a genuine test failure would be very expensive.
+                let script_missing = cmd!(sh, "which script").quiet().run().is_err();
+                if script_result.is_err() && script_missing {
                     eprintln!(
-                        "Warning: script command failed, falling back to basic output capture"
+                        "Warning: script command unavailable, falling back to basic output capture"
                     );
                     let tee_command = format!(
-                        "cargo {} 2>&1 | tee -a '{}'",
-                        command_args.join(" "),
-                        output_file
+                        "set -o pipefail; cargo {quoted_args} 2>&1 | tee -a {quoted_output}"
                     );
-                    cmd!(sh, "bash -c {tee_command}")
+                    remove_ring_env_vars(cmd!(sh, "bash -c {tee_command}"))
                         .env("RUST_BACKTRACE", "1")
                         .run()?;
                 } else {
@@ -954,7 +1020,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 )
                 .remove_and_run()?;
 
-                cmd!(sh, "cargo {command_args...}")
+                remove_ring_env_vars(cmd!(sh, "cargo {command_args...}"))
                     .env("RUST_BACKTRACE", "1")
                     .run()?;
             }
@@ -968,6 +1034,12 @@ fn main() -> eyre::Result<()> {
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
+}
+
+/// Quote a string for safe inclusion in a `bash -c` command line.
+/// Wraps in single quotes; embedded single quotes become `'\''`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Scans per-test `.status` marker files and writes an aggregate `status.txt`.

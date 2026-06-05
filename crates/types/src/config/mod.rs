@@ -934,6 +934,111 @@ mod tests {
         assert_eq!(cfg, dec);
     }
 
+    /// Minimal-but-complete `NodeConfig` TOML fixture missing only the
+    /// `[metrics]` block; used by both `metrics_bind_ip_*` tests below.
+    /// Mirrors the fixture in `test_deserialize_config_from_toml`.
+    const TOML_WITHOUT_METRICS: &str = r#"
+        node_mode = "Genesis"
+        sync_mode = "Full"
+        base_directory = "~/.tmp/.irys"
+        consensus = "Testing"
+        mining_key = "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0"
+        reward_address = "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32"
+        peer_filter_mode = "trusted_and_handshake"
+        genesis_peer_discovery_timeout_millis = 10000
+        stake_pledge_drives = false
+        initial_whitelist = ["127.0.0.1:8080"]
+        initial_stake_and_pledge_whitelist = [
+            "0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32",
+            "0xa93225cbf141438629f1bd906a31a1c5401ce924"
+        ]
+
+        [[trusted_peers]]
+        gossip = "127.0.0.1:8081"
+        api = "127.0.0.1:8080"
+
+        [trusted_peers.execution]
+        peering_tcp_addr = "127.0.0.1:30303"
+        peer_id = "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+        [[oracles]]
+        type = "mock"
+        initial_price = 1.0
+        incremental_change = 0.00000000000001
+        smoothing_interval = 15
+
+        [storage]
+        num_writes_before_sync = 1
+
+        [data_sync]
+        max_pending_chunk_requests = 1000
+        max_storage_throughput_bps = 209715200
+        bandwidth_adjustment_interval = "5s"
+        chunk_request_timeout = "10s"
+
+
+        [gossip]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [packing.local]
+        cpu_packing_concurrency = 4
+        gpu_packing_batch_size = 1024
+
+        [cache]
+        cache_clean_lag = 2
+
+        [http]
+        bind_ip = "127.0.0.1"
+        bind_port = 0
+        public_ip = "127.0.0.1"
+        public_port = 0
+
+        [reth.network]
+        use_random_ports = true
+        bind_ip = "0.0.0.0"
+        bind_port = 0
+        public_ip = "0.0.0.0"
+        public_port = 0
+
+        [vdf]
+        parallel_verification_thread_limit = 8
+        throttle = true
+
+        [mempool]
+        max_pending_pledge_items = 100
+        max_pledges_per_item = 100
+        max_pending_chunk_items = 30
+        max_chunks_per_item = 500
+        max_preheader_chunks_per_item= 64
+        max_preheader_data_path_bytes= 65536
+        max_invalid_items = 10_000
+        max_valid_items = 10_000
+        max_valid_chunks = 10000
+        max_valid_submit_txs = 3000
+        max_valid_commitment_addresses = 300
+        max_commitments_per_address = 20
+    "#;
+
+    #[test]
+    fn metrics_bind_ip_defaults_to_loopback() {
+        // Fixture omits the [metrics] section entirely — tests the
+        // #[serde(default)] fall-through for already-deployed configs.
+        let cfg: NodeConfig =
+            toml::from_str(TOML_WITHOUT_METRICS).expect("minimal config should deserialise");
+        assert_eq!(cfg.metrics.bind_ip, "127.0.0.1");
+    }
+
+    #[test]
+    fn metrics_bind_ip_overridable_via_toml() {
+        let toml = format!("{TOML_WITHOUT_METRICS}\n\n[metrics]\nbind_ip = \"10.0.0.5\"\n");
+        let cfg: NodeConfig =
+            toml::from_str(&toml).expect("config with explicit [metrics] should deserialise");
+        assert_eq!(cfg.metrics.bind_ip, "10.0.0.5");
+    }
+
     #[test]
     fn test_parse_testnet_config_template() {
         let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

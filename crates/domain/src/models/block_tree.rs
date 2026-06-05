@@ -19,6 +19,34 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
+/// Why a block is being evicted from the block-tree cache.
+///
+/// Recorded on the `Removing block from block tree cache` debug log so an
+/// operator reading the log can tell a validation-driven removal from a
+/// prune-depth eviction from a cascaded-from-parent recursive removal.
+#[derive(Debug, Clone)]
+pub enum RemovalReason {
+    /// Block (or one of its ancestors) failed full validation.
+    ValidationInvalid,
+    /// Block fell outside the pruning window for the canonical tip.
+    PruneDepth,
+    /// Block was removed because it is a descendant of another block being
+    /// recursively removed; carries the original target's hash so logs can
+    /// be correlated.
+    RecursiveDescendantOf(BlockHash),
+}
+
+impl RemovalReason {
+    /// Stable, bounded-cardinality string for the `reason=` log field.
+    pub fn as_log_value(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::ValidationInvalid => "validation_invalid".into(),
+            Self::PruneDepth => "prune_depth".into(),
+            Self::RecursiveDescendantOf(h) => format!("recursive_descendant_of={h}").into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockTreeEntry(pub Arc<SealedBlock>);
 
@@ -57,6 +85,34 @@ impl PartialEq for BlockTreeEntry {
 }
 
 impl Eq for BlockTreeEntry {}
+
+/// Result of finding the divergence point between two competing chains in the
+/// block tree cache. `old_divergent` and `new_divergent` are oldest-first and
+/// exclude the LCA itself; iterating them in order walks each fork from the
+/// block immediately above the LCA to its respective tip. The LCA is reported
+/// separately as a full `Arc<SealedBlock>` so callers can extract its header
+/// for downstream events (e.g., `ReorgEvent::fork_parent`).
+///
+/// Independent of `ChainState` flags by construction — produced only from
+/// parent pointers via `BlockTree::find_reorg_split`.
+#[derive(Debug, Clone)]
+pub struct ReorgSplit {
+    pub lca: Arc<SealedBlock>,
+    pub old_divergent: Vec<Arc<SealedBlock>>,
+    pub new_divergent: Vec<Arc<SealedBlock>>,
+}
+
+/// The two competing chain tips handed to [`BlockTree::find_reorg_split`]. Both
+/// are `BlockHash`, so positional arguments invite silent transposition (which
+/// would swap the old/new divergent suffixes); the named fields make the
+/// new-vs-old roles explicit at every call site.
+#[derive(Debug, Clone, Copy)]
+pub struct ReorgTips {
+    /// Tip of the incoming (heavier) chain the node is switching to.
+    pub new_tip: BlockHash,
+    /// Tip of the chain currently considered canonical.
+    pub old_tip: BlockHash,
+}
 
 #[derive(Debug)]
 pub struct BlockTree {
@@ -572,7 +628,7 @@ impl BlockTree {
     }
 
     /// Helper function to delete a single block without recursion
-    fn delete_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+    fn delete_block(&mut self, block_hash: &BlockHash, reason: &RemovalReason) -> eyre::Result<()> {
         let block_entry = self
             .blocks
             .get(block_hash)
@@ -609,6 +665,7 @@ impl BlockTree {
             block.height = height,
             chain_state = ?chain_state,
             cache.size_before = self.blocks.len(),
+            reason = %reason.as_log_value(),
             "Removing block from block tree cache"
         );
         self.blocks.remove(block_hash);
@@ -624,11 +681,20 @@ impl BlockTree {
 
     #[cfg(feature = "test-utils")]
     pub fn test_delete(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
-        self.delete_block(block_hash)
+        self.delete_block(block_hash, &RemovalReason::ValidationInvalid)
     }
 
-    /// Removes a block and all its descendants recursively
-    pub fn remove_block(&mut self, block_hash: &BlockHash) -> eyre::Result<()> {
+    /// Removes a block and all its descendants recursively.
+    ///
+    /// `reason` describes why the caller wants this block gone (and is
+    /// recorded on its `delete_block` log line). Descendants are removed with
+    /// [`RemovalReason::RecursiveDescendantOf`] so post-hoc log reading can
+    /// tell the original target from the cascaded children.
+    pub fn remove_block(
+        &mut self,
+        block_hash: &BlockHash,
+        reason: RemovalReason,
+    ) -> eyre::Result<()> {
         // Get children before deleting the block
         let children = self
             .blocks
@@ -638,11 +704,11 @@ impl BlockTree {
 
         // Recursively remove all children first
         for child in children {
-            self.remove_block(&child)?;
+            self.remove_block(&child, RemovalReason::RecursiveDescendantOf(*block_hash))?;
         }
 
         // Delete this block
-        self.delete_block(block_hash)
+        self.delete_block(block_hash, &reason)
     }
 
     // Helper to find new max difficulty when current max is removed
@@ -683,6 +749,90 @@ impl BlockTree {
             .0
             .last()
             .expect("canonical chain must always have an entry in it")
+    }
+
+    /// Find the lowest common ancestor of two tips by walking both lineages
+    /// through `previous_block_hash` links in `self.blocks`, then return both
+    /// divergent suffixes. Independent of `ChainState` flags — operates only on
+    /// parent pointers, the same source `update_longest_chain_cache` walks.
+    ///
+    /// Both `old_divergent` and `new_divergent` are oldest-first and exclude
+    /// the LCA itself, matching the existing `old_fork_blocks`/`new_fork_blocks`
+    /// contract observed by the mempool's `get_confirmed_range` (which slices
+    /// `fork[0..migration_depth]`, so the oldest-first ordering is load-bearing)
+    /// and other reorg consumers.
+    ///
+    /// Returns `Err` if either tip is missing from the cache, or if the walks
+    /// exhaust without intersecting (cache miss before reaching a shared
+    /// ancestor). Never panics.
+    pub fn find_reorg_split(&self, tips: ReorgTips) -> eyre::Result<ReorgSplit> {
+        use std::collections::HashSet;
+
+        let ReorgTips { new_tip, old_tip } = tips;
+
+        // Walk back from new_tip, recording every hash seen.
+        let mut new_walk: Vec<Arc<SealedBlock>> = Vec::new();
+        let mut new_hashes: HashSet<BlockHash> = HashSet::new();
+        let mut cursor = new_tip;
+        loop {
+            let Some(entry) = self.blocks.get(&cursor) else {
+                break;
+            };
+            new_hashes.insert(cursor);
+            new_walk.push(Arc::clone(&entry.block));
+            if entry.block.header().height == 0 {
+                break;
+            }
+            cursor = entry.block.header().previous_block_hash;
+        }
+        if new_walk.is_empty() {
+            return Err(eyre::eyre!("new tip {new_tip} not in block tree cache",));
+        }
+
+        // Walk back from old_tip, stopping at the first hash that appears in new_hashes.
+        let mut old_walk: Vec<Arc<SealedBlock>> = Vec::new();
+        let mut cursor = old_tip;
+        let lca = loop {
+            let Some(entry) = self.blocks.get(&cursor) else {
+                if old_walk.is_empty() {
+                    return Err(eyre::eyre!("old tip {old_tip} not in block tree cache",));
+                }
+                return Err(eyre::eyre!(
+                    "no common ancestor in cache between new tip {new_tip} \
+                     and old tip {old_tip}: old chain walk exhausted",
+                ));
+            };
+            if new_hashes.contains(&cursor) {
+                break Arc::clone(&entry.block);
+            }
+            old_walk.push(Arc::clone(&entry.block));
+            if entry.block.header().height == 0 {
+                return Err(eyre::eyre!(
+                    "no common ancestor in cache between new tip {new_tip} \
+                     and old tip {old_tip}: old chain reached genesis without intersecting",
+                ));
+            }
+            cursor = entry.block.header().previous_block_hash;
+        };
+
+        // Trim new_walk to drop blocks at or below LCA. new_walk is tip-first;
+        // LCA must appear in it because new_hashes contained it.
+        let lca_hash = lca.header().block_hash;
+        let lca_idx = new_walk
+            .iter()
+            .position(|sb| sb.header().block_hash == lca_hash)
+            .expect("lca_hash must appear in new_walk because new_hashes contained it");
+        let mut new_divergent: Vec<Arc<SealedBlock>> = new_walk.drain(..lca_idx).collect();
+
+        // Both walks are tip-first; downstream consumers require oldest-first.
+        new_divergent.reverse();
+        old_walk.reverse();
+
+        Ok(ReorgSplit {
+            lca,
+            old_divergent: old_walk,
+            new_divergent,
+        })
     }
 
     fn update_longest_chain_cache(&mut self) {
@@ -1291,7 +1441,7 @@ impl BlockTree {
                             && !matches!(child_entry.chain_state, ChainState::Onchain)
                         {
                             let child_state = child_entry.chain_state;
-                            if let Err(err) = self.remove_block(&child) {
+                            if let Err(err) = self.remove_block(&child, RemovalReason::PruneDepth) {
                                 tracing::error!(
                                     custom.error = ?err,
                                     custom.child_hash = ?child,
@@ -1303,7 +1453,7 @@ impl BlockTree {
                     }
 
                     // Now remove just this block
-                    if let Err(err) = self.delete_block(&hash) {
+                    if let Err(err) = self.delete_block(&hash, &RemovalReason::PruneDepth) {
                         tracing::error!(
                             custom.error = ?err,
                             block.hash = ?hash,
@@ -1603,6 +1753,34 @@ pub fn make_block_tree_entry(block: Arc<SealedBlock>) -> BlockTreeEntry {
 }
 
 #[cfg(test)]
+mod removal_reason_tests {
+    use super::*;
+
+    #[test]
+    fn as_log_value_uses_stable_snake_case_tags() {
+        assert_eq!(
+            RemovalReason::ValidationInvalid.as_log_value(),
+            "validation_invalid"
+        );
+        assert_eq!(RemovalReason::PruneDepth.as_log_value(), "prune_depth");
+    }
+
+    #[test]
+    fn recursive_descendant_log_value_carries_parent_hash() {
+        let parent = BlockHash::from([7_u8; 32]);
+        let formatted = RemovalReason::RecursiveDescendantOf(parent).as_log_value();
+        assert!(
+            formatted.starts_with("recursive_descendant_of="),
+            "unexpected prefix: {formatted}"
+        );
+        assert!(
+            formatted.contains(&parent.to_string()),
+            "missing parent hash in {formatted}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     use crate::{EmaSnapshot, dummy_epoch_snapshot};
@@ -1785,12 +1963,18 @@ mod tests {
         );
 
         // Remove b2_1
-        assert_matches!(cache.remove_block(&b2.block_hash), Ok(()));
+        assert_matches!(
+            cache.remove_block(&b2.block_hash, RemovalReason::ValidationInvalid),
+            Ok(())
+        );
         assert_eq!(cache.get_block(&b2.block_hash), None);
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
         // Remove b2_1 again
-        assert_matches!(cache.remove_block(&b2.block_hash), Err(_));
+        assert_matches!(
+            cache.remove_block(&b2.block_hash, RemovalReason::ValidationInvalid),
+            Err(_)
+        );
 
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
@@ -1881,7 +2065,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
         // Remove b1_2, causing b2 to now be the tip of the heaviest chain
-        assert_matches!(cache.remove_block(&b1_2.block_hash), Ok(()));
+        assert_matches!(
+            cache.remove_block(&b1_2.block_hash, RemovalReason::ValidationInvalid),
+            Ok(())
+        );
         assert_eq!(cache.get_block(&b1_2.block_hash), None);
         assert_eq!(
             cache
@@ -2209,7 +2396,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Verify previously pruned b3 can be safely removed again, with longest chain cache staying stable
-        assert_matches!(cache.remove_block(&b3.block_hash), Err(e) if e.to_string() == "Block not found");
+        assert_matches!(
+            cache.remove_block(&b3.block_hash, RemovalReason::PruneDepth),
+            Err(e) if e.to_string() == "Block not found"
+        );
         assert_eq!(None, cache.get_block(&b3.block_hash));
         assert_eq!(
             None,
@@ -2223,7 +2413,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b2_2, &b2_3], 0, &cache), Ok(()));
 
         // Same safety check for b4 - removing already pruned block shouldn't affect chain state
-        assert_matches!(cache.remove_block(&b4.block_hash), Err(e) if e.to_string() == "Block not found");
+        assert_matches!(
+            cache.remove_block(&b4.block_hash, RemovalReason::PruneDepth),
+            Err(e) if e.to_string() == "Block not found"
+        );
         assert_eq!(None, cache.get_block(&b4.block_hash));
         assert_eq!(
             None,
@@ -2832,5 +3025,307 @@ mod tests {
                 "fallback selection must be deterministic across insertion orders; expected smallest block_hash"
             );
         }
+    }
+
+    #[test]
+    fn find_reorg_split_returns_oldest_first_lca_exclusive_suffixes() {
+        // Build chain: G -> b1 -> b2 -> b3 -> old_tip(b4)
+        //                          \-> c1 -> c2 -> new_tip(c3)
+        // LCA = b2. old_divergent = [b3, b4]. new_divergent = [c1, c2, c3].
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut b2 = extend_chain(random_block(U256::from(2)), &b1);
+        let mut b3 = extend_chain(random_block(U256::from(3)), &b2);
+        let mut b4 = extend_chain(random_block(U256::from(4)), &b3);
+        let mut c1 = extend_chain(random_block(U256::from(5)), &b2);
+        let mut c2 = extend_chain(random_block(U256::from(6)), &c1);
+        let mut c3 = extend_chain(random_block(U256::from(7)), &c2);
+
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [
+            &mut b1, &mut b2, &mut b3, &mut b4, &mut c1, &mut c2, &mut c3,
+        ] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let split = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: c3.block_hash,
+                old_tip: b4.block_hash,
+            })
+            .expect("LCA exists in cache");
+
+        // LCA == b2
+        assert_eq!(split.lca.header().block_hash, b2.block_hash);
+        assert_eq!(split.lca.header().height, b2.height);
+
+        // old_divergent = [b3, b4], oldest-first, LCA-exclusive
+        assert_eq!(split.old_divergent.len(), 2);
+        assert_eq!(split.old_divergent[0].header().block_hash, b3.block_hash);
+        assert_eq!(split.old_divergent[1].header().block_hash, b4.block_hash);
+
+        // new_divergent = [c1, c2, c3], oldest-first, LCA-exclusive
+        assert_eq!(split.new_divergent.len(), 3);
+        assert_eq!(split.new_divergent[0].header().block_hash, c1.block_hash);
+        assert_eq!(split.new_divergent[1].header().block_hash, c2.block_hash);
+        assert_eq!(split.new_divergent[2].header().block_hash, c3.block_hash);
+
+        // LCA must not appear in either divergent Vec
+        assert!(
+            split
+                .old_divergent
+                .iter()
+                .all(|sb| sb.header().block_hash != b2.block_hash)
+        );
+        assert!(
+            split
+                .new_divergent
+                .iter()
+                .all(|sb| sb.header().block_hash != b2.block_hash)
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_new_tip_missing_from_cache() {
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let bogus = H256([0xFF; 32]);
+        let err = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: bogus,
+                old_tip: b1.block_hash,
+            })
+            .expect_err("missing new tip must produce Err, not panic");
+        assert!(
+            format!("{err}").contains("new tip"),
+            "Err must identify the missing chain side: {err}",
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_old_tip_missing_from_cache() {
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let bogus = H256([0xEE; 32]);
+        let err = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: b1.block_hash,
+                old_tip: bogus,
+            })
+            .expect_err("missing old tip must produce Err, not panic");
+        assert!(
+            format!("{err}").contains("old tip"),
+            "Err must identify the missing chain side: {err}",
+        );
+    }
+
+    #[test]
+    fn find_reorg_split_handles_identical_tips() {
+        // old_tip == new_tip → LCA is that block, both divergent Vecs empty.
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        cache
+            .add_block(
+                &seal_block(&mut b1),
+                comm,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .expect("add_block");
+
+        let split = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: b1.block_hash,
+                old_tip: b1.block_hash,
+            })
+            .expect("identical tips share themselves as LCA");
+        assert_eq!(split.lca.header().block_hash, b1.block_hash);
+        assert!(split.old_divergent.is_empty());
+        assert!(split.new_divergent.is_empty());
+    }
+
+    #[test]
+    fn find_reorg_split_handles_old_tip_at_genesis() {
+        // Old chain is genesis only. New chain extends from genesis.
+        // LCA = genesis. old_divergent = []. new_divergent = full new chain.
+        let g = random_block(U256::from(0));
+        let mut n1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut n2 = extend_chain(random_block(U256::from(2)), &n1);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut n1, &mut n2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let split = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: n2.block_hash,
+                old_tip: g.block_hash,
+            })
+            .expect("genesis is a shared ancestor");
+        assert_eq!(split.lca.header().block_hash, g.block_hash);
+        assert!(split.old_divergent.is_empty());
+        assert_eq!(split.new_divergent.len(), 2);
+        assert_eq!(split.new_divergent[0].header().block_hash, n1.block_hash);
+        assert_eq!(split.new_divergent[1].header().block_hash, n2.block_hash);
+    }
+
+    #[test]
+    fn find_reorg_split_ignores_stale_onchain_flag_regression() {
+        // Topology: G -> b1 -> b2(STALE Onchain) -> old_tip(b3)
+        //                 \-> c1 -> c2 -> new_tip(c3)
+        // True LCA via parent walk = b1.
+        // If the algorithm depended on the flag, it would mistakenly select b2.
+        let g = random_block(U256::from(0));
+        let mut b1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut b2 = extend_chain(random_block(U256::from(2)), &b1);
+        let mut b3 = extend_chain(random_block(U256::from(3)), &b2);
+        let mut c1 = extend_chain(random_block(U256::from(4)), &b1);
+        let mut c2 = extend_chain(random_block(U256::from(5)), &c1);
+        let mut c3 = extend_chain(random_block(U256::from(6)), &c2);
+
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut b1, &mut b2, &mut b3, &mut c1, &mut c2, &mut c3] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        // Inject a stale Onchain flag on b2. b2 is NOT on the new canonical
+        // (which goes G -> b1 -> c1 -> c2 -> c3). If find_reorg_split scanned
+        // for an Onchain anchor, it would pick b2 and produce a wrong LCA.
+        cache
+            .blocks
+            .get_mut(&b2.block_hash)
+            .expect("b2 in cache")
+            .chain_state = ChainState::Onchain;
+
+        let split = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: c3.block_hash,
+                old_tip: b3.block_hash,
+            })
+            .expect("LCA exists in cache via parent walk");
+
+        // True LCA = b1, NOT b2 (even though b2 carries a stale Onchain flag).
+        assert_eq!(
+            split.lca.header().block_hash,
+            b1.block_hash,
+            "find_reorg_split must use parent-walk truth, not the Onchain flag",
+        );
+        // old_divergent = [b2, b3]
+        assert_eq!(split.old_divergent.len(), 2);
+        assert_eq!(split.old_divergent[0].header().block_hash, b2.block_hash);
+        assert_eq!(split.old_divergent[1].header().block_hash, b3.block_hash);
+        // new_divergent = [c1, c2, c3]
+        assert_eq!(split.new_divergent.len(), 3);
+    }
+
+    #[test]
+    fn find_reorg_split_errs_when_chains_share_no_ancestor() {
+        // Two chains rooted at independent genesis blocks share no ancestor in
+        // the cache. Walking the old tip's lineage reaches its own genesis
+        // without ever intersecting the new chain — find_reorg_split must
+        // surface this no-common-ancestor divergence as Err, never panic.
+        let g = random_block(U256::from(0));
+        let mut n1 = extend_chain(random_block(U256::from(1)), &g);
+        let mut n2 = extend_chain(random_block(U256::from(2)), &n1);
+        let comm = Arc::new(CommitmentSnapshot::default());
+        let mut cache = BlockTree::new(&g, ConsensusConfig::testing());
+        for hdr in [&mut n1, &mut n2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        // Plant a second, disjoint genesis. `add_common` requires the parent to
+        // be in `self.blocks`, so insert the root directly (mirroring
+        // `BlockTree::new`) before extending a chain on top of it.
+        let mut g2 = random_block(U256::from(100));
+        let g2_hash = g2.block_hash;
+        let g2_sealed = seal_block(&mut g2);
+        cache.blocks.insert(
+            g2_hash,
+            BlockMetadata {
+                block: g2_sealed,
+                chain_state: ChainState::Onchain,
+                timestamp: SystemTime::now(),
+                children: HashSet::new(),
+                epoch_snapshot: dummy_epoch_snapshot(),
+                commitment_snapshot: comm.clone(),
+                ema_snapshot: dummy_ema_snapshot(),
+            },
+        );
+        let mut o1 = extend_chain(random_block(U256::from(101)), &g2);
+        let mut o2 = extend_chain(random_block(U256::from(102)), &o1);
+        for hdr in [&mut o1, &mut o2] {
+            cache
+                .add_block(
+                    &seal_block(hdr),
+                    comm.clone(),
+                    dummy_epoch_snapshot(),
+                    dummy_ema_snapshot(),
+                )
+                .expect("add_block");
+        }
+
+        let err = cache
+            .find_reorg_split(ReorgTips {
+                new_tip: n2.block_hash,
+                old_tip: o2.block_hash,
+            })
+            .expect_err("chains with no shared ancestor must Err, not panic");
+        let msg = format!("{err}");
+        assert!(msg.contains("no common ancestor"), "unexpected err: {msg}");
     }
 }
