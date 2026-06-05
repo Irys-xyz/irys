@@ -736,9 +736,7 @@ mod tests {
     //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
     //! satisfied with cheap placeholders.
     use super::*;
-    use irys_database::{
-        DatabaseProviderTestExt as _, cache_data_root, tables::CachedDataRoots,
-    };
+    use irys_database::{DatabaseProviderTestExt as _, cache_data_root, tables::CachedDataRoots};
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{

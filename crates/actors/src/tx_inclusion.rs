@@ -266,8 +266,7 @@ mod tests {
     use super::*;
     use irys_database::{
         DatabaseProvider, DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_tx_header,
-        set_data_tx_included_height,
-        tables::IrysBlockHeaders,
+        set_data_tx_included_height, tables::IrysBlockHeaders,
     };
     use irys_domain::{
         BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,

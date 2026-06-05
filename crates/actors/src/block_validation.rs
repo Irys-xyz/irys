@@ -6974,8 +6974,9 @@ mod tests {
     async fn assigned_ingress_proofs_uses_canonical_tx_metadata() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_tx_header,
-            set_data_tx_included_height,
+            DatabaseProviderTestExt as _,
+            db::IrysDatabaseExt as _,
+            insert_tx_header, set_data_tx_included_height,
             tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
@@ -7225,8 +7226,9 @@ mod tests {
     async fn assigned_ingress_proofs_classifies_intersecting_proof() -> eyre::Result<()> {
         use crate::tx_inclusion;
         use irys_database::{
-            DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_tx_header,
-            set_data_tx_included_height,
+            DatabaseProviderTestExt as _,
+            db::IrysDatabaseExt as _,
+            insert_tx_header, set_data_tx_included_height,
             tables::{IrysBlockHeaders, MigratedBlockHashes},
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard, EpochSnapshot};
