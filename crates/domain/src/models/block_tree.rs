@@ -8,7 +8,7 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::SystemTime,
 };
@@ -64,7 +64,12 @@ pub struct BlockTree {
     pub blocks: HashMap<BlockHash, BlockMetadata>,
 
     // Track solutions -> block hashes
-    solutions: HashMap<H256, HashSet<BlockHash>>,
+    /// Index of blocks by their solution hash. Used to detect competing blocks
+    /// with the same PoA solution (re-mining of the same VDF step, or
+    /// double-signing). Ordered containers (BTreeMap/BTreeSet) make iteration
+    /// deterministic across nodes — `get_by_solution_hash` relies on this for
+    /// stable, fork-safe selection when multiple candidates qualify.
+    solutions: BTreeMap<H256, BTreeSet<BlockHash>>,
 
     // Current tip
     pub tip: BlockHash,
@@ -72,7 +77,12 @@ pub struct BlockTree {
     // Track max cumulative difficulty
     max_cumulative_difficulty: (U256, BlockHash), // (difficulty, block_hash)
 
-    // Height -> Hash mapping
+    // Height -> Hash mapping.  The inner container is intentionally
+    // `HashSet`: the only reader (`get_hashes_for_height`) is API-server
+    // observability and does not feed consensus.  If a consensus-path
+    // caller is ever added, switch to `BTreeSet<BlockHash>` — mirroring
+    // the `solutions` field — to keep iteration deterministic across
+    // nodes.
     height_index: BTreeMap<u64, HashSet<BlockHash>>,
 
     // Cache of longest chain: (block/tx pairs, count of non-onchain blocks)
@@ -141,7 +151,7 @@ impl BlockTree {
         let cumulative_diff = genesis_block_header.cumulative_diff;
 
         let mut blocks = HashMap::new();
-        let mut solutions = HashMap::new();
+        let mut solutions = BTreeMap::new();
         let mut height_index = BTreeMap::new();
 
         // Create a dummy commitment snapshot
@@ -179,7 +189,7 @@ impl BlockTree {
 
         // Initialize all indices
         blocks.insert(block_hash, block_entry);
-        solutions.insert(solution_hash, HashSet::from([block_hash]));
+        solutions.insert(solution_hash, BTreeSet::from([block_hash]));
         height_index.insert(height, HashSet::from([block_hash]));
 
         Self {
@@ -297,7 +307,7 @@ impl BlockTree {
         let entry = make_block_tree_entry(Arc::clone(&sealed_start_block));
         let mut block_tree_cache = Self {
             blocks: HashMap::new(),
-            solutions: HashMap::new(),
+            solutions: BTreeMap::new(),
             tip: start_block_hash,
             max_cumulative_difficulty: (start_block.cumulative_diff, start_block_hash),
             height_index: BTreeMap::new(),
@@ -335,9 +345,10 @@ impl BlockTree {
         block_tree_cache
             .blocks
             .insert(start_block_hash, block_entry);
-        block_tree_cache
-            .solutions
-            .insert(start_block.solution_hash, HashSet::from([start_block_hash]));
+        block_tree_cache.solutions.insert(
+            start_block.solution_hash,
+            BTreeSet::from([start_block_hash]),
+        );
         block_tree_cache
             .height_index
             .insert(start_block.height, HashSet::from([start_block_hash]));
@@ -1168,6 +1179,13 @@ impl BlockTree {
     /// - Has matching `solution_hash`
     /// - Is not the excluded block
     /// - Either has same `cumulative_diff` as input or meets double-signing criteria
+    ///
+    /// **Determinism:** when multiple blocks qualify under the same arm
+    /// (exact-diff, double-signing, or fallback), this returns the block with
+    /// the **lexicographically smallest `BlockHash`**.  `BTreeSet<BlockHash>`
+    /// iterates in sorted order, so the first qualifying hash is the smallest
+    /// by construction.  The selection is identical across nodes — a
+    /// prerequisite for any consensus-path use of this function.
     #[must_use]
     pub fn get_by_solution_hash(
         &self,
@@ -1181,7 +1199,8 @@ impl BlockTree {
 
         let mut best_block = None;
 
-        // Examine each block hash
+        // Examine each block hash (BTreeSet iterates ascending by BlockHash —
+        // see the determinism note in the doc comment above).
         for &hash in block_hashes {
             // Skip the excluded block
             if hash == *excluding {
@@ -2695,5 +2714,123 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    /// Regression: when multiple blocks share the same `solution_hash` AND
+    /// satisfy the same arm of `get_by_solution_hash` (exact-cumdiff match
+    /// here), the selection must be deterministic across runs.  Before the
+    /// `solutions` field was switched from `HashMap<_, HashSet<_>>` to
+    /// `BTreeMap<_, BTreeSet<_>>`, iteration order was random, and which of
+    /// the qualifying blocks was returned varied across nodes — a
+    /// consensus-fork vector for any future caller of this function.
+    ///
+    /// Test shape: insert the two tied blocks in *opposite* orders into two
+    /// independent caches and assert both return the same block.  Repeating
+    /// the call on a single cache wouldn't catch a regression to
+    /// `HashMap`/`HashSet`, because a single hashed container is
+    /// iteration-stable within its own lifetime — only cross-instance variance
+    /// surfaces the bug.
+    #[tokio::test]
+    async fn get_by_solution_hash_is_deterministic_under_exact_match_tie() {
+        let b1 = random_block(U256::from(0));
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+
+        // Two competing children of b1 with the same solution_hash and the
+        // same cumulative_diff — both qualify under Case 1 (exact match).
+        let shared_solution = H256::random();
+        let mut b2 = extend_chain(random_block(U256::from(5)), &b1);
+        b2.solution_hash = shared_solution;
+        let sealed_b2 = seal_block(&mut b2);
+
+        let mut b3 = extend_chain(random_block(U256::from(5)), &b1);
+        b3.solution_hash = shared_solution;
+        let sealed_b3 = seal_block(&mut b3);
+
+        let expected = std::cmp::min(b2.block_hash, b3.block_hash);
+
+        for inserts in [
+            [&sealed_b2, &sealed_b3], // forward order
+            [&sealed_b3, &sealed_b2], // reversed order
+        ] {
+            let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
+            for sealed in inserts {
+                cache
+                    .add_block(
+                        sealed,
+                        comm_cache.clone(),
+                        dummy_epoch_snapshot(),
+                        dummy_ema_snapshot(),
+                    )
+                    .expect("add block");
+            }
+            let got = cache
+                .get_by_solution_hash(
+                    &shared_solution,
+                    &H256::random(),
+                    U256::from(5),
+                    U256::one(),
+                )
+                .expect("solution exists")
+                .block_hash;
+            assert_eq!(
+                got, expected,
+                "selection must be deterministic across insertion orders; expected smallest block_hash"
+            );
+        }
+    }
+
+    /// Regression companion: when no candidate matches Case 1 or Case 2, the
+    /// `best_block` fallback must also be deterministic — same root cause,
+    /// different arm.  Same cross-instance shape as the exact-match-tie test.
+    #[tokio::test]
+    async fn get_by_solution_hash_is_deterministic_under_fallback() {
+        let b1 = random_block(U256::from(0));
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+
+        // Two children with shared solution_hash but DIFFERENT cumulative_diff
+        // values, neither matching the query cumdiff — both fall through to
+        // the `best_block` fallback.
+        let shared_solution = H256::random();
+        let mut b2 = extend_chain(random_block(U256::from(7)), &b1);
+        b2.solution_hash = shared_solution;
+        let sealed_b2 = seal_block(&mut b2);
+
+        let mut b3 = extend_chain(random_block(U256::from(11)), &b1);
+        b3.solution_hash = shared_solution;
+        let sealed_b3 = seal_block(&mut b3);
+
+        let expected = std::cmp::min(b2.block_hash, b3.block_hash);
+
+        for inserts in [
+            [&sealed_b2, &sealed_b3], // forward order
+            [&sealed_b3, &sealed_b2], // reversed order
+        ] {
+            let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
+            for sealed in inserts {
+                cache
+                    .add_block(
+                        sealed,
+                        comm_cache.clone(),
+                        dummy_epoch_snapshot(),
+                        dummy_ema_snapshot(),
+                    )
+                    .expect("add block");
+            }
+            // Query cumdiff (=3) doesn't match either block; Case 2 also can't
+            // fire because the previous_cumulative_difficulty bound is high.
+            let got = cache
+                .get_by_solution_hash(
+                    &shared_solution,
+                    &H256::random(),
+                    U256::from(3),
+                    U256::from(1000),
+                )
+                .expect("solution exists")
+                .block_hash;
+            assert_eq!(
+                got, expected,
+                "fallback selection must be deterministic across insertion orders; expected smallest block_hash"
+            );
+        }
     }
 }

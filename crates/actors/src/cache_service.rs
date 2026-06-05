@@ -5,7 +5,8 @@ use crate::chunk_ingress_service::ingress_proofs::{
 use crate::metrics;
 use irys_database::DatabaseProvider;
 use irys_database::{
-    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
+    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than,
+    get_data_tx_metadata, tx_header_by_txid,
 };
 use irys_database::{
     db::DatabaseProviderCacheExt as _,
@@ -67,6 +68,27 @@ pub enum CacheServiceAction {
     /// Sent by the mempool when txs are pruned (anchor expired) to prevent stale
     /// txid references from blocking publish candidate selection.
     PruneTxidsFromCachedDataRoots(HashMap<H256, Vec<H256>>),
+    /// Remove a specific block hash from `CachedDataRoot.block_set`.
+    /// `block_set` is a non-trusted hint (consensus now uses
+    /// `tx_inclusion::find_canonical_ledger_range`); this action exists so
+    /// observers that detect stale entries can scrub them without waiting
+    /// for the next confirmation to overwrite the hint.
+    ///
+    /// **Status: intentionally parked primitive — no live production emitter.**
+    /// The original emitter (validator `get_assigned_ingress_proofs` walk
+    /// over `block_set` → `AssignedProofBlockMissing` recovery) was deleted
+    /// in commit 7da520194 when the validator was rewritten to use
+    /// `tx_inclusion::find_canonical_ledger_range` (no longer walks
+    /// `block_set`). The action + worker + handler are kept so future
+    /// stale-entry observers can wire in without rebuilding the primitive.
+    /// The `prune_block_hash_from_block_set_removes_stale_hash` test below
+    /// covers this path despite there being no current producer; treat any
+    /// "this is unused, delete it" review feedback against this primitive
+    /// as already-considered (REVIEW.md P2 #8).
+    PruneBlockHashFromBlockSet {
+        data_root: DataRoot,
+        block_hash: H256,
+    },
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -368,16 +390,44 @@ impl InnerCacheTask {
 
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
+        // Per-eviction observability state, buffered inside the write tx and
+        // emitted only after `commit()` succeeds — otherwise a failed commit
+        // (or a mid-loop delete error that drops the tx) would report
+        // evictions/chunks that never persisted.
+        struct EvictionRecord {
+            data_root: H256,
+            block_set: Vec<H256>,
+            txid_set_size: usize,
+            inclusion_max_height: Option<u64>,
+            expiry_height: Option<u64>,
+            horizon: Option<u64>,
+        }
+
         let signer = self.config.irys_signer();
         let local_addr = signer.address();
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
-        // Consensus read tx for block header lookups; cache write tx for cache table mutations.
+        let mut evictions: Vec<EvictionRecord> = Vec::new();
+        // Consensus read tx for canonical tx-metadata lookups; cache write tx for
+        // CDR/IngressProofs/CachedChunks mutations. `cache().begin_rw()` attaches
+        // the irys-cache MDBX rw-tx span automatically.
         let consensus_rtx = self.db.tx()?;
         let write_tx = self.db.cache().begin_rw()?;
         {
             let mut cursor = write_tx.cursor_write::<CachedDataRoots>()?;
-            let mut walker = cursor.walk(None)?;
+            // Seed the cursor with a random data_root so MDBX seeks to the
+            // nearest key; without this, a stable backlog of CDRs protected by
+            // the pending-tx / local-proof exemptions re-scans from the front
+            // every cycle and starves later entries.  Mirrors the TODO at
+            // `prune_ingress_proofs` (~L696).  When the first walk runs out of
+            // entries without hitting `MAX_EVICTIONS_PER_RUN`, fall through to
+            // a second walk from the beginning so total coverage stays
+            // wrap-around-complete (otherwise tests + small tables with all
+            // keys above the random seek would silently scan zero entries).
+            let seek_key: DataRoot = H256::random();
+            let mut walker = cursor.walk(Some(seek_key))?;
+            let mut wrapped = false;
+            loop {
             while let Some((data_root, cached)) = walker.next().transpose()? {
                 if eviction_count >= MAX_EVICTIONS_PER_RUN {
                     warn!(
@@ -386,48 +436,101 @@ impl InnerCacheTask {
                     );
                     break;
                 }
-                // Pruning horizon priority: block inclusion > expiry height > skip
-                // Rationale: Confirmed blocks provide the most reliable pruning point.
-                // Unconfirmed mempool entries use expiry_height as a conservative fallback.
-                // Entries without either metadata are likely still active and should not be pruned.
+                // Pruning horizon priority: canonical tx inclusion > expiry height > evict-anomalous.
+                //
+                // CDR lifetime is bounded by either (a) `expiry_height` set at tx
+                // ingress (`cache_data_root_with_expiry`), or (b) `included_height`
+                // set atomically with the confirming tip change in
+                // `BlockMigrationService::persist_metadata` (Phase 2 sets
+                // `included_height`, Phase 3 clears `expiry_height` — same write
+                // tx).  The local-proof exemption below extends (b) indefinitely
+                // while a local ingress proof is present.
+                //
+                // The `(None, None)` arm is reachable only when a CDR has lost
+                // both bounds: a reorg cleared `included_height` for every tx in
+                // `txid_set` after the confirmation already cleared
+                // `expiry_height`, and the mempool re-anchor path did not restore
+                // expiry (e.g. orphan resubmission failed).  Under the lifetime
+                // model such an entry should not exist, so treat it as a
+                // candidate for eviction — but keep the local-proof exemption so
+                // an entry that still carries a useful commitment survives.
+                //
+                // `IrysDataTxMetadata` lives in the consensus env, so metadata
+                // reads use `consensus_rtx` while the writes below stay on the
+                // cache rw-tx.
                 let mut inclusion_max_height: Option<u64> = None;
-                for block_hash in cached.block_set.iter() {
-                    if let Some(block_header) =
-                        irys_database::block_header_by_hash(&consensus_rtx, block_hash, false)?
+                let mut all_txs_confirmed = true;
+                for tx_id in cached.txid_set.iter() {
+                    match irys_database::get_data_tx_metadata(&consensus_rtx, tx_id)?
+                        .and_then(|m| m.included_height)
                     {
-                        inclusion_max_height = Some(
-                            inclusion_max_height
-                                .map_or(block_header.height, |h| h.max(block_header.height)),
-                        );
+                        Some(h) => {
+                            inclusion_max_height =
+                                Some(inclusion_max_height.map_or(h, |x| x.max(h)));
+                        }
+                        // No metadata row, or row exists with `included_height = None`:
+                        // this tx (sharing `data_root` with the rest of `txid_set`) is
+                        // still pending.  `inclusion_max_height` alone would prematurely
+                        // prune chunks the pending tx still needs — e.g. a Publish-
+                        // promotion sibling of an already-confirmed term-ledger tx that
+                        // shares the same `data_root`.
+                        //
+                        // Once any tx is pending, the horizon below ignores
+                        // `inclusion_max_height` and defers to `expiry_height`, so
+                        // further metadata reads are wasted DB work inside the open
+                        // write tx.  Bail early.
+                        None => {
+                            all_txs_confirmed = false;
+                            break;
+                        }
                     }
                 }
-                // Only fall back to expiry_height when there are no candidate
-                // blocks at all. A non-empty block_set with no resolvable
-                // headers means the blocks haven't been processed yet (or live
-                // on a not-yet-followed fork) — pruning on expiry in that case
-                // would evict entries that the inclusion path still needs.
-                let horizon = match (inclusion_max_height, cached.block_set.is_empty()) {
-                    (Some(h), _) => Some(h),
-                    (None, true) => cached.expiry_height,
-                    (None, false) => None,
-                };
-                let max_height: u64 = match horizon {
-                    Some(h) => h,
-                    None => {
-                        trace!(
-                            data_root.data_root = ?data_root,
-                            "Skipping prune for data root without inclusion or expiry"
-                        );
-                        continue;
+
+                // Horizon policy:
+                //  - All txs confirmed: use the latest `included_height` as the
+                //    boundary (falling back to `expiry_height`, then `(None, None)`
+                //    anomalous-eviction).
+                //  - Any tx still pending: defer to `expiry_height`.  An already-
+                //    confirmed sibling's `included_height` does NOT bind the
+                //    pending tx's chunk lifetime; using it as the horizon would
+                //    prematurely prune chunks the pending tx still needs.  If
+                //    expiry was already cleared by the sibling confirmation,
+                //    `horizon` is `None` and the eviction-candidate arm protects
+                //    the entry until the pending tx either confirms or is dropped
+                //    by mempool TTL.
+                let horizon = if all_txs_confirmed {
+                    match (inclusion_max_height, cached.expiry_height) {
+                        (Some(h), _) => Some(h),
+                        (None, Some(e)) => Some(e),
+                        (None, None) => None,
                     }
+                } else {
+                    cached.expiry_height
+                };
+
+                // Decide whether this entry is a candidate for eviction.
+                //  * horizon present: the historical "past the bound" check.
+                //  * horizon absent + all txs confirmed: truly anomalous state
+                //    (empty `txid_set`, or all txs confirmed-and-orphaned with
+                //    expiry already cleared) — evict unless the local-proof
+                //    exemption below applies.
+                //  * horizon absent + pending tx remains: protect (see horizon
+                //    policy above).
+                let is_eviction_candidate = match (horizon, all_txs_confirmed) {
+                    (Some(max_height), _) => max_height < prune_height,
+                    (None, true) => true,
+                    (None, false) => false,
                 };
 
                 trace!(
-                    "Processing data root {} max height: {}, prune height: {}",
-                    &data_root, &max_height, &prune_height
+                    data_root.data_root = ?data_root,
+                    horizon = ?horizon,
+                    prune_height,
+                    is_eviction_candidate,
+                    "Processing data root for prune evaluation"
                 );
 
-                if max_height < prune_height {
+                if is_eviction_candidate {
                     // Check for locally generated ingress proof
                     let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
                     let mut has_local_proof = false;
@@ -445,64 +548,187 @@ impl InnerCacheTask {
                     if has_local_proof {
                         trace!(
                             data_root.data_root = ?data_root,
+                            horizon = ?horizon,
                             "Skipping prune for data root with locally generated ingress proof"
                         );
                         continue;
                     }
 
-                    debug!(
-                        data_root.data_root = ?data_root,
-                        data_root.max_height = ?max_height,
-                        data_root.prune_height = ?prune_height,
-                        "expiring cached data for data root",
-                    );
+                    // Capture txid_set_size before `cached` is partially moved below.
+                    let txid_set_size = cached.txid_set.len();
+                    let expiry_height = cached.expiry_height;
+
                     write_tx.delete::<IngressProofs>(data_root, None)?;
                     chunks_pruned = chunks_pruned
                         .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                     write_tx.delete::<CachedDataRoots>(data_root, None)?;
                     eviction_count += 1;
+
+                    evictions.push(EvictionRecord {
+                        data_root,
+                        block_set: cached.block_set,
+                        txid_set_size,
+                        inclusion_max_height,
+                        expiry_height,
+                        horizon,
+                    });
                 }
             }
+            if wrapped || eviction_count >= MAX_EVICTIONS_PER_RUN {
+                break;
+            }
+            // First walk ran from `Some(seek_key)` to end without hitting the
+            // eviction cap.  Wrap around and scan the prefix `[start,
+            // seek_key)` so coverage is complete.  Without this fall-through
+            // a small table whose keys all sort above `seek_key` would
+            // silently scan zero entries this cycle.
+            wrapped = true;
+            walker = cursor.walk(None)?;
+            }
         } // cursor and walker dropped here, releasing borrow on write_tx
-        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
+
+        // Post-commit: only now is it safe to report what actually persisted.
+        // `has_local_proof` is hardcoded false because the eviction branch
+        // `continue`s on `has_local_proof == true` before reaching this buffer.
+        for entry in &evictions {
+            info!(
+                data_root = %entry.data_root,
+                block_set_size = entry.block_set.len(),
+                txid_set_size = entry.txid_set_size,
+                last_inclusion_height = ?entry.inclusion_max_height,
+                expiry_height = ?entry.expiry_height,
+                horizon = ?entry.horizon,
+                %prune_height,
+                has_local_proof = false,
+                "cached_data_root.evict"
+            );
+            debug!(
+                data_root = %entry.data_root,
+                block_set = ?entry.block_set,
+                "cached_data_root.evict.block_set"
+            );
+            metrics::record_cached_data_root_evicted();
+        }
+        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
 
         Ok(())
     }
 
     /// Spawns a background thread to remove specific txids from `CachedDataRoot.txid_set` entries.
     ///
-    /// Called when the mempool prunes expired txs. If a tx was never included in a
-    /// block, its txid becomes a dangling reference in `CachedDataRoot.txid_set`.
-    /// Cleaning it here prevents stale txids from blocking publish candidate selection.
+    /// Called when the mempool prunes expired txs or the reorg handler observes
+    /// a failed orphan re-ingress.  In both cases the *decision to scrub* is
+    /// made on stale state (either pre-TTL or pre-reorg-cleanup); by the time
+    /// this task runs the world may have moved on — most importantly, the tx
+    /// may have been re-confirmed by a new block that arrived in the gap.
     ///
-    /// Uses a background thread (matching `spawn_pruning_task`) to avoid blocking the actor loop.
-    /// Sends `PruneTxidsCompleted` when done so the service can drive the queue.
+    /// `txid_set` is **authoritative state** (see [`CachedDataRoot::txid_set`]
+    /// docs).  Removing an entry whose tx has since been (re-)confirmed
+    /// would make the prune loop miss that confirmation's chunk-retention
+    /// constraint and evict the CDR before chunk migration completes,
+    /// destroying chunks that are still needed.  Per-txid metadata recheck
+    /// inside the write tx closes that race: if `IrysDataTxMetadata[tx_id]`
+    /// is `Some` now, the tx is confirmed and the txid_set entry must stay.
+    ///
+    /// Residual race the recheck does not close: a peer gossips the tx back
+    /// in during the scrub window and `cache_data_root` re-adds it to
+    /// `txid_set`, but the tx has not yet confirmed (no metadata row).  The
+    /// scrub would drop it.  Bounded by mempool TTL re-population and
+    /// `cache_data_root` idempotency on the next ingress.  Acceptable for
+    /// the current architecture; revisit if the mempool grows a strong
+    /// "currently-pending" signal that can be consulted from MDBX context.
+    ///
+    /// Uses a background thread (matching `spawn_pruning_task`) to avoid
+    /// blocking the actor loop.  Sends `PruneTxidsCompleted` when done so
+    /// the service can drive the queue.
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let result = clone.db.update_cache_eyre(|db_tx| {
-                for (data_root, txids_to_remove) in &by_data_root {
-                    let Some(mut cached) = db_tx.get::<CachedDataRoots>(*data_root)? else {
-                        continue;
-                    };
+            // catch_unwind so a panic inside the body still drives a
+            // `PruneTxidsCompleted` back to the actor; without it the
+            // `txid_prune_running` flag stays `true` forever and the queue
+            // jams permanently.  `AssertUnwindSafe` is sound here — the
+            // captured `clone` is `Send + Clone`, and on the panic path we
+            // immediately stop using it after the catch.
+            //
+            // `IrysDataTxMetadata` is in the consensus env so the race check
+            // reads from a consensus ro-tx, while CDR writes go through the
+            // cache rw-tx (which `cache().begin_rw()` auto-scopes for MDBX
+            // span attribution).
+            let result: eyre::Result<()> = match std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| -> eyre::Result<()> {
+                    let consensus_rtx = clone.db.tx()?;
+                    let cache_wtx = clone.db.cache().begin_rw()?;
+                    for (data_root, txids_to_remove) in &by_data_root {
+                        let Some(mut cached) = cache_wtx.get::<CachedDataRoots>(*data_root)?
+                        else {
+                            continue;
+                        };
 
-                    let removal_set: HashSet<H256> = txids_to_remove.iter().copied().collect();
-                    let before_len = cached.txid_set.len();
-                    cached.txid_set.retain(|id| !removal_set.contains(id));
+                        // Build the actually-safe-to-remove set: any tx_id whose
+                        // metadata row exists now was (re-)confirmed since the
+                        // scrub was queued and must stay in txid_set — see the
+                        // race rationale in the function docs above.
+                        let mut removal_set: HashSet<H256> = HashSet::new();
+                        let mut raced_confirmed: usize = 0;
+                        for tx_id in txids_to_remove {
+                            if get_data_tx_metadata(&consensus_rtx, tx_id)?.is_some() {
+                                raced_confirmed += 1;
+                                continue;
+                            }
+                            removal_set.insert(*tx_id);
+                        }
+                        if raced_confirmed > 0 {
+                            debug!(
+                                data_root = %data_root,
+                                raced_confirmed,
+                                "Skipped txid scrub for tx(es) (re-)confirmed during scrub window"
+                            );
+                        }
+                        if removal_set.is_empty() {
+                            continue;
+                        }
 
-                    if cached.txid_set.len() < before_len {
-                        debug!(
-                            data_root = %data_root,
-                            removed = before_len - cached.txid_set.len(),
-                            remaining = cached.txid_set.len(),
-                            "Pruned stale txids from CachedDataRoot.txid_set"
-                        );
-                        db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                        let before_len = cached.txid_set.len();
+                        cached.txid_set.retain(|id| !removal_set.contains(id));
+
+                        if cached.txid_set.len() < before_len {
+                            debug!(
+                                data_root = %data_root,
+                                removed = before_len - cached.txid_set.len(),
+                                remaining = cached.txid_set.len(),
+                                "Pruned stale txids from CachedDataRoot.txid_set"
+                            );
+                            // Mirrors the `(None, None)` warn in
+                            // `remove_data_root_block_set_entry`: draining the
+                            // last txid while `expiry_height` is already None
+                            // leaves the CDR vacuously eviction-eligible (only
+                            // the local-proof exemption keeps it alive).
+                            // Surface this transition so observability is
+                            // symmetric across the two paths that produce it.
+                            if cached.txid_set.is_empty() && cached.expiry_height.is_none() {
+                                warn!(
+                                    data_root = %data_root,
+                                    "CachedDataRoot left in anomalous (no expiry, empty txid_set) state \
+                                     after stale-txid prune; entry now eviction-eligible unless held by \
+                                     a local ingress proof"
+                                );
+                            }
+                            cache_wtx.put::<CachedDataRoots>(*data_root, cached)?;
+                        }
                     }
+                    cache_wtx.commit()?;
+                    Ok(())
+                }),
+            ) {
+                Ok(r) => r,
+                Err(payload) => {
+                    let msg = panic_payload_string(payload);
+                    error!(custom.panic = %msg, "spawn_prune_txids_task body panicked");
+                    Err(eyre::eyre!("spawn_prune_txids_task panicked: {msg}"))
                 }
-                Ok(())
-            });
+            };
 
             let completion = match &result {
                 Ok(_) => Ok(()),
@@ -516,6 +742,50 @@ impl InnerCacheTask {
                 .send_traced(CacheServiceAction::PruneTxidsCompleted(completion))
             {
                 warn!(custom.error = ?e, "Failed to notify PruneTxidsCompleted");
+            }
+        });
+    }
+
+    /// Removes a single stale block hash from `CachedDataRoot.block_set`.
+    ///
+    /// Called when validation finds `get_ledger_range` returning `Ok(None)` for a
+    /// hash stored in the set.  Runs on a background thread to avoid blocking the
+    /// actor loop (mirrors `spawn_prune_txids_task`).  No completion signal is
+    /// needed because block-hash pruning does not need to be serialised.
+    fn spawn_prune_block_hash_task(&self, data_root: DataRoot, block_hash: H256) {
+        let clone = self.clone();
+        // Deliberately NO catch_unwind here: this task has no completion signal
+        // to forward to the actor loop. A panic loses one block_set entry but
+        // doesn't jam the queue (contrast with spawn_prune_txids_task,
+        // spawn_pruning_task, and spawn_epoch_processing, which all wrap their
+        // body in catch_unwind to protect their completion signals).
+        std::thread::spawn(move || {
+            // `CachedDataRoots` lives in the cache env, so the scrub runs on a
+            // cache rw-tx. Read via the rw-tx directly — `cached_data_root_by_data_root`
+            // is typed against the read-only `ScopedTx<Cache>`.
+            let result = clone.db.update_cache_eyre(|db_tx| {
+                let Some(mut cached) = db_tx.get::<CachedDataRoots>(data_root)? else {
+                    return Ok(());
+                };
+                let before_len = cached.block_set.len();
+                cached.block_set.retain(|h| h != &block_hash);
+                if cached.block_set.len() < before_len {
+                    debug!(
+                        data_root = %data_root,
+                        block_hash = %block_hash,
+                        "Pruned stale block hash from CachedDataRoot.block_set"
+                    );
+                    db_tx.put::<CachedDataRoots>(data_root, cached)?;
+                }
+                Ok(())
+            });
+            if let Err(e) = result {
+                warn!(
+                    data_root = %data_root,
+                    block_hash = %block_hash,
+                    "Failed to prune stale block hash from CachedDataRoot.block_set: {}",
+                    e
+                );
             }
         });
     }
@@ -709,7 +979,21 @@ impl InnerCacheTask {
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let res = clone.prune_cache(migration_height);
+            // Same panic-survival rationale as `spawn_prune_txids_task`:
+            // without `catch_unwind`, a panic anywhere in `prune_cache`
+            // leaves `pruning_running = true` forever and waiters of
+            // `response_sender` hang.
+            let res: eyre::Result<()> =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    clone.prune_cache(migration_height)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_string(payload);
+                        error!(custom.panic = %msg, "spawn_pruning_task body panicked");
+                        Err(eyre::eyre!("spawn_pruning_task panicked: {msg}"))
+                    }
+                };
             let completion = match &res {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
@@ -736,7 +1020,19 @@ impl InnerCacheTask {
     ) {
         let clone = self.clone();
         std::thread::spawn(move || {
-            let res = clone.on_epoch_processed(epoch_snapshot);
+            // Mirror of `spawn_pruning_task`: panic survival so the
+            // `epoch_running` flag is cleared and waiters resolve.
+            let res: eyre::Result<()> =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    clone.on_epoch_processed(epoch_snapshot)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_string(payload);
+                        error!(custom.panic = %msg, "spawn_epoch_processing body panicked");
+                        Err(eyre::eyre!("spawn_epoch_processing panicked: {msg}"))
+                    }
+                };
             let completion = match &res {
                 Ok(_) => Ok(()),
                 Err(e) => Err(eyre::eyre!(e.to_string())),
@@ -754,6 +1050,20 @@ impl InnerCacheTask {
                 warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
             }
         });
+    }
+}
+
+/// Extract a human-readable message from a `catch_unwind` payload.
+/// `Box<dyn Any + Send>` panic payloads in practice carry either `&'static
+/// str` or `String`; fall back to a generic label otherwise so the
+/// resulting `eyre` chain is never empty.
+fn panic_payload_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
     }
 }
 
@@ -963,13 +1273,34 @@ impl ChunkCacheService {
                     self.cache_task.spawn_prune_txids_task(work);
                 }
             }
-            CacheServiceAction::PruneTxidsCompleted(_res) => {
+            CacheServiceAction::PruneTxidsCompleted(res) => {
                 // Mark txid pruning idle and kick next if queued
                 self.txid_prune_running = false;
+                // Surface batch failure so the silent drop is observable.
+                // The worker already `warn!`s on Err (see
+                // `spawn_prune_txids_task`); we only want a stable counter
+                // here so dashboards can alert on it.  Stale tombstones
+                // self-heal on the next scrub trigger for that data_root
+                // (mempool TTL eviction or another failed reorg
+                // re-ingress), so we don't requeue.
+                if let Err(e) = res {
+                    debug!(
+                        error = %e,
+                        "PruneTxidsCompleted reported worker Err — recording metric and continuing"
+                    );
+                    metrics::record_cache_txid_scrub_failed();
+                }
                 if let Some(work) = self.txid_prune_queue.pop_front() {
                     self.txid_prune_running = true;
                     self.cache_task.spawn_prune_txids_task(work);
                 }
+            }
+            CacheServiceAction::PruneBlockHashFromBlockSet {
+                data_root,
+                block_hash,
+            } => {
+                self.cache_task
+                    .spawn_prune_block_hash_task(data_root, block_hash);
             }
         }
     }
@@ -980,6 +1311,8 @@ mod tests {
     use super::*;
     use irys_database::{
         DatabaseProviderTestExt as _, database,
+        db::IrysDatabaseExt as _,
+        db_cache::CachedDataRoot,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots},
     };
     use irys_domain::{BlockIndex, BlockTree};
@@ -994,6 +1327,14 @@ mod tests {
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
     // are pruned once prune_height > 0 and they should not be pruned!
+    //
+    // Real prod ingress goes through `cache_data_root_with_expiry`, which sets
+    // `expiry_height` to `anchor + tx_anchor_expiry_depth`.  Direct callers of
+    // `cache_data_root(_, _, None)` (this fixture, pre-fix code paths) leave
+    // `expiry_height = None`.  We set it manually here to mirror what the
+    // mempool ingress path produces, so the test exercises the realistic
+    // "unconfirmed entry with expiry in the future" state rather than the
+    // anomalous (None, None) state.
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
@@ -1013,6 +1354,17 @@ mod tests {
         });
         db.update_cache(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Mirror `cache_data_root_with_expiry`: set expiry_height to a future
+        // height so the entry has a valid lifetime bound (pre-confirmation arm).
+        db.update_cache(|wtx| {
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
+            cdr.expiry_height = Some(100);
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
             eyre::Ok(())
         })??;
 
@@ -1730,6 +2082,334 @@ mod tests {
             eyre::ensure!(
                 has_root,
                 "CachedDataRoots should NOT have been pruned due to local proof"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Truly anomalous `(None, None)` state: empty `txid_set`, no
+    /// `expiry_height`, no local ingress proof.  Under the lifetime model
+    /// this entry has no remaining tenants and no bound — evict on next
+    /// prune cycle.
+    ///
+    /// Note: the prior version of this test exercised a CDR with a pending
+    /// tx in `txid_set` and asserted eviction.  That semantics was changed
+    /// when the pending-tx guard was added to protect cross-ledger
+    /// same-`data_root` sibling txs from premature prune; pending txs now
+    /// keep the CDR alive (see `does_not_prune_cdr_with_pending_sibling_tx`).
+    /// The truly-anomalous arm now only fires when `txid_set` is empty.
+    #[tokio::test]
+    async fn prunes_truly_anomalous_empty_txid_set() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
+
+        // Construct a CDR with empty txid_set directly — the only state
+        // reachable by `(horizon=None, all_txs_confirmed=true)` after the
+        // pending-tx guard.
+        let data_root = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![],
+            block_set: vec![],
+            expiry_height: None,
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        service_task.prune_data_root_cache(1)?;
+
+        db.view_cache(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
+            eyre::ensure!(
+                !has_root,
+                "truly-anomalous CachedDataRoots entry (empty txid_set, no bounds) should be pruned"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// `(None, None)` anomalous-state arm with local-proof exemption:
+    /// `all_txs_confirmed == true` (only reachable with empty `txid_set`,
+    /// since any non-confirmed tx flips the flag false) combined with
+    /// `inclusion_max_height == None` and `expiry_height == None`.  Under
+    /// the eviction-candidate rule this fires the `(None, true)` arm and
+    /// would evict — except the local-proof check at the bottom of the arm
+    /// preserves any entry that still carries a useful commitment.  This
+    /// test exercises that exact path: clearing `txid_set` to reach
+    /// `all_txs_confirmed = true` without metadata, then asserting survival.
+    #[tokio::test]
+    async fn does_not_prune_anomalous_none_none_state_with_local_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
+
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        // Seed the CDR via the normal path, then clear `txid_set` and
+        // `expiry_height` to reach the `(None, None)` + `all_txs_confirmed`
+        // state.  An empty `txid_set` is the only way to get
+        // `all_txs_confirmed = true` together with `inclusion_max_height = None`:
+        // every other path through the prune loop flips the flag to false
+        // whenever metadata is missing.
+        db.update_cache(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry after seed"))?;
+            cdr.txid_set.clear();
+            cdr.expiry_height = None;
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            eyre::Ok(())
+        })??;
+
+        // Add a local ingress proof for this data_root.
+        let signer = config.irys_signer();
+        let local_addr = signer.address();
+        db.update_cache(|wtx| {
+            let mut ingress_proof = IngressProof::default();
+            ingress_proof.data_root = tx_header.data_root;
+            irys_database::store_external_ingress_proof_checked(wtx, &ingress_proof, local_addr)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Without the local-proof exemption the (None, None) state would be
+        // evicted; with it the entry must survive.
+        service_task.prune_data_root_cache(1)?;
+
+        db.view_cache(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(
+                has_root,
+                "CachedDataRoots in (None, None) state with local proof should NOT have been pruned"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Cross-ledger same-`data_root` regression: when two txs share a
+    /// `data_root` and one is confirmed (has `included_height`) while the
+    /// other is still pending (no metadata row), the CDR must NOT be evicted
+    /// on the confirmed tx's height alone — the pending tx still needs the
+    /// chunks.  Without the `all_txs_confirmed` guard, `inclusion_max_height`
+    /// derived from the confirmed sibling would shadow the now-cleared
+    /// `expiry_height` and the CDR would be pruned prematurely, breaking
+    /// Publish-promotion liveness when two ledgers reference the same data.
+    #[tokio::test]
+    async fn does_not_prune_cdr_with_pending_sibling_tx() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
+
+        let data_root = H256::random();
+        let confirmed_tx_id = H256::random();
+        let pending_tx_id = H256::random();
+        let make_tx = |id: H256| {
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id,
+                    data_root,
+                    data_size: 64,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            })
+        };
+        let confirmed_tx = make_tx(confirmed_tx_id);
+        let pending_tx = make_tx(pending_tx_id);
+
+        // Both txs land in the same CDR.txid_set via the shared data_root
+        // (cache env).
+        db.update_cache(|wtx| -> eyre::Result<()> {
+            database::cache_data_root(wtx, &confirmed_tx, None)?;
+            database::cache_data_root(wtx, &pending_tx, None)?;
+            Ok(())
+        })??;
+        // The confirmed sibling gets an inclusion height (term-ledger
+        // confirmation, consensus env); the pending tx remains without a
+        // metadata row.
+        db.update_eyre(|wtx| -> eyre::Result<()> {
+            irys_database::set_data_tx_included_height(wtx, &confirmed_tx_id, 5)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {:?}", e))?;
+            Ok(())
+        })?;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // `prune_height = 100` is well past the confirmed tx's `included_height`
+        // = 5.  Without the pending-tx guard the CDR would be evicted on
+        // inclusion alone.
+        service_task.prune_data_root_cache(100)?;
+
+        db.view_cache(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(data_root)?.is_some();
+            eyre::ensure!(
+                has_root,
+                "CDR with pending sibling tx (no included_height) must NOT be pruned"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Verifies that `PruneBlockHashFromBlockSet` removes a stale block hash from
+    // `CachedDataRoot.block_set` and leaves other hashes untouched.
+    //
+    // NOTE: This exercises an intentionally parked primitive — no live
+    // production emitter sends `PruneBlockHashFromBlockSet` after the
+    // `AssignedProofBlockMissing` recovery walk was deleted (commit
+    // 7da520194). The test is kept so the primitive stays wirable for
+    // future stale-entry observers. See the action's doc-comment.
+    #[tokio::test]
+    async fn prune_block_hash_from_block_set_removes_stale_hash() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = TempDirBuilder::new().build();
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = DatabaseProvider::for_testing(_temp_dir.path(), _cache_dir.path())
+            .expect("test db setup");
+
+        // Build a transaction header so we have a real data_root to key on.
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let data_root = tx_header.data_root;
+
+        // Persist a CachedDataRoot with two block hashes.
+        let stale_hash = H256::random();
+        let good_hash = H256::random();
+        db.update_cache(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            // Manually add two hashes to block_set.
+            let mut cached = wtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("just inserted");
+            cached.block_set.push(stale_hash);
+            cached.block_set.push(good_hash);
+            wtx.put::<CachedDataRoots>(data_root, cached)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let inner = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Spawn the prune task and wait for the background thread to finish.
+        inner.spawn_prune_block_hash_task(data_root, stale_hash);
+
+        // Give the background thread time to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        db.view_cache(|rtx| -> eyre::Result<()> {
+            let cached = rtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("CachedDataRoot should still exist");
+            assert!(
+                !cached.block_set.contains(&stale_hash),
+                "stale block hash should have been removed"
+            );
+            assert!(
+                cached.block_set.contains(&good_hash),
+                "good block hash should remain"
             );
             Ok(())
         })??;

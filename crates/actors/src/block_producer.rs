@@ -852,11 +852,15 @@ pub trait BlockProdStrategy {
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
             &mempool.epoch_snapshot,
-        )?;
+        )
+        // The producer treats all shadow-tx generation failures as local
+        // bugs; the validator-side typed routing in `block_validation.rs`
+        // does the consensus/node-fault classification.
+        .map_err(eyre::Report::from)?;
 
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
-            let metadata = tx_result?;
+            let metadata = tx_result.map_err(eyre::Report::from)?;
             let mut tx_raw = metadata.shadow_tx.compose(
                 self.inner().config.consensus.chain_id,
                 metadata.transaction_fee,
@@ -1527,11 +1531,16 @@ pub trait BlockProdStrategy {
             .await?;
 
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
+        // Producer treats commitment-refund snapshot invariants as a local
+        // bug — surfaces as `TxSelectorError::Other` and ultimately
+        // `BlockProductionError::Irrecoverable`. The validator-side mapping
+        // in `block_validation.rs` classifies them as node faults instead.
         let unstake_refund_events =
             crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
                 &parent_commitment_snapshot,
                 &self.inner().config.consensus,
-            )?;
+            )
+            .map_err(eyre::Report::from)?;
 
         // note: we do not filter txs by version for epoch blocks
         let commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
@@ -1622,10 +1631,15 @@ pub trait BlockProdStrategy {
         &self,
         commit_snapshot: &CommitmentSnapshot,
     ) -> eyre::Result<Vec<UnpledgeRefundEvent>> {
+        // Producer treats commitment-refund snapshot invariants as local
+        // bugs (see comment on the call site at `get_mempool_txs`); the
+        // validator-side mapping in `block_validation.rs` reclassifies
+        // them as node faults.
         crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
             commit_snapshot,
             &self.inner().config.consensus,
         )
+        .map_err(eyre::Report::from)
     }
 
     fn build_non_epoch_bundle(

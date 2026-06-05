@@ -91,6 +91,7 @@ itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
 test-log = { version = "0.2", features = ["trace"] }
+tracing-test = "0.2"
 pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.13"
@@ -100,8 +101,10 @@ rust_decimal = "1"
 rust_decimal_macros = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
+tar = "0.4"
 test-fuzz = "6"
 thiserror = "1"
+zstd = "0.13"
 tokio = { version = "1", features = ["rt", "macros"] }
 toml = "0.8"
 zeroize = "1.8"
@@ -220,6 +223,7 @@ reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev =
 reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
+reth-stages-types = { git = "https://github.com/irys-xyz/reth-irys", rev = "324bfb8f99a969a66c2ff6f11cfed974c265ee6c" }
 
 
 # just used (for local testing)

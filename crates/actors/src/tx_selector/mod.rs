@@ -12,8 +12,8 @@ use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
-    tx_header_by_txid_canonical,
+    cached_data_root_by_data_root, canonical_submit_height, ingress_proofs_by_data_root,
+    tx_header_by_txid,
 };
 use irys_domain::{
     BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
@@ -192,7 +192,16 @@ pub async fn select_best_txs(
         "Starting mempool transaction selection"
     );
 
-    // Collect confirmed commitment transactions from canonical chain to avoid duplicates
+    // Collect confirmed commitment transactions from canonical chain to avoid duplicates.
+    //
+    // TODO(tx-selector-onchain-filter): `canonical` here includes `Validated`
+    // and `NotOnchain(ValidBlock)` entries per `get_canonical_chain` (see
+    // `block_tree.rs:686-749`), not just `Onchain`. Under reorg replay, a
+    // dedup-against-Validated entry can briefly drop a commitment that should
+    // have been included. Self-correcting (next block re-includes it; no
+    // consensus impact), but worth filtering to Onchain-only to match the
+    // pattern in `tx_inclusion::lookup_via_block_tree:167-179`. Same gap at
+    // the `submit_txs_from_canonical` site below — fix both together.
     for entry in canonical.iter() {
         let commitment_ledger = entry
             .header()
@@ -860,7 +869,17 @@ async fn get_publish_txs_and_proofs(
                 .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
-        // reduce down the canonical chain to the txs in the submit ledger
+        // reduce down the canonical chain to the txs in the submit ledger.
+        //
+        // TODO(tx-selector-onchain-filter): same `canonical` includes-non-Onchain
+        // issue as the commitment-dedup site above. Under reorg replay, a
+        // `Validated` entry can leak its Submit tx_ids here, making the
+        // fast-path say "already submitted" for a tx whose Submit inclusion is
+        // about to be rolled back. The producer then skips the DB fallback
+        // (line ~893) and includes the tx as a publish candidate; peer
+        // validators catch any genuine double-publish via Vector B's
+        // canonical-DB check, so the worst case is a rejected block (no
+        // consensus impact, producer pays the cost).
         let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
             acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
             acc
@@ -882,23 +901,45 @@ async fn get_publish_txs_and_proofs(
                 );
                 continue;
             }
-            // check for previous submit inclusion in a parent block
-            // we do this by checking if the tx is in the block tree or database.
-            // if it is, we know it could've only gotten there by being included in the submit ledger.
+            // check for previous submit inclusion in a parent block.
+            // The Publish-targeting tx (ledger_id == Publish) can only have
+            // gotten `included_height` set via Submit-ledger inclusion: term
+            // ledgers (OneYear / ThirtyDay) reject `ledger_id == Publish` at
+            // structural validation, so a `Some` from the canonical DB index
+            // is sufficient evidence of prior Submit.
             if !submit_txs_from_canonical.contains(&tx_header.id) {
-                // check database — constrained to canonical chain at or before parent
-                if ctx
+                match ctx
                     .db
-                    .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_header.id, current_height))?
-                    .is_none()
+                    .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
                 {
-                    // no previous inclusion
-                    warn!(
-                        tx.id = ?tx_header.id,
-                        tx.data_root = ?tx_header.data_root,
-                        "Unable to find previous submit inclusion for publish candidate"
-                    );
-                    continue;
+                    Ok(Some(_)) => {
+                        // canonical Submit inclusion past the live-tree window
+                    }
+                    Ok(None) => {
+                        warn!(
+                            tx.id = ?tx_header.id,
+                            tx.data_root = ?tx_header.data_root,
+                            "Unable to find previous submit inclusion for publish candidate"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        // TODO(block-producer-errors): the validator path
+                        // (`data_txs_are_valid`) classifies this `Err` as a
+                        // node-fault and panics+restarts.  The producer here
+                        // still warn+continues.  Resolve via the block-producer
+                        // error-handling pass (tracked as a followup, F3).
+                        crate::metrics::record_block_production_lookup_failed(
+                            "publish_prior_submit",
+                        );
+                        warn!(
+                            tx.id = ?tx_header.id,
+                            tx.data_root = ?tx_header.data_root,
+                            error = %e,
+                            "canonical_submit_height failed for publish candidate; skipping"
+                        );
+                        continue;
+                    }
                 }
             }
 
@@ -976,10 +1017,11 @@ async fn get_publish_txs_and_proofs(
             let proofs_only: Vec<IngressProof> =
                 all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
 
-            // Get assigned and unassigned proofs using the existing utility function
+            // Get assigned and unassigned proofs using the existing utility function.
             let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
                 &proofs_only,
                 tx_header,
+                current_height,
                 ctx.block_tree,
                 ctx.db,
                 ctx.config,
@@ -987,9 +1029,21 @@ async fn get_publish_txs_and_proofs(
             ) {
                 Ok(result) => result,
                 Err(e) => {
+                    // TODO(block-producer-errors): same asymmetry as the
+                    // `canonical_submit_height` call above — the validator
+                    // path (`get_assigned_ingress_proofs`) classifies this `Err`
+                    // as a node-fault and panics+restarts.  The producer here
+                    // still warn+continues.  Resolve via the block-producer
+                    // error-handling pass (tracked as a followup, F3).
+                    crate::metrics::record_block_production_lookup_failed(
+                        "assigned_ingress_proofs",
+                    );
                     warn!(
-                        "Failed to get assigned proofs for tx {}: {}",
-                        &tx_header.id, e
+                        tx.id = %tx_header.id,
+                        data_root = %tx_header.data_root,
+                        current_height,
+                        error = %e,
+                        "tx_selector.assigned_proofs_lookup_failed"
                     );
                     continue;
                 }

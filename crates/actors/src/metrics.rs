@@ -13,6 +13,8 @@ irys_utils::define_metrics! {
     gauge CONCURRENT_ACTIVE("irys.validation.concurrent_active", "Active concurrent validation tasks");
     gauge VALIDATION_QUEUE_OLDEST_AGE_MS("irys.validation.queue_oldest_age_ms", "Age of the oldest pending VDF task in milliseconds");
     counter VALIDATION_TASK_FORCE_ABORTED("irys.validation.task_force_aborted_total", "Validation watchdog force-aborts of stalled VDF tasks");
+    counter VALIDATION_CONCURRENT_CANCEL_REQUEUED("irys.validation.concurrent_cancel_requeued_total", "Concurrent validation tasks requeued after unexpected JoinError::Cancelled (sustained occurrence implies Tokio distress or external abort source)");
+    counter VALIDATION_CONCURRENT_CANCEL_REPEATED("irys.validation.concurrent_cancel_repeated_total", "Concurrent validation tasks parked as RepeatedCancellation SoftInternal after exceeding MAX_CONCURRENT_CANCEL_RETRIES (recovery delegated to fresh gossip).");
     gauge CACHE_CHUNK_COUNT("irys.cache.chunk_count", "Number of cached chunks");
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
@@ -25,6 +27,12 @@ irys_utils::define_metrics! {
     gauge PACKING_SEMAPHORE_AVAILABLE("irys.packing.semaphore_available", "Available packing semaphore permits");
     counter DATA_TX_INGESTED("irys.mempool.data_tx_ingested_total", "Data transactions ingested into mempool");
     counter DATA_TX_UNFUNDED("irys.mempool.data_tx_unfunded_total", "Data transactions rejected due to insufficient funds");
+    counter CACHED_DATA_ROOT_EVICTED("irys.cache.cached_data_root_evicted_total", "CachedDataRoots entries evicted by prune_data_root_cache");
+    counter BLOCK_PRE_VALIDATION_FAILED("irys.block.pre_validation_failed_total", "Block pre-validation failures by reason (labelled)");
+    counter BLOCK_VALIDATION_FAILED("irys.block.validation_failed_total", "Block full-validation failures (post pre-validation) by reason (labelled)");
+    counter CHAIN_SYNC_BLOCK_REJECTED("irys.chain_sync.block_rejected_total", "Chain-sync block rejections by reason (labelled)");
+    counter BLOCK_PRODUCTION_LOOKUP_FAILED("irys.block_production.lookup_failed_total", "Block-production canonical DB lookup failures by site (labelled). Currently observed: tx_selector silently skips affected publish candidates.");
+    counter CACHE_TXID_SCRUB_FAILED("irys.cache.txid_scrub_failed_total", "CachedDataRoot.txid_set scrub batches that returned Err. Visible signal that stale tombstones may pin CDRs until the next scrub trigger.");
 
     histogram PREVALIDATION_DURATION_MS(
         "irys.validation.prevalidation_duration_ms",
@@ -77,6 +85,8 @@ irys_utils::define_metrics! {
     counter VALIDATION_CANCELLATIONS("irys.validation.cancellations_total", "Validation cancellations by reason (labelled)");
     counter REORG_PRIORITY_REEVALUATIONS("irys.validation.reorg_priority_reevaluations_total", "Validation priority re-evaluations triggered by reorg events");
     counter PRODUCER_PARENT_WAIT_TARGET_SWITCHES("irys.block_producer.parent_wait_target_switches_total", "Times block producer switched parent target while waiting for validation");
+    counter SOFT_INTERNAL_DISCARD("irys.block.soft_internal_discard_total", "Blocks discarded from block_tree due to soft-internal validation failure (labelled by reason). Pairs with soft_internal_recovered_total to gauge whether gossip-driven recovery is sufficient.");
+    counter SOFT_INTERNAL_RECOVERED("irys.block.soft_internal_recovered_total", "Blocks previously discarded as soft-internal that later reached Valid (labelled by the original discard reason). Pair with soft_internal_discard_total to gauge gossip-driven recovery rate.");
 }
 
 // Defined separately: uses the "irys-chain" meter (not "irys-actors") but
@@ -133,6 +143,14 @@ pub(crate) fn record_validation_queue_snapshot(
 
 pub(crate) fn record_validation_task_force_aborted(stage: &'static str) {
     VALIDATION_TASK_FORCE_ABORTED.add(1, &[KeyValue::new("stage", stage)]);
+}
+
+pub(crate) fn record_validation_concurrent_cancel_requeued() {
+    VALIDATION_CONCURRENT_CANCEL_REQUEUED.add(1, &[]);
+}
+
+pub(crate) fn record_validation_concurrent_cancel_repeated() {
+    VALIDATION_CONCURRENT_CANCEL_REPEATED.add(1, &[]);
 }
 
 pub(crate) fn record_cache_stats(chunk_count: u64, chunk_size_bytes: u64) {
@@ -234,4 +252,36 @@ pub(crate) fn record_data_tx_ingested() {
 
 pub(crate) fn record_data_tx_unfunded() {
     DATA_TX_UNFUNDED.add(1, &[]);
+}
+
+pub(crate) fn record_cached_data_root_evicted() {
+    CACHED_DATA_ROOT_EVICTED.add(1, &[]);
+}
+
+pub(crate) fn record_block_pre_validation_failed(reason: &'static str) {
+    BLOCK_PRE_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_block_validation_failed(reason: &'static str) {
+    BLOCK_VALIDATION_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub fn record_chain_sync_block_rejected(reason: &'static str) {
+    CHAIN_SYNC_BLOCK_REJECTED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_block_production_lookup_failed(site: &'static str) {
+    BLOCK_PRODUCTION_LOOKUP_FAILED.add(1, &[KeyValue::new("site", site)]);
+}
+
+pub(crate) fn record_cache_txid_scrub_failed() {
+    CACHE_TXID_SCRUB_FAILED.add(1, &[]);
+}
+
+pub(crate) fn record_soft_internal_discard(reason: &'static str) {
+    SOFT_INTERNAL_DISCARD.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+pub(crate) fn record_soft_internal_recovered(reason: &'static str) {
+    SOFT_INTERNAL_RECOVERED.add(1, &[KeyValue::new("reason", reason)]);
 }

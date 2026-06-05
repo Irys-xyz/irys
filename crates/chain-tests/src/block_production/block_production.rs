@@ -1359,6 +1359,13 @@ async fn spiky_heavy3_test_always_build_on_max_difficulty_block() -> eyre::Resul
     // Enable validation on the peer and wait until it processes the backlog.
     peer_node.node_ctx.set_validation_enabled(true);
 
+    // Wait for the queued backlog to land on the canonical chain. Without this,
+    // `mine_block` may snapshot a pre-drain height and return a backlog block
+    // that arrives during the wait instead of the locally produced one.
+    peer_node
+        .wait_for_block_at_height(last_source_block.height, 30)
+        .await?;
+
     // Mine a block on the peer using the standard production flow.
     let normal_block = peer_node.mine_block().await?;
 

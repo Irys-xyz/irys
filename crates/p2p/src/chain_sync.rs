@@ -1,5 +1,6 @@
-use crate::block_pool::{BlockRemovalReason, FailureReason};
+use crate::block_pool::{BlockRemovalReason, CriticalBlockPoolError, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
+use crate::types::AdvisoryGossipError;
 use crate::{BlockPool, GossipClient, GossipError, GossipResult};
 use irys_actors::MempoolFacade;
 use irys_actors::block_discovery::BlockDiscoveryFacade;
@@ -317,6 +318,18 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .await;
 
         if let Some(orphaned_blocks) = maybe_orphaned_blocks {
+            // Dispatch order is deliberately *not* sorted by `block_hash`.  The
+            // orphans come out of `get_orphaned_blocks_by_parent`'s HashSet
+            // (so iteration order is arbitrary per-node-per-run, not arrival
+            // order) and we hand them to `join_all` below for concurrent
+            // processing — there's no real "first-gossiped wins" semantics
+            // here, only "no canonical order".  That property is the point:
+            // a deterministic hash-sort would replace per-node randomization
+            // with a network-wide order an attacker could bias via hash
+            // grinding for fork-tiebreak influence.  Local nondeterminism is
+            // bounded because the next canonical block resolves the tip
+            // across the network and makes any transient disagreement
+            // self-healing.
             let mut futures = Vec::new();
             for orphaned_block in orphaned_blocks {
                 info!(
@@ -426,9 +439,30 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .pull_and_process_block(block_hash, self.sync_state.is_trusted_sync())
             .await
         {
+            let rejection_reason = match &err {
+                GossipError::BlockPool(CriticalBlockPoolError::ForkedBlock(_)) => {
+                    Some("forked_block")
+                }
+                GossipError::BlockPool(CriticalBlockPoolError::PreviousBlockNotFound(_)) => {
+                    Some("prev_block_not_found")
+                }
+                GossipError::BlockPool(_) => Some("block_pool_other"),
+                // Block stays in cache for retry — see is_advisory() branch at
+                // line 461. Distinct metric so operators can tell apart "we
+                // dropped the block" from "we kept it for retry".
+                GossipError::Advisory(AdvisoryGossipError::BlockPoolError(_)) => {
+                    Some("block_pool_advisory_retain_cache")
+                }
+                _ => None,
+            };
+            if let Some(reason) = rejection_reason {
+                irys_actors::record_chain_sync_block_rejected(reason);
+            }
             error!(
-                "Failed to pull and process block {:?}: {:?}",
-                block_hash, err
+                %block_hash,
+                rejection_reason = ?rejection_reason,
+                error = ?err,
+                "chain_sync.pull_and_process_block_failed"
             );
 
             if !err.is_advisory() {
@@ -1406,10 +1440,17 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade>(
             reported_height,
             peers.len()
         );
-        // Filter out blocks that are already processed or currently being processed
+        // Filter out blocks that are already processed or currently
+        // being processed. The dedup helper also re-emits
+        // `AttemptReprocessingBlock` for parked-after-SoftInternal
+        // blocks whose per-block cooldown has elapsed, so periodic-sync
+        // re-pulls can recover a parked tip block whose child has not
+        // arrived (the orphan-resolve recovery path is otherwise the
+        // only non-LRU way out of the parked state — see the
+        // `BlockDedupStatus::ParkedReadyForRetry` path in block_pool).
         if gossip_data_handler
             .block_pool
-            .is_block_processing_or_processed(&block_hash, reported_height)
+            .dedup_and_maybe_emit_reprocess(&block_hash, reported_height)
             .await
         {
             debug!(

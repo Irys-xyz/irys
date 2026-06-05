@@ -134,13 +134,19 @@ pub fn clear_data_tx_metadata(
 }
 
 /// Clear the promoted_height for a data transaction (used during re-orgs)
+///
+/// If `included_height` is still set, the row is kept with only `promoted_height` cleared.
+/// If neither field would remain set after the clear, the row is deleted entirely.
 pub fn clear_data_tx_promoted_height(
     tx: &(impl DbTxMut + DbTx),
     tx_id: &H256,
 ) -> Result<(), reth_db::DatabaseError> {
-    let mut metadata = get_data_tx_metadata(tx, tx_id)?.unwrap_or_default();
+    let Some(mut metadata) = get_data_tx_metadata(tx, tx_id)? else {
+        // Row absent — no-op; delete is safe but unnecessary.
+        return Ok(());
+    };
     metadata.promoted_height = None;
-    // Only store if included_height is set, otherwise delete entirely
+    // Only keep the row if included_height is still meaningful.
     if metadata.is_included() {
         put_data_tx_metadata(tx, tx_id, metadata)
     } else {
@@ -191,6 +197,36 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_data_tx_promoted_height(tx, tx_id)?;
+    }
+    Ok(())
+}
+
+/// Clear the included_height for a data transaction (used during re-orgs of term-ledger blocks).
+///
+/// Always deletes the row. A row with `{included: None, promoted: Some}` is
+/// semantically illegal — `promoted_height` requires the tx to have been
+/// included at some prior height, and the reorg invariant in
+/// `BlockMigrationService::persist_metadata` guarantees the matching Publish
+/// block is also in `blocks_to_clear`. Its `clear_data_tx_promoted_height`
+/// call becomes a no-op on the already-deleted row. If the tx is
+/// re-canonical on the new fork, Phase 2 recreates the row via
+/// `set_data_tx_included_height` and any matching Publish re-confirmation
+/// restores `promoted_height` in the same transaction.
+pub fn clear_data_tx_included_height(
+    tx: &impl DbTxMut,
+    tx_id: &H256,
+) -> Result<(), reth_db::DatabaseError> {
+    tx.delete::<IrysDataTxMetadata>(*tx_id, None)?;
+    Ok(())
+}
+
+/// Batch operation: Clear included_height for multiple data transactions (re-org handling).
+pub fn batch_clear_data_tx_included_height<'a>(
+    tx: &impl DbTxMut,
+    tx_ids: impl IntoIterator<Item = &'a H256>,
+) -> Result<(), reth_db::DatabaseError> {
+    for tx_id in tx_ids {
+        clear_data_tx_included_height(tx, tx_id)?;
     }
     Ok(())
 }
@@ -343,6 +379,172 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(metadata.is_none());
+        }
+    }
+
+    // ---- clear_data_tx_included_height tests ----
+
+    /// When only `included_height` is set, clearing it should delete the row entirely
+    /// (since a row with neither field set cannot be stored).
+    #[test]
+    fn clear_included_height_only_set_deletes_row() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        db.update(|tx| set_data_tx_included_height(tx, &tx_id, 42))
+            .unwrap()
+            .unwrap();
+
+        // Verify it's there
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.included_height, Some(42));
+        assert_eq!(meta.promoted_height, None);
+
+        // Clear it
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Row should be gone
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(
+            meta.is_none(),
+            "row should be deleted when no fields remain"
+        );
+    }
+
+    /// Clearing `included_height` always deletes the row, even when
+    /// `promoted_height` was set. A `{included: None, promoted: Some}` row is
+    /// semantically illegal — `promoted_height` requires the tx to have been
+    /// included at a prior height, and the reorg invariant guarantees the
+    /// matching Publish block is also being cleared in the same Phase 1.
+    #[test]
+    fn clear_included_height_deletes_row_even_when_promoted_is_set() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        db.update(|tx| set_data_tx_included_height(tx, &tx_id, 10))
+            .unwrap()
+            .unwrap();
+        db.update(|tx| set_data_tx_promoted_height(tx, &tx_id, 20))
+            .unwrap()
+            .unwrap();
+
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(
+            meta.is_none(),
+            "row must be deleted; {{None, Some}} is an illegal persistent state"
+        );
+    }
+
+    /// Calling `clear_data_tx_included_height` on a missing row is a no-op and
+    /// must not return an error.
+    #[test]
+    fn clear_included_height_missing_row_is_noop() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        // No setup — row doesn't exist.
+        db.update(|tx| clear_data_tx_included_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Still absent, no panic/error.
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(meta.is_none());
+    }
+
+    /// Calling `clear_data_tx_promoted_height` on a missing row is a no-op and
+    /// must not return an error.
+    #[test]
+    fn clear_promoted_height_missing_row_is_noop() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_id = H256::random();
+        // No setup — row doesn't exist.
+        db.update(|tx| clear_data_tx_promoted_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Still absent, no panic/error.
+        let meta = db
+            .view(|tx| get_data_tx_metadata(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+        assert!(meta.is_none());
+    }
+
+    /// `batch_clear_data_tx_included_height` clears all supplied tx_ids.
+    #[test]
+    fn batch_clear_included_height_happy_path() {
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            temp_dir.path(),
+            ConsensusTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let tx_ids: Vec<H256> = (0..3).map(|_| H256::random()).collect();
+
+        // Set included height for all
+        db.update(|tx| batch_set_data_tx_included_height(tx, &tx_ids, 55))
+            .unwrap()
+            .unwrap();
+
+        // Batch-clear
+        db.update(|tx| batch_clear_data_tx_included_height(tx, &tx_ids))
+            .unwrap()
+            .unwrap();
+
+        // All rows should be gone (only included_height was set)
+        for tx_id in &tx_ids {
+            let meta = db
+                .view(|tx| get_data_tx_metadata(tx, tx_id))
+                .unwrap()
+                .unwrap();
+            assert!(meta.is_none(), "row for {tx_id:?} should be deleted");
         }
     }
 

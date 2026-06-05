@@ -175,6 +175,14 @@ Once you’ve configured the `./config.toml` file and `<base dir>/irys_submodule
 OR run the executable directly: 
 
 `target/release/irys`
+
+**Important:** you must run the node under a supervisor that automatically restarts it on exit (e.g. `systemd` with `Restart=always`, Docker with `--restart=unless-stopped`, or equivalent). This is a requirement, not a recommendation. Without one, the node stays offline after any crash until you manually restart it, falls behind the network, and stops earning rewards.
+
+On any unrecoverable local fault — a failed DB read, a poisoned lock, a verifier thread panic, an internal arithmetic bug, etc. — the node exits the process immediately. There is no occurrence threshold, no retry, and no in-process recovery: a single unrecoverable fault ends the process and the supervisor must bring it back up.
+
+**Behavioural change:** earlier releases logged these local faults and kept running. This release exits on the same conditions. If you are upgrading and do not already have an auto-restart supervisor in place, add one before running this build.
+
+**Why:** when the node hits a local fault during block validation, it cannot tell whether the peer's block was actually valid or invalid — the failure was inside the node, not in the block. Marking the block either way risks forking off the network with silent data-level errors, so the safe response is to abort and let the supervisor restart the node clean from a known-good state.
 ## Auto Stake and Pledge
 By default your mining address needs to be staked before your storage modules can be pledged and mined. When you are ready to do this, and your node has synchronised to the network head, change the `stake_pledge_drives` config value in `./config.toml` to `true` and restart your node. If you have the funds in your miners account the node will automatically stake your mining address and pledge any storage modules you’ve configured for mining on Irys.
 ## Logs
@@ -184,3 +192,50 @@ A full node that tracks the current network state without participating in minin
 
 1. Since the node will not provide storage, the `irys_submodules.toml` file should remain empty.
 2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.
+
+# Snapshots
+A snapshot is a portable, content-addressed archive of an Irys node's chain state. It bundles the Irys consensus DB, the Reth execution DB, the Reth `static_files/`, the block index, and the genesis files into a single `.tar.zst` archive. A lagging node can be brought up to the snapshot's height without going through P2P sync.
+
+Snapshots intentionally exclude node-identity material (mining key, peer list, JWT, discovery secret) and storage-module packing (chunks are XOR-packed with the source miner's address — non-portable). The importing node must supply its own `config.toml` and `irys_submodules.toml`; because packed chunks are bound to the source miner's address, the importing node packs its own storage modules from its `irys_submodules.toml` on first boot rather than restoring the source node's modules.
+
+## Exporting a snapshot
+The node should be stopped before exporting against its data directory. The tool can also run against a running node thanks to MDBX's MVCC, but a stopped node guarantees a clean tip and a consistent Reth `db/`↔`static_files/` pair — against a running node those two are copied at slightly different instants and can skew.
+
+```sh
+irys-cli snapshot export \
+  --output /tmp/snapshot.tar.zst
+```
+
+The `--data-dir` is read from `config.toml`'s `base_directory` by default. Override with `--data-dir <path>` if needed. The schema and chain ID embedded in the archive are validated on import.
+
+Flags:
+
+- `--include-caches` — keep `CachedDataRoots`, `CachedChunksIndex`, `CachedChunks`, `IngressProofs` in the export. Off by default; these tables are rebuildable from canonical state.
+- `--no-compact` — skip MDBX page compaction during the copy. Produces a larger archive faster.
+- `--no-throttle-mvcc` — skip MVCC throttling. Faster but may stall a busy writer; only use against a stopped node.
+
+## Importing a snapshot
+The target data directory must be empty (or absent) unless `--force` is passed.
+
+```sh
+irys-cli snapshot import \
+  --input /tmp/snapshot.tar.zst \
+  --data-dir /var/lib/irys/.irys
+```
+
+The import flow validates the archive's `format_version`, `chain_id`, and `irys_schema_version`, refuses an archive containing more than one root manifest, verifies SHA-256 checksums on every declared file, sanity-opens both the staged consensus and Reth DBs before touching the target, then places state into `data-dir/`. An older `irys_schema_version` requires `--force` (migrations run on first boot); a schema newer than this binary is never importable, even with `--force`.
+
+After import, populate `config.toml` with a fresh mining key, ensure `irys_submodules.toml` lists your storage drives, and start the node normally. On first boot the node packs its own storage modules from that configuration (the source node's packed chunks are not portable).
+
+## Snapshot contents
+| Layer | Included | Notes |
+| --- | --- | --- |
+| `irys_consensus_data/` (MDBX) | yes | `PeerListItems` always cleared; cache tables cleared unless `--include-caches`. |
+| `reth/db/` (MDBX) | yes | All execution state. |
+| `reth/static_files/` | yes | Header / receipt segments. |
+| `block_index/` | yes | If present (some versions migrate this into the consensus DB). |
+| `.irys_genesis.json` / `.irys_genesis_commitments.json` | yes | If present. |
+| `reth/jwt.hex`, `reth/discovery-secret` | **no** | Node-local identity. |
+| `reth/known-peers.json`, `reth/reth.toml`, `reth/blobstore/`, `reth/logs/`, `reth/invalid_block_hooks/` | **no** | Node-local or rebuildable. |
+| `config.toml`, `irys_submodules.toml` | **no** | Per-node operator config. |
+| Storage modules (packed chunks) | **no** | Bound to source miner's address; not portable. |

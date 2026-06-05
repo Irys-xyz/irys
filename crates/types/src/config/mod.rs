@@ -224,6 +224,44 @@ impl Config {
             );
         }
 
+        // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
+        // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
+        // (block_validation.rs) where the per-proof intersection loop picks
+        // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
+        // consensus-fork vector when `block_range` straddles multiple Submit
+        // slots.  The determinism fix lives on `fix/assigned-miners-determinism`
+        // and is a consensus rule change that must be coordinated with a
+        // network upgrade.  Under all currently-deployed configs the value is
+        // 0 and the non-deterministic path is vacuous; raising it without the
+        // determinism fix risks divergence between nodes.
+        //
+        // When the determinism fix lands and gets activated, REMOVE this guard
+        // (and the matching test in this file).  Until then this assert errs
+        // loudly at startup so a config bump can't silently activate the bug.
+        ensure!(
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees
+                == 0,
+            "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
+             until fix/assigned-miners-determinism lands — the current `get_assigned_ingress_proofs` \
+             impl picks `assigned_miners` via non-deterministic HashMap iteration when \
+             block_range intersects multiple Submit slots",
+            self.consensus
+                .hardforks
+                .frontier
+                .number_of_ingress_proofs_from_assignees,
+        );
+        if let Some(ref fork) = self.consensus.hardforks.next_name_tbd {
+            ensure!(
+                fork.number_of_ingress_proofs_from_assignees == 0,
+                "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
+                 must be 0 until fix/assigned-miners-determinism lands — see frontier guard above",
+                fork.number_of_ingress_proofs_from_assignees,
+            );
+        }
+
         Ok(())
     }
 }
@@ -1126,6 +1164,62 @@ mod validate_tests {
             msg.contains("max_allowed_vdf_fork_steps"),
             "expected error about vdf fork steps, got: {msg}"
         );
+    }
+
+    /// Guard for `number_of_ingress_proofs_from_assignees`: the consensus
+    /// rule that consumes this value (`get_assigned_ingress_proofs`) only
+    /// became deterministic once `slot_ranges` switched to a `BTreeMap`.
+    /// Until that fix is gated behind a hardfork activation, the value MUST
+    /// stay `0` everywhere (no nondeterministic path is exercised because
+    /// the caller's clamp zeroes the requirement when the input is 0).
+    /// These tests pin both ensure! arms.
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_frontier() {
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 1;
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("frontier.number_of_ingress_proofs_from_assignees"),
+            "expected frontier guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nonzero_assignee_proofs_on_next_name_tbd() {
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 1,
+            });
+        });
+        let err = cfg.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("next_name_tbd.number_of_ingress_proofs_from_assignees"),
+            "expected next_name_tbd guard error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_assignee_proofs_zero_on_both_arms() {
+        // Default `NodeConfig::testing()` already pins both arms to 0; this
+        // asserts that the guard does NOT spuriously reject the happy path
+        // (e.g. by mishandling the `Option` arm when next_name_tbd is set).
+        use crate::hardfork_config::NextNameTBD;
+        let cfg = config_with_consensus(|c| {
+            c.hardforks.frontier.number_of_ingress_proofs_from_assignees = 0;
+            c.hardforks.next_name_tbd = Some(NextNameTBD {
+                activation_timestamp: crate::UnixTimestamp::from_secs(u64::MAX),
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 0,
+            });
+        });
+        cfg.validate()
+            .expect("both arms set to 0 should pass the assignee-proofs guard");
     }
 
     #[rstest]

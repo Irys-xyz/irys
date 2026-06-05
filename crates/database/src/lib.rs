@@ -21,6 +21,8 @@ pub mod provider;
 /// Extension traits for custom tables
 pub mod reth_ext;
 pub mod scoped_tx;
+/// Online MDBX env copy + node-local table stripping for snapshot export
+pub mod snapshot;
 /// Tables & methods specific to submodule databases
 pub mod submodule;
 /// Local macro definition of chain specific mdbx tables

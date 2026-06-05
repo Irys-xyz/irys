@@ -13,6 +13,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 reth.workspace = true
 reth-db.workspace = true
 reth-chainspec.workspace = true
+reth-node-core.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
 irys-reth = { workspace = true, features = ["test-utils"] }
@@ -33,9 +34,11 @@ alloy-evm.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
+irys-testing-utils.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 test-log.workspace = true
+reth-stages-types.workspace = true
 
 [lints]
 workspace = true

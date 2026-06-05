@@ -36,6 +36,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver},
     time::Duration,
@@ -50,6 +51,65 @@ pub enum VdfValidationResult {
     Valid,
     Invalid(eyre::Report),
     Cancelled,
+    /// Parent block was evicted from the block tree between VDF task queuing
+    /// and Stage B (seed-data validation against parent). Same eviction race
+    /// every other site in this branch classifies as `SoftInternal`; we
+    /// surface it here instead of panicking inside `spawn_blocking`. The
+    /// dispatch loop maps this to `ValidationError::ParentBlockMissing`,
+    /// which routes through `is_internal_failure() = true` → the block parks
+    /// for retry, no peer attribution.
+    ParentMissing {
+        parent_hash: BlockHash,
+    },
+}
+
+/// Sentinel error returned from `ensure_vdf_is_valid` when Stage B observes
+/// the parent absent from `block_tree`. Downcast in
+/// `PreemptibleVdfTask::execute` and converted to
+/// `VdfValidationResult::ParentMissing`. The prior shape `.expect`ed the
+/// parent, panicking and triggering supervisor restart on what is a
+/// recoverable eviction race; this sentinel surfaces it as SoftInternal.
+#[derive(Debug, thiserror::Error)]
+#[error("VDF Stage B: parent block {parent_hash} not found in block tree")]
+pub(crate) struct VdfStageBParentMissing {
+    pub parent_hash: BlockHash,
+}
+
+/// Sentinel error returned from `ensure_vdf_is_valid` when a `spawn_blocking`
+/// task in Stage B or Stage C/D resolves as a `JoinError` (thread panic or
+/// external `abort()`). Downcast in `PreemptibleVdfTask::execute` to split the
+/// two cases: panics route to a local-fault `panic!` (never-mislabel rule);
+/// external aborts route to `VdfValidationResult::Cancelled` (same requeue
+/// lane as watchdog-triggered aborts). Without this sentinel the `JoinError`
+/// falls through to the `None` arm and becomes `VdfValidationResult::Invalid`,
+/// mislabelling a local infrastructure failure as a peer-attributable consensus
+/// rejection.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "VDF blocking task failed (stage={stage:?}, is_panic={is_panic}, is_cancelled={is_cancelled})"
+)]
+pub(crate) struct VdfBlockingTaskFailed {
+    pub is_panic: bool,
+    pub is_cancelled: bool,
+    pub stage: VdfTaskStage,
+}
+
+/// Look up the parent for Stage B (seed-data validation) outside the blocking
+/// closure. Returns a cloned `IrysBlockHeader` on hit, or the typed
+/// `VdfStageBParentMissing` sentinel on miss. Factored out so the
+/// lookup-then-route path can be unit-tested against a real `BlockTree`
+/// without spinning up a full `ValidationServiceInner`.
+pub(crate) fn lookup_stage_b_parent(
+    block_tree_guard: &BlockTreeReadGuard,
+    block: &IrysBlockHeader,
+) -> Result<IrysBlockHeader, VdfStageBParentMissing> {
+    let binding = block_tree_guard.read();
+    binding
+        .get_block(&block.previous_block_hash)
+        .cloned()
+        .ok_or(VdfStageBParentMissing {
+            parent_hash: block.previous_block_hash,
+        })
 }
 
 #[repr(u8)]
@@ -97,14 +157,19 @@ impl VdfTaskStage {
 impl From<u8> for VdfTaskStage {
     fn from(raw: u8) -> Self {
         match raw {
-            // weird pattern for single source of discriminant truth
+            // weird pattern for single source of discriminant truth.
+            // Unknown discriminants panic loudly: a new variant must add an arm here.
+            x if x == Self::Starting as u8 => Self::Starting,
             x if x == Self::WaitPrevStep as u8 => Self::WaitPrevStep,
             x if x == Self::ValidateSeeds as u8 => Self::ValidateSeeds,
             x if x == Self::ValidateBatch as u8 => Self::ValidateBatch,
             x if x == Self::FastForwardBatch as u8 => Self::FastForwardBatch,
             x if x == Self::WaitFinalCatchUp as u8 => Self::WaitFinalCatchUp,
             x if x == Self::Completed as u8 => Self::Completed,
-            _ => Self::Starting,
+            other => panic!(
+                "VdfTaskStage::from(u8) unknown discriminant {other} — \
+                 a new VdfTaskStage variant needs an arm here"
+            ),
         }
     }
 }
@@ -357,9 +422,12 @@ impl ValidationService {
                                     custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
-                                self.send_validation_result(hash, ValidationResult::Invalid(
-                                    ValidationError::VdfValidationFailed(vdf_error.to_string())
-                                ));
+                                vdf_terminal_finalize_via(
+                                    &mut coordinator,
+                                    &self.inner.service_senders.block_tree,
+                                    hash,
+                                    ValidationError::VdfValidationFailed(vdf_error.to_string()),
+                                );
                             }
                             VdfValidationResult::Cancelled => {
                                 metrics::record_validation_result("vdf", "cancelled");
@@ -368,6 +436,31 @@ impl ValidationService {
                                 // recalculates priority (which may have changed
                                 // due to reorgs) before re-entering the queue.
                                 coordinator.submit_task(task);
+                            }
+                            VdfValidationResult::ParentMissing { parent_hash } => {
+                                // Stage B observed the parent missing from
+                                // block_tree (eviction race). Surface as
+                                // ParentBlockMissing → SoftInternal so the
+                                // block parks for retry and no peer attribution
+                                // occurs. See `lookup_stage_b_parent` and the
+                                // `seeds_validation_task` mirror path.
+                                metrics::record_validation_result("vdf", "parent_missing");
+                                metrics::record_validation_full_duration_ms(
+                                    task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                                warn!(
+                                    block.hash = %hash,
+                                    block.parent_hash = %parent_hash,
+                                    "VDF Stage B: parent missing from block tree (eviction race); routing as SoftInternal"
+                                );
+                                vdf_terminal_finalize_via(
+                                    &mut coordinator,
+                                    &self.inner.service_senders.block_tree,
+                                    hash,
+                                    ValidationError::ParentBlockMissing {
+                                        block_hash: parent_hash,
+                                    },
+                                );
                             }
                         }
                         Err(join_error) => if join_error.is_panic() {
@@ -422,6 +515,13 @@ impl ValidationService {
                     match result {
                         Some(Ok((id, validation))) => {
                             coordinator.concurrent_task_blocks.remove(&id);
+                            // The block produced a verdict — clear any
+                            // accumulated cancel-retry counter so a future
+                            // resubmission of the same hash starts fresh
+                            // (no stale state from a prior burst of cancels
+                            // that didn't reach the cap before the run
+                            // succeeded).
+                            coordinator.clear_concurrent_cancel_retries(&validation.block_hash);
                             metrics::record_validation_full_duration_ms(
                                 validation.enqueued_at.elapsed().as_secs_f64() * 1000.0,
                             );
@@ -432,32 +532,180 @@ impl ValidationService {
                         }
                         Some(Err(e)) => {
                             let removed = coordinator.concurrent_task_blocks.remove(&e.id());
-                            let message = if e.is_cancelled() {
-                                "Concurrent validation task was cancelled"
-                            } else {
-                                "Concurrent validation task panicked"
-                            };
-                            error!(
-                                block.hash = ?removed.as_ref().map(|(h, _)| h),
-                                custom.error = %e,
-                                message
-                            );
-                            if let Some((hash, enqueued_at)) = removed {
-                                metrics::record_validation_full_duration_ms(
-                                    enqueued_at.elapsed().as_secs_f64() * 1000.0,
-                                );
-                                if !self.send_validation_result(hash, ValidationResult::Invalid(
-                                    ValidationError::TaskPanicked {
-                                        task: "concurrent_validation".to_string(),
-                                        details: e.to_string(),
-                                    },
-                                )) {
-                                    // Block tree won't handle diagnostics since send failed,
-                                    // so record directly as a fallback.
-                                    self.inner.chain_sync_state.record_validation_finished(&hash);
-                                    self.inner.chain_sync_state.record_block_validation_error(
-                                        format!("block={} error=concurrent task panicked: {}", hash, e),
+                            if e.is_cancelled() {
+                                // JoinError::Cancelled here is unexpected: the
+                                // only intentional cancel path is
+                                // `ValidationCoordinator::shutdown()` via
+                                // `concurrent_tasks.abort_all()`, which runs
+                                // after the main loop has already broken on
+                                // the shutdown signal — i.e. it cannot reach
+                                // this arm. So a cancel landing here is a
+                                // runtime hiccup (sibling worker panic,
+                                // runtime tear-down race, etc.). The first
+                                // few cancellations for a given block are
+                                // transparently requeued (mirrors the VDF
+                                // cancel arm's "defensive resubmit"); past
+                                // `MAX_CONCURRENT_CANCEL_RETRIES` we stop
+                                // looping and route the block out via
+                                // `ValidationCancelReason::RepeatedCancellation`
+                                // so a poisoned local condition (sibling-
+                                // worker panic loop, runtime distress, etc.)
+                                // can't tight-loop between the VDF queue and
+                                // the JoinSet and starve other blocks. The
+                                // give-up path parks the block as
+                                // SoftInternal; fresh gossip is the recovery
+                                // lane.
+                                //
+                                // Metric increments are routed by decision
+                                // (requeued vs repeated) so operator dashboards
+                                // can distinguish self-healing from terminal
+                                // cap-hit park events.
+                                if let Some((hash, enqueued_at, sealed_block, skip_vdf_validation)) = removed {
+                                    let decision = coordinator.record_concurrent_cancel(hash);
+                                    match decision {
+                                        active_validations::ConcurrentCancelDecision::Requeue { attempt } => {
+                                            metrics::record_validation_concurrent_cancel_requeued();
+                                            warn!(
+                                                block.hash = %hash,
+                                                custom.error = %e,
+                                                custom.metric = "validation_concurrent_cancel_requeued",
+                                                retry.attempt = attempt,
+                                                retry.max_attempts = active_validations::MAX_CONCURRENT_CANCEL_RETRIES,
+                                                "Concurrent validation task unexpectedly cancelled; requeuing - sustained occurrence suggests Tokio runtime distress or external abort source"
+                                            );
+                                            // Do NOT fire `record_validation_full_duration_ms`
+                                            // here — this validation is still in
+                                            // flight. Firing now would double-count
+                                            // when the requeued task finally
+                                            // completes. Preserve `enqueued_at` so
+                                            // the eventual completion records the
+                                            // true gossip-to-completion latency
+                                            // including the cancelled attempt.
+                                            //
+                                            // Resubmit through `submit_task` (which
+                                            // enters the VDF queue first). Re-running
+                                            // VDF for an already-VDF-validated block
+                                            // is wasted work but cheap, and the cancel
+                                            // could have fired at any stage — VDF
+                                            // re-entry is the only path that covers
+                                            // every possibility safely.
+                                            //
+                                            // Original `parent_span` (gossip trace
+                                            // context) was consumed when the task was
+                                            // first constructed; on requeue, attach
+                                            // to the current span so the trace tree
+                                            // continues from this handler rather than
+                                            // dangling.
+                                            let task = block_validation_task::BlockValidationTask::new_with_enqueued_at(
+                                                sealed_block,
+                                                Arc::clone(&self.inner),
+                                                self.inner.block_tree_guard.clone(),
+                                                skip_vdf_validation,
+                                                tracing::Span::current(),
+                                                enqueued_at,
+                                            );
+                                            coordinator.submit_task(task);
+                                            // No `record_validation_finished` here:
+                                            // we're keeping the validation in flight.
+                                        }
+                                        active_validations::ConcurrentCancelDecision::GiveUp { attempt } => {
+                                            // Cap hit — stop looping on this
+                                            // block. Route through
+                                            // `RepeatedCancellation` (SoftInternal:
+                                            // validity unknown, the cancel said
+                                            // nothing about the peer's block, the
+                                            // block parks for fresh gossip
+                                            // recovery alongside other
+                                            // SoftInternal discards).
+                                            metrics::record_validation_concurrent_cancel_repeated();
+                                            error!(
+                                                block.hash = %hash,
+                                                custom.error = %e,
+                                                custom.metric = "validation_concurrent_cancel_repeated",
+                                                retry.attempt = attempt,
+                                                retry.max_attempts = active_validations::MAX_CONCURRENT_CANCEL_RETRIES,
+                                                "Concurrent validation task cancelled past retry cap; routing as RepeatedCancellation SoftInternal — fresh gossip is the recovery lane"
+                                            );
+                                            // Fire the full-duration metric
+                                            // now (validation is leaving the
+                                            // active set — the cancelled
+                                            // attempts collectively count
+                                            // toward this final outcome).
+                                            metrics::record_validation_full_duration_ms(
+                                                enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                            );
+                                            // `_sealed_block` and
+                                            // `_skip_vdf_validation` are not
+                                            // needed on the give-up path —
+                                            // we're not constructing another
+                                            // BlockValidationTask. Dropping
+                                            // them releases the Arc refcount.
+                                            let _ = (sealed_block, skip_vdf_validation);
+                                            // Mirror the panic-arm shape: route
+                                            // through `.into()` so the From
+                                            // dispatcher classifies as
+                                            // InternalFailure SoftInternal.
+                                            if !self.send_validation_result(
+                                                hash,
+                                                ValidationError::ValidationCancelled {
+                                                    reason: crate::block_validation::ValidationCancelReason::RepeatedCancellation,
+                                                }
+                                                .into(),
+                                            ) {
+                                                // Block tree won't handle diagnostics since send failed,
+                                                // so record directly as a fallback.
+                                                self.inner.chain_sync_state.record_validation_finished(&hash);
+                                                self.inner.chain_sync_state.record_block_validation_error(
+                                                    format!("block={} error=concurrent task cancelled past retry cap: {}", hash, e),
+                                                );
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // No tuple in `concurrent_task_blocks` for
+                                    // this id — the prior behaviour just
+                                    // silently logged the cancel. Preserve
+                                    // that since we have no hash to route on.
+                                    warn!(
+                                        custom.error = %e,
+                                        custom.metric = "validation_concurrent_cancel_requeued",
+                                        "Concurrent validation task unexpectedly cancelled but bookkeeping entry was already removed; nothing to requeue"
                                     );
+                                }
+                            } else {
+                                error!(
+                                    block.hash = ?removed.as_ref().map(|(h, _, _, _)| h),
+                                    custom.error = %e,
+                                    "Concurrent validation task panicked"
+                                );
+                                if let Some((hash, enqueued_at, _sealed_block, _skip_vdf)) = removed {
+                                    // Panic terminates the attempt — clear
+                                    // any accumulated cancel-retry counter
+                                    // so a future resubmission starts fresh.
+                                    coordinator.clear_concurrent_cancel_retries(&hash);
+                                    metrics::record_validation_full_duration_ms(
+                                        enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                    );
+                                    // Route through `.into()` so the From dispatcher
+                                    // classifies TaskPanicked as InternalFailure
+                                    // (validity unknown, do not peer-attribute).
+                                    // Constructing `Invalid(TaskPanicked)` directly
+                                    // here would defeat the seal.
+                                    if !self.send_validation_result(
+                                        hash,
+                                        ValidationError::TaskPanicked {
+                                            task: "concurrent_validation".to_string(),
+                                            details: e.to_string(),
+                                        }
+                                        .into(),
+                                    ) {
+                                        // Block tree won't handle diagnostics since send failed,
+                                        // so record directly as a fallback.
+                                        self.inner.chain_sync_state.record_validation_finished(&hash);
+                                        self.inner.chain_sync_state.record_block_validation_error(
+                                            format!("block={} error=concurrent task panicked: {}", hash, e),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -492,18 +740,30 @@ impl ValidationService {
                         // The operator gets a loud crash signal; the underlying bug isn't
                         // re-triggered by the next block as a silent data-level failure.
                         // See design/docs/vdf-validation-stall-detection.md.
+                        // SAFETY: abort_stalled_current(...) does not .await, and there is no other
+                        // .await between that call and this re-read, so the watchdog cannot have been
+                        // cleared by a concurrent task. Do not insert .await between these two points
+                        // without revisiting this expect.
                         let current_vdf = coordinator
                             .vdf_scheduler
                             .current
                             .as_ref()
                             .expect("watchdog aborted a task; current must be Some");
+                        let completed_ago = current_vdf
+                            .completed_at
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .map(|t| t.elapsed());
+                        let handle_finished = current_vdf.handle.is_finished();
                         metrics::record_validation_task_force_aborted(stage.metric_label());
                         panic!(
-                            "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?})",
+                            "Validation watchdog force-aborted stalled VDF task (block={}, height={}, stage={}, stalled_for={:?}, completed_ago={:?}, handle_finished={})",
                             current_vdf.hash,
                             current_vdf.sealed_block.header().height,
                             stage.as_str(),
                             stalled_for,
+                            completed_ago,
+                            handle_finished,
                         );
                     }
 
@@ -566,26 +826,93 @@ impl ValidationService {
 
     /// Report a block's validation result to the block tree service.
     /// Returns `true` on success. On send failure, logs an error and returns `false`.
+    ///
+    /// PANICS on node-fault delivery failure: see [`send_validation_result_via`].
     fn send_validation_result(
         &self,
         block_hash: BlockHash,
         validation_result: ValidationResult,
     ) -> bool {
-        if let Err(e) = self.inner.service_senders.block_tree.send_traced(
-            crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash,
-                validation_result,
-            },
-        ) {
-            error!(
-                block.hash = %block_hash,
-                custom.error = ?e,
-                "Failed to send validation result to block tree service"
-            );
-            return false;
-        }
-        true
+        send_validation_result_via(
+            &self.inner.service_senders.block_tree,
+            block_hash,
+            validation_result,
+        )
     }
+}
+
+/// Free-function form of `ValidationService::send_validation_result` so the
+/// delivery-failure behaviour can be unit-tested without standing up a full
+/// `ValidationService`.
+///
+/// PANICS on node-fault delivery failure: if the channel send fails AND the
+/// unsent payload is an `InternalFailure` classified as a node fault, this
+/// function panics immediately rather than returning `false`. The block-tree
+/// handler (`on_block_validation_finished`) is the normal site that converts
+/// node faults into a panic+SIGINT for graceful shutdown; if delivery to it
+/// fails we must not silently swallow the fault and keep running. The panic
+/// is caught by `setup_panic_hook` in `crates/chain/src/main.rs`, which
+/// raises SIGINT for graceful shutdown. Same never-mislabel rationale as
+/// the block-tree node-fault site — see `ValidationError::is_node_fault`.
+fn send_validation_result_via(
+    block_tree_sender: &UnboundedSender<Traced<crate::block_tree_service::BlockTreeServiceMessage>>,
+    block_hash: BlockHash,
+    validation_result: ValidationResult,
+) -> bool {
+    if let Err(e) = block_tree_sender.send_traced(
+        crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+            block_hash,
+            validation_result,
+        },
+    ) {
+        error!(
+            block.hash = %block_hash,
+            custom.error = ?e,
+            "Failed to send validation result to block tree service"
+        );
+        // Recover the unsent payload from the send error so we can inspect
+        // its classification. If it's a node fault, the block-tree handler
+        // would have panicked on receipt — replicate that here so a dropped
+        // channel can't mask a node fault into silent continuation.
+        let (unsent_msg, _span) = e.0.into_parts();
+        if let crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+            validation_result: ValidationResult::InternalFailure(inner),
+            ..
+        } = &unsent_msg
+            && inner.is_node_fault()
+        {
+            panic!(
+                "validation result delivery failed for node-fault block (block={}, error={}); aborting node — see ValidationError::is_node_fault for rationale",
+                block_hash, inner
+            );
+        }
+        return false;
+    }
+    true
+}
+
+/// VDF terminal-arm housekeeping: clear the per-hash concurrent-cancel
+/// retry counter (so a future fresh submission of the same hash starts
+/// from zero) and dispatch the validation result. Shared by the VDF
+/// `Invalid` and `ParentMissing` arms — both are terminal verdicts.
+///
+/// Mirrors the counter-clear at the concurrent-stage Ok arm and the
+/// panic arm in the validation select loop. Without the counter clear, a
+/// prior attempt's cancel counter would silently shorten the retry
+/// budget for a future resubmission. See `concurrent_cancel_retries` and
+/// `record_concurrent_cancel`.
+///
+/// Returns the same `bool` as the underlying `send_validation_result_via`
+/// (true on successful dispatch, false otherwise). Panics on node-fault
+/// delivery failure — see [`send_validation_result_via`].
+pub(in crate::validation_service) fn vdf_terminal_finalize_via(
+    coordinator: &mut active_validations::ValidationCoordinator,
+    block_tree_sender: &UnboundedSender<Traced<crate::block_tree_service::BlockTreeServiceMessage>>,
+    block_hash: BlockHash,
+    error: ValidationError,
+) -> bool {
+    coordinator.clear_concurrent_cancel_retries(&block_hash);
+    send_validation_result_via(block_tree_sender, block_hash, error.into())
 }
 
 impl ValidationServiceInner {
@@ -626,6 +953,7 @@ impl ValidationServiceInner {
         cancel: Arc<AtomicU8>,
         stage_signal: Arc<AtomicU8>,
         progress_signal: Arc<Mutex<Instant>>,
+        completed_at_signal: Arc<Mutex<Option<Instant>>>,
         skip_vdf_validation: bool,
     ) -> eyre::Result<()> {
         let vdf_info = Arc::new(block.vdf_limiter_info.clone());
@@ -695,23 +1023,40 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: validating seed data against parent"
         );
         {
-            let block_tree_guard = self.block_tree_guard.clone();
+            // Lift the parent lookup OUT of the spawn_blocking closure.
+            // If the parent has been evicted between VDF task queuing and now
+            // (depth-prune / reorg eviction race), surface a typed sentinel
+            // error rather than panicking inside the blocking task. The
+            // sentinel is downcast in `PreemptibleVdfTask::execute` and
+            // mapped to `VdfValidationResult::ParentMissing`, which the
+            // dispatch loop routes via `ValidationError::ParentBlockMissing`
+            // → `SoftInternal` (same shape as `seeds_validation_task` in the
+            // concurrent stage).
+            let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
-            tokio::task::spawn_blocking(move || {
-                let binding = block_tree_guard.read();
-                let previous_block = binding
-                    .get_block(&block_header.previous_block_hash)
-                    .expect("previous block should exist");
+            match tokio::task::spawn_blocking(move || {
                 ensure!(
                     matches!(
-                        is_seed_data_valid(&block_header, previous_block, vdf_reset_frequency),
+                        is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency),
                         crate::block_tree_service::ValidationResult::Valid
                     ),
                     "Seed data is invalid"
                 );
                 Ok::<(), eyre::Report>(())
             })
-            .await??;
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(join_err) => {
+                    return Err(VdfBlockingTaskFailed {
+                        is_panic: join_err.is_panic(),
+                        is_cancelled: join_err.is_cancelled(),
+                        stage: VdfTaskStage::ValidateSeeds,
+                    }
+                    .into());
+                }
+            }
         }
 
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
@@ -751,7 +1096,7 @@ impl ValidationServiceInner {
                 let vdf_config_for_batch = vdf_config.clone();
                 let this_inner = Arc::clone(&self);
                 let cancel_for_blocking = Arc::clone(&cancel);
-                tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     vdf_step_batch_is_valid(
                         &this_inner.pool,
                         &vdf_info_for_batch,
@@ -762,7 +1107,19 @@ impl ValidationServiceInner {
                         cancel_for_blocking,
                     )
                 })
-                .await??;
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(join_err) => {
+                        return Err(VdfBlockingTaskFailed {
+                            is_panic: join_err.is_panic(),
+                            is_cancelled: join_err.is_cancelled(),
+                            stage: VdfTaskStage::ValidateBatch,
+                        }
+                        .into());
+                    }
+                }
             }
 
             record_vdf_task_progress(
@@ -810,6 +1167,14 @@ impl ValidationServiceInner {
         );
         final_wait_result?;
 
+        // Write completed_at before the stage atomic so a watchdog reading
+        // stage == Completed is guaranteed to find completed_at = Some(_).
+        // Mirrors the last_progress_at ordering invariant documented above
+        // record_vdf_task_progress: progress_signal is written before the
+        // stage atomic, and completed_at is written in that same window.
+        *completed_at_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         record_vdf_task_progress(&stage_signal, &progress_signal, VdfTaskStage::Completed);
         info!(
             vdf.global_step_number = vdf_info.global_step_number,
@@ -923,6 +1288,93 @@ mod tests {
         );
     }
 
+    /// On send failure, a node-fault `InternalFailure` payload must trigger a
+    /// local panic so the supervisor restarts the node — the block-tree
+    /// handler would have panicked on receipt and we must not silently swallow
+    /// the fault when the channel is dead. See `ValidationError::is_node_fault`.
+    #[test]
+    #[should_panic(expected = "validation result delivery failed for node-fault block")]
+    fn send_validation_result_panics_on_node_fault_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        // Drop the receiver so the send fails.
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(1);
+        // TaskPanicked routes through `From<ValidationError>` to
+        // `ValidationResult::InternalFailure` and is classified as a node fault
+        // (verifier thread crashed).
+        let node_fault: ValidationResult = ValidationError::TaskPanicked {
+            task: "concurrent_validation".to_string(),
+            details: "boom".to_string(),
+        }
+        .into();
+        assert!(
+            matches!(&node_fault, ValidationResult::InternalFailure(inner) if inner.is_node_fault()),
+            "precondition: TaskPanicked must classify as node-fault InternalFailure"
+        );
+
+        let _ = super::send_validation_result_via(&tx, block_hash, node_fault);
+    }
+
+    /// A non-node-fault `InternalFailure` (e.g. shadow-tx generation hit a
+    /// mempool race) must NOT panic on delivery failure — these are soft
+    /// retry-plausible failures, and the recovery path is leaving the block
+    /// in cache for re-evaluation rather than crashing the node.
+    #[test]
+    fn send_validation_result_returns_false_for_soft_internal_failure_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(2);
+        // ValidationCancelled(HeightDifference) is `is_internal_failure() = true` but
+        // `is_node_fault() = false` — a soft local failure.
+        let soft_internal: ValidationResult = ValidationError::ValidationCancelled {
+            reason: crate::block_validation::ValidationCancelReason::HeightDifference,
+        }
+        .into();
+        assert!(
+            matches!(&soft_internal, ValidationResult::InternalFailure(inner) if !inner.is_node_fault()),
+            "precondition: ValidationCancelled(HeightDifference) must classify as non-node-fault InternalFailure"
+        );
+
+        let result = super::send_validation_result_via(&tx, block_hash, soft_internal);
+        assert!(
+            !result,
+            "send failure must surface as `false`, not panic, for soft internal failures"
+        );
+    }
+
+    /// A consensus-rejection (`Invalid`) payload must NOT panic on delivery
+    /// failure — the block is genuinely bad, the dropped channel is a
+    /// liveness/shutdown concern handled separately by the caller.
+    #[test]
+    fn send_validation_result_returns_false_for_invalid_when_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            Traced<crate::block_tree_service::BlockTreeServiceMessage>,
+        >();
+        drop(rx);
+
+        let block_hash = H256::from_low_u64_be(3);
+        // ShadowTransactionInvalid is `is_internal_failure() = false` →
+        // routes to `ValidationResult::Invalid`.
+        let invalid: ValidationResult =
+            ValidationError::ShadowTransactionInvalid("bad tx".to_string()).into();
+        assert!(
+            matches!(&invalid, ValidationResult::Invalid(_)),
+            "precondition: ShadowTransactionInvalid must classify as Invalid"
+        );
+
+        let result = super::send_validation_result_via(&tx, block_hash, invalid);
+        assert!(
+            !result,
+            "send failure must surface as `false`, not panic, for consensus rejections"
+        );
+    }
+
     #[test_log::test(tokio::test)]
     async fn valid_batch_fast_forwards_only_validated_prefix() {
         let (config, vdf_info) = build_vdf_info(3);
@@ -959,5 +1411,88 @@ mod tests {
             rx.try_recv().is_err(),
             "only the validated prefix should be emitted"
         );
+    }
+
+    /// Stage B parent-missing regression: when the parent is absent from
+    /// `block_tree` at Stage B entry, the lookup helper must return the
+    /// typed `VdfStageBParentMissing` sentinel instead of panicking. The
+    /// wider pipeline maps this to `VdfValidationResult::ParentMissing` →
+    /// `ValidationError::ParentBlockMissing` → `SoftInternal`. Before the
+    /// fix, the lookup ran inside `spawn_blocking` with `.expect("previous block
+    /// should exist")` and panicked the node on a recoverable eviction race.
+    mod stage_b_parent_lookup {
+        use super::*;
+        use irys_domain::BlockTree;
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{ConsensusConfig, IrysBlockHeader};
+        use std::sync::RwLock;
+
+        fn signed_genesis() -> IrysBlockHeader {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = 0;
+            header.poa.chunk = Some(Default::default());
+            header.test_sign();
+            header
+        }
+
+        fn empty_block_tree() -> BlockTreeReadGuard {
+            let genesis = signed_genesis();
+            let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)))
+        }
+
+        #[test]
+        fn returns_sentinel_when_parent_absent() {
+            let block_tree = empty_block_tree();
+
+            // Child block whose parent hash isn't in the tree (genesis isn't
+            // the parent we're pointing at).
+            let mut child = IrysBlockHeader::new_mock_header();
+            child.height = 5;
+            child.previous_block_hash = H256::from_low_u64_be(0xdead);
+
+            let err = lookup_stage_b_parent(&block_tree, &child)
+                .expect_err("missing parent must surface the typed sentinel, not panic");
+
+            assert_eq!(
+                err.parent_hash, child.previous_block_hash,
+                "sentinel must carry the parent hash so the dispatch loop can build the ParentBlockMissing error"
+            );
+        }
+
+        #[test]
+        fn returns_cloned_parent_when_present() {
+            // Genesis is present in the tree; build a child whose parent IS
+            // genesis. Lookup must hit and return the cloned header.
+            let genesis = signed_genesis();
+            let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+            let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+
+            let mut child = IrysBlockHeader::new_mock_header();
+            child.height = 1;
+            child.previous_block_hash = genesis.block_hash;
+
+            let parent = lookup_stage_b_parent(&block_tree, &child)
+                .expect("parent present in tree must return Ok");
+            assert_eq!(parent.block_hash, genesis.block_hash);
+            assert_eq!(parent.height, genesis.height);
+        }
+
+        /// Direct round-trip: confirm the sentinel error converts cleanly to
+        /// `eyre::Report` (the actual return shape of `ensure_vdf_is_valid`)
+        /// and downcasts back to the typed sentinel so
+        /// `PreemptibleVdfTask::execute` can route it.
+        #[test]
+        fn sentinel_round_trips_through_eyre_report() {
+            let parent_hash = H256::from_low_u64_be(0xbeef);
+            let original = VdfStageBParentMissing { parent_hash };
+
+            // Wrap via `.into()` exactly as `ensure_vdf_is_valid` does.
+            let report: eyre::Report = original.into();
+            let recovered = report
+                .downcast_ref::<VdfStageBParentMissing>()
+                .expect("typed sentinel must survive eyre boxing");
+            assert_eq!(recovered.parent_hash, parent_hash);
+        }
     }
 }

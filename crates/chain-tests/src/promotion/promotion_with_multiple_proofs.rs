@@ -24,10 +24,15 @@ async fn spiky_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result<()> 
             // Set the total number of proofs required to promote above the number of nodes (3)
             // to validate the clamping to 3 proofs to promote.
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 5;
+            // Keep `from_assignees` at 0: the test's assertions
+            // (`wait_for_multiple_ingress_proofs_no_mining`, count = 3)
+            // verify the *total*-proof codepath only, and the startup
+            // guard in `Config::validate` rejects any non-zero value
+            // until `fix/assigned-miners-determinism` lands.
             consensus
                 .hardforks
                 .frontier
-                .number_of_ingress_proofs_from_assignees = 2;
+                .number_of_ingress_proofs_from_assignees = 0;
             consensus.num_partitions_per_slot = 3;
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;

@@ -2,12 +2,13 @@ use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
 use irys_database::DatabaseProviderTestExt as _;
-use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
-use irys_testing_utils::utils::TempDirBuilder;
+use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, EpochSnapshot};
+use irys_testing_utils::{new_mock_signed_header, utils::TempDirBuilder};
 use irys_types::{
     Base64, BlockIndexItem, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader,
     LedgerIndexItem, PoaData, compute_solution_hash, partition::PartitionAssignment,
 };
+use std::sync::{Arc, RwLock};
 
 #[test_log::test(test)]
 /// test that a parent blocks solution_hash must equal the current blocks previous_solution_hash
@@ -85,7 +86,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
     let _cache_dir = TempDirBuilder::new().build();
     let db = irys_database::DatabaseProvider::for_testing(_tmp_dir.path(), _cache_dir.path())
         .expect("test db setup");
-    let block_index = BlockIndex::new_for_testing(db);
+    let block_index = BlockIndex::new_for_testing(db.clone());
     for (height, item) in block_index_items.iter().enumerate() {
         block_index.push_item(item, height as u64).unwrap();
     }
@@ -112,9 +113,28 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         data_path: Some(Base64(vec![])),
     };
 
+    // The test indexes three blocks at heights 0/1/2 with Publish
+    // total_chunks of [0, 10, 20]. With offset=10, anchoring on the
+    // top block (height=2) keeps the offset in range (10 < 20) so the
+    // pre-check passes and the merkle proof is the failure source.
+    //
+    // The fast-path block_index lookup is exercised here; block_tree is
+    // populated with a signed mock genesis solely to satisfy the
+    // `poa_is_valid` signature (the fallback path is unreachable when
+    // parent_height is in the index). `BlockTree::new` validates the
+    // genesis signature, hence the signed mock header.
+    let dummy_genesis = new_mock_signed_header();
+    let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+        &dummy_genesis,
+        config.clone(),
+    ))));
     let res = poa_is_valid(
         &poa,
         &block_index_guard,
+        &block_tree_guard,
+        &db,
+        H256::zero(),
+        2,
         &epoch_snapshot,
         &config,
         &IrysAddress::ZERO,

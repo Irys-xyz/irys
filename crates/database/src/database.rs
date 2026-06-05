@@ -19,9 +19,9 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DatabaseVersion, H256, IngressProof, IrysAddress,
-    IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE, PeerListItem,
-    TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseVersion, H256, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE,
+    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -187,57 +187,120 @@ pub fn tx_header_by_txid<T: DbTx>(
     }
 }
 
-/// Gets a [`DataTransactionHeader`] by its [`IrysTransactionId`], but only if it was
-/// included (Submit ledger) on the canonical chain at or before `max_height`.
+/// Fork-aware canonical-height lookups
+/// ====================================
 ///
-/// This prevents accepting tx headers that were persisted from orphaned forks or
-/// that were included in blocks beyond a given parent height.
+/// `IrysDataTxMetadata` (the non-fork-aware hint table written from
+/// whatever block last became the local node's tip at a given height) is
+/// not safe to trust on its own when answering "is this tx canonically
+/// included on the chain a validator is currently evaluating?".  An
+/// orphaned tip can leave a stranded `included_height` / `promoted_height`
+/// behind, and Phase-1 scrub only fires on reorg.
 ///
-/// Checks:
-/// 1. The tx header exists in `IrysDataTxHeaders`
-/// 2. Its `included_height` metadata is set and ≤ `max_height`
-/// 3. The block at `included_height` in `MigratedBlockHashes` is canonical
+/// `MigratedBlockHashes` (MBH) IS fork-aware past `block_migration_depth`
+/// — `validate_reorg_within_migration_depth` aborts any reorg that would
+/// rewrite a migrated row, so MBH attests the canonical hash from every
+/// chain's perspective.
 ///
-/// Returns `Ok(None)` if any check fails.
-pub fn tx_header_by_txid_canonical<T: DbTx>(
+/// The two helpers in this section return a height from `IrysDataTxMetadata`
+/// only if MBH confirms it ≤ `max_height`.  They return primitive
+/// `Option<u64>` (no header mutation) so call sites can't accidentally
+/// treat a stranded hint as canonical.
+///
+/// **Fork-awareness caveat (reorg-readiness).**  The "MBH-verified ⇒
+/// canonical-on-every-chain" inference rests on `block_migration_depth`
+/// being the absolute reorg ceiling.  If deeper reorgs are ever permitted,
+/// MBH rows past `block_migration_depth` become a LOCAL-canonical view
+/// that can disagree with the chain a validator is evaluating.  These
+/// helpers (and every site that reads from them) must be audited together
+/// with the `Searching { Publish }` arm in `data_txs_are_valid` when that
+/// invariant changes.
+fn canonical_metadata_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
     max_height: u64,
-) -> eyre::Result<Option<DataTransactionHeader>> {
-    let Some(header) = tx_header_by_txid(tx, txid)? else {
+    pick: impl FnOnce(&DataTransactionMetadata) -> Option<u64>,
+    field_name: &'static str,
+) -> eyre::Result<Option<u64>> {
+    let Some(metadata) = crate::get_data_tx_metadata(tx, txid)? else {
         return Ok(None);
     };
-
-    // The tx must have an included_height (set during block migration)
-    let Some(included_height) = header.metadata().included_height else {
-        debug!(tx.id = %txid, "DB fallback: tx has no included_height metadata, rejecting");
+    let Some(height) = pick(&metadata) else {
         return Ok(None);
     };
-
-    // The inclusion must be at or before the parent's height
-    if included_height > max_height {
+    if height > max_height {
         debug!(
             tx.id = %txid,
-            tx.included_height = included_height,
+            tx.height = height,
             max_height,
-            "DB fallback: tx included_height exceeds parent height, rejecting"
+            field = field_name,
+            "canonical lookup: metadata height exceeds max_height — rejecting hint"
         );
         return Ok(None);
     }
-
-    // Verify the height has been migrated (canonical chain reached this height)
-    // If MigratedBlockHashes has an entry, that height is on the canonical chain
-    let canonical_hash = tx.get::<MigratedBlockHashes>(included_height)?;
-    if canonical_hash.is_none() {
+    if tx.get::<MigratedBlockHashes>(height)?.is_none() {
         debug!(
             tx.id = %txid,
-            tx.included_height = included_height,
-            "DB fallback: height not yet migrated, cannot verify canonicality, rejecting"
+            tx.height = height,
+            field = field_name,
+            "canonical lookup: MigratedBlockHashes has no row for hint — rejecting (stranded write or unmigrated)"
         );
         return Ok(None);
     }
+    Ok(Some(height))
+}
 
-    Ok(Some(header))
+/// Returns the MBH-verified Submit-ledger inclusion height of `txid`, if
+/// any, capped at `max_height`.
+///
+/// `Some(h)` means: `IrysDataTxMetadata` carries `included_height = h ≤
+/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).  The
+/// raw header table is not consulted — Submit confirmation is purely a
+/// metadata-vs-MBH question.
+///
+/// `None` means: tx unknown, metadata missing, hint > `max_height`, OR
+/// hint not confirmed by MBH (stranded local-tip write).  Callers cannot
+/// distinguish these cases from the return value alone — by design, since
+/// they all share the same outcome at every existing call site ("no
+/// canonical Submit at or below `max_height`").
+pub fn canonical_submit_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    canonical_metadata_height(
+        tx,
+        txid,
+        max_height,
+        |m| m.included_height,
+        "included_height",
+    )
+}
+
+/// Returns the MBH-verified Publish (promotion) height of `txid`, if any,
+/// capped at `max_height`.
+///
+/// `Some(h)` means: `IrysDataTxMetadata` carries `promoted_height = h ≤
+/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).
+///
+/// `None` is the validator-safe answer for *all* of: tx unknown, no
+/// `promoted_height` hint, hint > `max_height`, OR hint not confirmed by
+/// MBH.  This is the explicit fix for the stranded-`promoted_height` bug
+/// where an orphaned local-tip write left a hint behind that
+/// `MigratedBlockHashes` never recorded — previously read as cross-table
+/// corruption, now correctly classified as "no canonical promotion."
+pub fn canonical_promoted_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    canonical_metadata_height(
+        tx,
+        txid,
+        max_height,
+        |m| m.promoted_height,
+        "promoted_height",
+    )
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -316,7 +379,15 @@ pub fn cache_data_root(
         cached_data_root.data_size = tx_header.data_size;
     }
 
-    // If the entry exists and a block header reference was provided, add the block hash reference if necessary
+    // If a block header is provided, record it in block_set and clear any
+    // pre-confirmation expiry.  Authoritative block_set maintenance happens
+    // atomically with the tip change in
+    // `BlockMigrationService::persist_metadata` (see
+    // `update_data_root_block_set` / `remove_data_root_block_set_entry`) —
+    // by the time this is called from mempool's `on_block_confirmed`, the
+    // hash is already present.  The append is kept as a defensive idempotent
+    // write so direct callers of `cache_data_root` (tests, etc.) get
+    // consistent state.
     if let Some(block_header) = block_header {
         if !cached_data_root
             .block_set
@@ -324,12 +395,30 @@ pub fn cache_data_root(
         {
             cached_data_root.block_set.push(block_header.block_hash);
         }
-        // Clear any pre-confirmation expiry once the data_root is included in a block
         cached_data_root.expiry_height = None;
     }
 
     // Update the database with the modified or new entry
     tx.put::<CachedDataRoots>(key, cached_data_root.clone())?;
+
+    // Surface anomalous writes: a CDR with `block_set.is_empty()` and
+    // `expiry_height.is_none()` has no lifetime bound and will land in the
+    // `(None, None)` arm of `prune_data_root_cache` (evicted unless a local
+    // ingress proof is present).  Under the authoritative-writer model this
+    // should not be produced by the normal flow: confirmed entries get
+    // their block_set populated by `BlockMigrationService::persist_metadata`
+    // Phase 3, and unconfirmed entries get `expiry_height` set by
+    // `cache_data_root_with_expiry`.  Direct callers of `cache_data_root`
+    // that bypass both paths (test fixtures, pre-fix code) can produce
+    // this state — warn so operators see them.
+    if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
+        warn!(
+            data_root = %key,
+            tx.id = %tx_header.id,
+            had_block_header = block_header.is_some(),
+            "cached_data_root.anomalous_write: block_set empty and expiry_height None — entry has no lifetime bound"
+        );
+    }
 
     Ok(Some(cached_data_root))
 }
@@ -340,6 +429,82 @@ pub fn cached_data_root_by_data_root(
     data_root: DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_root)?)
+}
+
+/// Ensures `block_hash` is present in the `block_set` of an existing
+/// [`CachedDataRoot`] and clears `expiry_height` (matching `cache_data_root`'s
+/// confirmation semantics).  No-op if no entry exists for `data_root` — this
+/// helper is intended for migration-time consistency and must not fabricate
+/// cache entries for data_roots whose chunks the node never tracked.
+///
+/// **Append-before-clear ordering** (mirrors the `(empty, None)` warn in
+/// `remove_data_root_block_set_entry`): the `block_set.push` happens before
+/// `expiry_height` is cleared in the same write tx, so the
+/// `(block_set.is_empty(), expiry_height.is_none())` post-condition is
+/// unreachable here — the new block_hash anchors the lifetime bound before
+/// the pre-confirmation expiry is dropped.  No warn arm needed.
+///
+/// Returns `true` if the row was modified.
+pub fn update_data_root_block_set<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let already_present = cdr.block_set.contains(&block_hash);
+    let needs_expiry_clear = cdr.expiry_height.is_some();
+    if already_present && !needs_expiry_clear {
+        return Ok(false);
+    }
+    if !already_present {
+        cdr.block_set.push(block_hash);
+    }
+    if needs_expiry_clear {
+        cdr.expiry_height = None;
+    }
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    Ok(true)
+}
+
+/// Removes `block_hash` from the `block_set` of an existing [`CachedDataRoot`].
+/// Used when migration clears an orphaned block during reorg so `block_set`
+/// stops accumulating dead references.  No-op if the entry is absent or the
+/// hash is not present.  `expiry_height` is intentionally left untouched: any
+/// re-anchoring of an orphaned tx is handled by the mempool reorg path.
+///
+/// Returns `true` if the row was modified.
+pub fn remove_data_root_block_set_entry<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    block_hash: H256,
+) -> eyre::Result<bool> {
+    let Some(mut cdr) = tx.get::<CachedDataRoots>(data_root)? else {
+        return Ok(false);
+    };
+    let before = cdr.block_set.len();
+    cdr.block_set.retain(|h| h != &block_hash);
+    if cdr.block_set.len() == before {
+        return Ok(false);
+    }
+    let now_anomalous = cdr.block_set.is_empty() && cdr.expiry_height.is_none();
+    tx.put::<CachedDataRoots>(data_root, cdr)?;
+    if now_anomalous {
+        // Reorg scrub left the CDR with no canonical block hashes and no
+        // pre-confirmation expiry.  Mempool's orphan re-anchor path
+        // (`handle_confirmed_data_tx_reorg`) is expected to re-ingest the
+        // orphaned tx and restore `expiry_height` via
+        // `cache_data_root_with_expiry`.  If that doesn't happen, the entry
+        // sits in the `(None, None)` arm and is only evicted by
+        // `prune_data_root_cache` after the local-proof exemption check.
+        warn!(
+            %data_root,
+            removed_block_hash = %block_hash,
+            "cached_data_root.anomalous_state_after_scrub: block_set now empty and expiry_height None — awaiting mempool orphan re-anchor or prune"
+        );
+    }
+    Ok(true)
 }
 
 type IsDuplicate = bool;
@@ -963,10 +1128,11 @@ mod tests {
         Ok(())
     }
 
-    mod tx_header_by_txid_canonical_tests {
+    mod canonical_height_tests {
         use crate::{
-            db::IrysDatabaseExt as _, db_index::set_data_tx_included_height, insert_tx_header,
-            tables::ConsensusTables, tables::MigratedBlockHashes, tx_header_by_txid_canonical,
+            canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
+            db_index::set_data_tx_included_height, db_index::set_data_tx_promoted_height,
+            insert_tx_header, tables::ConsensusTables, tables::MigratedBlockHashes,
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
@@ -991,8 +1157,9 @@ mod tests {
         #[case::height_equals_max(5, true, true)]
         #[case::height_exceeds_max(3, true, false)]
         #[case::unmigrated_height(10, false, false)]
-        /// Verifies `tx_header_by_txid_canonical` respects both height bounds and migration status.
-        fn canonical_lookup(
+        /// `canonical_submit_height` returns Some iff metadata is set, ≤ max_height,
+        /// and confirmed by `MigratedBlockHashes`.
+        fn submit_height_respects_bounds_and_migration(
             #[case] max_height: u64,
             #[case] insert_migration: bool,
             #[case] expect_found: bool,
@@ -1022,12 +1189,403 @@ mod tests {
             .unwrap();
 
             let result = db
-                .view_eyre(|tx| tx_header_by_txid_canonical(tx, &tx_id, max_height))
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, max_height))
                 .unwrap();
             assert_eq!(
                 result.is_some(),
                 expect_found,
                 "max_height={max_height}, migrated={insert_migration} => found={expect_found}"
+            );
+        }
+
+        /// Regression for the stranded-`promoted_height` bug.  Setup mirrors
+        /// the production fault that crashed the validator with
+        /// `BlockBoundsLookupError`:
+        ///   - tx has `included_height = 5` with `MBH[5]` set (canonical Submit)
+        ///   - tx has `promoted_height = 24688` with `MBH[24688] = None`
+        ///     (writer block became a local tip via FCFS tie-break, was
+        ///     later orphaned, never migrated, and the node didn't reorg
+        ///     away from it so Phase 1 scrub never ran).
+        ///
+        /// Pre-fix the validator's DB fallback raised
+        /// `BlockBoundsLookupError` (NodeFault → restart) on the MBH
+        /// mismatch.  Post-fix `canonical_promoted_height` returns `None`
+        /// for the same input — the explicit "no canonical promotion per
+        /// the migration index" signal the validator now relies on to fall
+        /// through to accept.
+        ///
+        /// `canonical_submit_height` independently still returns
+        /// `Some(submit_height)` — the Submit row is MBH-confirmed, only
+        /// the Publish row is stranded.
+        #[test]
+        fn promoted_height_returns_none_when_mbh_disagrees() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let canonical_submit_hash = H256::random();
+            let submit_height = 5_u64;
+            let stranded_promote_height = 24_688_u64;
+            let parent_height = 25_000_u64;
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                // Canonical Submit inclusion: metadata hint + MBH agree.
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, canonical_submit_hash)?;
+                // Stranded promotion: metadata hint set, MBH deliberately absent.
+                set_data_tx_promoted_height(tx, &tx_id, stranded_promote_height)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let submit = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+
+            assert_eq!(
+                submit,
+                Some(submit_height),
+                "canonical_submit_height must still attest the MBH-confirmed Submit row"
+            );
+            assert_eq!(
+                promoted, None,
+                "canonical_promoted_height MUST be None when MBH[promoted_height] is None; \
+                 a Some(_) here would let the validator treat the stranded \
+                 non-fork-aware hint as canonical evidence of a prior promotion \
+                 (the original BlockBoundsLookupError-then-NodeFault bug)"
+            );
+        }
+
+        /// Companion to `promoted_height_returns_none_when_mbh_disagrees`:
+        /// when MBH agrees, `canonical_promoted_height` MUST surface the
+        /// hint — otherwise the validator's legitimate double-publish
+        /// signal disappears.
+        #[test]
+        fn promoted_height_returns_some_when_mbh_agrees() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let submit_hash = H256::random();
+            let publish_hash = H256::random();
+            let submit_height = 5_u64;
+            let promote_height = 7_u64;
+            let parent_height = 25_000_u64;
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                set_data_tx_promoted_height(tx, &tx_id, promote_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, submit_hash)?;
+                tx.put::<MigratedBlockHashes>(promote_height, publish_hash)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let submit = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+
+            assert_eq!(submit, Some(submit_height));
+            assert_eq!(
+                promoted,
+                Some(promote_height),
+                "MBH-confirmed promotion must survive the cross-check"
+            );
+        }
+
+        /// `canonical_promoted_height` rejects hints above `max_height`,
+        /// mirroring the existing `included_height > max_height` rejection.
+        /// A peer could otherwise present metadata claiming a future
+        /// promotion that hasn't happened yet from the validator's
+        /// vantage point.
+        #[test]
+        fn promoted_height_returns_none_when_above_max_height() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                ConsensusTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let submit_height = 3_u64;
+            let promote_height = 10_u64;
+            let parent_height = 5_u64; // < promote_height
+            let submit_hash = H256::random();
+            let publish_hash = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                set_data_tx_promoted_height(tx, &tx_id, promote_height)?;
+                tx.put::<MigratedBlockHashes>(submit_height, submit_hash)?;
+                tx.put::<MigratedBlockHashes>(promote_height, publish_hash)?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+            assert_eq!(
+                promoted, None,
+                "promoted_height > max_height must return None — \
+                 it's not visible to the validator's parent_height window"
+            );
+        }
+    }
+
+    /// Direct tests for the `update_data_root_block_set` /
+    /// `remove_data_root_block_set_entry` helpers introduced for the
+    /// `BlockMigrationService`-as-authoritative-writer refactor.  These pin
+    /// the idempotency / no-op / expiry-handling semantics independently of
+    /// the migration call site.
+    mod data_root_block_set_helpers {
+        use crate::{
+            IrysDatabaseArgs as _, cache_data_root,
+            db::IrysDatabaseExt as _,
+            open_or_create_db, remove_data_root_block_set_entry,
+            tables::{CacheTables, CachedDataRoots},
+            update_data_root_block_set,
+        };
+        use irys_testing_utils::utils::tempfile;
+        use irys_types::{DataTransactionHeader, H256};
+        use reth_db::{Database as _, mdbx::DatabaseArguments, transaction::DbTx as _};
+
+        /// Returns `(env, tempdir)`.  The caller must bind the tempdir to a
+        /// variable that lives the duration of the test — dropping it before
+        /// the env removes the underlying directory.
+        // `data_root_block_set_helpers` exercises cache-scoped CDR helpers; open
+        // the env with `CacheTables::ALL` so `CachedDataRoots` is materialised.
+        fn open_db() -> (reth_db::mdbx::DatabaseEnv, tempfile::TempDir) {
+            let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let env = open_or_create_db(
+                tmp.path(),
+                CacheTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            (env, tmp)
+        }
+
+        /// Build a CDR for `data_root` with the given txid in its txid_set
+        /// and `block_set = initial_block_set`, `expiry_height = expiry`.
+        fn seed_cdr(
+            db: &reth_db::mdbx::DatabaseEnv,
+            data_root: H256,
+            tx_id: H256,
+            initial_block_set: Vec<H256>,
+            expiry: Option<u64>,
+        ) {
+            let tx_header =
+                DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                    tx: irys_types::DataTransactionHeaderV1 {
+                        id: tx_id,
+                        data_root,
+                        data_size: 64,
+                        ..Default::default()
+                    },
+                    metadata: Default::default(),
+                });
+            // `cache_data_root` is typed against `ScopedTxMut<Cache>`; open the
+            // scoped rw-tx directly rather than going through `db.update`.
+            let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::begin_rw(db)
+                .expect("begin cache rw-tx");
+            cache_data_root(&tx, &tx_header, None).expect("cache_data_root");
+            let mut cdr = tx
+                .get::<CachedDataRoots>(data_root)
+                .expect("get CachedDataRoots")
+                .expect("seed_cdr: cache_data_root must produce an entry");
+            cdr.block_set = initial_block_set;
+            cdr.expiry_height = expiry;
+            tx.put::<CachedDataRoots>(data_root, cdr)
+                .expect("put CachedDataRoots");
+            tx.commit().expect("commit cache rw-tx");
+        }
+
+        fn read_cdr(
+            db: &reth_db::mdbx::DatabaseEnv,
+            data_root: H256,
+        ) -> Option<crate::db_cache::CachedDataRoot> {
+            db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+                .unwrap()
+                .unwrap()
+        }
+
+        #[test]
+        fn update_returns_false_when_cdr_missing() {
+            let (db, _tmp) = open_db();
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, H256::random(), H256::random()))
+                .unwrap();
+            assert!(!res, "missing CDR must be a no-op returning false");
+        }
+
+        #[test]
+        fn update_appends_hash_and_clears_expiry() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let new_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![], Some(42));
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, new_hash))
+                .unwrap();
+            assert!(res, "append + clear-expiry must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![new_hash]);
+            assert!(cdr.expiry_height.is_none(), "expiry must be cleared");
+        }
+
+        #[test]
+        fn update_is_idempotent_when_hash_present_and_expiry_already_cleared() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let existing_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![existing_hash], None);
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .unwrap();
+            assert!(
+                !res,
+                "no-op when hash already present and expiry already cleared"
+            );
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![existing_hash], "block_set unchanged");
+        }
+
+        #[test]
+        fn update_clears_expiry_even_if_hash_already_present() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let existing_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![existing_hash], Some(99));
+
+            let res = db
+                .update_eyre(|tx| update_data_root_block_set(tx, data_root, existing_hash))
+                .unwrap();
+            assert!(res, "modification reported when expiry is cleared");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![existing_hash], "block_set unchanged");
+            assert!(cdr.expiry_height.is_none(), "expiry cleared");
+        }
+
+        #[test]
+        fn remove_returns_false_when_cdr_missing() {
+            let (db, _tmp) = open_db();
+            let res = db
+                .update_eyre(|tx| {
+                    remove_data_root_block_set_entry(tx, H256::random(), H256::random())
+                })
+                .unwrap();
+            assert!(!res, "missing CDR must be a no-op returning false");
+        }
+
+        #[test]
+        fn remove_returns_false_when_hash_absent() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let other_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![other_hash], Some(5));
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, H256::random()))
+                .unwrap();
+            assert!(!res, "hash not in block_set must be a no-op");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![other_hash], "block_set unchanged");
+            assert_eq!(cdr.expiry_height, Some(5), "expiry unchanged");
+        }
+
+        #[test]
+        fn remove_strips_hash_and_leaves_expiry_alone() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let target_hash = H256::random();
+            let keep_hash = H256::random();
+            seed_cdr(
+                &db,
+                data_root,
+                tx_id,
+                vec![target_hash, keep_hash],
+                Some(50),
+            );
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, target_hash))
+                .unwrap();
+            assert!(res, "hash present must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert_eq!(cdr.block_set, vec![keep_hash], "only target removed");
+            assert_eq!(
+                cdr.expiry_height,
+                Some(50),
+                "expiry_height intentionally left untouched per helper docblock"
+            );
+        }
+
+        /// Scrubbing the last hash from `block_set` while `expiry_height` is
+        /// already `None` leaves the CDR in the anomalous (None, None)
+        /// state.  The helper still completes successfully; the warn! at the
+        /// call site (logged but not test-asserted here) is the observable
+        /// signal for operators.
+        #[test]
+        fn remove_can_leave_cdr_in_anomalous_state() {
+            let (db, _tmp) = open_db();
+            let data_root = H256::random();
+            let tx_id = H256::random();
+            let only_hash = H256::random();
+            seed_cdr(&db, data_root, tx_id, vec![only_hash], None);
+
+            let res = db
+                .update_eyre(|tx| remove_data_root_block_set_entry(tx, data_root, only_hash))
+                .unwrap();
+            assert!(res, "hash present must report a modification");
+
+            let cdr = read_cdr(&db, data_root).expect("CDR present");
+            assert!(cdr.block_set.is_empty(), "block_set scrubbed to empty");
+            assert!(
+                cdr.expiry_height.is_none(),
+                "expiry intentionally left untouched"
             );
         }
     }

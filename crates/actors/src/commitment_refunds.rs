@@ -1,9 +1,28 @@
-use eyre::{Result, bail};
 use irys_domain::CommitmentSnapshot;
 use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, ConsensusConfig};
 
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
+
+/// Typed error for commitment-refund derivation.
+///
+/// Today the only failure shape is a snapshot invariant violation, which
+/// is always a node fault: the local commitment snapshot is internally
+/// inconsistent and retry cannot heal it. On the validator side this routes
+/// to `ValidationError::ShadowTxNodeFault` (panic + supervisor restart);
+/// on the producer side this is wrapped through `eyre::Report` and bubbles
+/// as an `Irrecoverable` block production error.
+#[derive(Debug, thiserror::Error)]
+pub enum CommitmentRefundError {
+    /// Snapshot invariant violation (e.g. `pledge_count_before_executing == 0`).
+    /// Always a node fault.
+    #[error("snapshot invariant violation: {0}")]
+    SnapshotInvariant(String),
+}
+
+// Producer-side call sites return `eyre::Result`. `eyre::Report` provides a
+// blanket `From<E: std::error::Error + Send + Sync + 'static>` impl, so `?`
+// lifts `CommitmentRefundError` automatically — no explicit `From` needed.
 
 /// Derive epoch unpledge refund events deterministically from a commitment snapshot.
 ///
@@ -12,7 +31,7 @@ use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 pub(crate) fn derive_unpledge_refunds_from_snapshot(
     commit_snapshot: &CommitmentSnapshot,
     config: &ConsensusConfig,
-) -> Result<Vec<UnpledgeRefundEvent>> {
+) -> Result<Vec<UnpledgeRefundEvent>, CommitmentRefundError> {
     let mut unpledges: Vec<CommitmentTransaction> = commit_snapshot
         .commitments
         .values()
@@ -28,10 +47,10 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
                 ..
             } => {
                 if pledge_count_before_executing == 0 {
-                    bail!(
+                    return Err(CommitmentRefundError::SnapshotInvariant(format!(
                         "Invalid unpledge in epoch snapshot: pledge_count_before_executing = 0 (tx: {:?})",
                         tx.id()
-                    );
+                    )));
                 }
                 CommitmentTransaction::calculate_pledge_value_at_count(
                     config,
@@ -55,7 +74,7 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
 pub(crate) fn derive_unstake_refunds_from_snapshot(
     commit_snapshot: &CommitmentSnapshot,
     config: &ConsensusConfig,
-) -> Result<Vec<UnstakeRefundEvent>> {
+) -> Result<Vec<UnstakeRefundEvent>, CommitmentRefundError> {
     // Collect all unstakes from the snapshot
     let mut unstakes: Vec<CommitmentTransaction> = commit_snapshot
         .commitments

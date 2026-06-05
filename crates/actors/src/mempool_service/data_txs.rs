@@ -468,14 +468,21 @@ impl Inner {
         }) {
             Ok(()) => {
                 info!(
-                    "Successfully cached data_root {:?} for tx {:?}",
-                    tx.data_root, tx.id
+                    data_root = %tx.data_root,
+                    tx.id = %tx.id,
+                    source = "tx_ingress",
+                    expiry_height,
+                    "cached_data_root.write"
                 );
             }
             Err(db_error) => {
                 error!(
-                    "Failed to cache data_root {:?} for tx {:?}: {:?}",
-                    tx.data_root, tx.id, db_error
+                    data_root = %tx.data_root,
+                    tx.id = %tx.id,
+                    source = "tx_ingress",
+                    expiry_height,
+                    error = ?db_error,
+                    "cached_data_root.write_failed"
                 );
             }
         };

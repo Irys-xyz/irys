@@ -1,6 +1,7 @@
 mod cli_args;
 mod commands;
 mod db_utils;
+mod snapshot;
 mod snapshot_output;
 
 #[cfg(test)]

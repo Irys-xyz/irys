@@ -3,6 +3,7 @@ pub mod dump;
 pub mod ext;
 pub mod genesis;
 pub mod node;
+pub mod snapshot;
 pub mod unwind;
 
 pub use adapter::IrysRethNodeAdapter;

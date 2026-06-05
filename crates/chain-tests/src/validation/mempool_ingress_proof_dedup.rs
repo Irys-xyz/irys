@@ -161,7 +161,7 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     // Store both data txs and all proofs in the DB.
     // We also set included_height metadata so the tx selector's canonical DB
-    // fallback (`tx_header_by_txid_canonical`) can find them as prior submit inclusions.
+    // fallback (`canonical_submit_height`) can find them as prior submit inclusions.
     // Consensus tables (IrysDataTxHeaders, metadata) use update_eyre;
     // cache tables (CachedDataRoots, IngressProofs) use update_cache_eyre.
     {

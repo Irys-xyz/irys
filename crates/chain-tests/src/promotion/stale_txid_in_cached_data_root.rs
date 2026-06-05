@@ -201,8 +201,29 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
 
-    // Mine initial blocks
-    genesis_node.mine_blocks(2).await?;
+    // Mine to the edge of anchor acceptance: ingress still accepts a
+    // genesis anchor at tip height 3 (`min_anchor_height = 3 - 3 = 0`,
+    // anchor at 0 is *not* too old by `<` comparison), but block production
+    // at the next height uses a stricter `[parent_height - (expiry_depth -
+    // block_migration_depth), parent_height - block_migration_depth]`
+    // window which puts the genesis anchor out of range immediately.
+    //
+    // With `tx_anchor_expiry_depth = 3` and `block_migration_depth = 1`,
+    // mining 3 blocks here parks the chain at height 3 — the gossip
+    // ingress below succeeds, but every subsequent block production call
+    // rejects the tx in `tx_selector`, so it never accumulates
+    // `included_height`/`promoted_height` metadata.  This is exactly the
+    // "stale txid pinned in CDR.txid_set" tombstone the test wants the
+    // mempool TTL + cache scrub to clean up.
+    //
+    // The earlier `mine_blocks(2)` form was passing only by accident:
+    // it left the genesis anchor still acceptable to block production
+    // (`parent_height - block_migration_depth = 1`, so an anchor at 0
+    // sat just inside the inclusion window), the tx confirmed at height
+    // 3, promoted at height 4, and the pre-`7c801780d` scrub deleted
+    // the `txid_set` entry of a confirmed tx — the exact bug the new
+    // metadata-recheck guard refuses to repeat.
+    genesis_node.mine_blocks(3).await?;
 
     let chunks: Vec<[u8; 32]> = vec![[10; 32], [20; 32], [30; 32]];
     let data: Vec<u8> = chunks.iter().flat_map(|c| c.iter()).copied().collect();
@@ -269,10 +290,12 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
         Ok(())
     })?;
 
-    // Mine enough blocks to expire the anchor.
-    // Anchor at height 0, effective_expiry = tx_anchor_expiry_depth(3) + block_migration_depth(1) + 5 = 9
-    // Prune when: anchor_height(0) < current_height - 9 → current_height > 9
-    // We're at height 2, so mine 9 more blocks to reach height 11.
+    // Mine enough blocks to cross the mempool prune horizon.
+    // Anchor at height 0, effective_expiry = tx_anchor_expiry_depth(3) +
+    // block_migration_depth(1) + 5 = 9.  Mempool prunes when
+    // anchor_height(0) < current_height - 9 → current_height > 9.  After
+    // the initial `mine_blocks(3)` we are at height 3; mining 9 more
+    // reaches height 12, well past the prune horizon.
     genesis_node.mine_blocks(9).await?;
 
     // Poll until the stale txid is gone from CachedDataRoot.txid_set (or the entry is

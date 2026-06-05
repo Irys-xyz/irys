@@ -90,14 +90,59 @@ pub struct CachedDataRoot {
     /// Has this data_size been confirmed by the data_path of the rightmost chunk in the data_root
     pub data_size_confirmed: bool,
 
-    /// The set of all tx.ids' that contain this `data_root`
+    /// Set of tx.ids that *currently* reference this `data_root` — i.e. the
+    /// txs whose chunk-retention needs keep the CDR alive.
+    ///
+    /// **Authoritative state, not a hint.**  Unlike `block_set` (below), this
+    /// field is the load-bearing input to the prune loop's pending-tx guard
+    /// (`cache_service::InnerCacheTask::prune_data_root_cache`): an entry
+    /// with no `IrysDataTxMetadata` row is interpreted as a *currently
+    /// pending* tx whose chunks must be preserved.  `tx_selector::
+    /// get_publish_txs_and_proofs` similarly drives publish-candidate
+    /// selection off this set and treats stale entries as a bug (see its
+    /// `debug_assert!` on "stale CachedDataRoot references").
+    ///
+    /// Writer model:
+    ///   - **`cache_data_root`** appends idempotently on every tx-ingress
+    ///     path (mempool ingress, gossip ingress, on_block_confirmed).
+    ///     Adds, never removes.
+    ///   - **`cache_service::spawn_prune_txids_task`** is the sole removal
+    ///     path, driven by two signals: mempool TTL eviction
+    ///     (`prune_pending_txs` Phase 4) and reorg failed-reingress
+    ///     (`handle_confirmed_data_tx_reorg`).  Both signals are
+    ///     "this tx is no longer relevant".  Per-txid metadata recheck
+    ///     inside the scrub task guards against the "tx re-confirmed during
+    ///     the scrub window" race.
+    ///
+    /// Future-proofing: any consumer that promotes this field's semantics
+    /// to fork-tolerant truth (e.g. cross-restart reconciliation) must
+    /// reconcile against `IrysDataTxMetadata` + `MigratedBlockHashes` plus
+    /// live mempool state — `txid_set` alone has no restart-survivable
+    /// signal for "still in mempool".
     pub txid_set: Vec<H256>,
 
-    /// Block hashes for blocks containing transactions with this `data_root`
+    /// Block hashes for blocks whose **Submit ledger** has included a tx
+    /// referencing this `data_root`.  Maintained by two writers:
+    ///   - **Mempool `BlockConfirmed`** writes the confirming block hash on
+    ///     each newly confirmed tip (pre-migration forward-fill).  This is
+    ///     what lets chunks arriving *after* block confirmation find a
+    ///     populated `block_set`.
+    ///   - **`BlockMigrationService::persist_metadata`** scrubs orphaned
+    ///     block hashes during reorgs and idempotently appends the
+    ///     canonical hash for any tx whose CDR exists at migration time
+    ///     (update-only — never fabricates).
+    ///
+    /// Treat as a hint, not consensus state.  A stale `BlockConfirmed`
+    /// processed after a reorg can leave an orphan hash here; range / slot
+    /// lookups belong to
+    /// `irys_actors::tx_inclusion::find_canonical_ledger_range`, which
+    /// derives canonical truth from `IrysDataTxMetadata` +
+    /// `MigratedBlockHashes` instead of trusting this set.
     pub block_set: Vec<H256>,
 
-    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used for pruning while unconfirmed.
-    /// If None, pruning falls back to block inclusion history.
+    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used
+    /// for pruning while unconfirmed.  If `None`, pruning falls back to the
+    /// canonical inclusion heights of the txs in `txid_set`.
     #[serde(default)]
     pub expiry_height: Option<u64>,
 

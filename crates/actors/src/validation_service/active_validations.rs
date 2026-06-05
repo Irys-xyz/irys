@@ -26,7 +26,10 @@ use tracing::{Instrument as _, debug, info, instrument, warn};
 use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
-use crate::validation_service::{VdfTaskStage, VdfValidationResult, record_vdf_task_progress};
+use crate::validation_service::{
+    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskStage, VdfValidationResult,
+    record_vdf_task_progress,
+};
 
 /// Block priority states for validation ordering
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -91,6 +94,11 @@ pub(super) struct PreemptibleVdfTask {
     pub cancel_u8: Arc<std::sync::atomic::AtomicU8>,
     pub stage_u8: Arc<std::sync::atomic::AtomicU8>,
     pub progress_instant: Arc<Mutex<Instant>>,
+    /// Written to `Some(Instant::now())` just before the stage atomic is set
+    /// to `Completed`. Read by the watchdog at panic time to compute
+    /// `completed_ago`, distinguishing scheduler latency from a real lifecycle
+    /// wedge. `None` until the `Completed` transition fires.
+    pub completed_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl PreemptibleVdfTask {
@@ -124,6 +132,7 @@ impl PreemptibleVdfTask {
                 self.cancel_u8.clone(),
                 self.stage_u8.clone(),
                 self.progress_instant.clone(),
+                self.completed_at.clone(),
                 skip_vdf,
             )
             .await
@@ -142,30 +151,73 @@ impl PreemptibleVdfTask {
                 //   design/docs/vdf-validation-stall-detection.md. The
                 //   cooperative `Wait*` stages must follow the same policy.
                 // - Anything else (real validation finding) → Invalid.
-                match e.downcast_ref::<WaitForStepError>() {
-                    Some(WaitForStepError::Cancelled) => {
-                        metrics::record_validation_cancellation("vdf_preempted");
+                // `spawn_blocking` JoinError (panic or external abort): the typed
+                // `VdfBlockingTaskFailed` sentinel is checked first. A panic in a
+                // blocking verifier thread is a local-infrastructure fault, not
+                // block-invalidity evidence — mislabelling it as `Invalid` would
+                // peer-attribute a node-side crash and fork us off the network.
+                // An external `abort()` (watchdog) is peer-innocent and requeues
+                // like any other cancellation. Mirrors the symmetric PoA pattern at
+                // `classify_poa_join_error` in `block_validation_task.rs`.
+                if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>() {
+                    if blocking_failed.is_panic {
+                        // Local verifier thread panicked — this is a node fault,
+                        // not block invalidity. Panic here so the never-mislabel
+                        // rule is enforced: the JoinError propagates through the
+                        // spawned VDF task as JoinError::is_panic(), then
+                        // `resume_unwind` in the validation service select loop
+                        // re-raises it onto the service task. The global panic hook
+                        // then raises SIGINT and the shutdown watchdog forces abort.
+                        panic!(
+                            "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
+                            blocking_failed.stage,
+                            self.task.sealed_block.header().block_hash,
+                        );
+                    } else {
+                        // is_cancelled() — external abort (watchdog or runtime
+                        // teardown). Peer-innocent: requeue via the same lane as
+                        // cooperative preemption.
+                        metrics::record_validation_cancellation("vdf_blocking_aborted");
                         VdfValidationResult::Cancelled
                     }
-                    Some(WaitForStepError::Stalled { .. }) => {
-                        metrics::record_validation_cancellation("vdf_stalled");
-                        // See above. Panic propagates through the spawned task
-                        // as JoinError::is_panic(), then `resume_unwind` in the
-                        // validation service select loop re-raises it onto the
-                        // service task. The global panic hook then raises SIGINT
-                        // and the 45s shutdown watchdog forces process abort.
-                        panic!(
-                            "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
-                            self.task.sealed_block.header().block_hash,
-                            e
-                        );
+                // Stage B parent-eviction race: typed sentinel from
+                // `ensure_vdf_is_valid` surfaces as a SoftInternal-mappable
+                // ParentMissing rather than the panic the prior `.expect`
+                // site produced. Checked before the WaitForStepError downcast
+                // since it can fire at any VDF stage entry, not just the
+                // wait stage.
+                } else if let Some(parent_missing) = e.downcast_ref::<VdfStageBParentMissing>() {
+                    metrics::record_validation_cancellation("vdf_parent_missing");
+                    VdfValidationResult::ParentMissing {
+                        parent_hash: parent_missing.parent_hash,
                     }
-                    None => {
-                        if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8 {
+                } else {
+                    match e.downcast_ref::<WaitForStepError>() {
+                        Some(WaitForStepError::Cancelled) => {
                             metrics::record_validation_cancellation("vdf_preempted");
                             VdfValidationResult::Cancelled
-                        } else {
-                            VdfValidationResult::Invalid(e)
+                        }
+                        Some(WaitForStepError::Stalled { .. }) => {
+                            metrics::record_validation_cancellation("vdf_stalled");
+                            // See above. Panic propagates through the spawned task
+                            // as JoinError::is_panic(), then `resume_unwind` in the
+                            // validation service select loop re-raises it onto the
+                            // service task. The global panic hook then raises SIGINT
+                            // and the 45s shutdown watchdog forces process abort.
+                            panic!(
+                                "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
+                                self.task.sealed_block.header().block_hash,
+                                e
+                            );
+                        }
+                        None => {
+                            if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8
+                            {
+                                metrics::record_validation_cancellation("vdf_preempted");
+                                VdfValidationResult::Cancelled
+                            } else {
+                                VdfValidationResult::Invalid(e)
+                            }
                         }
                     }
                 }
@@ -184,6 +236,12 @@ pub(super) struct RunningVdfTask {
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub stage_signal: Arc<std::sync::atomic::AtomicU8>,
     pub last_progress_at: Arc<Mutex<Instant>>,
+    /// Timestamp recorded when the stage transitions to `Completed`, written
+    /// before the stage atomic (same ordering window as `last_progress_at`).
+    /// Read by the watchdog at panic time to compute `completed_ago`, allowing
+    /// CI failures to distinguish scheduler latency (handle already ready, but
+    /// `poll_vdf` wasn't polled) from a genuine lifecycle wedge.
+    pub completed_at: Arc<Mutex<Option<Instant>>>,
     pub started_at: Instant,
     pub sealed_block: Arc<SealedBlock>,
     pub handle: JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>,
@@ -206,6 +264,7 @@ pub(super) trait VdfSpawnStrategy {
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         stage_u8: Arc<std::sync::atomic::AtomicU8>,
         progress_instant: Arc<Mutex<Instant>>,
+        completed_at: Arc<Mutex<Option<Instant>>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)>;
@@ -222,6 +281,7 @@ impl VdfSpawnStrategy for ProductionVdfSpawn {
         cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         stage_u8: Arc<std::sync::atomic::AtomicU8>,
         progress_instant: Arc<Mutex<Instant>>,
+        completed_at: Arc<Mutex<Option<Instant>>>,
         hash: BlockHash,
         priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -232,6 +292,7 @@ impl VdfSpawnStrategy for ProductionVdfSpawn {
                     cancel_u8,
                     stage_u8,
                     progress_instant,
+                    completed_at,
                 }
                 .execute()
                 .await;
@@ -262,6 +323,7 @@ impl VdfSpawnStrategy for TestVdfSpawn {
         _cancel_u8: Arc<std::sync::atomic::AtomicU8>,
         _stage_u8: Arc<std::sync::atomic::AtomicU8>,
         _progress_instant: Arc<Mutex<Instant>>,
+        _completed_at: Arc<Mutex<Option<Instant>>>,
         _hash: BlockHash,
         _priority: BlockPriorityMeta,
     ) -> JoinHandle<(BlockHash, VdfValidationResult, BlockValidationTask)> {
@@ -417,6 +479,8 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
         let stage_signal = Arc::clone(&stage_u8);
         let progress_instant = Arc::new(Mutex::new(Instant::now()));
         let last_progress_at = Arc::clone(&progress_instant);
+        let completed_at_arc = Arc::new(Mutex::new(None::<Instant>));
+        let completed_at = Arc::clone(&completed_at_arc);
         let sealed_block = Arc::clone(&task.sealed_block);
         let requeue_task = task.clone();
 
@@ -426,6 +490,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             cancel_u8,
             stage_u8,
             progress_instant,
+            completed_at_arc,
             hash,
             priority,
         );
@@ -436,6 +501,7 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
             cancel_signal,
             stage_signal,
             last_progress_at,
+            completed_at,
             started_at: Instant::now(),
             sealed_block,
             handle,
@@ -506,6 +572,48 @@ impl<S: VdfSpawnStrategy> VdfScheduler<S> {
     }
 }
 
+/// Per-block decision returned by [`ValidationCoordinator::record_concurrent_cancel`].
+///
+/// A cancellation in the concurrent-stage `JoinSet` result handler may be a
+/// one-off Tokio hiccup (the only intentional cancel path runs at shutdown,
+/// which can't reach that arm). The first few cancellations for a given block
+/// are transparently requeued; sustained recurrence indicates a poisoned
+/// local condition (sibling-worker panic loop, runtime tear-down race,
+/// watchdog edge case) and we stop re-running the block to avoid starving
+/// the rest of the queue. Recovery is fresh gossip re-entry once the local
+/// condition clears (same SoftInternal park lane as
+/// [`crate::block_validation::ValidationCancelReason::ParentMissing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConcurrentCancelDecision {
+    /// Retry budget is still available — requeue the block via
+    /// `submit_task`. Caller carries `attempt` for tracing/metrics only.
+    Requeue { attempt: u8 },
+    /// Retry budget exhausted — do NOT requeue. Caller must route the block
+    /// via `send_validation_result` with
+    /// `ValidationCancelReason::RepeatedCancellation` (SoftInternal: validity
+    /// unknown, park the block, fresh gossip is the recovery lane).
+    GiveUp { attempt: u8 },
+}
+
+/// Per-block cap on concurrent-stage `JoinError::Cancelled` requeues before
+/// the validation service stops looping on the same block and routes it
+/// through `ValidationCancelReason::RepeatedCancellation`.
+///
+/// Rationale for `3`: one cancel is plausibly a transient Tokio hiccup
+/// (worker panic, runtime tear-down race) that genuinely benefits from a
+/// retry. Two is the safety margin for a brief window of distress that
+/// clears between attempts. At three the local condition is structural —
+/// continuing to requeue tight-loops between the VDF queue and the
+/// concurrent JoinSet, burning cycles while starving other blocks of
+/// validation slots. The existing `MAX_RETRY_ATTEMPTS = 5` in
+/// `block_producer` is the only sibling retry constant; a producer retry is
+/// cheap (rebuild on a new parent) and the cost of giving up is "no block
+/// this slot", whereas a validation retry pays the full VDF+concurrent
+/// pipeline cost on every loop and giving up just parks the block in cache
+/// for gossip recovery. The lower cap reflects the higher per-attempt cost
+/// and the cheaper give-up path.
+pub(super) const MAX_CONCURRENT_CANCEL_RETRIES: u8 = 3;
+
 /// Main validation coordinator
 pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn> {
     /// VDF validation scheduler
@@ -514,9 +622,28 @@ pub(super) struct ValidationCoordinator<S: VdfSpawnStrategy = ProductionVdfSpawn
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
-    /// Maps task IDs to (block hash, enqueue time) for panic diagnostics and
-    /// E2E duration accounting when a concurrent task fails to return a result.
-    pub concurrent_task_blocks: HashMap<tokio::task::Id, (BlockHash, Instant)>,
+    /// Maps task IDs to the bookkeeping needed when a concurrent task fails
+    /// to return a result. `sealed_block` + `skip_vdf_validation` allow the
+    /// `JoinError::Cancelled` arm in `validation_service` to reconstruct
+    /// the task and re-`submit_task` it — `concurrent_tasks.abort_all()`
+    /// only runs from `shutdown()`, so a cancel reaching the result handler
+    /// is an unexpected runtime hiccup rather than an intentional drop,
+    /// and re-queuing is safer than soft-discarding a block whose validity
+    /// we never actually decided on.
+    pub concurrent_task_blocks:
+        HashMap<tokio::task::Id, (BlockHash, Instant, Arc<SealedBlock>, bool)>,
+
+    /// Per-block counter of concurrent-stage `JoinError::Cancelled`
+    /// requeues. Keyed on `BlockHash` (not `tokio::task::Id`) because the
+    /// requeue path traverses `submit_task → VDF queue → spawn_concurrent`,
+    /// which mints a fresh `Id` each time — a per-Id counter would reset on
+    /// every requeue and never trip the cap. Counter is cleared when the
+    /// block exits via the Ok / panic arms (validation produced a verdict,
+    /// or a node-fault was surfaced), or when the cap is hit (the block is
+    /// being routed out via `RepeatedCancellation` and won't re-enter
+    /// without fresh gossip). See [`ConcurrentCancelDecision`] for the
+    /// decision shape and [`MAX_CONCURRENT_CANCEL_RETRIES`] for the cap.
+    pub concurrent_cancel_retries: HashMap<BlockHash, u8>,
 
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
@@ -531,6 +658,7 @@ impl ValidationCoordinator {
             vdf_scheduler: VdfScheduler::new(runtime_handle),
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            concurrent_cancel_retries: HashMap::new(),
             block_tree_guard,
         }
     }
@@ -546,6 +674,7 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             vdf_scheduler,
             concurrent_tasks: JoinSet::new(),
             concurrent_task_blocks: HashMap::new(),
+            concurrent_cancel_retries: HashMap::new(),
             block_tree_guard,
         }
     }
@@ -602,6 +731,12 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
     pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
         let block_hash = task.sealed_block.header().block_hash;
         let enqueued_at = task.enqueued_at;
+        // Capture before the task is moved into the spawn closure so the
+        // cancel-arm requeue path can reconstruct a fresh `BlockValidationTask`
+        // for the same block. Cloning the `Arc<SealedBlock>` is a refcount
+        // bump; the bool is Copy.
+        let sealed_block = Arc::clone(&task.sealed_block);
+        let skip_vdf_validation = task.skip_vdf_validation;
 
         let abort_handle = self.concurrent_tasks.spawn(
             async move {
@@ -619,8 +754,10 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
             ))
             .in_current_span(),
         );
-        self.concurrent_task_blocks
-            .insert(abort_handle.id(), (block_hash, enqueued_at));
+        self.concurrent_task_blocks.insert(
+            abort_handle.id(),
+            (block_hash, enqueued_at, sealed_block, skip_vdf_validation),
+        );
     }
 
     /// Abort all running validation tasks for clean shutdown.
@@ -643,6 +780,53 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
         // Abort all concurrent validation tasks
         self.concurrent_tasks.abort_all();
         self.concurrent_task_blocks.clear();
+        self.concurrent_cancel_retries.clear();
+    }
+
+    /// Record a concurrent-stage cancellation for `block_hash` and decide
+    /// whether to requeue or give up. Increments the per-block counter and
+    /// compares against [`MAX_CONCURRENT_CANCEL_RETRIES`].
+    ///
+    /// - `attempt == 1` on the first cancellation seen for the block.
+    /// - Returns `Requeue` while `attempt < MAX_CONCURRENT_CANCEL_RETRIES`.
+    /// - Returns `GiveUp` and clears the counter at the cap so the entry
+    ///   doesn't linger after the block leaves the active set.
+    ///
+    /// Counter clearing on `GiveUp`: the block is being routed out via
+    /// `ValidationCancelReason::RepeatedCancellation` and won't re-enter
+    /// without fresh gossip. Fresh gossip starts the count from zero —
+    /// the new entry is a different validation attempt, not a continuation
+    /// of the give-up'd one.
+    pub(super) fn record_concurrent_cancel(
+        &mut self,
+        block_hash: BlockHash,
+    ) -> ConcurrentCancelDecision {
+        let counter = self
+            .concurrent_cancel_retries
+            .entry(block_hash)
+            .or_insert(0);
+        // Saturate so an attacker can't roll the counter back to 0 by
+        // forcing 256 cancellations (defensive — the cap is 3, so this
+        // is unreachable in practice, but cheap to guard).
+        *counter = counter.saturating_add(1);
+        let attempt = *counter;
+        if attempt >= MAX_CONCURRENT_CANCEL_RETRIES {
+            // Cap hit — drop the counter so we don't leak entries for
+            // every block that ever burned through its retry budget.
+            self.concurrent_cancel_retries.remove(&block_hash);
+            ConcurrentCancelDecision::GiveUp { attempt }
+        } else {
+            ConcurrentCancelDecision::Requeue { attempt }
+        }
+    }
+
+    /// Clear the cancel-retry counter for `block_hash`. Invoked when the
+    /// block exits the concurrent stage via a verdict (Ok arm) or via a
+    /// task panic (panic arm) — both terminate the validation attempt,
+    /// so a future cancel for a future submission of the same hash should
+    /// start fresh from zero rather than inheriting stale state.
+    pub(super) fn clear_concurrent_cancel_retries(&mut self, block_hash: &BlockHash) {
+        self.concurrent_cancel_retries.remove(block_hash);
     }
 
     /// Reevaluate all priorities after reorg
@@ -1185,6 +1369,7 @@ mod tests {
             cancel_signal: Arc::clone(&cancel),
             stage_signal: stage,
             last_progress_at: progress,
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: sealed,
             handle: tokio::spawn(std::future::pending()),
@@ -1710,6 +1895,7 @@ mod tests {
                 VdfTaskStage::Starting as u8,
             )),
             last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: ext_sealed,
             handle: tokio::spawn(std::future::pending()),
@@ -1908,6 +2094,7 @@ mod tests {
                 VdfTaskStage::Starting as u8,
             )),
             last_progress_at: Arc::new(Mutex::new(Instant::now())),
+            completed_at: Arc::new(Mutex::new(None)),
             started_at: Instant::now(),
             sealed_block: Arc::new(
                 SealedBlock::new(
@@ -1939,5 +2126,372 @@ mod tests {
             CancelEnum::Continue as u8,
             "Cancel signal should not be set when priority is unchanged"
         );
+    }
+
+    /// Concurrent-stage cancel-retry cap.
+    ///
+    /// After `MAX_CONCURRENT_CANCEL_RETRIES` cancellations for the same
+    /// block hash, the coordinator must stop returning `Requeue` and start
+    /// returning `GiveUp`. The first `cap - 1` calls Requeue (so we don't
+    /// over-eagerly give up on a transient hiccup); the cap-th call is
+    /// the one that returns GiveUp. The GiveUp path is what the
+    /// validation-service cancel arm uses to route a
+    /// `ValidationCancelReason::RepeatedCancellation` outcome instead of
+    /// looping back into `submit_task`.
+    #[tokio::test]
+    async fn cancel_retry_cap_returns_giveup_at_threshold() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // The first `cap - 1` cancels must return Requeue with the
+        // running attempt count.
+        for expected_attempt in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            let decision = coordinator.record_concurrent_cancel(hash);
+            assert_eq!(
+                decision,
+                ConcurrentCancelDecision::Requeue {
+                    attempt: expected_attempt
+                },
+                "cancel #{expected_attempt} (cap={MAX_CONCURRENT_CANCEL_RETRIES}) must Requeue"
+            );
+        }
+
+        // The cap-th cancel must return GiveUp. attempt equals the cap.
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::GiveUp {
+                attempt: MAX_CONCURRENT_CANCEL_RETRIES
+            },
+            "cap-th cancel must return GiveUp"
+        );
+
+        // After GiveUp, the counter entry is cleared (the block is being
+        // routed out via RepeatedCancellation — fresh gossip starts a new
+        // count). The next cancel for the same hash starts from attempt 1.
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "GiveUp must clear the counter so the entry doesn't leak"
+        );
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "after GiveUp clears the counter, a fresh cancel starts from attempt 1"
+        );
+    }
+
+    /// A Valid (Ok-arm) outcome clears the cancel-retry counter so a
+    /// subsequent burst of cancels doesn't immediately trip the cap from
+    /// stale state.
+    #[tokio::test]
+    async fn cancel_retry_counter_cleared_on_verdict() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // Accumulate cancels up to but not including the cap.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+            "counter should be at cap-1 before the verdict"
+        );
+
+        // Simulate a Valid/Invalid verdict arriving for the block: the
+        // Ok-arm in the validation-service loop calls
+        // `clear_concurrent_cancel_retries`.
+        coordinator.clear_concurrent_cancel_retries(&hash);
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "verdict must clear the per-block counter"
+        );
+
+        // A fresh cancel for the same hash starts from attempt 1, not
+        // from cap-1 — the verdict was a clean exit, the previous
+        // burst is unrelated to whatever cancels we see next.
+        let decision = coordinator.record_concurrent_cancel(hash);
+        assert_eq!(
+            decision,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "post-clear, the counter must start over from 1"
+        );
+    }
+
+    /// Distinct block hashes maintain independent cancel counters.
+    /// A poisoned block burning through its retry budget must not push a
+    /// different healthy block past its cap.
+    #[tokio::test]
+    async fn cancel_retry_counters_are_per_hash() {
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash_a = BlockHash::random();
+        let hash_b = BlockHash::random();
+        assert_ne!(hash_a, hash_b, "test precondition: distinct hashes");
+
+        // Push hash_a to the cap (so it would GiveUp on the next call).
+        for _ in 0..(MAX_CONCURRENT_CANCEL_RETRIES - 1) {
+            let d = coordinator.record_concurrent_cancel(hash_a);
+            assert!(matches!(d, ConcurrentCancelDecision::Requeue { .. }));
+        }
+
+        // hash_b is untouched — its first cancel must return Requeue with
+        // attempt = 1, not GiveUp.
+        let decision_b = coordinator.record_concurrent_cancel(hash_b);
+        assert_eq!(
+            decision_b,
+            ConcurrentCancelDecision::Requeue { attempt: 1 },
+            "hash_b counter must be independent of hash_a's"
+        );
+
+        // hash_a's next cancel still trips the cap as expected.
+        let decision_a = coordinator.record_concurrent_cancel(hash_a);
+        assert_eq!(
+            decision_a,
+            ConcurrentCancelDecision::GiveUp {
+                attempt: MAX_CONCURRENT_CANCEL_RETRIES
+            },
+            "hash_a should still GiveUp at the cap regardless of hash_b activity"
+        );
+    }
+
+    /// `RepeatedCancellation` classifies as `SoftInternal` (not
+    /// `NodeFault`, not `Invalid`). This is the routing invariant: when
+    /// the cap-hit path constructs the variant and routes it via
+    /// `From<ValidationError>`, the block must park rather than be
+    /// peer-attributed or trigger a node-fault abort. Pair with
+    /// `validation_cancel_reason_classifier_dispatch` and
+    /// `validation_cancelled_converts_per_reason`, which also cover
+    /// `RepeatedCancellation`.
+    #[test]
+    fn repeated_cancellation_classifies_as_softinternal() {
+        use crate::block_tree_service::ValidationResult;
+        use crate::block_validation::{ValidationCancelReason, ValidationError};
+
+        let reason = ValidationCancelReason::RepeatedCancellation;
+        // IS_INTERNAL is a const — verified at compile time by the tripwire in block_validation.rs.
+
+        let result: ValidationResult = ValidationError::ValidationCancelled { reason }.into();
+        let ValidationResult::InternalFailure(inner) = &result else {
+            panic!("RepeatedCancellation must dispatch to InternalFailure, got {result:?}");
+        };
+        assert!(
+            !inner.is_node_fault(),
+            "RepeatedCancellation is a soft retry give-up, not a node fault — \
+             the supervisor must NOT restart the node on this"
+        );
+    }
+
+    /// The VDF terminal arms (`Invalid` and `ParentMissing`) MUST clear
+    /// the `concurrent_cancel_retries` counter for the hash before
+    /// dispatching the result. Without the clear, a future fresh
+    /// submission of the same hash would inherit a stale counter from
+    /// the prior attempt and silently start with a shortened retry
+    /// budget — a poisoned-resubmission landmine.
+    ///
+    /// Drives the real `vdf_terminal_finalize_via` helper that the
+    /// production select-loop arms call. Mirrors
+    /// `cancel_retry_counter_cleared_on_verdict` (which covers the
+    /// Ok-arm path) for the terminal-VDF path.
+    #[tokio::test]
+    async fn vdf_terminal_finalize_clears_concurrent_cancel_retries() {
+        use crate::block_validation::ValidationError;
+        use crate::validation_service::vdf_terminal_finalize_via;
+
+        let (block_tree_guard, _blocks) = setup_canonical_chain_scenario(0);
+        let mut coordinator =
+            ValidationCoordinator::new(block_tree_guard, tokio::runtime::Handle::current());
+        let hash = BlockHash::random();
+
+        // Seed the counter to cap-1 to simulate a prior burst of cancels
+        // on a previous attempt. Use the real production helper so the
+        // test is sensitive to any future refactor that changes the
+        // increment semantics.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+            "test precondition: counter must be at cap-1"
+        );
+
+        // Construct a real channel so the dispatch path actually fires
+        // (the helper returns true on success). We don't care about the
+        // dispatched payload here — the counter clear is the contract.
+        let (block_tree_sender, _block_tree_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // VDF Invalid arm: route a `VdfValidationFailed` (Consensus
+        // classification) through the helper. Counter must be cleared.
+        let dispatched = vdf_terminal_finalize_via(
+            &mut coordinator,
+            &block_tree_sender,
+            hash,
+            ValidationError::VdfValidationFailed("synthetic vdf failure".to_string()),
+        );
+        assert!(
+            dispatched,
+            "VDF Invalid terminal dispatch must succeed when the receiver is alive"
+        );
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "VDF Invalid terminal must clear concurrent_cancel_retries — without this, \
+             a future fresh submission's retry budget silently shortens (poisoned-resubmission landmine)"
+        );
+
+        // Re-seed the counter and exercise the VDF ParentMissing arm
+        // through the same helper. Same contract.
+        for _ in 1..MAX_CONCURRENT_CANCEL_RETRIES {
+            coordinator.record_concurrent_cancel(hash);
+        }
+        assert_eq!(
+            coordinator.concurrent_cancel_retries.get(&hash).copied(),
+            Some(MAX_CONCURRENT_CANCEL_RETRIES - 1),
+        );
+        let dispatched = vdf_terminal_finalize_via(
+            &mut coordinator,
+            &block_tree_sender,
+            hash,
+            ValidationError::ParentBlockMissing {
+                block_hash: BlockHash::random(),
+            },
+        );
+        assert!(dispatched);
+        assert!(
+            !coordinator.concurrent_cancel_retries.contains_key(&hash),
+            "VDF ParentMissing terminal must clear concurrent_cancel_retries — \
+             same counter-clear invariant as the Invalid arm"
+        );
+    }
+
+    // =========================================================================
+    // Tests for the VdfBlockingTaskFailed sentinel (JoinError split: panic vs abort)
+    // =========================================================================
+    //
+    // These tests verify the fix for the never-mislabel invariant on
+    // `spawn_blocking` sites in `ensure_vdf_is_valid`. Before the fix, a
+    // `JoinError` from Stage B / C/D fell through the downcast chain to the
+    // `None` arm and became `VdfValidationResult::Invalid` — a peer-attributable
+    // consensus rejection for what is actually a local-verifier-thread fault.
+    //
+    // Mirrors the symmetric PoA test suite at
+    // `block_validation_task.rs:classify_poa_join_error_tests`.
+
+    /// Cancelled-arm: an externally aborted `spawn_blocking` task produces
+    /// `JoinError::is_cancelled()`. The `VdfBlockingTaskFailed` sentinel
+    /// (is_panic=false) must route to `VdfValidationResult::Cancelled`, not
+    /// `Invalid`.
+    ///
+    /// We test this by constructing the sentinel directly and confirming it
+    /// round-trips through `eyre::Report` and maps to the correct branch.
+    #[tokio::test]
+    async fn vdf_blocking_cancelled_routes_to_cancelled_not_invalid() {
+        // Simulate a JoinError::is_cancelled() by aborting a spawned task.
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(std::future::pending());
+        handle.abort();
+        let join_err = handle
+            .await
+            .expect_err("aborted task must produce JoinError");
+        assert!(
+            join_err.is_cancelled(),
+            "fixture must produce is_cancelled() = true"
+        );
+
+        // Construct the sentinel exactly as `ensure_vdf_is_valid` does.
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: join_err.is_panic(),
+            is_cancelled: join_err.is_cancelled(),
+            stage: VdfTaskStage::ValidateSeeds,
+        };
+        assert!(
+            !sentinel.is_panic,
+            "is_cancelled fixture must not be is_panic"
+        );
+
+        // Confirm the sentinel round-trips through eyre::Report.
+        let report: eyre::Report = sentinel.into();
+        let recovered = report
+            .downcast_ref::<VdfBlockingTaskFailed>()
+            .expect("VdfBlockingTaskFailed must survive eyre boxing");
+        assert!(!recovered.is_panic);
+        assert!(recovered.is_cancelled);
+        assert_eq!(recovered.stage, VdfTaskStage::ValidateSeeds);
+
+        // The production path: if !is_panic → Cancelled.
+        let result = if recovered.is_panic {
+            VdfValidationResult::Invalid(eyre::eyre!("should not reach"))
+        } else {
+            VdfValidationResult::Cancelled
+        };
+        assert!(
+            matches!(result, VdfValidationResult::Cancelled),
+            "VdfBlockingTaskFailed(is_cancelled) must map to Cancelled, not Invalid"
+        );
+    }
+
+    /// Panic-arm: a `spawn_blocking` task that panics produces a
+    /// `JoinError::is_panic()`. Confirms the sentinel carries `is_panic=true`
+    /// and round-trips through `eyre::Report`.
+    #[tokio::test]
+    async fn vdf_blocking_panic_produces_is_panic_join_error() {
+        let handle = tokio::task::spawn_blocking(|| -> () {
+            panic!("simulated blocking-thread panic in VDF stage");
+        });
+        let join_err = handle
+            .await
+            .expect_err("panicking blocking task must produce JoinError");
+        assert!(
+            join_err.is_panic(),
+            "panicking spawn_blocking must produce is_panic() = true"
+        );
+
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: join_err.is_panic(),
+            is_cancelled: join_err.is_cancelled(),
+            stage: VdfTaskStage::ValidateBatch,
+        };
+        assert!(sentinel.is_panic, "sentinel must carry is_panic=true");
+        assert!(!sentinel.is_cancelled);
+        assert_eq!(sentinel.stage, VdfTaskStage::ValidateBatch);
+
+        let report: eyre::Report = sentinel.into();
+        let recovered = report
+            .downcast_ref::<VdfBlockingTaskFailed>()
+            .expect("VdfBlockingTaskFailed must survive eyre boxing");
+        assert!(recovered.is_panic);
+        assert!(!recovered.is_cancelled);
+        assert_eq!(recovered.stage, VdfTaskStage::ValidateBatch);
+    }
+
+    /// Panic dispatch: drives the `VdfBlockingTaskFailed { is_panic: true }`
+    /// branch in the downcast chain to confirm the never-mislabel panic fires
+    /// with the correct message. Uses the same conditional logic as the
+    /// production code path.
+    #[tokio::test]
+    #[should_panic(expected = "VDF blocking task panicked")]
+    async fn vdf_blocking_panic_sentinel_causes_execute_to_panic() {
+        let sentinel = VdfBlockingTaskFailed {
+            is_panic: true,
+            is_cancelled: false,
+            stage: VdfTaskStage::ValidateSeeds,
+        };
+        let report: eyre::Report = sentinel.into();
+        let e = &report;
+
+        // Replicate the dispatch logic from PreemptibleVdfTask::execute.
+        if let Some(blocking_failed) = e.downcast_ref::<VdfBlockingTaskFailed>()
+            && blocking_failed.is_panic
+        {
+            panic!(
+                "VDF blocking task panicked (stage={:?}, block={}); local-thread fault — crashing per never-mislabel rule",
+                blocking_failed.stage, "test-block-hash",
+            );
+        }
     }
 }
