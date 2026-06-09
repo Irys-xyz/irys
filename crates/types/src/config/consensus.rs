@@ -731,8 +731,25 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
-                aurora: None,
-                borealis: None,
+                // Aurora hardfork - deprecates V1 commitment transactions
+                aurora: Some(Aurora {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-06-23T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    minimum_commitment_tx_version: 2,
+                }),
+                // Borealis hardfork - enables UpdateRewardAddress commitment transactions
+                borealis: Some(Borealis {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-06-30T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                }),
                 cascade: None,
             },
         }
@@ -975,8 +992,15 @@ impl ConsensusConfig {
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
-                // Borealis hardfork - disabled for testnet (controlled activation)
-                borealis: None,
+                // Borealis hardfork - controlled activation on testnet
+                borealis: Some(Borealis {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-06-10T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                }),
                 cascade: None,
             },
         }
@@ -1027,6 +1051,61 @@ mod tests {
             genesis_config.keccak256_hash(),
             peer_config.keccak256_hash(),
             "Genesis and Peer nodes with same expected_genesis_hash must have matching consensus hashes"
+        );
+    }
+
+    /// Pins the mainnet Aurora/Borealis activation times so an accidental edit
+    /// or merge that shifts a hardfork boundary fails CI. These are consensus
+    /// values — any change is a protocol change.
+    #[test]
+    fn test_mainnet_hardfork_activation_times() {
+        let config = ConsensusConfig::mainnet();
+
+        // Aurora — 2026-06-23T12:00:00+00:00
+        let aurora_ts = UnixTimestamp::from_secs(1782216000);
+        let aurora = config
+            .hardforks
+            .aurora
+            .as_ref()
+            .expect("mainnet Aurora must be configured");
+        assert_eq!(aurora.activation_timestamp, aurora_ts);
+        assert_eq!(aurora.minimum_commitment_tx_version, 2);
+        // Inactive one second before the boundary, active at it.
+        assert!(
+            config
+                .hardforks
+                .aurora_at(UnixTimestamp::from_secs(1782216000 - 1))
+                .is_none()
+        );
+        assert!(config.hardforks.aurora_at(aurora_ts).is_some());
+
+        // Borealis — 2026-06-30T12:00:00+00:00 (epoch-aligned at runtime; pin the
+        // configured activation timestamp).
+        assert_eq!(
+            config
+                .hardforks
+                .borealis
+                .as_ref()
+                .expect("mainnet Borealis must be configured")
+                .activation_timestamp,
+            UnixTimestamp::from_secs(1782820800)
+        );
+    }
+
+    /// Pins the testnet Borealis activation time (controlled rollout).
+    #[test]
+    fn test_testnet_borealis_activation_time() {
+        let config = ConsensusConfig::testnet();
+
+        // Borealis — 2026-06-10T12:00:00+00:00 (epoch-aligned at runtime).
+        assert_eq!(
+            config
+                .hardforks
+                .borealis
+                .as_ref()
+                .expect("testnet Borealis must be configured")
+                .activation_timestamp,
+            UnixTimestamp::from_secs(1781092800)
         );
     }
 
