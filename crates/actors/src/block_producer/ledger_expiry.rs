@@ -147,95 +147,21 @@ pub async fn calculate_expired_ledger_fees(
         }
     };
 
-    // Step 3: Process boundary blocks
-    let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
-    tracing::info!(
-        "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
-        block_range.min_block.height,
-        block_range.max_block.height,
-        same_block
-    );
-
-    let earliest_miners;
-    let latest_miners;
-
-    if same_block {
-        // When min and max are the same block, process it only once to avoid double-counting
-        // Process as earliest block (will include all transactions in the partition range)
-        let miners = process_boundary_block(
-            &block_range.min_block,
-            block_range.min_block.item.block_hash,
-            Arc::clone(&block_range.min_block_miners),
-            true, // is_earliest
-            ledger_type,
-            config,
-            &block_index,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        earliest_miners = miners;
-        latest_miners = BTreeMap::new();
-    } else {
-        // Different blocks - process both boundaries
-        let e_miners = process_boundary_block(
-            &block_range.min_block,
-            block_range.min_block.item.block_hash,
-            Arc::clone(&block_range.min_block_miners),
-            true, // is_earliest
-            ledger_type,
-            config,
-            &block_index,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        let l_miners = process_boundary_block(
-            &block_range.max_block,
-            block_range.max_block.item.block_hash,
-            Arc::clone(&block_range.max_block_miners),
-            false, // is_earliest
-            ledger_type,
-            config,
-            &block_index,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        earliest_miners = e_miners;
-        latest_miners = l_miners;
-    }
-
-    // Step 4: Process middle blocks
-    let middle_miners =
-        process_middle_blocks(block_range.middle_blocks, ledger_type, block_tree_guard, db).await?;
-
-    // Step 5: Combine all transactions
-    let mut all_tx_ids = Vec::new();
-    all_tx_ids.extend(earliest_miners.keys());
-    all_tx_ids.extend(latest_miners.keys());
-    all_tx_ids.extend(middle_miners.keys());
-
-    tracing::info!(
-        "Collected transactions: earliest={}, latest={}, middle={}, total={}",
-        earliest_miners.len(),
-        latest_miners.len(),
-        middle_miners.len(),
-        all_tx_ids.len()
-    );
-
-    let mut tx_to_miners = BTreeMap::new();
-    tx_to_miners.extend(earliest_miners);
-    tx_to_miners.extend(latest_miners);
-    tx_to_miners.extend(middle_miners);
+    // Steps 3-5: Process boundary + middle blocks → tx → miners
+    let tx_to_miners = collect_tx_to_miners_from_range(
+        block_range,
+        ledger_type,
+        config,
+        &block_index,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await?;
 
     // Step 6: Fetch transactions
+    let mut all_tx_ids = Vec::new();
+    all_tx_ids.extend(tx_to_miners.keys());
     let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
     transactions.sort_by(irys_types::DataTransactionHeader::compare_tx);
 
@@ -270,6 +196,170 @@ pub async fn calculate_expired_ledger_fees(
     );
 
     Ok(fees)
+}
+
+/// Boundary + middle block processing (algorithm steps 3-5): maps every tx in the
+/// expired chunk ranges to the miners who stored it.
+///
+/// Shared by [`calculate_expired_ledger_fees`] (fee/refund distribution) and
+/// [`expired_submit_tx_ids`] (NC-0042 non-promotability set) so the two cannot
+/// disagree about which txs an expired slot contains — the structural flaw the
+/// cycle-math approximation introduced (see NC-0042 §4b).
+async fn collect_tx_to_miners_from_range(
+    block_range: BlockRange,
+    ledger_type: DataLedger,
+    config: &Config,
+    block_index: &BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
+    let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
+    tracing::info!(
+        "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
+        block_range.min_block.height,
+        block_range.max_block.height,
+        same_block
+    );
+
+    let earliest_miners;
+    let latest_miners;
+
+    if same_block {
+        // When min and max are the same block, process it only once to avoid double-counting
+        // Process as earliest block (will include all transactions in the partition range)
+        let miners = process_boundary_block(
+            &block_range.min_block,
+            block_range.min_block.item.block_hash,
+            Arc::clone(&block_range.min_block_miners),
+            true, // is_earliest
+            ledger_type,
+            config,
+            block_index,
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await?;
+
+        earliest_miners = miners;
+        latest_miners = BTreeMap::new();
+    } else {
+        // Different blocks - process both boundaries
+        let e_miners = process_boundary_block(
+            &block_range.min_block,
+            block_range.min_block.item.block_hash,
+            Arc::clone(&block_range.min_block_miners),
+            true, // is_earliest
+            ledger_type,
+            config,
+            block_index,
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await?;
+
+        let l_miners = process_boundary_block(
+            &block_range.max_block,
+            block_range.max_block.item.block_hash,
+            Arc::clone(&block_range.max_block_miners),
+            false, // is_earliest
+            ledger_type,
+            config,
+            block_index,
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await?;
+
+        earliest_miners = e_miners;
+        latest_miners = l_miners;
+    }
+
+    // Process middle blocks
+    let middle_miners =
+        process_middle_blocks(block_range.middle_blocks, ledger_type, block_tree_guard, db).await?;
+
+    tracing::info!(
+        "Collected transactions: earliest={}, latest={}, middle={}",
+        earliest_miners.len(),
+        latest_miners.len(),
+        middle_miners.len(),
+    );
+
+    let mut tx_to_miners = BTreeMap::new();
+    tx_to_miners.extend(earliest_miners);
+    tx_to_miners.extend(latest_miners);
+    tx_to_miners.extend(middle_miners);
+
+    Ok(tx_to_miners)
+}
+
+/// NC-0042 §4b/§4c: the set of Submit-ledger transaction ids whose storage has
+/// **expired as of `block_height`** — i.e. the txs that are (or will be at the
+/// next epoch) perm-fee-refunded and therefore must never be promoted.
+///
+/// This is the authoritative non-promotability predicate shared by the producer
+/// filter (`tx_selector::get_publish_txs_and_proofs`) and the validator check
+/// (`block_validation`). It is derived from the *same* expired-partition →
+/// block → tx walk that `calculate_expired_ledger_fees` uses for refunds, so the
+/// "is this tx refunded?" and "may this tx be promoted?" decisions cannot
+/// diverge.
+///
+/// Unlike the refund pipeline (which keys on *newly* expiring slots, acting once
+/// per slot), this keys on [`EpochSnapshot::get_all_expired_term_slot_indexes`]
+/// (inclusive of slots that expired at an earlier epoch), so a tx remains
+/// non-promotable for every block at-or-after its slot's expiry — covering both
+/// the same-block (epoch) collision and the cross-block double-pay.
+///
+/// Miners are irrelevant here (no fee attribution), so a sentinel miner is used
+/// purely to satisfy the boundary-filter's non-empty-miners requirement; the
+/// returned value is the tx-id set only.
+#[tracing::instrument(skip_all, fields(block.height = block_height))]
+pub async fn expired_submit_tx_ids(
+    parent_epoch_snapshot: &EpochSnapshot,
+    block_height: u64,
+    config: &Config,
+    block_index: BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<std::collections::BTreeSet<IrysTransactionId>> {
+    let slot_indexes =
+        parent_epoch_snapshot.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height);
+    if slot_indexes.is_empty() {
+        return Ok(std::collections::BTreeSet::new());
+    }
+
+    // Sentinel miner: `find_block_range` / `filter_transactions_by_chunk_range`
+    // require a non-empty miner list to include a slot's txs, but we only need the
+    // tx ids here. The address value is never read (we take `.keys()`).
+    let expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>> = slot_indexes
+        .into_iter()
+        .map(|i| (SlotIndex::new(i as u64), vec![IrysAddress::ZERO]))
+        .collect();
+
+    let block_range =
+        match find_block_range(expired_slots, config, &block_index, DataLedger::Submit)? {
+            Some(br) => br,
+            // No chunks were ever uploaded into the expired slot ranges.
+            None => return Ok(std::collections::BTreeSet::new()),
+        };
+
+    let tx_to_miners = collect_tx_to_miners_from_range(
+        block_range,
+        DataLedger::Submit,
+        config,
+        &block_index,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await?;
+
+    Ok(tx_to_miners.into_keys().collect())
 }
 
 /// Fetches a block header from block tree or database

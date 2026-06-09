@@ -1371,6 +1371,21 @@ impl EpochSnapshot {
             .collect()
     }
 
+    /// Slot indexes of the given term `ledger` whose storage has expired as of
+    /// `epoch_height`, **inclusive** of slots that expired at an earlier epoch.
+    /// Unlike `get_expiring_partition_info` (newly-expiring only, used by the
+    /// refund pipeline), this is the set the NC-0042 publish-candidate filter and
+    /// validator check key on: a tx is non-promotable for every block at-or-after
+    /// its Submit slot's expiry. See `Ledgers::get_all_expired_term_slot_indexes`.
+    pub fn get_all_expired_term_slot_indexes(
+        &self,
+        ledger: DataLedger,
+        epoch_height: u64,
+    ) -> Vec<usize> {
+        self.ledgers
+            .get_all_expired_term_slot_indexes(ledger, epoch_height)
+    }
+
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {
         let slots = self.ledgers[ledger_id].get_slots();
 
