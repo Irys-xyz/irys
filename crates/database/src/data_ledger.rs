@@ -132,6 +132,42 @@ impl TermLedger {
         expired_slot_indexes
     }
 
+    /// Like [`get_expired_slot_indexes`](Self::get_expired_slot_indexes) but returns
+    /// **all** slots whose storage has expired as of `epoch_height`, including those
+    /// already marked `is_expired` from a previous epoch. The never-expire-the-last-slot
+    /// rule is preserved.
+    ///
+    /// `get_expired_slot_indexes` returns only *newly* expiring slots (it filters out
+    /// `is_expired`), because the refund/fee pipeline must act on each slot exactly once.
+    /// The NC-0042 publish-candidate filter and validator check need the opposite: a tx
+    /// whose Submit slot expired must be treated as non-promotable for *every* block
+    /// at-or-after the expiry, not just the single epoch block where it newly expires.
+    /// Keying on `last_height` (set once at allocation, never mutated) makes this a pure
+    /// function of canonical slot state — producer and validator always agree.
+    pub fn get_all_expired_slot_indexes(&self, epoch_height: u64) -> Vec<usize> {
+        let min_blocks = self
+            .epoch_length
+            .checked_mul(self.num_blocks_in_epoch)
+            .expect("epoch_length * num_blocks_in_epoch overflows u64");
+
+        if epoch_height < min_blocks {
+            return Vec::new();
+        }
+
+        let expiry_height = epoch_height - min_blocks;
+        let last_slot_index = self.slots.len().saturating_sub(1);
+
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(slot_index, slot)| {
+                // Never expire the last slot in a ledger (matches get_expired_slot_indexes).
+                *slot_index != last_slot_index && slot.last_height <= expiry_height
+            })
+            .map(|(slot_index, _)| slot_index)
+            .collect()
+    }
+
     /// Returns indices of newly expired slots
     pub fn expire_old_slots(&mut self, epoch_height: u64) -> Vec<usize> {
         let expired_slot_indexes = self.get_expired_slot_indexes(epoch_height);
@@ -422,6 +458,20 @@ impl Ledgers {
         }
 
         expired_partitions
+    }
+
+    /// Slot indexes of the given term `ledger` whose storage has expired as of
+    /// `epoch_height`, inclusive of already-expired slots. Used by the NC-0042
+    /// publish-candidate filter (producer) and validator check, which must treat
+    /// a tx as non-promotable for every block at-or-after its slot's expiry.
+    /// See [`TermLedger::get_all_expired_slot_indexes`].
+    pub fn get_all_expired_term_slot_indexes(
+        &self,
+        ledger: DataLedger,
+        epoch_height: u64,
+    ) -> Vec<usize> {
+        self.get_term_ledger(ledger)
+            .get_all_expired_slot_indexes(epoch_height)
     }
 
     // Private helper methods for term ledger lookups
@@ -774,5 +824,76 @@ mod tests {
 
         let expiring = ledgers.get_expiring_partitions(1000);
         assert!(expiring.iter().all(|e| e.ledger_id != DataLedger::Publish));
+    }
+
+    /// `get_all_expired_slot_indexes` is the NC-0042 §4b/§4c non-promotability
+    /// predicate. It must never expire the last/only slot — the case a per-tx
+    /// cycle-math approximation got wrong, since the genesis slot stays the "last
+    /// slot" and its data is still stored until a newer slot is allocated.
+    #[test]
+    fn get_all_expired_slot_indexes_never_expires_the_only_slot() {
+        let config = ConsensusConfig::testing();
+        let epoch_length = config.epoch.submit_ledger_epoch_length;
+        let blocks_per_cycle = epoch_length * config.epoch.num_blocks_in_epoch;
+
+        let mut ledger = TermLedger::new(DataLedger::Submit, &config, epoch_length);
+        ledger.allocate_slots(1, 0); // single slot allocated at genesis
+
+        // Even far past the cycle boundary, the only slot is the last slot and
+        // never expires — exactly where the cycle-math approximation diverged.
+        assert!(
+            ledger
+                .get_all_expired_slot_indexes(blocks_per_cycle)
+                .is_empty()
+        );
+        assert!(
+            ledger
+                .get_all_expired_slot_indexes(blocks_per_cycle * 10)
+                .is_empty()
+        );
+    }
+
+    /// The inclusive set keeps a slot once it has expired (the cross-block
+    /// double-pay guard), whereas `get_expired_slot_indexes` returns only the
+    /// *newly* expiring slot (the once-per-slot refund trigger).
+    #[test]
+    fn get_all_expired_slot_indexes_includes_already_expired_slots() {
+        let config = ConsensusConfig::testing();
+        let epoch_length = config.epoch.submit_ledger_epoch_length;
+        let num_blocks = config.epoch.num_blocks_in_epoch;
+        let blocks_per_cycle = epoch_length * num_blocks;
+
+        // slot 0 allocated at genesis, slot 1 allocated one epoch later → slot 0
+        // is non-last and expires at 0 + blocks_per_cycle.
+        let mut ledger = TermLedger::new(DataLedger::Submit, &config, epoch_length);
+        ledger.allocate_slots(1, 0); // slot 0
+        ledger.allocate_slots(1, num_blocks); // slot 1 (the kept last slot)
+
+        let expiry = blocks_per_cycle; // slot 0 expires here
+
+        // One epoch before: nothing expired yet.
+        assert!(
+            ledger
+                .get_all_expired_slot_indexes(expiry - num_blocks)
+                .is_empty()
+        );
+
+        // At expiry, slot 0 is in both sets.
+        assert_eq!(ledger.get_all_expired_slot_indexes(expiry), vec![0]);
+        assert_eq!(ledger.get_expired_slot_indexes(expiry), vec![0]);
+
+        // After it is marked expired, the inclusive set still returns it
+        // (a tx in slot 0 stays non-promotable at every later block) while the
+        // newly-expiring set drops it (it must only be refunded once).
+        ledger.expire_old_slots(expiry);
+        assert_eq!(
+            ledger.get_all_expired_slot_indexes(expiry + 1),
+            vec![0],
+            "an already-expired slot must remain in the inclusive set (cross-block guard)"
+        );
+        assert!(
+            ledger.get_expired_slot_indexes(expiry + 1).is_empty(),
+            "get_expired_slot_indexes returns only newly-expiring slots"
+        );
     }
 }

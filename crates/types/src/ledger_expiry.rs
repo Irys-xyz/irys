@@ -31,6 +31,16 @@ impl SubmitLedgerMetadata {
     }
 }
 
+// NOTE: There is deliberately no per-tx "absolute expiry height" helper here.
+// Submit-ledger expiry is a per-*slot* property
+// (`TermLedger::get_all_expired_slot_indexes`): a slot expires at
+// `slot.last_height + blocks_per_cycle`, except the last/newest slot is never
+// expired, and slots are allocated at arbitrary epoch boundaries — not cycle
+// boundaries. A per-tx cycle-math approximation of expiry diverges from this and
+// caused both a false-positive (rejecting valid promotions) and a false-negative
+// (missing a double-pay) in the first NC-0042 fix. Promotion/refund decisions
+// must use the expired-partition set (`ledger_expiry::expired_submit_tx_ids`).
+
 /// Calculates the number of epochs remaining before the submit ledger expires.
 /// Returns a value from 1 to submit_ledger_epoch_length (never 0).
 pub fn calculate_submit_ledger_expiry(
