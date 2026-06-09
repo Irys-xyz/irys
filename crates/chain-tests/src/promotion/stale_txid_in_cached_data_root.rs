@@ -146,6 +146,9 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     };
 
     let result = tokio::task::spawn(async move {
+        // This test exercises stale-txid handling in the publish-candidate path,
+        // not Submit-ledger expiry, so no tx is expired here.
+        let expired_submit_tx_ids = std::collections::BTreeSet::new();
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &block_tree,
             db: &db,
@@ -153,6 +156,7 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
             config: &config,
             mempool_state: mempool_guard.atomic_state(),
             chunk_ingress_state: &chunk_ingress_state,
+            expired_submit_tx_ids: &expired_submit_tx_ids,
         };
         irys_actors::tx_selector::select_best_txs(
             parent_hash,

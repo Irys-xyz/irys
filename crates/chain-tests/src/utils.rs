@@ -2153,6 +2153,32 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .timestamp_secs();
             irys_types::UnixTimestamp::from_secs(parent_secs.as_secs() + 1)
         };
+        // Mirror production (block_producer::fetch_best_mempool_txs): compute the
+        // set of Submit-ledger txs whose storage has expired as of the block being
+        // produced, so the publish-candidate expiry filter (NC-0042 §4b) behaves
+        // here exactly as in the real producer.
+        let (parent_height, parent_epoch_snapshot) = {
+            let tree = self.node_ctx.block_tree_guard.read();
+            let height = tree
+                .get_block(&parent_block_hash)
+                .expect("parent block should exist in block tree")
+                .height;
+            let snapshot = tree
+                .get_epoch_snapshot(&parent_block_hash)
+                .expect("parent epoch snapshot should exist");
+            (height, snapshot)
+        };
+        let expired_submit_tx_ids =
+            irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
+                &parent_epoch_snapshot,
+                parent_height + 1,
+                &self.node_ctx.config,
+                self.node_ctx.block_producer_inner.block_index.clone(),
+                &self.node_ctx.block_tree_guard,
+                &self.node_ctx.mempool_guard,
+                &self.node_ctx.db,
+            )
+            .await?;
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &self.node_ctx.block_tree_guard,
             db: &self.node_ctx.db,
@@ -2160,6 +2186,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             config: &self.node_ctx.config,
             mempool_state: self.node_ctx.mempool_guard.atomic_state(),
             chunk_ingress_state: &self.node_ctx.chunk_ingress_state,
+            expired_submit_tx_ids: &expired_submit_tx_ids,
         };
         irys_actors::tx_selector::select_best_txs(parent_block_hash, new_block_timestamp, &ctx)
             .await

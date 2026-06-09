@@ -77,6 +77,13 @@ pub struct TxSelectionContext<'a> {
     pub config: &'a Config,
     pub mempool_state: &'a AtomicMempoolState,
     pub chunk_ingress_state: &'a ChunkIngressState,
+    /// Submit-ledger tx ids whose storage has expired as of the block being
+    /// produced (NC-0042 §4b). Such txs are perm-fee-refunded by the expiry
+    /// pipeline and must not be promoted; `get_publish_txs_and_proofs` drops any
+    /// publish candidate in this set. Computed by the producer via
+    /// `ledger_expiry::expired_submit_tx_ids` from the same walk that schedules
+    /// the refunds, so the two cannot diverge. Empty for non-producer callers.
+    pub expired_submit_tx_ids: &'a std::collections::BTreeSet<H256>,
 }
 
 /// Main entry point: selects the best transactions from the mempool for block production.
@@ -875,10 +882,9 @@ async fn get_publish_txs_and_proofs(
         // `Validated` entry can leak its Submit tx_ids here, making the
         // fast-path say "already submitted" for a tx whose Submit inclusion is
         // about to be rolled back. The producer then skips the DB fallback
-        // (line ~893) and includes the tx as a publish candidate; peer
-        // validators catch any genuine double-publish via Vector B's
-        // canonical-DB check, so the worst case is a rejected block (no
-        // consensus impact, producer pays the cost).
+        // and includes the tx as a publish candidate; peer validators catch any
+        // genuine double-publish via Vector B's canonical-DB check, so the worst
+        // case is a rejected block (no consensus impact, producer pays the cost).
         let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
             acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
             acc
@@ -940,6 +946,24 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                 }
+            }
+
+            // NC-0042 §4b: drop publish candidates whose Submit-ledger storage has
+            // expired as of the block we're producing. `ctx.expired_submit_tx_ids`
+            // is computed by the producer from the *same* expired-partition → block
+            // → tx walk that schedules `user_perm_fee_refunds` (Pipeline B,
+            // `ledger_expiry::expired_submit_tx_ids`), so "is this tx refunded?" and
+            // "may this tx be promoted?" cannot diverge. A tx in this set is (or
+            // will be, at the next epoch) perm-fee-refunded; promoting it would be a
+            // same-block or cross-block double-pay.
+            if ctx.expired_submit_tx_ids.contains(&tx_header.id) {
+                warn!(
+                    tx.id = ?tx_header.id,
+                    tx.data_root = ?tx_header.data_root,
+                    next_block_height,
+                    "Submit-ledger storage expired; tx is non-promotable (would conflict with perm_fee refund) — see NC-0042",
+                );
+                continue;
             }
 
             // If it's not promoted, validate the proofs

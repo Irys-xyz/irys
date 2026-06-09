@@ -4603,21 +4603,54 @@ async fn generate_expected_shadow_transactions(
         Vec::new()
     };
 
-    // Deterministic block-invariant: peer-attributable. See
-    // `ShadowTransactionInvalid` doc — a tx in the publish ledger that also
-    // has a perm_fee refund scheduled is a structural inconsistency in the
-    // peer's block (promoted txs must not receive refunds). Routed here
-    // (rather than only inside `ShadowTxGenerator::new`) so violations
-    // surface as consensus rejection rather than soft-internal
-    // `ShadowTxNodeFault` for invariant violations. The constructor keeps an identical guard
-    // as defence-in-depth for non-validation callers.
-    for tx in &publish_ledger_with_txs.txs {
-        for (refund_tx_id, _, _) in &expired_ledger_fees.user_perm_fee_refunds {
-            if tx.id == *refund_tx_id {
+    // NC-0042: peer-attributable consensus rule — no Publish-ledger tx may have
+    // its Submit-ledger storage already expired as of this block.
+    //   == block.height  →  same-block epoch collision (Bug A, devnet 39960)
+    //   <  block.height  →  cross-block silent double-pay (devnet 39962 — every
+    //                       validator accepted it pre-fix)
+    //
+    // Producer-side: `tx_selector::get_publish_txs_and_proofs` already filters
+    // out expired candidates (using this same set) so an honest producer never
+    // emits such a block. This check is the peer-attributable rejection when a
+    // malicious or buggy peer's block does.
+    //
+    // Defence-in-depth: `ShadowTxGenerator::new` (shadow_tx_generator.rs:258)
+    // still guards the same-block case for any non-validation construction path
+    // (tests, future callers). The rule here is canonical; the constructor guard
+    // is defence-in-depth only.
+    //
+    // The expired set is derived from the *same* expired-partition → block → tx walk
+    // that schedules `user_perm_fee_refunds`, so "is this tx refunded?" and "may
+    // this tx be promoted?" cannot diverge (the structural flaw the earlier
+    // cycle-math approximation introduced — see NC-0042 §4b).
+    //
+    // This is a strict superset of the old same-block guard: a tx whose Submit
+    // slot expires *at* this block (same-block epoch collision) and a tx whose
+    // slot expired at an *earlier* epoch (cross-block double-pay, devnet 39962)
+    // are both in the set. A tx whose Submit inclusion is in this very block
+    // (same-block Submit→Publish) is not — its slot can't have expired yet.
+    {
+        let expired_submit_tx_ids = ledger_expiry::expired_submit_tx_ids(
+            &parent_epoch_snapshot,
+            block.height,
+            config,
+            block_index.clone(),
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await
+        // Locally derived (parent epoch snapshot, our block_index/mempool/DB);
+        // a failure here is a hard node-local fault, not a peer statement.
+        .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
+
+        for tx in &publish_ledger_with_txs.txs {
+            if expired_submit_tx_ids.contains(&tx.id) {
                 return Err(consensus(format!(
-                    "Transaction {} is in publish ledger but also has a perm_fee refund scheduled. \
-                     Promoted transactions should not receive refunds.",
-                    tx.id
+                    "Transaction {} is in the publish ledger but its Submit-ledger \
+                     storage has already expired as of block {} (it is/was perm_fee \
+                     refunded; promoted txs must not be refunded). See NC-0042.",
+                    tx.id, block.height,
                 )));
             }
         }
