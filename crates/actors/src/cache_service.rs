@@ -16,7 +16,7 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof, IrysAddress,
     LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
@@ -799,7 +799,7 @@ impl InnerCacheTask {
         // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
         // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
-        let mut to_delete: Vec<DataRoot> = Vec::new();
+        let mut to_delete: Vec<(DataRoot, IrysAddress)> = Vec::new();
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
@@ -827,7 +827,7 @@ impl InnerCacheTask {
             // Associated txids
             let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
                 debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
-                to_delete.push(data_root);
+                to_delete.push((data_root, address));
                 continue;
             };
 
@@ -855,7 +855,7 @@ impl InnerCacheTask {
 
             if at_capacity {
                 // Unpromoted + expired + at capacity: delete
-                to_delete.push(data_root);
+                to_delete.push((data_root, address));
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
             } else if is_locally_produced && any_unpromoted {
                 match check_result.regeneration_action {
@@ -876,15 +876,17 @@ impl InnerCacheTask {
                 }
             } else {
                 // Not local + expired: delete
-                to_delete.push(data_root);
+                to_delete.push((data_root, address));
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
             }
         }
 
-        // Delete expired proofs using a proper removal function
+        // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same data_root
         if !to_delete.is_empty() {
-            for root in to_delete.iter() {
-                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof(&self.db, *root) {
+            for (root, addr) in to_delete.iter() {
+                if let Err(e) =
+                    ChunkIngressServiceInner::remove_ingress_proof_by_signer(&self.db, *root, *addr)
+                {
                     warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -917,9 +919,11 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
-                if let Err(e) =
-                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
-                {
+                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof_by_signer(
+                    &self.db,
+                    proof.data_root,
+                    local_addr,
+                ) {
                     warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -947,9 +951,11 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Regeneration disabled, removing ingress proof for data root"
                 );
-                if let Err(e) =
-                    ChunkIngressServiceInner::remove_ingress_proof(&self.db, proof.data_root)
-                {
+                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof_by_signer(
+                    &self.db,
+                    proof.data_root,
+                    local_addr,
+                ) {
                     warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }
@@ -2433,6 +2439,142 @@ mod tests {
             assert!(
                 cached.block_set.contains(&good_hash),
                 "good block hash should remain"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    /// Regression: `prune_ingress_proofs` must delete only the expired signer's
+    /// row, not all proofs for the same `data_root`.
+    ///
+    /// Sets up three distinct-signer proofs for one `data_root`:
+    /// - `signer_a` / `signer_b`: valid anchors (genesis block hash) → not expired
+    /// - `signer_c` (not local): invalid anchor (random unknown hash) → expired
+    ///
+    /// After one pass of `prune_ingress_proofs` the expired proof must be gone
+    /// and the two valid ones must still be present.
+    #[tokio::test]
+    async fn prune_ingress_proofs_preserves_valid_distinct_signer_proofs() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // A shared data_root for all three proofs.
+        let data_root = H256::random();
+        // A txid that will live in the CDR's txid_set and remain unpromoted.
+        let txid = H256::random();
+
+        // Three distinct signer addresses.
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random(); // this one will have an expired proof
+
+        // Build the genesis block; its hash is a valid anchor.
+        let genesis_block = new_mock_signed_header();
+        let valid_anchor = genesis_block.block_hash;
+        // A random hash not in the block tree → InvalidAnchor → expired.
+        let invalid_anchor = H256::random();
+
+        // Persist CDR + unpromoted tx header + three ingress-proof rows.
+        db.update(|wtx| -> eyre::Result<()> {
+            // CachedDataRoot with one pending txid (any_unpromoted = true).
+            let cdr = CachedDataRoot {
+                data_size: 64,
+                data_size_confirmed: false,
+                txid_set: vec![txid],
+                block_set: vec![],
+                expiry_height: None,
+                cached_at: irys_types::UnixTimestamp::now()?,
+            };
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+
+            // Tx header for the pending txid; promoted_height = None (default).
+            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: txid,
+                    data_root,
+                    data_size: 64,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            });
+            database::insert_tx_header(wtx, &tx_header)?;
+
+            // Two valid proofs (known anchor → not expired).
+            let make_proof = |anchor: H256| {
+                let mut p = IngressProof::default();
+                p.data_root = data_root;
+                p.anchor = anchor;
+                p
+            };
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(valid_anchor),
+                addr_a,
+            )?;
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(valid_anchor),
+                addr_b,
+            )?;
+            // One expired proof (unknown anchor).
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(invalid_anchor),
+                addr_c,
+            )?;
+
+            Ok(())
+        })??;
+
+        // Sanity: three proofs inserted.
+        let initial_count = db.view_eyre(|rtx| {
+            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
+        })?;
+        assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
+
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        service_task.prune_ingress_proofs()?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
+            assert_eq!(
+                remaining.len(),
+                2,
+                "two valid proofs must survive; got {}",
+                remaining.len()
+            );
+            let addrs: Vec<IrysAddress> = remaining.iter().map(|(_, c)| c.address).collect();
+            assert!(addrs.contains(&addr_a), "proof for addr_a must survive");
+            assert!(addrs.contains(&addr_b), "proof for addr_b must survive");
+            assert!(
+                !addrs.contains(&addr_c),
+                "expired proof for addr_c must be deleted"
             );
             Ok(())
         })??;

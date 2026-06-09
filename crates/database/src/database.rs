@@ -732,8 +732,26 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
-pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
-    Ok(tx.delete::<IngressProofs>(data_root, None)?)
+/// Deletes only the ingress proof row for a specific (data_root, address) pair,
+/// leaving proofs from other signers intact.
+/// Returns `true` if a row was deleted, `false` if no matching row was found.
+pub fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+) -> eyre::Result<bool> {
+    let matches: Vec<CompactCachedIngressProof> = ingress_proofs_by_data_root(tx, data_root)?
+        .into_iter()
+        .filter(|(_, proof)| proof.address == address)
+        .map(|(_, proof)| proof)
+        .collect();
+
+    let mut deleted = false;
+    for existing in matches {
+        tx.delete::<IngressProofs>(data_root, Some(existing))?;
+        deleted = true;
+    }
+    Ok(deleted)
 }
 
 pub fn store_ingress_proof(
