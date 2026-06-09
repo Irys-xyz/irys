@@ -246,15 +246,20 @@ impl<'a> ShadowTxGenerator<'a> {
     ) -> Result<Self> {
         // Defence-in-depth: no publish-ledger tx may also have a perm_fee
         // refund scheduled (promoted transactions must not receive refunds).
-        // The canonical check lives at the validation call site
-        // (`generate_expected_shadow_transactions` in `block_validation.rs`)
-        // so violations surface as `ValidationError::ShadowTransactionInvalid`
-        // (peer-attributable consensus rejection) rather than soft
-        // `ShadowTxNodeFault`. This in-constructor guard covers any
-        // other construction path (tests, future callers) so the invariant
-        // can't be silently bypassed. If this arm ever fires from production
-        // validation, the call-site check failed to run — fix the call site,
-        // don't relax this guard.
+        //
+        // The canonical validator check now lives at `generate_expected_shadow_transactions`
+        // in `block_validation.rs` (NC-0042 §4c). It rejects any publish-ledger tx
+        // whose Submit-ledger storage has expired as of the block, using the same
+        // expired-partition → tx set that schedules the refunds
+        // (`ledger_expiry::expired_submit_tx_ids`). That covers both the same-block
+        // (`==`) and cross-block (`<`) double-pay cases and subsumes this guard's
+        // `==`-only same-block detection. Violations there surface as
+        // `ValidationError::ShadowTransactionInvalid` (peer-attributable rejection).
+        //
+        // This in-constructor guard is defence-in-depth for non-validation
+        // construction paths (tests, future callers).  If it fires from a
+        // production validation path, the call-site check failed to run —
+        // fix the call site, don't relax this guard.
         for tx in &publish_ledger.txs {
             for (refund_tx_id, _, _) in &ledger_expiry_balance_delta.user_perm_fee_refunds {
                 if tx.id == *refund_tx_id {
