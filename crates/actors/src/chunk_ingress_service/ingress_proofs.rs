@@ -5,12 +5,13 @@ use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
-use irys_database::{delete_ingress_proof, store_ingress_proof};
+use irys_database::{delete_ingress_proof_by_signer, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _, Traced,
+    BlockHash, Config, DataRoot, DatabaseProvider, H256, IngressProof, IrysAddress,
+    SendTraced as _, Traced,
 };
 use reth_db::DatabaseError;
 use tracing::{debug, error, warn};
@@ -183,13 +184,16 @@ impl ChunkIngressServiceInner {
         }
     }
 
-    pub(crate) fn remove_ingress_proof(
+    /// Removes only the ingress proof belonging to `address` for the given
+    /// `data_root`, leaving proofs from other signers intact.
+    pub(crate) fn remove_ingress_proof_by_signer(
         irys_db: &DatabaseProvider,
         data_root: DataRoot,
+        address: IrysAddress,
     ) -> Result<(), IngressProofError> {
         irys_db
             .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
-                delete_ingress_proof(rw_tx, data_root)
+                delete_ingress_proof_by_signer(rw_tx, data_root, address)
                     .map_err(|report| DatabaseError::Other(report.to_string()))?;
                 Ok(())
             })
