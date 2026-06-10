@@ -74,14 +74,14 @@ impl DataRequestRecord {
     /// Check if the tracking window has expired
     pub fn is_window_expired(&self) -> bool {
         let now = now_as_millis();
-        now - self.window_start > WINDOW_DURATION_MS
+        now.saturating_sub(self.window_start) > WINDOW_DURATION_MS
     }
 
     /// Check if enough time has passed since last request (deduplication window)
     pub fn is_duplicate_request(&self) -> bool {
         let now = now_as_millis();
         // Consider duplicate if within the configured milliseconds
-        (now - self.last_request) < self.duplicate_request_milliseconds
+        now.saturating_sub(self.last_request) < self.duplicate_request_milliseconds
     }
 
     /// Reset for new tracking window
@@ -229,7 +229,7 @@ impl DataRequestTracker {
         // Collect keys to remove (can't remove while iterating)
         let mut keys_to_remove = Vec::new();
         for entry in self.request_history.iter() {
-            let age = now - entry.window_start;
+            let age = now.saturating_sub(entry.window_start);
             if age > ENTRY_EXPIRY_MS {
                 keys_to_remove.push(*entry.key());
             }
@@ -255,7 +255,7 @@ impl DataRequestTracker {
         let last_cleanup = self.last_cleanup.load(Ordering::Relaxed) as u128;
         let cleanup_interval_ms = self.cleanup_interval.as_millis();
 
-        if now - last_cleanup > cleanup_interval_ms {
+        if now.saturating_sub(last_cleanup) > cleanup_interval_ms {
             // Use compare_exchange to ensure only one thread does cleanup
             if self
                 .last_cleanup
@@ -377,6 +377,52 @@ mod tests {
         // Reset should make it fresh again
         record.reset_window();
         assert!(!record.is_window_expired());
+    }
+
+    #[test]
+    fn cleanup_does_not_panic_when_window_start_is_in_the_future() {
+        let tracker = DataRequestTracker::new();
+        let peer_id = IrysPeerId::from(IrysAddress::from([4_u8; 20]));
+
+        // Simulate the race / backward-clock case: an entry whose window_start is
+        // slightly ahead of the wall clock that cleanup will read.
+        let future = now_as_millis() + 5_000;
+        tracker.request_history.insert(
+            peer_id,
+            DataRequestRecord {
+                window_start: future,
+                request_count: 1,
+                score_given: 0,
+                last_request: future,
+                duplicate_request_milliseconds: 0,
+            },
+        );
+
+        tracker.cleanup_expired_entries();
+        assert!(
+            tracker.get_peer_stats(&peer_id).is_some(),
+            "fresh entry must not be evicted"
+        );
+    }
+
+    #[test]
+    fn record_checks_do_not_panic_when_timestamps_are_in_the_future() {
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
+        let future = now_as_millis() + 5_000;
+        record.window_start = future;
+        record.last_request = future;
+
+        assert!(!record.is_window_expired());
+        assert!(record.is_duplicate_request());
+    }
+
+    #[test]
+    fn cleanup_if_needed_does_not_panic_when_last_cleanup_is_in_the_future() {
+        let tracker = DataRequestTracker::new();
+        let future = (now_as_millis() + 5_000) as u64;
+        tracker.last_cleanup.store(future, Ordering::Relaxed);
+
+        tracker.cleanup_if_needed();
     }
 
     #[rstest]
