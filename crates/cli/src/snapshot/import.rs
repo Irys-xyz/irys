@@ -427,7 +427,7 @@ mod tests {
     use super::*;
     use crate::snapshot::archive::pack;
     use crate::snapshot::manifest::{MANIFEST_FILENAME, ManifestFile};
-    use irys_database::tables::IrysTables;
+    use irys_database::tables::ConsensusTables;
     use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use proptest::prelude::*;
@@ -461,7 +461,7 @@ mod tests {
             BadConsensus::EmptyDb => {
                 let env = open_or_create_db(
                     &consensus_dir,
-                    IrysTables::ALL,
+                    ConsensusTables::ALL,
                     DatabaseArguments::irys_testing().expect("testing args"),
                 )
                 .expect("open empty db");

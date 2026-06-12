@@ -17,8 +17,10 @@ pub mod db_index;
 pub mod db_metrics;
 pub mod metadata;
 pub mod migration;
+pub mod provider;
 /// Extension traits for custom tables
 pub mod reth_ext;
+pub mod scoped_tx;
 /// Online MDBX env copy + node-local table stripping for snapshot export
 pub mod snapshot;
 /// Tables & methods specific to submodule databases
@@ -28,7 +30,12 @@ pub mod tables;
 
 pub use data_ledger::*;
 pub use database::*;
+pub use db::{DatabaseProviderCacheExt, DatabaseProviderTestExt};
 pub use db_index::*;
+pub use provider::{DatabaseProvider, Env, RethDatabaseProvider};
+pub use scoped_tx::{
+    Cache, CacheTable, Consensus, ConsensusTable, DbScope, Reth, ScopedTx, ScopedTxMut, Submodule,
+};
 pub use system_ledger::*;
 
 pub mod reth_db {

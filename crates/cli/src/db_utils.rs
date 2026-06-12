@@ -11,7 +11,6 @@ use std::{
 };
 
 use irys_database::reth_db::{DatabaseEnv, DatabaseEnvKind};
-use tracing::info_span;
 
 /// Load NodeConfig from the CONFIG env var (default "config.toml").
 ///
@@ -40,10 +39,12 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
         load_genesis_block_from_disk, load_genesis_commitments_from_disk,
         save_genesis_block_to_disk, save_genesis_commitments_to_disk,
     };
+    use irys_database::DatabaseProvider;
     use irys_database::database;
-    use irys_database::reth_db::{Database as _, transaction::DbTx as _};
+    use irys_database::reth_db::transaction::DbTx as _;
+    use irys_database::scoped_tx::{Consensus, begin_scoped_rw};
     use irys_domain::BlockIndex;
-    use irys_types::{BlockBody, DatabaseProvider, SealedBlock};
+    use irys_types::{BlockBody, SealedBlock};
 
     let genesis_block = load_genesis_block_from_disk(genesis_dir)
         .wrap_err_with(|| format!("loading genesis block from {:?}", genesis_dir))?;
@@ -105,7 +106,7 @@ pub(crate) fn import_genesis_to_db(genesis_dir: &Path, config: &Config) -> eyre:
     }
 
     let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
-    let db = DatabaseProvider(db_env);
+    let db = DatabaseProvider::new(db_env.clone(), db_env);
     let block_index = BlockIndex::new(&config.node_config, db.clone())?;
 
     if block_index.num_blocks() > 0 {
@@ -123,14 +124,7 @@ Use an empty/reset database before importing.",
     };
     let genesis_sealed = SealedBlock::new((*genesis_block).clone(), genesis_body)?;
 
-    // Span attributes any libmdbx writer-lock stall warning fired during
-    // begin_rw_txn to libmdbx_rw_tx_lock_stalls_total{scope="irys-consensus"}.
-    let _span = info_span!(
-        irys_utils::MDBX_RW_TX_SPAN,
-        db_scope = irys_utils::DB_SCOPE_IRYS_CONSENSUS
-    )
-    .entered();
-    let write_tx = db.tx_mut()?;
+    let write_tx = begin_scoped_rw::<Consensus>(db.consensus().as_ref())?;
     database::insert_block_header(&write_tx, &genesis_block)?;
     for commitment_tx in &commitments {
         database::insert_commitment_tx(&write_tx, commitment_tx)?;
@@ -225,15 +219,24 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 }
 
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_storage::irys_consensus_data_db::{
+        open_or_create_irys_cache_data_db, open_or_create_irys_consensus_data_db,
+    };
 
     let config = load_node_config_from_env()?;
     let db_path = config.irys_consensus_data_dir();
+    let cache_path = config.irys_cache_data_dir();
 
     let db_env = match access {
         DatabaseEnvKind::RW => {
             let db = open_or_create_irys_consensus_data_db(&db_path, config.database.sync_mode)?;
-            irys_database::migration::ensure_db_version_compatible(&db)?;
+            // Open the cache env (creating it if needed) so the migration
+            // function can verify/stamp both env's schema versions together.
+            // CLI sub-commands operate on the consensus env, so we drop the
+            // cache handle after the migration check.
+            let cache =
+                open_or_create_irys_cache_data_db(&cache_path, config.database.cache_sync_mode)?;
+            irys_database::migration::ensure_db_version_compatible(&db, &cache)?;
             db
         }
         DatabaseEnvKind::RO => {
@@ -244,8 +247,25 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
                     .with_log_level(None)
                     .with_exclusive(Some(false)),
             )?;
+            // The cache env must exist on disk — any RW invocation prior would
+            // have created it via the V3→V4 migration. RO open can't create it,
+            // and MDBX's error here is opaque, so surface a directed message.
+            if !cache_path.exists() {
+                bail!(
+                    "Cache DB not found at {}. Run a read/write command (e.g. node startup) \
+                     once to create/migrate the cache env before opening it read-only.",
+                    cache_path.display()
+                );
+            }
+            let cache = DatabaseEnv::open(
+                &cache_path,
+                access,
+                irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+                    .with_log_level(None)
+                    .with_exclusive(Some(false)),
+            )?;
             //note: any migrations will fail, as this is RO env, but if they needed to run the database was out of date and you should open it as RW and migrate it first before continuing.
-            irys_database::migration::ensure_db_version_compatible(&db)?;
+            irys_database::migration::ensure_db_version_compatible(&db, &cache)?;
             db
         }
     };

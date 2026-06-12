@@ -6,15 +6,15 @@ use irys_actors::{
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
-    add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
-    db::IrysDatabaseExt as _,
+    DatabaseProviderTestExt as _, add_genesis_commitments, add_test_commitments,
+    add_test_commitments_for_signer, db::IrysDatabaseExt as _,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::PartitionChunkRange;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockTransactions, DataLedger, DbSyncMode, H256, IrysBlockHeader, SealedBlock,
+    BlockTransactions, DataLedger, H256, IrysBlockHeader, SealedBlock,
     partition::PartitionAssignment,
 };
 use irys_types::{Config, U256};
@@ -800,12 +800,9 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
-        &base_path,
-        DbSyncMode::UtterlyNoSync,
-    )
-    .expect("to create DB");
-    let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
+    let _cache_dir = TempDirBuilder::new().build();
+    let db = irys_database::DatabaseProvider::for_testing(&base_path, _cache_dir.path())
+        .expect("test db setup");
     let block_index = BlockIndex::new_for_testing(db);
 
     // Initialize genesis block at height 0

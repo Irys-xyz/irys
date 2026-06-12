@@ -1,8 +1,10 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
 use eyre::{OptionExt as _, ensure};
+use irys_database::DatabaseProvider;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header,
-    tx_header_by_txid,
+    block_header_by_hash,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
+    insert_commitment_tx, insert_tx_header, tx_header_by_txid,
 };
 use irys_domain::{
     BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
@@ -12,7 +14,6 @@ use irys_storage::ii;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
     PartitionChunkOffset, SealedBlock, SendTraced as _, SystemLedger, Traced, U256,
-    app_state::DatabaseProvider,
 };
 use std::{
     collections::HashMap,
@@ -253,22 +254,23 @@ impl BlockMigrationService {
             }
         }
 
+        // Authoritative tx metadata lives in the consensus env and is written
+        // in a single consensus tx so a crash can never split the
+        // included/promoted-height state.
+        //
+        // Per-ledger clear semantics (Phase 1):
+        //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
+        //     The reorg invariant guarantees the matching Publish block is
+        //     also in `blocks_to_clear` (if the tx was promoted at all),
+        //     so either iteration order ends with the row deleted.
+        //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
+        //     `included_height` on the same tx must not be disturbed
+        //     (Publish-only orphan: Submit stays canonical, row kept as
+        //     `{Some, None}`).
         self.db.update_eyre(|tx| {
-            // Phase 1: Clear orphaned tx metadata, and scrub the orphaned
-            // block_hash from any CachedDataRoot.block_set that retained it.
-            //
-            // Per-ledger semantics:
-            //   - Term-ledger (Submit, OneYear, ThirtyDay): delete the row.
-            //     The reorg invariant guarantees the matching Publish block is
-            //     also in `blocks_to_clear` (if the tx was promoted at all),
-            //     so either iteration order ends with the row deleted.
-            //   - Publish ledger: clear `promoted_height` only.  A Submit-confirmed
-            //     `included_height` on the same tx must not be disturbed
-            //     (Publish-only orphan: Submit stays canonical, row kept as
-            //     `{Some, None}`).
+            // Phase 1: Clear orphaned tx metadata.
             for block in blocks_to_clear {
                 let header = block.header();
-                let orphan_block_hash = header.block_hash;
                 let commitment_ids = header.commitment_tx_ids();
 
                 for dl in &header.data_ledgers {
@@ -286,34 +288,18 @@ impl BlockMigrationService {
                 if !commitment_ids.is_empty() {
                     irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
                 }
-
-                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
-                    irys_database::remove_data_root_block_set_entry(
-                        tx,
-                        submit_tx.data_root,
-                        orphan_block_hash,
-                    )?;
-                }
             }
             // Phase 2: Write confirmed metadata.
-            // Phase 3: Backstop the CachedDataRoot.block_set invariant for the
-            //          canonical Submit-ledger txs we just confirmed (update-only,
-            //          does not create cache entries for data_roots the node
-            //          never tracked chunks for).
             //
             // `included_height` ↔ term ledgers (Submit, OneYear, ThirtyDay) only.
             // `promoted_height` ↔ Publish ledger only.
             // Writing `included_height` for Publish txs would overwrite the
             // Submit-block height that was set when the tx first entered the
             // Submit ledger, violating the "first included in Submit" invariant.
-            // Phase 3 reads tx bodies (not the metadata written in Phase 2), so
-            // it has no ordering dependency on Phase 2 writes and is folded into
-            // the same outer loop.
             for block in blocks_to_confirm {
                 let header = block.header();
                 let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
-                let block_hash = header.block_hash;
 
                 write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
                 if !commitment_ids.is_empty() {
@@ -323,8 +309,34 @@ impl BlockMigrationService {
                         height,
                     )?;
                 }
+            }
+            Ok(())
+        })?;
 
-                // Phase 3: append `block_hash` to each Submit-tx's CDR.block_set.
+        // `CachedDataRoots` lives in the cache env, so block_set upkeep runs in
+        // a separate cache tx.  block_set is a diagnostic hint only — prune
+        // eviction decisions are driven by tx-metadata `included_height`
+        // (consensus, written above) and the CDR's own `expiry_height`, never by
+        // block_set — so the loss of cross-env atomicity with the consensus
+        // writes above is tolerable: at worst the hint lags a crash boundary.
+        self.db.update_cache_eyre(|cache_tx| {
+            let tx = cache_tx.inner();
+            // Phase 1: scrub the orphaned block_hash from any retained block_set.
+            for block in blocks_to_clear {
+                let orphan_block_hash = block.header().block_hash;
+                for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
+                    irys_database::remove_data_root_block_set_entry(
+                        tx,
+                        submit_tx.data_root,
+                        orphan_block_hash,
+                    )?;
+                }
+            }
+            // Phase 3: append `block_hash` to each confirmed Submit-tx's
+            // CDR.block_set (update-only; does not fabricate entries for
+            // data_roots the node never tracked chunks for).
+            for block in blocks_to_confirm {
+                let block_hash = block.header().block_hash;
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                     irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)?;
                 }
@@ -724,10 +736,7 @@ mod tests {
     //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
     //! satisfied with cheap placeholders.
     use super::*;
-    use irys_database::{
-        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
-        tables::{CachedDataRoots, IrysTables},
-    };
+    use irys_database::{DatabaseProviderTestExt as _, cache_data_root, tables::CachedDataRoots};
     use irys_domain::BlockTree;
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
@@ -736,8 +745,6 @@ mod tests {
         IrysBlockHeader, U256,
     };
     use reth_db::Database as _;
-    use reth_db::mdbx::DatabaseArguments;
-    use reth_db::transaction::{DbTx as _, DbTxMut as _};
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
@@ -782,12 +789,13 @@ mod tests {
         irys_testing_utils::utils::tempfile::TempDir,
     )> {
         let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
+        // Consensus + cache envs live in sibling subdirs of one tempdir so a
+        // single returned guard keeps both alive.
+        let db = DatabaseProvider::for_testing(
+            &tmp.path().join("consensus"),
+            &tmp.path().join("cache"),
         )?;
-        Ok((DatabaseProvider(Arc::new(env)), tmp))
+        Ok((db, tmp))
     }
 
     /// Build a signed block header with the given Submit-ledger `tx_ids`
@@ -857,7 +865,7 @@ mod tests {
             },
             metadata: DataTransactionMetadata::new(),
         });
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_cache(|tx| -> eyre::Result<()> {
             cache_data_root(tx, &tx_header, None)?;
             let mut cdr = tx
                 .get::<CachedDataRoots>(data_root)?
@@ -875,7 +883,7 @@ mod tests {
         db: &DatabaseProvider,
         data_root: H256,
     ) -> Option<irys_database::db_cache::CachedDataRoot> {
-        db.view(|tx| tx.get::<CachedDataRoots>(data_root))
+        db.view_cache(|tx| tx.get::<CachedDataRoots>(data_root))
             .unwrap()
             .unwrap()
     }

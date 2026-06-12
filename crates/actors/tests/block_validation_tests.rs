@@ -1,13 +1,12 @@
 use irys_actors::block_validation::{
     PreValidationError, poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid,
 };
-use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+use irys_database::DatabaseProviderTestExt as _;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, EpochSnapshot};
-use irys_testing_utils::new_mock_signed_header;
+use irys_testing_utils::{new_mock_signed_header, utils::TempDirBuilder};
 use irys_types::{
-    Base64, BlockIndexItem, ConsensusConfig, DataLedger, DatabaseProvider, H256, IrysAddress,
-    IrysBlockHeader, LedgerIndexItem, PoaData, compute_solution_hash,
-    partition::PartitionAssignment,
+    Base64, BlockIndexItem, ConsensusConfig, DataLedger, H256, IrysAddress, IrysBlockHeader,
+    LedgerIndexItem, PoaData, compute_solution_hash, partition::PartitionAssignment,
 };
 use std::sync::{Arc, RwLock};
 
@@ -83,14 +82,10 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         },
     ];
 
-    let _tmp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
-    let db_env = open_or_create_db(
-        _tmp_dir.path(),
-        irys_database::tables::IrysTables::ALL,
-        reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
-    )
-    .unwrap();
-    let db = DatabaseProvider(Arc::new(db_env));
+    let _tmp_dir = TempDirBuilder::new().build();
+    let _cache_dir = TempDirBuilder::new().build();
+    let db = irys_database::DatabaseProvider::for_testing(_tmp_dir.path(), _cache_dir.path())
+        .expect("test db setup");
     let block_index = BlockIndex::new_for_testing(db.clone());
     for (height, item) in block_index_items.iter().enumerate() {
         block_index.push_item(item, height as u64).unwrap();

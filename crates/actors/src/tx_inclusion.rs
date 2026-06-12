@@ -13,11 +13,12 @@
 //!      + `MigratedBlockHashes` — O(1) DB read once the confirming block
 //!      has migrated out of the tree window.
 
-use irys_database::{block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes};
+use irys_database::{
+    DatabaseProvider, block_header_by_hash, canonical_submit_height, tables::MigratedBlockHashes,
+};
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::{
     DataLedger, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange,
-    app_state::DatabaseProvider,
 };
 use nodit::interval::ii;
 use reth_db::Database as _;
@@ -264,8 +265,8 @@ fn compute_submit_range(
 mod tests {
     use super::*;
     use irys_database::{
-        IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, set_data_tx_included_height,
-        tables::{IrysBlockHeaders, IrysTables},
+        DatabaseProvider, DatabaseProviderTestExt as _, db::IrysDatabaseExt as _, insert_tx_header,
+        set_data_tx_included_height, tables::IrysBlockHeaders,
     };
     use irys_domain::{
         BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot, EpochSnapshot,
@@ -276,20 +277,18 @@ mod tests {
     use irys_types::{
         BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
-        IrysBlockHeader, SealedBlock, U256, app_state::DatabaseProvider,
+        IrysBlockHeader, SealedBlock, U256,
     };
-    use reth_db::mdbx::DatabaseArguments;
     use reth_db::transaction::DbTxMut as _;
     use std::sync::{Arc, RwLock};
 
     fn open_db() -> eyre::Result<(DatabaseProvider, tempfile::TempDir)> {
         let tmp = TempDirBuilder::new().build();
-        let env = open_or_create_db(
-            tmp.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing()?,
+        let db = DatabaseProvider::for_testing(
+            &tmp.path().join("consensus"),
+            &tmp.path().join("cache"),
         )?;
-        Ok((DatabaseProvider(Arc::new(env)), tmp))
+        Ok((db, tmp))
     }
 
     /// Build a signed block header with custom Submit-ledger totals and tx_ids.
@@ -312,18 +311,18 @@ mod tests {
     }
 
     fn put_block_header(db: &DatabaseProvider, header: &IrysBlockHeader) -> eyre::Result<()> {
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_eyre(|tx| -> eyre::Result<()> {
             tx.put::<IrysBlockHeaders>(header.block_hash, header.clone().into())?;
             Ok(())
-        })??;
+        })?;
         Ok(())
     }
 
     fn mark_migrated(db: &DatabaseProvider, height: u64, hash: H256) -> eyre::Result<()> {
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_eyre(|tx| -> eyre::Result<()> {
             tx.put::<MigratedBlockHashes>(height, hash)?;
             Ok(())
-        })??;
+        })?;
         Ok(())
     }
 
@@ -344,11 +343,11 @@ mod tests {
             },
             metadata,
         });
-        db.update(|tx| -> eyre::Result<()> {
+        db.update_eyre(|tx| -> eyre::Result<()> {
             insert_tx_header(tx, &header)?;
             set_data_tx_included_height(tx, &tx_id, included_height)?;
             Ok(())
-        })??;
+        })?;
         Ok(())
     }
 
@@ -875,6 +874,7 @@ mod tests {
     /// accidentally re-introducing a CDR read into a canonical-truth path.
     #[test_log::test(tokio::test)]
     async fn corrupt_cdr_does_not_affect_canonical_range_lookup() -> eyre::Result<()> {
+        use irys_database::db::DatabaseProviderCacheExt as _;
         use irys_database::db_cache::CachedDataRoot;
         use irys_database::tables::CachedDataRoots;
         use irys_types::UnixTimestamp;
@@ -900,7 +900,8 @@ mod tests {
         // entries would foul the lookup; if it consulted `data_size`, the
         // u64::MAX value would alias an absurd chunk range.  Any read would
         // produce a different (or Err) result than the baseline.
-        db.update(|tx| -> eyre::Result<()> {
+        // `CachedDataRoots` lives in the cache env.
+        db.update_cache_eyre(|tx| -> eyre::Result<()> {
             let cdr = CachedDataRoot {
                 data_size: u64::MAX,
                 data_size_confirmed: true,
@@ -911,7 +912,7 @@ mod tests {
             };
             tx.put::<CachedDataRoots>(data_root, cdr)?;
             Ok(())
-        })??;
+        })?;
 
         let guard = empty_block_tree_guard();
         let range = find_canonical_ledger_range(

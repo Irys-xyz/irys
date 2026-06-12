@@ -26,7 +26,7 @@ mod round_trip_tests {
     use irys_database::reth_db::mdbx::DatabaseArguments;
     use irys_database::reth_db::transaction::DbTx as _;
     use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
-    use irys_database::tables::{IrysBlockHeaders, IrysTables, PeerListItems};
+    use irys_database::tables::{ConsensusTables, IrysBlockHeaders, PeerListItems};
     use irys_database::{IrysDatabaseArgs as _, insert_peer_list_item, open_or_create_db};
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -59,7 +59,7 @@ mod round_trip_tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let irys_db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");
@@ -150,7 +150,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 7777,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT as u32,
         })
         .expect("import");
 
@@ -181,7 +181,7 @@ mod round_trip_tests {
 
         let imported = open_or_create_db(
             target_dir.join(IRYS_CONSENSUS_SUBDIR),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open imported irys db");
@@ -270,7 +270,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: false,
             expected_chain_id: 4242,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT as u32,
         })
         .expect_err("smuggled archive must be rejected");
         assert!(
@@ -309,7 +309,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4243,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT as u32,
         })
         .expect("force import succeeds");
 
@@ -384,7 +384,7 @@ mod round_trip_tests {
             data_dir: target_dir.clone(),
             force: true,
             expected_chain_id: 4244,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT as u32,
         })
         .unwrap_err();
         assert!(
@@ -428,7 +428,7 @@ mod round_trip_tests {
             data_dir: target_dir,
             force: false,
             expected_chain_id: 11,
-            expected_irys_schema_version: 3,
+            expected_irys_schema_version: irys_types::DatabaseVersion::CURRENT as u32,
         })
         .unwrap_err();
         assert!(err.to_string().contains("not empty"), "got: {err}");

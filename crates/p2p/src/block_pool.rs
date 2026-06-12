@@ -13,13 +13,13 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
+use irys_database::DatabaseProvider;
 use irys_domain::ExecutionPayloadCache;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, H256,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _,
-    SystemLedger, Traced,
+    BlockBody, BlockHash, Config, DataLedger, EvmBlockHash, H256, IrysBlockHeader,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SendTraced as _, SystemLedger, Traced,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;

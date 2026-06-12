@@ -1,6 +1,7 @@
 use irys_database::{
     IrysDatabaseArgs as _, block_index_item_by_height, db::IrysDatabaseExt as _,
-    insert_block_index_items_for_block, open_or_create_db, prune_ledger_range, tables::IrysTables,
+    insert_block_index_items_for_block, open_or_create_db, prune_ledger_range,
+    tables::ConsensusTables,
 };
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::{DataLedger, DataTransactionLedger, H256, H256List, IrysBlockHeader, hash_sha256};
@@ -17,7 +18,7 @@ fn index_and_prune_block_index() -> eyre::Result<()> {
     info!("temp_dir:{:?}\nbase_path:{:?}", tmp_dir, base_path);
     let db = open_or_create_db(
         tmp_dir,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_testing().unwrap(),
     )
     .unwrap();

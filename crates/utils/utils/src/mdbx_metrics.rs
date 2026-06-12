@@ -26,6 +26,15 @@ pub const DB_SCOPE_FIELD: &str = "db_scope";
 /// Canonical scope label for the Irys consensus database.
 pub const DB_SCOPE_IRYS_CONSENSUS: &str = "irys-consensus";
 
+/// Canonical scope label for the Irys cache database (sibling MDBX env
+/// holding cache tables such as `CachedChunks` and `IngressProofs`).
+pub const DB_SCOPE_IRYS_CACHE: &str = "irys-cache";
+
+/// Canonical scope label for the per-partition Irys submodule databases.
+/// Each storage submodule owns its own MDBX env; this label is shared across
+/// all of them since the metrics layer's `scope` label is a finite vocabulary.
+pub const DB_SCOPE_IRYS_SUBMODULE: &str = "irys-submodule";
+
 /// Canonical scope label for the Reth EVM database.
 pub const DB_SCOPE_RETH_EVM: &str = "reth-evm";
 
@@ -187,6 +196,8 @@ impl Visit for DbScopeFieldVisitor {
 fn canonical_scope(value: &str) -> Option<&'static str> {
     match value {
         DB_SCOPE_IRYS_CONSENSUS => Some(DB_SCOPE_IRYS_CONSENSUS),
+        DB_SCOPE_IRYS_CACHE => Some(DB_SCOPE_IRYS_CACHE),
+        DB_SCOPE_IRYS_SUBMODULE => Some(DB_SCOPE_IRYS_SUBMODULE),
         DB_SCOPE_RETH_EVM => Some(DB_SCOPE_RETH_EVM),
         _ => None,
     }
@@ -267,6 +278,46 @@ mod tests {
         });
 
         assert_eq!(recorder.scope_count(DB_SCOPE_IRYS_CONSENSUS), 1);
+        assert_eq!(recorder.scope_count(DB_SCOPE_UNKNOWN), 0);
+    }
+
+    #[test]
+    fn layer_attributes_cache_db_stalls_via_span_field() {
+        let recorder = StallCounterRecorder::default();
+        let subscriber = Registry::default().with(mdbx_lock_metrics_layer());
+
+        metrics::with_local_recorder(&recorder, || {
+            tracing::subscriber::with_default(subscriber, || {
+                let span = info_span!("op", db_scope = DB_SCOPE_IRYS_CACHE);
+                let _enter = span.enter();
+                tracing::warn!(
+                    target: "libmdbx",
+                    "Process stalled, awaiting read-write transaction lock."
+                );
+            });
+        });
+
+        assert_eq!(recorder.scope_count(DB_SCOPE_IRYS_CACHE), 1);
+        assert_eq!(recorder.scope_count(DB_SCOPE_UNKNOWN), 0);
+    }
+
+    #[test]
+    fn layer_attributes_submodule_db_stalls_via_span_field() {
+        let recorder = StallCounterRecorder::default();
+        let subscriber = Registry::default().with(mdbx_lock_metrics_layer());
+
+        metrics::with_local_recorder(&recorder, || {
+            tracing::subscriber::with_default(subscriber, || {
+                let span = info_span!("op", db_scope = DB_SCOPE_IRYS_SUBMODULE);
+                let _enter = span.enter();
+                tracing::warn!(
+                    target: "libmdbx",
+                    "Process stalled, awaiting read-write transaction lock."
+                );
+            });
+        });
+
+        assert_eq!(recorder.scope_count(DB_SCOPE_IRYS_SUBMODULE), 1);
         assert_eq!(recorder.scope_count(DB_SCOPE_UNKNOWN), 0);
     }
 

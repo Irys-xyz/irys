@@ -1,12 +1,9 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::{bail, eyre};
-use irys_database::block_header_by_hash;
+use irys_database::{DatabaseProvider, block_header_by_hash};
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
-use irys_types::{
-    Config, DatabaseProvider, H256, H256List, U256, VDFLimiterInfo, VdfConfig,
-    block_production::Seed,
-};
+use irys_types::{Config, H256, H256List, U256, VDFLimiterInfo, VdfConfig, block_production::Seed};
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
 use reth_db::Database as _;

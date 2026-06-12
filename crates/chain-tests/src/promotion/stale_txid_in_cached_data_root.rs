@@ -1,11 +1,10 @@
 use crate::utils::IrysNodeTest;
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::CachedDataRoots;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{DataLedger, NodeConfig, SendTraced as _, UnixTimestamp};
-use reth_db::transaction::DbTxMut as _;
 use tracing::info;
 
 /// Regression test for: stale txid in CachedDataRoot.txid_set blocks block production.
@@ -75,7 +74,7 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     //   3. The tx is pruned from mempool (anchor expired) — but CachedDataRoot and
     //      IngressProof are NOT cleaned up because the local proof exemption in
     //      prune_data_root_cache() skips entries with a locally-generated proof
-    genesis_node.node_ctx.db.update_eyre(|db_tx| {
+    genesis_node.node_ctx.db.update_cache_eyre(|db_tx| {
         // Write CachedDataRoot with the stale txid
         let cached = CachedDataRoot {
             data_size: data_tx.header.data_size,
@@ -100,12 +99,12 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
         anchor,
     )?;
 
-    genesis_node.node_ctx.db.update_eyre(|db_tx| {
+    genesis_node.node_ctx.db.update_cache_eyre(|db_tx| {
         irys_database::store_ingress_proof_checked(db_tx, &ingress_proof, &genesis_signer)
     })?;
 
     // Verify the stale state is set up correctly
-    genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         let cdr = irys_database::cached_data_root_by_data_root(db_tx, data_root)?
             .expect("CachedDataRoot should exist");
         assert!(
@@ -279,12 +278,12 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
         config.consensus_config().chain_id,
         anchor,
     )?;
-    genesis_node.node_ctx.db.update_eyre(|db_tx| {
+    genesis_node.node_ctx.db.update_cache_eyre(|db_tx| {
         irys_database::store_ingress_proof_checked(db_tx, &ingress_proof, &genesis_signer)
     })?;
 
     // Verify CachedDataRoot.txid_set contains our txid
-    genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         let cdr = irys_database::cached_data_root_by_data_root(db_tx, data_root)?
             .expect("CachedDataRoot should exist");
         assert!(cdr.txid_set.contains(&txid));
@@ -305,7 +304,7 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let still_present = genesis_node.node_ctx.db.view_eyre(|db_tx| {
+            let still_present = genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
                 Ok(
                     irys_database::cached_data_root_by_data_root(db_tx, data_root)?
                         .is_some_and(|cdr| cdr.txid_set.contains(&txid)),
@@ -323,7 +322,7 @@ async fn stale_txid_in_cached_data_root_does_not_block_after_fix() -> eyre::Resu
     }
 
     // Verify the txid was pruned from CachedDataRoot.txid_set by Fix B
-    genesis_node.node_ctx.db.view_eyre(|db_tx| {
+    genesis_node.node_ctx.db.view_cache_eyre(|db_tx| {
         match irys_database::cached_data_root_by_data_root(db_tx, data_root)? {
             Some(cdr) => {
                 assert!(

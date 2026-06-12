@@ -194,7 +194,7 @@ impl Display for BlockParam {
 //     use base58::ToBase58;
 //     use database::open_or_create_db;
 //     use irys_actors::mempool_service::MempoolService;
-//     use irys_database::tables::IrysTables;
+//     use irys_database::tables::ConsensusTables;
 //     use irys_storage::ChunkProvider;
 //     use irys_types::{app_state::DatabaseProvider, irys::IrysSigner, StorageConfig};
 //     use log::{error, info};
@@ -210,7 +210,7 @@ impl Display for BlockParam {
 
 //         //let path = get_data_dir();
 //         let path = tempdir().unwrap();
-//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+//         let db = open_or_create_db(path, ConsensusTables::ALL, None).unwrap();
 //         let blk = IrysBlockHeader::default();
 
 //         let res =
@@ -230,7 +230,7 @@ impl Display for BlockParam {
 //         let storage_config = StorageConfig::default();
 
 //         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+//             irys_database::DatabaseProvider(db_arc.clone()),
 //             task_manager.executor(),
 //             IrysSigner::random_signer(),
 //             storage_config.clone(),
@@ -278,7 +278,7 @@ impl Display for BlockParam {
 //     #[tokio::test]
 //     async fn test_get_non_existent_block() -> Result<(), Error> {
 //         let path = tempdir().unwrap();
-//         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+//         let db = open_or_create_db(path, ConsensusTables::ALL, None).unwrap();
 //         let blk = IrysBlockHeader::default();
 
 //         let db_arc = Arc::new(db);
@@ -287,7 +287,7 @@ impl Display for BlockParam {
 //         let storage_config = StorageConfig::default();
 
 //         let mempool_service = MempoolService::new(
-//             irys_types::app_state::DatabaseProvider(db_arc.clone()),
+//             irys_database::DatabaseProvider(db_arc.clone()),
 //             task_manager.executor(),
 //             IrysSigner::random_signer(),
 //             storage_config.clone(),

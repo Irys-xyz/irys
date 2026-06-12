@@ -11,9 +11,7 @@ use reth_db::transaction::{DbTx as _, DbTxMut as _};
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, PeerListItems,
-};
+use crate::tables::PeerListItems;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CopyFlags {
@@ -123,25 +121,25 @@ pub fn copy_dir_recursive(src: &Path, dest: &Path) -> eyre::Result<()> {
 
 /// Clear node-local tables in an opened consensus-DB env.
 ///
-/// `PeerListItems` is always cleared. Cache tables (`CachedDataRoots`,
-/// `CachedChunksIndex`, `CachedChunks`, `IngressProofs`) are cleared when
-/// `include_caches` is false.
-pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result<()> {
+/// Clears `PeerListItems` (the only node-local table in the consensus env).
+///
+/// `include_caches` is retained for API compatibility but no longer gates
+/// cache-table stripping here: after the consensus/cache DB split the cache
+/// tables (`CachedDataRoots`, `CachedChunksIndex`, `CachedChunks`,
+/// `IngressProofs`) live in a separate `irys_cache_data` env that the
+/// consensus snapshot does not copy, so there is nothing cache-related to
+/// strip from this env.
+//
+// TODO(cache-db): the snapshot CLI does not yet copy or strip the sibling
+// cache env. Decide whether portable snapshots should include cache data
+// (likely not — it is ephemeral and rebuildable) and wire up cache-env
+// handling + honour `include_caches` accordingly.
+pub fn strip_node_local(env: &DatabaseEnv, _include_caches: bool) -> eyre::Result<()> {
     let tx = env
         .tx_mut()
         .context("opening write tx for snapshot strip")?;
     tx.clear::<PeerListItems>()
         .context("clearing PeerListItems")?;
-    if !include_caches {
-        tx.clear::<CachedDataRoots>()
-            .context("clearing CachedDataRoots")?;
-        tx.clear::<CachedChunksIndex>()
-            .context("clearing CachedChunksIndex")?;
-        tx.clear::<CachedChunks>()
-            .context("clearing CachedChunks")?;
-        tx.clear::<IngressProofs>()
-            .context("clearing IngressProofs")?;
-    }
     tx.commit().context("committing snapshot strip")?;
     Ok(())
 }
@@ -149,7 +147,7 @@ pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::IrysTables;
+    use crate::tables::ConsensusTables;
     use crate::{
         IrysDatabaseArgs as _, insert_block_header, insert_peer_list_item, open_or_create_db,
     };
@@ -185,7 +183,7 @@ mod tests {
         let dir = TempDirBuilder::new().build();
         let db = open_or_create_db(
             dir.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open fixture db");
@@ -252,7 +250,7 @@ mod tests {
 
         let copy_db = open_or_create_db(
             &dest_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open copied db");

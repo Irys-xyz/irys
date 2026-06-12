@@ -25,9 +25,10 @@ use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes;
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_chain::{IrysNode, IrysNodeCtx};
+use irys_database::DatabaseProvider;
 use irys_database::walk_all;
 use irys_database::{
-    db::IrysDatabaseExt as _,
+    db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _},
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
     tx_header_by_txid,
@@ -50,8 +51,8 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
-    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, NodeConfig, NodeMode,
+    PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, H256, H256List, IrysAddress,
@@ -1282,8 +1283,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             let chunk_cache_count = self
                 .node_ctx
                 .db
-                .view_eyre(|tx| {
-                    get_cache_size::<CachedChunks, _>(tx, self.node_ctx.config.consensus.chunk_size)
+                .view_cache_eyre(|tx| {
+                    get_cache_size::<CachedChunks, _>(
+                        tx.inner(),
+                        self.node_ctx.config.consensus.chunk_size,
+                    )
                 })?
                 .0;
 
@@ -1413,24 +1417,23 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             }
 
-            // Snapshot ingress proofs from DB into a map by data_root and drop the read transaction
-            let ingress_proofs_by_root = {
-                let ro_tx = self
-                    .node_ctx
-                    .db
-                    .as_ref()
-                    .tx()
-                    .map_err(|e| {
-                        tracing::error!("Failed to create mdbx transaction: {}", e);
-                    })
-                    .unwrap();
-                let proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
-                let mut map: HashMap<_, Vec<_>> = HashMap::new();
-                for (data_root, proof) in proofs {
-                    map.entry(data_root).or_default().push(proof);
-                }
-                map
-            };
+            // Snapshot ingress proofs from the cache DB into a map by data_root.
+            // IngressProofs lives in the cache env after the V3->V4 split, so
+            // we open a read transaction against the cache env explicitly.
+            let ingress_proofs_by_root = self
+                .node_ctx
+                .db
+                .view_cache(|tx| walk_all::<IngressProofs, _>(tx.inner()))
+                .map_err(|e| eyre::eyre!("cache view_cache failed: {e}"))?
+                .map_err(|e| eyre::eyre!("walk_all<IngressProofs> failed: {e}"))?
+                .into_iter()
+                .fold(
+                    HashMap::new(),
+                    |mut map: HashMap<_, Vec<_>>, (data_root, proof)| {
+                        map.entry(data_root).or_default().push(proof);
+                        map
+                    },
+                );
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
@@ -2494,7 +2497,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn stop(self) -> IrysNodeTest<()> {
         let pre_stop_state = self.diag_wait_state().await;
         info!("Stopping node with state: {}", pre_stop_state);
-        let db_inner = Arc::clone(&self.node_ctx.db.0);
+        let db_inner = Arc::clone(self.node_ctx.db.consensus());
         // Internal timeouts in stop() now handle hung subsystems, so no outer timeout needed.
         self.node_ctx
             .stop(irys_types::ShutdownReason::ServiceCompleted("test".into()))
@@ -2641,13 +2644,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                     for i in 0..expected_chunks {
                         // Read chunk directly from sender's DB cache by data_root + tx-relative offset
                         let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
-                        if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
+                        let cached = self.node_ctx.db.view_cache_eyre(|tx| {
                             irys_database::cached_chunk_by_chunk_offset(
                                 tx,
                                 tx_header.data_root,
                                 tx_chunk_offset,
                             )
-                        }) && let Some(bytes) = cached_chunk.chunk
+                        })?;
+                        if let Some((_meta, cached_chunk)) = cached
+                            && let Some(bytes) = cached_chunk.chunk
                         {
                             let unpacked = irys_types::UnpackedChunk {
                                 data_root: tx_header.data_root,
@@ -2676,17 +2681,13 @@ impl IrysNodeTest<IrysNodeCtx> {
                             {
                                 let mut attempts = 0_usize;
                                 loop {
-                                    let got = peer
-                                        .node_ctx
-                                        .db
-                                        .view_eyre(|tx| {
-                                            irys_database::cached_chunk_by_chunk_offset(
-                                                tx,
-                                                verify_data_root,
-                                                verify_tx_offset,
-                                            )
-                                        })
-                                        .unwrap_or(None);
+                                    let got = peer.node_ctx.db.view_cache_eyre(|tx| {
+                                        irys_database::cached_chunk_by_chunk_offset(
+                                            tx,
+                                            verify_data_root,
+                                            verify_tx_offset,
+                                        )
+                                    })?;
                                     if got.is_some() || attempts >= 5 {
                                         break;
                                     }

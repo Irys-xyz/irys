@@ -22,14 +22,13 @@ use core::time::Duration;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
+use irys_database::DatabaseProvider;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::Traced;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{
-    Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion,
-};
+use irys_types::{Config, IrysAddress, IrysPeerId, P2PGossipConfig, ProtocolVersion};
 use reth_tasks::TaskExecutor;
 use std::net::TcpListener;
 use std::sync::Arc;
