@@ -269,15 +269,23 @@ impl ChunkOrchestrator {
                 let data_ledger = block
                     .data_ledgers
                     .iter()
-                    .find(|dl| dl.ledger_id == self.ledger_id)
-                    .expect("should be able to look up data_ledger by id");
+                    .find(|dl| dl.ledger_id == self.ledger_id);
 
-                // info!("block: {:#?}", block);
-
-                if data_ledger.total_chunks == 0 {
-                    None
-                } else {
-                    Some(data_ledger.total_chunks.saturating_sub(1))
+                // A migrated block that predates this ledger's hardfork
+                // activation (e.g. a pre-Cascade block for the OneYear or
+                // ThirtyDay term ledgers) has no entry for the ledger —
+                // treat it as "no migrated chunks for this ledger yet".
+                match data_ledger {
+                    None => {
+                        debug!(
+                            ledger_id = self.ledger_id,
+                            block_height = block.height,
+                            "migrated block has no entry for this data ledger; nothing to sync yet"
+                        );
+                        None
+                    }
+                    Some(dl) if dl.total_chunks == 0 => None,
+                    Some(dl) => Some(dl.total_chunks.saturating_sub(1)),
                 }
             } else {
                 None

@@ -53,12 +53,14 @@ impl BlockTreeReadGuard {
                 .get_block(&block_entry.block_hash())
                 .expect("Block to be in block tree");
 
-            let data_ledger = block
+            // A block that predates the ledger's hardfork activation (e.g. a
+            // pre-Cascade block for the OneYear/ThirtyDay term ledgers) has no
+            // entry for it — report "no chunks for this ledger at that height".
+            block
                 .data_ledgers
                 .iter()
                 .find(|dl| dl.ledger_id == ledger_id)
-                .expect("should be able to look up data_ledger by id");
-            Some(data_ledger.total_chunks.into())
+                .map(|data_ledger| data_ledger.total_chunks.into())
         } else {
             None
         }

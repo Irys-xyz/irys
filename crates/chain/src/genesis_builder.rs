@@ -242,7 +242,10 @@ fn prepare_unsigned_genesis(config: &Config) -> eyre::Result<GenesisPrelude> {
         &config.consensus.genesis,
         reth_chain_spec.genesis_hash(),
         number_of_ingress_proofs_total,
-        config.consensus.hardforks.cascade.as_ref(),
+        config
+            .consensus
+            .hardforks
+            .cascade_at(UnixTimestamp::from_secs(timestamp_secs)),
     )?;
 
     // Set timestamp fields

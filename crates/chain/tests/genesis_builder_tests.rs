@@ -103,6 +103,61 @@ fn test_config() -> Config {
     Config::new_with_random_peer_id(node_config)
 }
 
+fn test_config_with_cascade(activation_secs: u64) -> Config {
+    use irys_types::{UnixTimestamp, hardfork_config::Cascade};
+    let node_config = NodeConfig::testing().with_consensus(|c| {
+        // Ensure deterministic timestamp — testing() defaults to 0 which means "use now()"
+        if c.genesis.timestamp_millis == 0 {
+            c.genesis.timestamp_millis = 1_700_000_000_000;
+        }
+        c.genesis.initial_packed_partitions = Some(5.0);
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+    Config::new_with_random_peer_id(node_config)
+}
+
+/// Regression for the devnet cascade-from-genesis incident: a positive
+/// activation timestamp at or before the genesis timestamp must produce a
+/// genesis header with all four data ledgers. Before the fix, only a literal
+/// zero activation timestamp did.
+#[tokio::test]
+async fn cascade_active_at_genesis_yields_four_ledger_genesis() {
+    // Non-zero and before the resolved genesis timestamp (1_700_000_000 s) —
+    // the encoding devnet used.
+    let config = test_config_with_cascade(1_600_000_000);
+    let miners = test_miners();
+    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+    assert_eq!(
+        output.block.data_ledgers.len(),
+        4,
+        "pre-genesis activation timestamp must include the term ledgers"
+    );
+}
+
+#[tokio::test]
+async fn cascade_activation_at_exact_genesis_timestamp_yields_four_ledger_genesis() {
+    // Boundary: activation equal to the resolved genesis timestamp counts as
+    // active (>= comparison, matching the epoch-layer predicate).
+    let config = test_config_with_cascade(1_700_000_000);
+    let miners = test_miners();
+    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+    assert_eq!(output.block.data_ledgers.len(), 4);
+}
+
+#[tokio::test]
+async fn cascade_activating_after_genesis_yields_two_ledger_genesis() {
+    // Activation after the resolved genesis timestamp: term ledgers absent.
+    let config = test_config_with_cascade(1_800_000_000);
+    let miners = test_miners();
+    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+    assert_eq!(output.block.data_ledgers.len(), 2);
+}
+
 fn test_miners() -> Vec<GenesisMinerEntry> {
     let key_a = SigningKey::from_slice(&hex::decode(KEY_A).unwrap()).unwrap();
     let key_b = SigningKey::from_slice(&hex::decode(KEY_B).unwrap()).unwrap();

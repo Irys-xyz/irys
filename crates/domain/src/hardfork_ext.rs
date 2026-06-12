@@ -14,16 +14,10 @@ pub trait HardforkConfigExt {
 
 impl HardforkConfigExt for IrysHardforkConfig {
     fn is_update_reward_address_allowed_for_epoch(&self, epoch_snapshot: &EpochSnapshot) -> bool {
-        let epoch_block_timestamp = epoch_snapshot.epoch_block.timestamp_secs();
-        self.borealis
-            .as_ref()
-            .is_some_and(|f| epoch_block_timestamp >= f.activation_timestamp)
+        self.is_borealis_active_at(epoch_snapshot.epoch_block.timestamp_secs())
     }
 
     fn is_cascade_active_for_epoch(&self, epoch_snapshot: &EpochSnapshot) -> bool {
-        let epoch_block_timestamp = epoch_snapshot.epoch_block.timestamp_secs();
-        self.cascade
-            .as_ref()
-            .is_some_and(|f| epoch_block_timestamp >= f.activation_timestamp)
+        self.is_cascade_active_at(epoch_snapshot.epoch_block.timestamp_secs())
     }
 }

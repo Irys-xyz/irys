@@ -1,6 +1,7 @@
 use irys_actors::{
     DataSyncServiceInner, DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher, ChunkFetcherFactory, MockChunkFetcher},
+    chunk_orchestrator::ChunkOrchestrator,
     peer_bandwidth_manager::PeerBandwidthManager,
     services::{ServiceReceivers, ServiceSenders},
 };
@@ -889,4 +890,93 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
 
         result
     }
+}
+
+/// Regression: a migrated block whose header predates a term ledger's
+/// activation has no entry for that ledger. get_max_chunk_offset must treat
+/// that as "no migrated chunks yet" (None), not panic.
+/// Devnet incident 2026-06-11: chunk_orchestrator.rs:273 .expect() aborted
+/// the genesis node 34 times when the migration depth reached a genesis
+/// header that lacked the OneYear/ThirtyDay ledgers.
+#[tokio::test]
+async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
+    let tmp_dir = TempDirBuilder::new().with_tracing().build();
+
+    let chunk_size: u64 = 256 * 1024;
+    let num_chunks: u64 = 5;
+    let node_config = NodeConfig {
+        consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+            chunk_size,
+            num_chunks_in_partition: num_chunks,
+            num_chunks_in_recall_range: 2,
+            num_partitions_per_slot: 1,
+            entropy_packing_iterations: 1,
+            // Canonical chain holds only the mock genesis (length 1), so a
+            // depth of 1 makes genesis the most recently migrated block.
+            block_migration_depth: 1,
+            chain_id: 1,
+            ..ConsensusConfig::testing()
+        }),
+        base_directory: tmp_dir.path().to_path_buf(),
+        ..NodeConfig::testing()
+    };
+    let config = Config::new_with_random_peer_id(node_config);
+
+    // Storage module assigned to the OneYear term ledger, slot 0.
+    let pa = PartitionAssignment {
+        ledger_id: Some(DataLedger::OneYear.into()),
+        slot_index: Some(0),
+        miner_address: IrysAddress::from([9_u8; 20]),
+        partition_hash: H256::random(),
+    };
+    let storage_module_info = StorageModuleInfo {
+        id: 0,
+        partition_assignment: Some(pa),
+        submodules: vec![(
+            partition_chunk_offset_ie!(0, num_chunks as u32),
+            "chunks".into(),
+        )],
+    };
+    let storage_module =
+        Arc::new(StorageModule::new(&storage_module_info, &config).expect("storage module"));
+
+    // Mock genesis carries only Publish + Submit — no OneYear entry, exactly
+    // like a block that predates Cascade activation.
+    let fake_genesis = irys_testing_utils::new_mock_signed_header();
+    assert!(
+        fake_genesis
+            .data_ledgers
+            .iter()
+            .all(|dl| dl.ledger_id != u32::from(DataLedger::OneYear)),
+        "precondition: mock genesis must not contain a OneYear ledger entry"
+    );
+
+    let block_tree = BlockTree::new(&fake_genesis, config.consensus.clone());
+    let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
+    let (service_senders, _receivers) = irys_actors::test_helpers::build_test_service_senders();
+    let mock_fetcher = Arc::new(MockChunkFetcher::new(
+        u32::from(DataLedger::OneYear) as usize
+    ));
+
+    let orchestrator = ChunkOrchestrator::new(
+        storage_module,
+        Arc::new(RwLock::new(HashMap::new())),
+        block_tree_guard.clone(),
+        &service_senders,
+        mock_fetcher,
+        config.node_config.clone(),
+        tokio::runtime::Handle::current(),
+    );
+
+    // Before the fix this panics: "should be able to look up data_ledger by id".
+    assert_eq!(orchestrator.get_max_chunk_offset(), None);
+
+    // Same scenario through the second lookup site: a block height whose header
+    // predates the ledger must yield None, not panic (the mock genesis sits at
+    // height 42).
+    assert_eq!(
+        block_tree_guard.get_total_chunks(fake_genesis.height, DataLedger::OneYear.into()),
+        None
+    );
 }
