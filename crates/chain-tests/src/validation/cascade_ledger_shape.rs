@@ -93,3 +93,84 @@ async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::
     ctx.stop().await;
     Ok(())
 }
+
+/// Regression test for the 2026-06-11 devnet incident: a positive Cascade
+/// activation timestamp at or before the genesis timestamp must yield a
+/// genesis header with all four data ledgers, and a node hosting term-ledger
+/// partitions must mine past block_migration_depth — the point where the
+/// migrated-block pointer reaches genesis — without the chunk orchestrator
+/// panicking.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_pre_genesis_activation_active_from_genesis() -> eyre::Result<()> {
+    use irys_config::submodules::StorageSubmodulesConfig;
+    use irys_types::hardfork_config::Cascade;
+
+    let seconds_to_wait = 20;
+    let config = NodeConfig::testing().with_consensus(|c| {
+        c.hardforks.cascade = Some(Cascade {
+            // Non-zero and earlier than any realistic genesis timestamp —
+            // the devnet encoding of "active from genesis" that previously
+            // produced a two-ledger genesis header.
+            activation_timestamp: UnixTimestamp::from_secs(1),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    // Pre-configure 5 storage submodules so there are enough partitions for
+    // all 4 data ledgers (Publish, Submit, OneYear, ThirtyDay).
+    let test = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test.cfg.base_directory.clone(), 5)?;
+    let ctx = test
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // The genesis header must carry all four data ledgers.
+    let genesis_block = ctx.get_block_by_height(0).await?;
+    let ledger_ids: Vec<u32> = genesis_block
+        .data_ledgers
+        .iter()
+        .map(|l| l.ledger_id)
+        .collect();
+    assert_eq!(
+        ledger_ids,
+        vec![
+            DataLedger::Publish as u32,
+            DataLedger::Submit as u32,
+            DataLedger::OneYear as u32,
+            DataLedger::ThirtyDay as u32,
+        ],
+        "genesis header must contain all four data ledgers"
+    );
+
+    // The node must own term-ledger partition assignments, so its term-ledger
+    // chunk orchestrators actually run (regression precondition).
+    let miner_address = ctx.node_ctx.config.node_config.miner_address();
+    let assignments = ctx.get_partition_assignments(miner_address);
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        assert!(
+            assignments
+                .iter()
+                .any(|pa| pa.ledger_id == Some(ledger as u32)),
+            "node must own a {ledger:?} partition assignment"
+        );
+    }
+
+    // Mine past block_migration_depth so the migrated-block pointer crosses
+    // the genesis block — the exact window where the devnet node panicked.
+    let depth = ctx.node_ctx.config.consensus.block_migration_depth as u64;
+    for h in 1..=depth + 1 {
+        ctx.mine_block().await?;
+        let block = ctx.get_block_by_height(h).await?;
+        assert_eq!(
+            block.data_ledgers.len(),
+            4,
+            "block {h} must carry four data ledgers"
+        );
+    }
+
+    // Reaching this point without an abort is the core regression assertion.
+    ctx.stop().await;
+    Ok(())
+}

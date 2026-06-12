@@ -165,6 +165,30 @@ impl IrysHardforkConfig {
             .filter(|f| timestamp >= f.activation_timestamp)
     }
 
+    /// Get the Cascade hardfork config if it is active at the given timestamp
+    /// (in seconds). Raw timestamp check — epoch alignment is the caller's
+    /// concern (pass an epoch block's timestamp for epoch-aligned semantics).
+    #[must_use]
+    pub fn cascade_at(&self, timestamp: UnixTimestamp) -> Option<&Cascade> {
+        self.cascade
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Check if the Cascade hardfork is active at the given timestamp (in seconds).
+    #[must_use]
+    pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
+        self.cascade_at(timestamp).is_some()
+    }
+
+    /// Check if the Borealis hardfork is active at the given timestamp (in seconds).
+    #[must_use]
+    pub fn is_borealis_active_at(&self, timestamp: UnixTimestamp) -> bool {
+        self.borealis
+            .as_ref()
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
+    }
+
     /// Check if a commitment transaction version is valid at a given timestamp.
     /// Returns true if no hardfork is active or if version meets minimum requirement.
     #[must_use]
@@ -255,6 +279,81 @@ mod tests {
         // After activation timestamp
         let aurora = config.aurora_at(UnixTimestamp::from_secs(1501));
         assert_eq!(aurora, config.aurora.as_ref());
+    }
+
+    #[test]
+    fn test_cascade_at() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+        };
+
+        // Before activation timestamp
+        assert!(config.cascade_at(UnixTimestamp::from_secs(1499)).is_none());
+        assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(1499)));
+
+        // At activation timestamp
+        assert_eq!(
+            config.cascade_at(UnixTimestamp::from_secs(1500)),
+            config.cascade.as_ref()
+        );
+        assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1500)));
+
+        // After activation timestamp
+        assert_eq!(
+            config.cascade_at(UnixTimestamp::from_secs(1501)),
+            config.cascade.as_ref()
+        );
+        assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1501)));
+
+        // No cascade configured
+        let no_cascade = IrysHardforkConfig {
+            cascade: None,
+            ..config
+        };
+        assert!(
+            no_cascade
+                .cascade_at(UnixTimestamp::from_secs(2000))
+                .is_none()
+        );
+        assert!(!no_cascade.is_cascade_active_at(UnixTimestamp::from_secs(2000)));
+    }
+
+    #[test]
+    fn test_is_borealis_active_at() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: Some(Borealis {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+            }),
+            cascade: None,
+        };
+
+        assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
+        assert!(config.is_borealis_active_at(UnixTimestamp::from_secs(1500)));
+        assert!(config.is_borealis_active_at(UnixTimestamp::from_secs(1501)));
+
+        let no_borealis = IrysHardforkConfig {
+            borealis: None,
+            ..config
+        };
+        assert!(!no_borealis.is_borealis_active_at(UnixTimestamp::from_secs(2000)));
     }
 
     #[test]
