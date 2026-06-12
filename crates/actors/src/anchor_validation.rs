@@ -5,49 +5,50 @@ use irys_types::ingress::IngressProof;
 use irys_types::{H256, IrysTransactionCommon, app_state::DatabaseProvider};
 use tracing::{debug, warn};
 
-/// Resolves an anchor (block hash) to its height.
-/// If the anchor is not found, returns `Ok(None)`.
+/// Resolves a canonical anchor (block hash) to its height.
+/// Returns `Ok(None)` if the anchor is unknown or non-canonical.
 ///
-/// When `canonical=true`: checks the block tree's canonical chain first, then falls back
-/// to the database with a `MigratedBlockHashes` cross-check to ensure the block is
-/// actually canonical (not an orphan from a resolved fork).
+/// Checks the block tree's canonical chain first, then falls back to the
+/// database with a `MigratedBlockHashes` cross-check to ensure the block
+/// is actually canonical (not an orphan from a resolved fork).
+#[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor))]
+pub fn get_canonical_anchor_height(
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    anchor: H256,
+) -> eyre::Result<Option<u64>> {
+    if let Some(height) = block_tree
+        .read()
+        .get_canonical_chain()
+        .0
+        .iter()
+        .find(|b| b.block_hash() == anchor)
+        .map(BlockTreeEntry::height)
+    {
+        return Ok(Some(height));
+    }
+
+    db.view_eyre(|tx| irys_database::canonical_block_height_by_hash(tx, &anchor))
+}
+
+/// Resolves any known anchor (block hash) to its height, including orphaned blocks.
+/// Returns `Ok(None)` if the anchor is completely unknown.
 ///
-/// When `canonical=false`: checks the block tree for any known block, then falls back to
-/// `IrysBlockHeaders` without canonical verification (used by mempool expiry).
-#[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
+/// Checks the block tree for any known block first, then falls back to
+/// `IrysBlockHeaders` without canonical verification (used by mempool expiry
+/// and ingress proof validation).
+#[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor))]
 pub fn get_anchor_height(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     anchor: H256,
-    canonical: bool,
 ) -> eyre::Result<Option<u64>> {
-    // Fast path: check the in-memory block tree first.
-    if let Some(height) = {
-        let guard = block_tree.read();
-        if canonical {
-            guard
-                .get_canonical_chain()
-                .0
-                .iter()
-                .find(|b| b.block_hash() == anchor)
-                .map(BlockTreeEntry::height)
-        } else {
-            guard.get_block(&anchor).map(|h| h.height)
-        }
-    } {
+    if let Some(height) = block_tree.read().get_block(&anchor).map(|h| h.height) {
         return Ok(Some(height));
     }
 
-    // Slow path: consult the database for blocks pruned from the tree.
-    if canonical {
-        // Cross-check IrysBlockHeaders against MigratedBlockHashes in one
-        // read transaction to ensure the block is actually canonical.
-        db.view_eyre(|tx| irys_database::canonical_block_height_by_hash(tx, &anchor))
-    } else {
-        // Non-canonical lookup (e.g. mempool expiry): accept any known block.
-        let hdr = db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?;
-        Ok(hdr.map(|h| h.height))
-    }
+    let hdr = db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?;
+    Ok(hdr.map(|h| h.height))
 }
 
 /// Validates that a transaction's anchor falls within `[min_anchor_height, max_anchor_height]`.
@@ -63,7 +64,7 @@ pub fn validate_anchor_for_inclusion(
     let tx_id = tx.id();
     let anchor = tx.anchor();
     // transaction anchors must be canonical for inclusion
-    let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
+    let anchor_height = match get_canonical_anchor_height(block_tree, db, anchor).map_err(|e| {
         TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {
         Some(height) => height,
@@ -104,7 +105,7 @@ pub fn validate_ingress_proof_anchor_for_inclusion(
     ingress_proof: &IngressProof,
 ) -> eyre::Result<bool> {
     let anchor = ingress_proof.anchor;
-    let anchor_height = match get_anchor_height(block_tree, db, anchor, true).map_err(|e| {
+    let anchor_height = match get_canonical_anchor_height(block_tree, db, anchor).map_err(|e| {
         TxIngressError::DatabaseError(format!("Error getting anchor height for {}: {}", anchor, e))
     })? {
         Some(height) => height,
