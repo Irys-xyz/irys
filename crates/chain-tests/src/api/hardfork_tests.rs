@@ -193,7 +193,7 @@ async fn wait_until_activation(node: &IrysNodeTest<IrysNodeCtx>, activation_time
 }
 
 async fn wait_for_wallclock(activation_timestamp: u64) {
-    const MAX_WAIT_SECS: u64 = 60;
+    const MAX_WAIT_SECS: u64 = 120;
     // After realtime crosses `activation_timestamp` we hold on monotonic time
     // and keep re-checking realtime: if it ever dips back below activation
     // during the hold (Hyper-V time-sync lurch on WSL2, NTP correction, etc.),
@@ -231,6 +231,12 @@ async fn wait_for_wallclock(activation_timestamp: u64) {
             tokio::time::sleep(poll_interval).await;
         }
         if !lurched {
+            // The final poll-interval sleep in the hold loop above is otherwise
+            // unguarded: re-check once more so a lurch landing in that last
+            // window restarts the wait instead of returning a false success.
+            if now_secs() < activation_timestamp {
+                continue;
+            }
             return;
         }
         // Realtime dipped below activation mid-hold; loop and re-wait.
