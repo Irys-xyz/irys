@@ -979,4 +979,24 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         block_tree_guard.get_total_chunks(fake_genesis.height, DataLedger::OneYear.into()),
         None
     );
+
+    // Defense-in-depth: if Cascade *is* active at the block's timestamp yet the
+    // block still lacks the term ledger (a structurally invalid block that block
+    // validation would reject), the guard must surface the anomaly in the logs
+    // but still degrade to None rather than aborting. Reuse the same mock genesis
+    // — which carries no OneYear entry — under a Cascade-active config.
+    use irys_types::{UnixTimestamp, hardfork_config::Cascade};
+    let mut cascade_consensus = config.consensus.clone();
+    cascade_consensus.hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(1),
+        one_year_epoch_length: 365,
+        thirty_day_epoch_length: 30,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+    let cascade_tree = BlockTree::new(&fake_genesis, cascade_consensus);
+    let cascade_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(cascade_tree)));
+    assert_eq!(
+        cascade_guard.get_total_chunks(fake_genesis.height, DataLedger::OneYear.into()),
+        None
+    );
 }

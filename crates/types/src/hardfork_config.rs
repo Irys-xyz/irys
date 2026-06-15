@@ -1,7 +1,7 @@
 //! Configurable hardfork parameters.
 
 use crate::{
-    UnixTimestamp, VersionDiscriminant,
+    DataLedger, UnixTimestamp, VersionDiscriminant,
     serialization::unix_timestamp_string_serde,
     storage_pricing::{
         Amount,
@@ -189,6 +189,20 @@ impl IrysHardforkConfig {
             .is_some_and(|f| timestamp >= f.activation_timestamp)
     }
 
+    /// Whether a data ledger may legitimately be absent from a block produced at
+    /// `timestamp`. Only the Cascade term ledgers (OneYear/ThirtyDay) qualify,
+    /// and only before Cascade activates: block validation (`extract_data_ledgers`)
+    /// requires a block to carry the exact ledger set for its activation state,
+    /// so a missing-ledger lookup in any other case is an invariant violation,
+    /// not an expected pre-activation gap.
+    #[must_use]
+    pub fn ledger_absence_expected(&self, ledger_id: u32, timestamp: UnixTimestamp) -> bool {
+        matches!(
+            DataLedger::try_from(ledger_id),
+            Ok(DataLedger::OneYear | DataLedger::ThirtyDay)
+        ) && !self.is_cascade_active_at(timestamp)
+    }
+
     /// Check if a commitment transaction version is valid at a given timestamp.
     /// Returns true if no hardfork is active or if version meets minimum requirement.
     #[must_use]
@@ -328,6 +342,47 @@ mod tests {
                 .is_none()
         );
         assert!(!no_cascade.is_cascade_active_at(UnixTimestamp::from_secs(2000)));
+    }
+
+    #[test]
+    fn test_ledger_absence_expected() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+        };
+
+        let before = UnixTimestamp::from_secs(1499);
+        let at = UnixTimestamp::from_secs(1500);
+
+        // Cascade term ledgers may be legitimately absent only before activation.
+        assert!(config.ledger_absence_expected(DataLedger::OneYear as u32, before));
+        assert!(config.ledger_absence_expected(DataLedger::ThirtyDay as u32, before));
+        assert!(!config.ledger_absence_expected(DataLedger::OneYear as u32, at));
+        assert!(!config.ledger_absence_expected(DataLedger::ThirtyDay as u32, at));
+
+        // Publish/Submit are never Cascade-gated: their absence is never expected.
+        assert!(!config.ledger_absence_expected(DataLedger::Publish as u32, before));
+        assert!(!config.ledger_absence_expected(DataLedger::Submit as u32, before));
+
+        // With Cascade unconfigured the term ledgers never exist, so their
+        // absence is always expected (never an invariant violation).
+        let no_cascade = IrysHardforkConfig {
+            cascade: None,
+            ..config
+        };
+        assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
+        assert!(!no_cascade.ledger_absence_expected(DataLedger::Publish as u32, at));
     }
 
     #[test]

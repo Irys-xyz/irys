@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{Instrument as _, debug};
+use tracing::{Instrument as _, debug, error};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -271,16 +271,33 @@ impl ChunkOrchestrator {
                     .iter()
                     .find(|dl| dl.ledger_id == self.ledger_id);
 
-                // A migrated block that predates this ledger's hardfork
-                // activation (e.g. a pre-Cascade block for the OneYear or
-                // ThirtyDay term ledgers) has no entry for the ledger —
-                // treat it as "no migrated chunks for this ledger yet".
                 match data_ledger {
-                    None => {
+                    // A migrated block that predates this ledger's activation
+                    // (e.g. a pre-Cascade block for the OneYear/ThirtyDay term
+                    // ledgers) legitimately has no entry for it — nothing to
+                    // sync for this ledger yet.
+                    None if self
+                        .config
+                        .consensus_config()
+                        .hardforks
+                        .ledger_absence_expected(self.ledger_id, block.timestamp_secs()) =>
+                    {
                         debug!(
                             ledger_id = self.ledger_id,
                             block_height = block.height,
-                            "migrated block has no entry for this data ledger; nothing to sync yet"
+                            "migrated block predates this ledger's activation; nothing to sync yet"
+                        );
+                        None
+                    }
+                    // Consensus requires a block to carry the full ledger set
+                    // for its activation state, so a missing entry here is an
+                    // invariant violation. Surface it loudly instead of masking
+                    // it — but still return None rather than aborting the task.
+                    None => {
+                        error!(
+                            ledger_id = self.ledger_id,
+                            block_height = block.height,
+                            "data ledger missing from migrated block where consensus requires it; nothing to sync"
                         );
                         None
                     }
