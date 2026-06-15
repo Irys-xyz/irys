@@ -17,7 +17,7 @@ use crate::{
 
 use super::tables::{
     ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
-    SubmoduleTables, TxPathByTxPathHash,
+    SubmoduleTables, TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
@@ -95,6 +95,26 @@ pub fn add_full_tx_path<T: DbTxMut>(
     Ok(())
 }
 
+/// Get the `(data_root, prefix_hash)` binding for a tx_path hash.
+pub fn get_tx_leaf_binding<T: DbTx>(
+    tx: &T,
+    path_hash: TxPathHash,
+) -> eyre::Result<Option<TxLeafBinding>> {
+    Ok(tx.get::<TxLeafBindingByTxPathHash>(path_hash)?)
+}
+
+/// Store the `(data_root, prefix_hash)` a tx_path leaf folds from, keyed by the tx_path
+/// hash, so the real `data_root` can be recovered (and the proof leaf re-verified via the
+/// fold) on read once `prefix_hash` is folded into the ledger `tx_root` leaf.
+pub fn add_tx_leaf_binding<T: DbTxMut>(
+    tx: &T,
+    path_hash: TxPathHash,
+    binding: &TxLeafBinding,
+) -> eyre::Result<()> {
+    tx.put::<TxLeafBindingByTxPathHash>(path_hash, binding.clone())?;
+    Ok(())
+}
+
 pub fn add_data_path_hash_to_offset_index<T: DbTxMut + DbTx>(
     tx: &T,
     offset: PartitionChunkOffset,
@@ -162,6 +182,7 @@ pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkDataPathByPathHash>()?;
     tx.clear::<TxPathByTxPathHash>()?;
     tx.clear::<DataRootInfosByDataRoot>()?;
+    tx.clear::<TxLeafBindingByTxPathHash>()?;
     Ok(())
 }
 

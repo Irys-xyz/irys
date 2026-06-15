@@ -180,8 +180,8 @@ pub async fn submit_data_tx(
     if !tx_build.keep_default.iter().any(|f| f == "metadata_format") {
         tx.header.metadata_format = 1;
     }
-    if !tx_build.keep_default.iter().any(|f| f == "header_size") {
-        tx.header.header_size = 64;
+    if !tx_build.keep_default.iter().any(|f| f == "prefix_size") {
+        tx.header.prefix_size = 64;
     }
     let tx = signer
         .sign_transaction(tx)

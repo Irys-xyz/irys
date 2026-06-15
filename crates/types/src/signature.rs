@@ -218,10 +218,17 @@ mod tests {
     #[test]
     fn data_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off
-        // from the JS Client - `txSigningParity`
-        const SIG_HEX: &str = "0x2b80b5cb509d4a1b7cad4f68c44cc13b2e985c7101fe5a38668bcfeb1e79f01351e2c570ba367698228b52785b0375e3579d7a9ceef995116a25c565efa820281c";
+        // from the JS Client - `txSigningParity`.
+        //
+        // REGENERATED for the `prefix_hash` softfork: adding the signed `prefix_hash`
+        // field (and renaming `header_size` -> `prefix_size`) changes the data-tx RLP
+        // signing preimage, so these data-tx parity goldens were regenerated from this
+        // node's signer. The JS client `txSigningParity` fixture MUST be updated to
+        // produce the same `prefix_size`/`prefix_hash` preimage before cross-impl
+        // parity holds again. (The commitment-tx goldens below are unaffected.)
+        const SIG_HEX: &str = "0x8c44a1584fc747b9e3507de0e5d6daecfe0936375509262e87daed629cf86f431ce09b227715918124e867b1df82f8d28c586d52d0d0226823ae075599d913bd1b";
         // Base58 encoding of the signature (for version=1 signing preimage)
-        const SIG_BS58: &str = "4qfCDRG4yFjuFebpicpPk4baWjw7gtHWoBb9S3HRzLY942sQmwv216dGWPXABWN9s2n8hy1XiLNu1VmarHLDUe8VH";
+        const SIG_BS58: &str = "DNvrarFksNmyBeFoFBq6H2hape4cywqzdLTo2v2NpyjQ7GmhKjxfscKmEbDMHjm6zP6oAcCpR1TLP4DxZRJJ3Entr";
         // spellchecker:on
 
         let testing_config = ConsensusConfig::testing();
@@ -240,7 +247,8 @@ mod tests {
                     signer: IrysAddress::ZERO,
                     data_root: H256::from([3_u8; 32]),
                     data_size: 242,
-                    header_size: 0,
+                    prefix_size: 0,
+                    prefix_hash: H256::zero(),
                     term_fee: BoundedFee::from(99_u64),
                     perm_fee: Some(BoundedFee::from(98_u64)),
                     ledger_id: DataLedger::Publish.into(),

@@ -44,6 +44,18 @@ tables! {
         type Value = DataRootInfos;
     }
 
+    /// Maps a tx_path hash to the `(data_root, prefix_hash)` of the transaction that
+    /// produced it. After the `prefix_hash` softfork, a tx_path leaf stores the folded
+    /// `hash_all_sha256([data_root, prefix_hash])` (the ledger `tx_root` leaf value), NOT
+    /// the raw `data_root`, so the `data_root` can no longer be read directly out of the
+    /// proof leaf. The stored pair is the source of the real `data_root` on read and is
+    /// cross-checked against the proof leaf via the same fold, so the binding and the
+    /// proof can never silently disagree (a mismatch indicates corruption).
+    table TxLeafBindingByTxPathHash {
+        type Key = TxPathHash;
+        type Value = TxLeafBinding;
+    }
+
 
     /// Table to store various metadata, such as the current db schema version
     table Metadata {
@@ -69,6 +81,15 @@ pub struct DataRootInfos(pub Vec<DataRootInfo>);
 pub struct DataRootInfo {
     pub start_offset: RelativeChunkOffset,
     pub data_size: u64, // The data_size from the data transaction that paid to store the data_root at this start_offset
+}
+
+/// The `(data_root, prefix_hash)` a tx_path leaf folds from. Stored per tx_path hash so
+/// the real `data_root` can be recovered (and the proof leaf re-verified via the fold)
+/// after `prefix_hash` is folded into the ledger `tx_root` leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+pub struct TxLeafBinding {
+    pub data_root: H256,
+    pub prefix_hash: H256,
 }
 
 impl PartialOrd for DataRootInfo {

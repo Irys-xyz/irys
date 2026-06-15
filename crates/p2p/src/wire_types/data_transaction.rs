@@ -14,7 +14,8 @@ pub struct DataTransactionHeaderV1Inner {
     #[serde(with = "irys_types::string_u64")]
     pub data_size: u64,
     #[serde(with = "irys_types::string_u64")]
-    pub header_size: u64,
+    pub prefix_size: u64,
+    pub prefix_hash: H256,
     pub term_fee: BoundedFee,
     pub ledger_id: u32,
     #[serde(with = "irys_types::string_u64")]
@@ -43,7 +44,7 @@ impl_versioned_tx_from!(
             meta: irys_types::DataTransactionHeaderV1WithMetadata,
             tx: irys_types::DataTransactionHeaderV1,
             fields {
-                id, anchor, signer, data_root, data_size, header_size,
+                id, anchor, signer, data_root, data_size, prefix_size, prefix_hash,
                 term_fee, ledger_id, chain_id, signature, metadata_format, perm_fee,
             }
         },
