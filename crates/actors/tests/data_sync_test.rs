@@ -992,6 +992,11 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         thirty_day_epoch_length: 30,
         annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
     };
+    assert!(
+        fake_genesis.timestamp_secs() >= cascade.activation_timestamp,
+        "precondition: Cascade must be active at the mock genesis timestamp so the \
+         anomaly branch (not the pre-activation branch) is exercised"
+    );
     let mut cascade_consensus = config.consensus.clone();
     cascade_consensus.hardforks.cascade = Some(cascade.clone());
     let cascade_tree = BlockTree::new(&fake_genesis, cascade_consensus);
