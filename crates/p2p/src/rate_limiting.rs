@@ -119,15 +119,10 @@ impl DataRequestTracker {
     pub fn check_request(
         &self,
         peer_id: &IrysPeerId,
-        duplicate_request_milliseconds: u128,
+        duplicate_request_window: Duration,
     ) -> RequestCheckResult {
         // Perform cleanup if needed
         self.cleanup_if_needed();
-
-        let duplicate_request_window = Duration::from_millis(
-            u64::try_from(duplicate_request_milliseconds)
-                .expect("duplicate_request_milliseconds out of range for u64"),
-        );
 
         // Get or create record for this peer
         let mut entry = self
@@ -260,7 +255,7 @@ mod tests {
     use irys_types::{IrysAddress, IrysPeerId};
     use rstest::rstest;
 
-    const TEST_DEDUP_WINDOW_MS: u128 = 10_000;
+    const TEST_DEDUP_WINDOW: Duration = Duration::from_millis(10_000);
     const TEST_SLEEP_MS: u64 = 11_000;
     #[tokio::test]
     async fn slow_test_data_request_tracker_score_limiting() {
@@ -271,7 +266,7 @@ mod tests {
         for i in 1..=5 {
             // Wait a bit to avoid deduplication window
             tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-            let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+            let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
             assert!(result.should_serve(), "Should serve data for request {}", i);
             if i == 1 {
                 // First request always updates score
@@ -290,7 +285,7 @@ mod tests {
 
         // Nth request should not update score but still serve
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             !result.should_update_score(),
             "Should not update score after cap"
@@ -312,12 +307,12 @@ mod tests {
         let peer_id = IrysPeerId::from(IrysAddress::from([2_u8; 20]));
 
         // First request
-        let result1 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result1 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(result1.should_update_score());
         assert!(result1.should_serve());
 
         // Immediate second request should be deduplicated
-        let result2 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result2 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             !result2.should_update_score(),
             "Should not update score for duplicate"
@@ -329,7 +324,7 @@ mod tests {
 
         // After deduplication window, should allow score update
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result3 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result3 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             result3.should_update_score(),
             "Should update score after dedup window"
@@ -339,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_data_request_record_expiry() {
-        let mut record = DataRequestRecord::new(Duration::from_millis(TEST_DEDUP_WINDOW_MS as u64));
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW);
 
         // Fresh record should not be expired
         assert!(!record.is_window_expired());
@@ -387,7 +382,7 @@ mod tests {
 
     #[test]
     fn record_checks_do_not_panic_when_timestamps_are_in_the_future() {
-        let mut record = DataRequestRecord::new(Duration::from_millis(TEST_DEDUP_WINDOW_MS as u64));
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW);
         let future = Instant::now()
             .checked_add(Duration::from_secs(5))
             .expect("instant + 5s must not overflow");
@@ -423,9 +418,9 @@ mod tests {
         let tracker = DataRequestTracker::new();
         let peer_id = IrysPeerId::from(IrysAddress::from([3_u8; 20]));
 
-        let mut last_result = tracker.check_request(&peer_id, 0);
+        let mut last_result = tracker.check_request(&peer_id, Duration::ZERO);
         for _ in 1..total_requests {
-            last_result = tracker.check_request(&peer_id, 0);
+            last_result = tracker.check_request(&peer_id, Duration::ZERO);
         }
 
         assert_eq!(
