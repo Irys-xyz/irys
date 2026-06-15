@@ -276,8 +276,7 @@ impl ChunkOrchestrator {
                     // (e.g. a pre-Cascade block for the OneYear/ThirtyDay term
                     // ledgers) legitimately has no entry for it — nothing to
                     // sync for this ledger yet.
-                    None if self
-                        .config
+                    None if tree
                         .consensus_config()
                         .hardforks
                         .ledger_absence_expected(self.ledger_id, block.timestamp_secs()) =>

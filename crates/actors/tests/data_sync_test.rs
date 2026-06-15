@@ -898,7 +898,7 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
 /// Devnet incident 2026-06-11: chunk_orchestrator.rs:273 .expect() aborted
 /// the genesis node 34 times when the migration depth reached a genesis
 /// header that lacked the OneYear/ThirtyDay ledgers.
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     let tmp_dir = TempDirBuilder::new().with_tracing().build();
 
