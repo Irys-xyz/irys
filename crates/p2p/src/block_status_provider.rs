@@ -1,5 +1,8 @@
 use irys_domain::{BlockIndexReadGuard, BlockState, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, BlockIndexItem, H256, VDFLimiterInfo, block_provider::BlockProvider};
+use irys_types::{
+    BlockHash, BlockIndexItem, H256,
+    block_provider::{BlockProvider, CanonicalVdfSnapshot},
+};
 use tracing::debug;
 #[cfg(test)]
 use {
@@ -66,6 +69,9 @@ pub struct BlockStatusProvider {
     /// (same height, different hash) is still treated as a potential reorg
     /// candidate rather than a pruned fork. Derived from `block_tree_depth`.
     max_reorg_depth: u64,
+    /// Confirmation depth (in blocks) past which a reset seed is treated as final by
+    /// the VDF reset-boundary gate. Equals `block_migration_depth`.
+    block_migration_depth: u64,
 }
 
 impl Default for BlockStatusProvider {
@@ -79,11 +85,13 @@ impl BlockStatusProvider {
         block_index_read_guard: BlockIndexReadGuard,
         block_tree_read_guard: BlockTreeReadGuard,
         block_tree_depth: u64,
+        block_migration_depth: u64,
     ) -> Self {
         Self {
             block_tree_read_guard,
             block_index_read_guard,
             max_reorg_depth: block_tree_depth,
+            block_migration_depth,
         }
     }
 
@@ -270,6 +278,7 @@ impl BlockStatusProvider {
             )))),
             block_index_read_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db)),
             max_reorg_depth: node_config.consensus_config().block_tree_depth,
+            block_migration_depth: u64::from(node_config.consensus_config().block_migration_depth),
         }
     }
 
@@ -485,13 +494,14 @@ impl BlockStatusProvider {
 }
 
 impl BlockProvider for BlockStatusProvider {
-    fn latest_canonical_vdf_info(&self) -> Option<VDFLimiterInfo> {
+    fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
         let binding = self.block_tree_read_guard.read();
-
-        let latest_canonical_hash = binding.get_latest_canonical_entry().block_hash();
-        binding
-            .get_block(&latest_canonical_hash)
-            .map(|block| block.vdf_limiter_info.clone())
+        let entry = binding.get_latest_canonical_entry();
+        Some(CanonicalVdfSnapshot {
+            vdf_info: entry.header().vdf_limiter_info.clone(),
+            confirmed_global_step_number: binding
+                .confirmed_canonical_step(self.block_migration_depth),
+        })
     }
 }
 
@@ -517,6 +527,24 @@ mod tests {
         let provider = BlockStatusProvider::mock(&node_config, db);
         let genesis = provider.genesis_header();
         (provider, genesis, tmp_dir)
+    }
+
+    #[test]
+    fn latest_canonical_vdf_info_reports_confirmed_step() {
+        let (provider, genesis, _tmp) = mock_provider();
+        let snap = provider
+            .latest_canonical_vdf_info()
+            .expect("a canonical snapshot");
+        // Genesis is the only (and deepest) canonical block, so it is the confirmed tip
+        // regardless of `block_migration_depth`.
+        assert_eq!(
+            snap.confirmed_global_step_number,
+            genesis.vdf_limiter_info.global_step_number
+        );
+        assert_eq!(
+            snap.vdf_info.global_step_number,
+            genesis.vdf_limiter_info.global_step_number
+        );
     }
 
     // Every `ChainState` variant that should resolve to `InTreePendingValidation`:

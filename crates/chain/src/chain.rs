@@ -1831,6 +1831,7 @@ impl IrysNode {
             block_index_guard.clone(),
             block_tree_guard.clone(),
             config.consensus.block_tree_depth,
+            u64::from(config.consensus.block_migration_depth),
         );
 
         // In case if you're wondering why this channel is not in the service senders:

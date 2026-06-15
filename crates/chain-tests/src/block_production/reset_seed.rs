@@ -25,8 +25,13 @@ async fn spiky_slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_a
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
-    let max_seconds = 60;
-    let reset_frequency = 48; // Reset every 48 VDF steps
+    let max_seconds = 120;
+    // A production-scale reset window. The confirmation gate fails closed (it only ever
+    // gates on the confirmed chain step), so the VDF may run at most one window ahead of the
+    // confirmed tip; `reset_frequency` must therefore comfortably exceed a block's worth of
+    // run-ahead plus the confirmation lag. A tiny window (e.g. 48, where steps-per-block
+    // approaches the window) would wedge honest mining.
+    let reset_frequency = 600; // Reset every 600 VDF steps
     let min_resets_required = 3; // Need at least 3 resets to verify seed rotation behavior
     let block_migration_depth = 1;
 
