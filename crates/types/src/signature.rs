@@ -215,6 +215,74 @@ mod tests {
 
     // spellchecker:on
 
+    /// `prefix_size` and `prefix_hash` are normal (non-`#[rlp(skip)]`) header fields,
+    /// so they join the signed RLP preimage. Mutating either after signing must
+    /// invalidate the signature — this is what lets the signature (and, transitively,
+    /// the block's `tx_root`) authenticate them.
+    #[test]
+    fn prefix_fields_are_covered_by_signature() -> eyre::Result<()> {
+        let testing_config = ConsensusConfig::testing();
+        let irys_signer = IrysSigner {
+            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
+                .unwrap(),
+            chain_id: testing_config.chain_id,
+            chunk_size: testing_config.chunk_size,
+        };
+        let addr = IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice());
+
+        let header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1WithMetadata {
+            tx: crate::DataTransactionHeaderV1 {
+                anchor: H256::from([1_u8; 32]),
+                signer: IrysAddress::ZERO,
+                data_root: H256::from([3_u8; 32]),
+                data_size: 242,
+                prefix_size: 64,
+                prefix_hash: H256::from([7_u8; 32]),
+                term_fee: BoundedFee::from(99_u64),
+                perm_fee: Some(BoundedFee::from(98_u64)),
+                ledger_id: DataLedger::Publish.into(),
+                chain_id: testing_config.chain_id,
+                ..Default::default()
+            },
+            metadata: crate::DataTransactionMetadata::new(),
+        });
+
+        let tx = irys_signer.sign_transaction(DataTransaction {
+            header,
+            ..Default::default()
+        })?;
+        assert!(
+            tx.header
+                .signature
+                .validate_signature(tx.signature_hash(), addr),
+            "freshly signed tx must validate"
+        );
+
+        // Mutate prefix_hash, keep the original signature → must no longer validate.
+        let mut tampered_hash = tx.clone();
+        tampered_hash.header.prefix_hash = H256::from([8_u8; 32]);
+        assert!(
+            !tampered_hash
+                .header
+                .signature
+                .validate_signature(tampered_hash.header.signature_hash(), addr),
+            "mutating prefix_hash must invalidate the signature"
+        );
+
+        // Mutate prefix_size, keep the original signature → must no longer validate.
+        let mut tampered_size = tx;
+        tampered_size.header.prefix_size = 65;
+        assert!(
+            !tampered_size
+                .header
+                .signature
+                .validate_signature(tampered_size.header.signature_hash(), addr),
+            "mutating prefix_size must invalidate the signature"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn data_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off

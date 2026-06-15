@@ -353,6 +353,46 @@ async fn test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     Ok(())
 }
 
+/// A block whose ledger `tx_root` does not match the folded `(data_root, prefix_hash)`
+/// recompute of its included transactions must be rejected with `TxRootMismatch`. This is
+/// the consensus enforcement that authenticates each tx's `prefix_hash` via the
+/// block-signature-sealed `tx_root`.
+#[tokio::test]
+async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // Tamper the Submit ledger's tx_root so it no longer matches the recompute of the
+    // ledger's transactions (genesis-produced block has an empty Submit ledger, which
+    // folds to H256::zero()), then re-sign so the block is otherwise well-formed.
+    let mut header = (**ctx.block.header()).clone();
+    let bogus = H256::from_low_u64_be(0xDEAD_BEEF);
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    assert_ne!(
+        ledger.tx_root, bogus,
+        "test value must differ from real root"
+    );
+    ledger.tx_root = bogus;
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    let mut body = ctx.block.to_block_body();
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::TxRootMismatch { ledger_id, .. }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+        }
+        other => panic!("expected TxRootMismatch, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
