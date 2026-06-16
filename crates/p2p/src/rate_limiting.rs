@@ -235,7 +235,7 @@ impl DataRequestTracker {
         let Ok(mut last) = self.last_cleanup.lock() else {
             return;
         };
-        if now.duration_since(*last) > self.cleanup_interval {
+        if now.saturating_duration_since(*last) > self.cleanup_interval {
             *last = now;
             drop(last);
             self.cleanup_expired_entries();
