@@ -33,7 +33,7 @@ use reth::builder::Block as _;
 use reth_ethereum_primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{Instrument as _, debug, error, warn};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
@@ -838,12 +838,12 @@ where
         &self,
         peer_info: &PeerListItem,
         request: GossipRequestV2<GossipDataRequestV2>,
-        duplicate_request_milliseconds: u128,
+        duplicate_request_window: Duration,
     ) -> GossipResult<bool> {
         // Check rate limiting and score cap
         let check_result = self
             .data_request_tracker
-            .check_request(&request.peer_id, duplicate_request_milliseconds);
+            .check_request(&request.peer_id, duplicate_request_window);
 
         // If rate limited, don't serve data
         if !check_result.should_serve() {
@@ -875,11 +875,11 @@ where
     pub(crate) async fn handle_get_data_sync(
         &self,
         request: GossipRequestV2<GossipDataRequestV2>,
-        duplicate_request_milliseconds: u128,
+        duplicate_request_window: Duration,
     ) -> GossipResult<Option<GossipDataV2>> {
         let check_result = self
             .data_request_tracker
-            .check_request(&request.peer_id, duplicate_request_milliseconds);
+            .check_request(&request.peer_id, duplicate_request_window);
         if !check_result.should_serve() {
             debug!(
                 "Node {}: Rate limiting peer {:?} for pull-data request",

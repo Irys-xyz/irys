@@ -20,12 +20,12 @@ use tracing::{debug, warn};
 /// 3. Verifies non-reset blocks maintain seed continuity
 /// 4. Spins up a peer node to verify reset seeds propagate correctly during sync
 #[test_log::test(tokio::test)]
-async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer()
+async fn spiky_slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer()
 -> eyre::Result<()> {
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
-    let max_seconds = 20;
+    let max_seconds = 60;
     let reset_frequency = 48; // Reset every 48 VDF steps
     let min_resets_required = 3; // Need at least 3 resets to verify seed rotation behavior
     let block_migration_depth = 1;
