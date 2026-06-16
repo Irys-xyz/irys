@@ -2853,8 +2853,8 @@ mod tests {
     /// non-`Onchain` (still forkable) head blocks, so `confirmed_canonical_step` must skip
     /// them — otherwise the VDF reset-boundary gate would treat a reorgable block's seed as
     /// confirmed during a sync/reorg window.
-    #[tokio::test]
-    async fn confirmed_canonical_step_skips_non_onchain_head() {
+    #[test]
+    fn confirmed_canonical_step_skips_non_onchain_head() {
         let comm_cache = Arc::new(CommitmentSnapshot::default());
 
         let mut b1 = random_block(U256::from(1));
