@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781171865525,
+  "lastUpdate": 1781628068437,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6415,6 +6415,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fe96706fcd2562671da34990e8e7607f30cff7e8",
+          "message": "fix: clock drift/monotonic timers (#1402)\n\n* fix: harden logic against clock drift\n\nIn certain conditions, i.e WSL2, wallclock time can notably drift - this causes test failures.\nThis commit hardens relevant logic so that we use monotonic clocks where possible.\n\n* fix: update multiversion testing to not fail fast\n\n* docs: fix missing line in README\n\n* fix: unchecked cast\n\n* fix: pass multiversion old_ref via env to prevent shell injection\n\nold_ref was interpolated directly into the run: script, so a maliciously named git ref could inject shell. Route it through an env var and reference it as a quoted variable.\n\n* fix: harden wait_for_wallclock against final-poll lurch and tight deadline\n\nRe-check realtime after the hold loop so a backward lurch in the last poll interval restarts the wait instead of returning a false success. Raise the deadline 60s -> 120s to absorb large WSL2 time-sync lurches.\n\n* refactor: type rate-limiter dedup window as Duration\n\nThread Duration through check_request / handle_get_data* and the default constant instead of u128 milliseconds, removing the per-call try_from().expect() conversion.\n\n* refactor: use saturating_duration_since in cleanup_if_needed\n\nUse the documented never-panic API instead of relying on duration_since's\ncurrent saturating behavior, which std docs warn may reintroduce a panic\nin future versions. Makes the elapsed-or-zero intent explicit and\nconsistent with the sibling .elapsed() calls. No behavioral change.",
+          "timestamp": "2026-06-16T17:25:16+01:00",
+          "tree_id": "535af0f938fa58c0fa2972284677b0b6cc4257aa",
+          "url": "https://github.com/Irys-xyz/irys/commit/fe96706fcd2562671da34990e8e7607f30cff7e8"
+        },
+        "date": 1781628066108,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01532,
+            "range": "± 0.000414",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152872,
+            "range": "± 0.003777",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.559771,
+            "range": "± 0.041093",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.500449,
+            "range": "± 0.515754",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078852,
+            "range": "± 0.000965",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 778.271037,
+            "range": "± 25.404372",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.617892,
+            "range": "± 7.000562",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.128505,
+            "range": "± 0.003273",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1227.323256,
+            "range": "± 84.262947",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1567.584905,
+            "range": "± 12.648957",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035588,
+            "range": "± 0.000996",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.396057,
+            "range": "± 1.151866",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.988639,
+            "range": "± 2.012836",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
