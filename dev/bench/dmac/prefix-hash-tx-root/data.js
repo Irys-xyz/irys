@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781171865525,
+  "lastUpdate": 1781569221549,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6415,6 +6415,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "ca54efbba8ae02ae2b849dbecd32efd72ef91efd",
+          "message": "feat(consensus): add prefix_hash to data tx and fold into ledger tx_root",
+          "timestamp": "2026-06-11T09:42:39Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1450/commits/ca54efbba8ae02ae2b849dbecd32efd72ef91efd"
+        },
+        "date": 1781569220609,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011911,
+            "range": "± 0.000121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119636,
+            "range": "± 0.00236",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.195082,
+            "range": "± 0.0056",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.995737,
+            "range": "± 0.085126",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074575,
+            "range": "± 0.000101",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.265778,
+            "range": "± 1.049478",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.927479,
+            "range": "± 1.37512",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117494,
+            "range": "± 0.000489",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1174.188002,
+            "range": "± 0.883631",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1526.916442,
+            "range": "± 1.713188",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034048,
+            "range": "± 0.000739",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.609911,
+            "range": "± 0.202248",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.106702,
+            "range": "± 0.262666",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
