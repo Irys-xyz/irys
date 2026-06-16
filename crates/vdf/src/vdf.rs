@@ -15,6 +15,10 @@ use tracing::{debug, error, info, warn};
 
 const PAUSED_VDF_LOOP_SLEEP: Duration = Duration::from_millis(200);
 const PAUSED_SYNC_FAST_FORWARD_SLEEP: Duration = Duration::from_millis(10);
+/// Minimum gap between repeated reset-boundary-gate warnings. While parked the loop wakes
+/// every `PAUSED_VDF_LOOP_SLEEP` (200ms), so the warning is rate-limited to avoid ~5/sec
+/// log spam during an expected multi-block park; the first occurrence still logs immediately.
+const BOUNDARY_GATE_WARN_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
@@ -99,6 +103,9 @@ pub fn run_vdf<B: BlockProvider>(
         global_step_number
     );
     let vdf_reset_frequency = config.reset_frequency as u64;
+    // Timestamp of the last reset-boundary-gate warning, for rate-limiting (see
+    // `BOUNDARY_GATE_WARN_INTERVAL`). Cleared whenever the loop is not gated.
+    let mut last_boundary_gate_warning: Option<Instant> = None;
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -206,12 +213,28 @@ pub fn run_vdf<B: BlockProvider>(
         // if mining disabled, wait 200ms and continue loop i.e. check again
         if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) || is_too_far_ahead {
             if is_too_far_ahead {
-                warn!(
-                    "VDF gated at reset boundary: next step {} (canonical {}, confirmed {}); waiting",
-                    global_step_number + 1,
-                    canonical_global_step_number,
-                    confirmed_global_step_number
-                );
+                // Rate-limit: an expected multi-block park would otherwise log every 200ms.
+                let now = Instant::now();
+                let throttled = last_boundary_gate_warning
+                    .is_some_and(|last| now.duration_since(last) < BOUNDARY_GATE_WARN_INTERVAL);
+                if throttled {
+                    debug!(
+                        "VDF still gated at reset boundary: next step {} (canonical {}, confirmed {})",
+                        global_step_number + 1,
+                        canonical_global_step_number,
+                        confirmed_global_step_number
+                    );
+                } else {
+                    warn!(
+                        "VDF gated at reset boundary: next step {} (canonical {}, confirmed {}); waiting",
+                        global_step_number + 1,
+                        canonical_global_step_number,
+                        confirmed_global_step_number
+                    );
+                    last_boundary_gate_warning = Some(now);
+                }
+            } else {
+                last_boundary_gate_warning = None;
             }
             // During sync we pause local VDF mining, but trusted-peer catch-up
             // still depends on this loop consuming fast-forward steps promptly.
@@ -923,6 +946,38 @@ mod tests {
                 prop_assert_eq!(got, expected);
             }
         }
+
+        /// The issue #1447 fix isolated to a single decision. At the exact fork window of
+        /// #1447 — boundary 16, whose reset seed is pinned by the rotation block at step 8,
+        /// which sits freshly at the canonical tip (0 confirmations) while the confirmed
+        /// chain still trails at step 6 — the gate's outcome flips purely on which step it is
+        /// given. The OLD rule fed the canonical tip and let the loop CROSS, consuming the
+        /// still-forkable seed (the bug; see the wedge it causes in
+        /// `issue_1447_unconfirmed_reset_seed_poisons_buffer_and_wedges_block_validation`).
+        /// THIS branch feeds the confirmed step and BLOCKS the crossing until the rotation
+        /// block is confirmed (the fix). Same predicate, different argument — that swap is
+        /// the whole change.
+        #[test]
+        fn gating_on_confirmed_step_not_canonical_tip_is_the_1447_fix() {
+            const RESET_FREQUENCY: u64 = 8;
+            const BOUNDARY: u64 = 16; // rotation block at BOUNDARY - RESET_FREQUENCY = step 8
+            const CANONICAL_TIP_STEP: u64 = 8; // rotation block freshly at the tip, 0 confirmations
+            const CONFIRMED_STEP: u64 = 6; // confirmed chain still behind the rotation point
+
+            // OLD rule (gate on the canonical tip): NOT blocked -> the loop crosses and applies
+            // the unconfirmed fork-loser seed. This is the #1447 bug.
+            assert!(
+                !is_reset_boundary_blocked(BOUNDARY, RESET_FREQUENCY, CANONICAL_TIP_STEP),
+                "old rule (gate on canonical tip) crosses the boundary on an unconfirmed seed — the #1447 bug"
+            );
+
+            // THIS branch (gate on the confirmed step): blocked -> the loop parks until the
+            // rotation block is confirmed. This is the fix.
+            assert!(
+                is_reset_boundary_blocked(BOUNDARY, RESET_FREQUENCY, CONFIRMED_STEP),
+                "confirmed-step gate parks until the seed's rotation block is confirmed — the #1447 fix"
+            );
+        }
     }
 
     #[derive(Clone)]
@@ -1069,9 +1124,8 @@ mod tests {
     /// 6). That is the exact fork window of issue #1447: the seed's rotation block is at the
     /// tip yet not confirmed. The caller then decides what the loop observes next.
     ///
-    /// `reset_frequency` is 8, so boundary 16's rotation point is step 8 and the confirmation
-    /// lag (8 - 6 = 2) is below `reset_frequency / 2` — the gate therefore reads the confirmed
-    /// step rather than falling back to the canonical tip.
+    /// `reset_frequency` is 8, so boundary 16's rotation point is step 8. The gate reads the
+    /// confirmed step (6), not the canonical tip (8), so boundary 16 remains blocked.
     async fn parked_one_short_of_boundary_16(
         config: &Config,
     ) -> (
