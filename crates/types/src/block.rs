@@ -701,11 +701,15 @@ impl DataTransactionLedger {
     /// The canonical `(data_root, prefix_hash)` fold — `hash_all_sha256([data_root,
     /// prefix_hash])` — and the single definition of the ledger `tx_root` leaf value.
     ///
-    /// Folding `prefix_hash` alongside `data_root` is what lets an indexer/light client
-    /// holding only the block-signature-sealed `tx_root` trust every tx's `prefix_hash`
-    /// (and the tags it commits to) without verifying any individual tx signature: it
-    /// reconstructs this leaf from each `(data_root, prefix_hash)` pair and rebuilds the
-    /// tree. Every consumer that relates a `data_root`+`prefix_hash` to a tx_path leaf —
+    /// Folding `prefix_hash` alongside `data_root` lets an indexer/light client holding
+    /// only the block-signature-sealed `tx_root` authenticate every tx's
+    /// `(data_root, prefix_hash)` pair without verifying any individual tx signature: it
+    /// reconstructs this leaf from each pair and rebuilds the tree. (This proves the pair
+    /// was *committed*; it does not prove `prefix_hash` matches the tx's actual prefix
+    /// bytes — the network never validates that. Checking
+    /// `prefix_hash == SHA-256(data[..prefix_size])` against the data is left to an
+    /// off-chain indexer.)
+    /// Every consumer that relates a `data_root`+`prefix_hash` to a tx_path leaf —
     /// block production, validation's recompute, the PoA leaf binding, and storage's
     /// `recover_tx_path_data_root` re-verification — goes through here, so the formula
     /// lives in exactly one place and must stay byte-for-byte identical to the gateway's

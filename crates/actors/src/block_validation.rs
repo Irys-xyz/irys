@@ -3296,7 +3296,18 @@ fn load_owning_tx_for_poa(
                     .ok_or_else(|| {
                         eyre::eyre!("missing owning block header {owning_block_hash:?}")
                     })?;
-                let tx_ids = ledger_tx_ids_in(&header, ledger).unwrap_or_default();
+                // Bounds resolution already matched this ledger at this block, so the
+                // owning header must contain it. A missing ledger is a local index/header
+                // inconsistency, not a bad block — surface it as a node fault (this closure's
+                // error maps to `BlockBoundsLookupError`) rather than letting an empty tx
+                // list fall through to the consensus-reject `PoAChunkOffsetOutOfTxBounds`.
+                let tx_ids = ledger_tx_ids_in(&header, ledger).ok_or_else(|| {
+                    eyre::eyre!(
+                        "owning block {owning_block_hash:?} header missing ledger {} that \
+                         bounds resolution already matched — local index/header inconsistency",
+                        ledger as u32
+                    )
+                })?;
                 let mut cursor: u128 = 0;
                 for txid in &tx_ids {
                     if cursor > tx_leaf_min_byte_range {
