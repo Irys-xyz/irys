@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781628068437,
+  "lastUpdate": 1781700728385,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6523,6 +6523,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "53d7392f5c7803c150682733854145c43c1045b3",
+          "message": "fix: align genesis cascade activation with the epoch-layer predicate",
+          "timestamp": "2026-06-16T16:25:22Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1448/commits/53d7392f5c7803c150682733854145c43c1045b3"
+        },
+        "date": 1781700727406,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015868,
+            "range": "± 0.001271",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.131967,
+            "range": "± 0.006952",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.258478,
+            "range": "± 0.138784",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.4568,
+            "range": "± 0.917034",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078764,
+            "range": "± 0.000314",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 787.768262,
+            "range": "± 18.730725",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1065.11243,
+            "range": "± 29.110728",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.149845,
+            "range": "± 0.002342",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1256.026454,
+            "range": "± 119.64115",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1625.502522,
+            "range": "± 30.149642",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035207,
+            "range": "± 0.002473",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 215.575676,
+            "range": "± 2.017234",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 280.385493,
+            "range": "± 2.347296",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000125,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
