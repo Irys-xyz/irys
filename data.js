@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781725874930,
+  "lastUpdate": 1781736401322,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6847,6 +6847,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3a5169809d16813d8cadfcb96ce8bda1d61e22c0",
+          "message": "feat(consensus): reject zero-size, oversized-prefix, and foreign-chain-id transactions (#1451)\n\n* fix(consensus): reject zero-size data txs and harden PoA owning-tx recovery\n\nA data tx with `data_size == 0` was accepted by prevalidation (validate_transactions\nchecks only count/id/signature) and would inject a zero-width leaf into the ledger\n`tx_root` tree. Because `validate_path` resolves an exact-boundary target to the\nright-hand leaf while owning-tx recovery returned the first tx at that cumulative\nstart offset, a recall chunk following a zero-size tx was mis-attributed, yielding a\nspurious `PoaTxRootLeafMismatch` that made the following tx's data permanently\nun-minable. An end-to-end test confirms such a block otherwise prevalidates fully.\n\n- prevalidate_block now rejects any data ledger containing a `data_size == 0` tx\n  (new PreValidationError::ZeroSizeDataTx), closing the class at the consensus gate\n  so a hand-crafted peer block can't smuggle one past ingress.\n- load_owning_tx_for_poa skips zero-width leaves via a shared `is_poa_owning_leaf`\n  predicate wired into both the block-tree and DB-fallback scans (defense-in-depth).\n\nTests: unit tests for the zero-size scan and the owning-leaf predicate, plus an\nend-to-end prevalidate_block rejection test.\n\n* feat(mempool): reject zero-size data txs at ingress\n\nMirror the ZeroSizeDataTx consensus prevalidation guard at the mempool ingress gate\n(`precheck_data_ingress_common`, shared by the gossip and API paths) so a data tx with\n`data_size == 0` is never admitted or gossiped onward. A zero-size tx stores no data and\nwould inject a zero-width leaf into the ledger `tx_root` tree.\n\n- New `TxIngressError::ZeroDataSize(H256)`; the API routes map it to 400 Bad Request and\n  gossip maps it to InvalidData (source-reputation penalty) via\n  `InvalidDataError::TransactionZeroDataSize`.\n\nTest: end-to-end `test_api_rejects_zero_size_data_tx` asserts a hand-crafted signed\nzero-size data tx is rejected at ingress with `ZeroDataSize` (red→green verified).\n\n* feat(consensus): reject prefix_size > data_size and foreign chain_id txs\n\nAdd two structural transaction-validation rules, each enforced at BOTH\nmempool ingress and the authoritative consensus prevalidation gate, so a\nhand-crafted peer block cannot bypass ingress:\n\n- prefix_size > data_size (data txs): prefix_hash commits to the first\n  prefix_size data bytes, so prefix_size > data_size is a structurally\n  impossible claim. New PreValidationError::PrefixSizeExceedsDataSize and\n  TxIngressError::PrefixSizeExceedsDataSize.\n\n- chain_id mismatch (data AND commitment txs): chain_id is a signed field,\n  so a tx signed for another chain is rejected. New PreValidationError\n  variants DataTxChainIdMismatch / CommitmentChainIdMismatch and a shared\n  TxIngressError::ChainIdMismatch, plus a CommitmentTransaction::chain_id()\n  getter. The commitment consensus check applies to epoch and non-epoch\n  blocks.\n\nBoth rules are surfaced through the API routes (400) and p2p gossip\n(reputation decrease). Covered by unit tests for each finder helper and\nend-to-end ingress + prevalidation integration tests for data and\ncommitment transactions.\n\n* fix(types): stamp signer chain_id in data-tx builder\n\n`IrysSigner::merklize` built data-tx headers from `DataTransactionHeader::default()`, which leaves `chain_id = 0`, and no builder ever stamped the signer's chain_id. That was harmless until this branch added consensus/ingress `chain_id` enforcement, which then rejected every builder-produced data tx (chain_id 0 != node chain_id) — breaking the API end-to-end tests with HTTP 400.\n\nStamp `self.chain_id` onto the header in `merklize` (next to data_size/data_root) so builder-produced txs target the signer's configured chain. This conforms the Rust builder to the wire contract already reflected in the gossip fixtures (`chainId` is set), and is what makes the new chain_id rule pass for honestly-built transactions.\n\n* test: assign body.data_transactions instead of push in zero-size prevalidation test\n\nAligns `test_prevalidation_rejects_zero_size_data_tx` with its sibling tests,\nwhich all set `body.data_transactions = vec![..]`. Functionally equivalent today\n(the genesis test block carries no data transactions), but keeps per-test body\nconstruction uniform.\n\n* refactor(actors): share data-tx structural checks between ingress and consensus\n\nExtract the three data-transaction structural rules (zero data_size,\nprefix_size > data_size, foreign chain_id) into a single\n`data_tx_structural_defect` predicate in a new `data_tx_validation` module.\nBoth gates now call it:\n\n- mempool ingress (`precheck_data_ingress_common`)\n- consensus prevalidation (`prevalidate_block`)\n\nEach gate maps the returned `DataTxStructuralDefect` to its own error type\n(`TxIngressError` vs `PreValidationError`), so only the *rule* is shared. This\nguarantees ingress and consensus can't drift — a tx ingress accepts is\nguaranteed to clear the same structural checks at consensus, and vice versa.\n\nAlso collapses the three separate per-check scans at the consensus gate into a\nsingle pass, and removes the three `first_*` finder helpers and their unit\ntests in favor of the shared predicate's consolidated unit tests. Commitment\nchain_id validation is left as-is (its only structural check is chain_id).",
+          "timestamp": "2026-06-17T23:27:43+01:00",
+          "tree_id": "0dd7bfa90220a2c0fab6801c81cbfb4aa0d82e74",
+          "url": "https://github.com/Irys-xyz/irys/commit/3a5169809d16813d8cadfcb96ce8bda1d61e22c0"
+        },
+        "date": 1781736399430,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011876,
+            "range": "± 0.000337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119065,
+            "range": "± 0.001981",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.19677,
+            "range": "± 0.018069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.902671,
+            "range": "± 0.223711",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077211,
+            "range": "± 0.001726",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 777.847315,
+            "range": "± 27.33068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.387729,
+            "range": "± 2.578212",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11776,
+            "range": "± 0.002365",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1188.997887,
+            "range": "± 8.656565",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1572.500735,
+            "range": "± 19.520035",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034084,
+            "range": "± 0.001403",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.881893,
+            "range": "± 1.562083",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.281361,
+            "range": "± 0.25982",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
