@@ -123,6 +123,21 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number, proposed_ff_step.step
                 );
 
+                // The confirmed-step reset-boundary gate (see `is_reset_boundary_blocked`)
+                // intentionally does NOT apply on the fast-forward path, so the snapshot's
+                // `confirmed_global_step_number` is discarded here. FF replays the steps of a
+                // block already under validation into the shared step buffer verbatim; it never
+                // runs the loop ahead, so it cannot reproduce the #1447 run-ahead bug (the local
+                // loop applying a reset seed pinned by a still-forkable block).
+                //
+                // A residual, *theoretical* concern remains: the step buffer is a single
+                // append-only sequence and validation rejects a block whose steps disagree with
+                // it, so a competing fork whose post-boundary steps differ could — if validated
+                // first — make the canonical block be rejected. Reaching that requires a reorg
+                // ~one reset window deep (where the boundary's reset seed is pinned), far deeper
+                // than `block_migration_depth` — i.e. past finality, refused before adoption.
+                // Full mechanism, the deep-reorg bound, and the invariant relied upon:
+                // design/docs/vdf-reset-seed-confirmation-gate.md.
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,
