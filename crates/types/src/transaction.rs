@@ -297,9 +297,27 @@ pub struct DataTransactionHeaderV1 {
     #[serde(with = "string_u64")]
     pub data_size: u64,
 
-    /// Size of the header (to store tags etc.) in bytes
+    /// Size of the prefix (tags/schema section) in bytes — the number of leading data
+    /// bytes that `prefix_hash` commits to.
+    ///
+    /// NOTE: the network does NOT validate `prefix_size` (or `prefix_hash`) against the
+    /// transaction's data; both are committed into the ledger `tx_root` for an off-chain
+    /// indexer that holds the data to validate. See `prefix_hash` below.
     #[serde(with = "string_u64")]
-    pub header_size: u64,
+    pub prefix_size: u64,
+
+    /// `SHA-256(first prefix_size bytes of the transaction data)` (bare SHA-256,
+    /// no length suffix). Signed and folded into the ledger `tx_root` so that an indexer
+    /// holding only the block-signature-sealed `tx_root` can reconstruct the
+    /// `(data_root, prefix_hash)` pair without verifying each tx's signature.
+    /// Signed automatically as a normal (non-`#[rlp(skip)]`) field.
+    ///
+    /// NOTE: the network does NOT validate `prefix_hash` (or `prefix_size`) against the
+    /// transaction's data — the protocol never checks
+    /// `prefix_hash == SHA-256(data[..prefix_size])`. The committed value is signer-asserted;
+    /// validating it against the actual prefix bytes is the responsibility of an off-chain
+    /// indexer that holds the data.
+    pub prefix_hash: H256,
 
     /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
     pub term_fee: BoundedFee,
@@ -412,7 +430,8 @@ impl DataTransactionHeaderV1 {
             signer: IrysAddress::default(),
             data_root: H256::zero(),
             data_size: 0,
-            header_size: 0,
+            prefix_size: 0,
+            prefix_hash: H256::zero(),
             term_fee: BoundedFee::zero(),
             perm_fee: None,
             ledger_id: DataLedger::Publish.into(),
@@ -890,7 +909,8 @@ mod tests {
             signer: IrysAddress::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
-            header_size: 0,
+            prefix_size: 0,
+            prefix_hash: H256::zero(),
             term_fee: BoundedFee::from(100_u64),
             perm_fee: Some(BoundedFee::from(200_u64)),
             ledger_id: DataLedger::Submit.into(),
@@ -1190,7 +1210,8 @@ mod tests {
                 signer: IrysAddress::default(),
                 data_root: H256::from([3_u8; 32]),
                 data_size: 1024,
-                header_size: 0,
+                prefix_size: 0,
+                prefix_hash: H256::zero(),
                 term_fee: BoundedFee::from(100_u64),
                 perm_fee: Some(BoundedFee::from(200_u64)),
                 ledger_id: DataLedger::Submit.into(),

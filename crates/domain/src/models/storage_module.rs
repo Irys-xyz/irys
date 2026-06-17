@@ -43,18 +43,19 @@ use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
-        add_full_tx_path, add_tx_path_hash_to_offset_index, clear_submodule_database,
-        create_or_open_submodule_db, get_data_path_by_offset, get_data_root_infos_for_data_root,
-        get_tx_path_by_offset,
-        tables::{DataRootInfo, DataRootInfos},
+        add_full_tx_path, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
+        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+        get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
+        get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
+        tables::{DataRootInfo, DataRootInfos, TxLeafBinding},
     },
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_types::{
     Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config, DataLedger, DataRoot,
-    DataTransactionHeader, H256, IrysAddress, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
-    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset,
-    TxChunkOffset, TxPath, UnpackedChunk,
+    DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, LedgerChunkOffset,
+    LedgerChunkRange, PackedChunk, PartitionChunkOffset, PartitionChunkRange,
+    ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk,
     app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
@@ -63,6 +64,7 @@ use irys_types::{
 use nodit::{InclusiveInterval as _, Interval, NoditMap, NoditSet, interval::ii};
 use openssl::sha;
 use reth_db::Database as _;
+use reth_db::transaction::DbTx;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -77,6 +79,56 @@ use tracing::{debug, error, info, warn};
 use crate::{CircularBuffer, StorageModulesReadGuard};
 
 type SubmodulePath = PathBuf;
+
+/// Recover the verified real `data_root` and this offset's `data_path` hash in a single
+/// offset-index read.
+///
+/// After the `prefix_hash` softfork, the tx_path leaf stores the folded
+/// `hash_all_sha256([data_root, prefix_hash])` (the ledger `tx_root` leaf value), so the
+/// raw `data_root` can no longer be read out of the proof leaf. The real `data_root` comes
+/// from the stored `TxLeafBinding` and is cross-checked against the proof leaf via the same
+/// fold — so the binding and the proof can never silently disagree; a mismatch is surfaced
+/// as corruption rather than served.
+///
+/// Returns `Ok(None)` if no tx_path is indexed at this offset. The returned
+/// `data_path_hash` (the chunk's own path hash, `None` if its chunk hasn't been written)
+/// lets the caller fetch the `data_path` directly without re-reading the offset index.
+fn recover_tx_path_data_root<T: DbTx>(
+    tx: &T,
+    partition_offset: PartitionChunkOffset,
+) -> eyre::Result<Option<(DataRoot, Option<ChunkPathHash>)>> {
+    // Single read of the offset index; both the tx_path_hash (for data_root recovery) and
+    // the data_path_hash (returned to the caller) come from this one lookup.
+    let Some(path_hashes) = get_path_hashes_by_offset(tx, partition_offset)? else {
+        return Ok(None);
+    };
+    let Some(tx_path_hash) = path_hashes.tx_path_hash else {
+        return Ok(None);
+    };
+    let Some(tx_path) = get_full_tx_path(tx, tx_path_hash)? else {
+        return Ok(None);
+    };
+
+    let leaf = get_leaf_proof(&Base64::from(tx_path))?
+        .hash()
+        .map(H256::from)
+        .ok_or_eyre("Unable to parse tx_path leaf hash")?;
+
+    let binding = get_tx_leaf_binding(tx, tx_path_hash)?
+        .ok_or_eyre("missing tx_path -> (data_root, prefix_hash) binding for stored tx_path")?;
+    // Re-verify via the single canonical fold (same formula block production/validation use).
+    let expected_leaf =
+        DataTransactionLedger::fold_tx_root_leaf(binding.data_root, binding.prefix_hash);
+    eyre::ensure!(
+        leaf == expected_leaf,
+        "tx_path leaf {leaf:?} != fold(stored data_root {:?}, prefix_hash {:?}) = {expected_leaf:?} \
+         — submodule corruption (binding out of sync with stored proof)",
+        binding.data_root,
+        binding.prefix_hash,
+    );
+
+    Ok(Some((binding.data_root, path_hashes.data_path_hash)))
+}
 
 // In-memory chunk data indexed by offset within partition
 type ChunkMap = BTreeMap<PartitionChunkOffset, (ChunkBytes, ChunkType)>;
@@ -1008,6 +1060,18 @@ impl StorageModule {
             submodule.db.update_eyre(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
+                // Record the (data_root, prefix_hash) this tx_path leaf folds from, so the
+                // real data_root can be recovered on read (the leaf now stores the folded
+                // hash_all_sha256([data_root, prefix_hash]), not the raw data_root) and the
+                // proof leaf re-verified against it.
+                add_tx_leaf_binding(
+                    tx,
+                    tx_path_hash,
+                    &TxLeafBinding {
+                        data_root: data_tx.data_root,
+                        prefix_hash: data_tx.prefix_hash,
+                    },
+                )?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
@@ -1263,19 +1327,14 @@ impl StorageModule {
         // Get paths and process them
         let Some((data_root, data_size, data_path, chunk_offset)) =
             self.query_submodule_db_by_offset(partition_offset, |tx| {
-                let tx_path = match get_tx_path_by_offset(tx, partition_offset) {
-                    Ok(Some(tx_path)) => tx_path,
-                    Ok(None) => return Ok(None),
-                    Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
+                // Recover the real data_root from the stored tx-leaf binding (verified
+                // against the tx_path leaf via the (data_root, prefix_hash) fold), along
+                // with this offset's data_path hash from the same offset-index read.
+                let Some((data_root, data_path_hash)) =
+                    recover_tx_path_data_root(tx, partition_offset)?
+                else {
+                    return Ok(None);
                 };
-
-                // Extract the data_root form the tx_path leaf node
-                let path_buff = Base64::from(tx_path);
-                let proof = get_leaf_proof(&path_buff)?;
-                let data_root = proof
-                    .hash()
-                    .map(H256::from)
-                    .ok_or_eyre("Unable to parse data_root from tx_path")?;
 
                 // Retrieve all DataRootInfo entries for this data_root from the database.
                 // Each entry contains a start_offset and the data_size paid for in the tx that provided the data_root
@@ -1309,10 +1368,12 @@ impl StorageModule {
                 // - First chunk write creates both tx_path and its specific data_path
                 // - Subsequent chunks only create their own data_paths under the existing tx_path
                 // - Reading an unwritten chunk returns None (tx_path exists, but chunk's data_path doesn't)
-                let data_path =  match  get_data_path_by_offset(tx, partition_offset) {
-                    Ok(Some(data_path)) => data_path,
-                    Ok(None) => return Ok(None),
-                    Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
+                // Fetch the data_path from the hash recovered above — no second offset-index read.
+                let Some(data_path_hash) = data_path_hash else {
+                    return Ok(None);
+                };
+                let Some(data_path) = get_full_data_path(tx, data_path_hash)? else {
+                    return Ok(None);
                 };
 
                 let path_buff = Base64::from(data_path);
@@ -1361,19 +1422,19 @@ impl StorageModule {
         partition_offset: PartitionChunkOffset,
     ) -> Result<Option<(DataRoot, Base64)>> {
         self.query_submodule_db_by_offset(partition_offset, |tx| {
-            let Some(tx_path) = get_tx_path_by_offset(tx, partition_offset)? else {
+            // Recover the real data_root from the stored tx-leaf binding (verified against
+            // the tx_path leaf via the (data_root, prefix_hash) fold) plus this offset's
+            // data_path hash, from a single offset-index read.
+            let Some((data_root, data_path_hash)) =
+                recover_tx_path_data_root(tx, partition_offset)?
+            else {
                 return Ok(None);
             };
 
-            // Extract the data_root from the tx_path leaf node
-            let path_buff = Base64::from(tx_path);
-            let proof = get_leaf_proof(&path_buff)?;
-            let data_root = proof
-                .hash()
-                .map(H256::from)
-                .ok_or_eyre("Unable to parse data_root from tx_path")?;
-
-            let Some(data_path) = get_data_path_by_offset(tx, partition_offset)? else {
+            let Some(data_path_hash) = data_path_hash else {
+                return Ok(None);
+            };
+            let Some(data_path) = get_full_data_path(tx, data_path_hash)? else {
                 return Ok(None);
             };
 

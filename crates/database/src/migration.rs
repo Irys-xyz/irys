@@ -535,7 +535,12 @@ mod v2_to_v3 {
                 signer: v2_header.signer,
                 data_root: v2_header.data_root,
                 data_size: v2_header.data_size,
-                header_size: v2_header.header_size,
+                // Historical on-disk field `header_size` is the new `prefix_size`.
+                prefix_size: v2_header.header_size,
+                // Legacy V2 records predate `prefix_hash`; no prefix commitment is
+                // recoverable during migration, so default it to zero. (No real data
+                // transactions exist pre-softfork, so this path is a formality.)
+                prefix_hash: irys_types::H256::zero(),
                 term_fee: v2_header.term_fee,
                 ledger_id: v2_header.ledger_id,
                 chain_id: v2_header.chain_id,

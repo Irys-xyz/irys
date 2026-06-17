@@ -9,7 +9,8 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::{
-    canonical_promoted_height, canonical_submit_height, tables::MigratedBlockHashes,
+    canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
+    tables::MigratedBlockHashes,
 };
 use irys_domain::{
     BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -357,6 +358,24 @@ pub enum PreValidationError {
     #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
     TooManyDataTxs { max: u64, got: usize },
 
+    /// The ledger's `tx_root` does not match the merkle root recomputed from the
+    /// included transactions' folded `(data_root, prefix_hash)` leaves. Any tampering
+    /// with a tx's `data_root` or `prefix_hash` relative to the signed `tx_root` is
+    /// rejected here.
+    #[error("tx_root mismatch for ledger {ledger_id}: header {expected}, recomputed {recomputed}")]
+    TxRootMismatch {
+        ledger_id: u32,
+        expected: H256,
+        recomputed: H256,
+    },
+
+    /// The PoA tx_path leaf does not equal the folded `(data_root, prefix_hash)` value of
+    /// the recall chunk's owning transaction. The tx_path proof validated against the
+    /// block's signed `tx_root`, so this means the owning tx's `data_root`/`prefix_hash`
+    /// were tampered with relative to what the `tx_root` commits to.
+    #[error("PoA tx_path leaf mismatch: expected folded leaf {expected}, got {got}")]
+    PoaTxRootLeafMismatch { expected: H256, got: H256 },
+
     /// Too many commitment transactions
     #[error("Too many commitment transactions: max {max}, got {got}")]
     TooManyCommitmentTxs { max: u64, got: usize },
@@ -545,6 +564,8 @@ impl PreValidationError {
             | Self::TimestampTooFarInFuture { .. }
             | Self::TooManyCommitmentTxs { .. }
             | Self::TooManyDataTxs { .. }
+            | Self::TxRootMismatch { .. }
+            | Self::PoaTxRootLeafMismatch { .. }
             | Self::TransactionIdMismatch { .. }
             | Self::TxFoundInMultipleBlocks { .. }
             | Self::TxInMultipleLedgers { .. }
@@ -648,6 +669,8 @@ impl PreValidationError {
             Self::DatabaseError { .. } => "database_error",
             Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
+            Self::TxRootMismatch { .. } => "tx_root_mismatch",
+            Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
             Self::MissingTransactions(_) => "missing_transactions",
             Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
@@ -1652,12 +1675,40 @@ pub async fn prevalidate_block(
         }
     }
 
-    // Enforce max_data_txs_per_block across all term ledgers (Submit + OneYear + ThirtyDay)
+    // Enforce max_data_txs_per_block across all term ledgers (Submit + OneYear +
+    // ThirtyDay) BEFORE the per-ledger tx_root recompute below — the count limit is an
+    // O(1) structural check, so reject an over-sized block before doing O(N) merkle work.
     if total_term_txs > max_data_txs as usize {
         return Err(PreValidationError::TooManyDataTxs {
             max: max_data_txs,
             got: total_term_txs,
         });
+    }
+
+    // Recompute each ledger's `tx_root` from the folded `(data_root, prefix_hash)` leaves
+    // of the included transactions and compare against the signed header value. This is
+    // what enforces `prefix_hash` (and `data_root`) through consensus: the block signature
+    // seals `tx_root`, so any tampering with a tx's `data_root`/`prefix_hash` relative to
+    // it changes the recomputed root and rejects the block. `ledger_txs` is in `dl.tx_ids`
+    // order (asserted by `validate_transactions` above), matching the order the fold uses.
+    // The empty-ledger case folds to `H256::zero()`, leaving pre-data-tx blocks unaffected.
+    // Uses `compute_tx_root` (root-only) to avoid building per-leaf proofs validation discards.
+    for dl in &block.data_ledgers {
+        let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
+            PreValidationError::InvalidLedgerId {
+                ledger_id: dl.ledger_id,
+                block_height: block.height,
+            }
+        })?;
+        let ledger_txs = transactions.get_ledger_txs(ledger);
+        let recomputed_tx_root = DataTransactionLedger::compute_tx_root(ledger_txs);
+        if recomputed_tx_root != dl.tx_root {
+            return Err(PreValidationError::TxRootMismatch {
+                ledger_id: dl.ledger_id,
+                expected: dl.tx_root,
+                recomputed: recomputed_tx_root,
+            });
+        }
     }
 
     // Look up individual ledgers for ingress proof validation
@@ -2914,7 +2965,7 @@ mod c1_side_fork_regression_tests {
                      out-of-range PoA offset. Error message: {msg}",
                 );
             }
-            Ok(bb) => {
+            Ok((bb, _owning_hash)) => {
                 // The side-fork's predecessor at `curr_height - 1 = 1` is
                 // `phantom_parent_hash` — NOT `canonical_h1_hash`. Any
                 // `Ok(_)` here is wrong-fork: the production walk sourced
@@ -3175,6 +3226,108 @@ fn ledger_entry_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<(u64,
         .map(|l| (l.total_chunks, l.tx_root))
 }
 
+/// The ordered `tx_ids` a block applied to `ledger` (the same order the ledger's
+/// `tx_root` was folded over), or `None` if the ledger is absent from this block.
+fn ledger_tx_ids_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<Vec<H256>> {
+    header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == ledger as u32)
+        .map(|l| l.tx_ids.0.clone())
+}
+
+/// Canonical (migrated) block hash at `height` from `MigratedBlockHashes`. Used by the
+/// PoA data-ledger branch to name the recall chunk's owning block for owning-tx lookup
+/// when it lives below `block_tree`'s window (older history is always canonical/migrated).
+/// Cheap (one point read, no header fetch) so it can run during bounds resolution; the
+/// heavier header + tx-header fetch is deferred until after `tx_path` validation succeeds.
+fn canonical_block_hash_at(db: &DatabaseProvider, height: u64) -> Result<H256, PreValidationError> {
+    db.view_eyre(|tx| {
+        tx.get::<MigratedBlockHashes>(height)?
+            .ok_or_else(|| eyre::eyre!("no canonical (migrated) block at height {height}"))
+    })
+    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))
+}
+
+/// Recover the recall chunk's owning data transaction for the PoA data-ledger branch.
+///
+/// After `prefix_hash` is folded into the tx_root leaf, a tx_path proof no longer yields the
+/// real `data_root`, so we fetch the owning block's ledger txs and pick the one whose
+/// cumulative byte range (prefix sums of `data_size`, the same order the fold uses) begins at
+/// `tx_leaf_min_byte_range`. Recent/tip owning blocks live in the in-memory `block_tree`
+/// (not yet migrated to the consensus DB, where `block_header_by_hash` would miss them), so we
+/// try the tree first and fall back to the DB for migrated history. Deferred until after
+/// `tx_path` validation so an invalid proof still surfaces as `MerkleProofInvalid`.
+fn load_owning_tx_for_poa(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    owning_block_hash: BlockHash,
+    ledger: DataLedger,
+    tx_leaf_min_byte_range: u128,
+) -> Result<DataTransactionHeader, PreValidationError> {
+    // The owner is the leaf whose cumulative start byte == `tx_leaf_min_byte_range`. Both
+    // paths prefix-sum `data_size` in `tx_ids` order and STOP at the owner — never reading
+    // or cloning the ledger's trailing transactions.
+    let from_tree = {
+        let tree = block_tree_guard.read();
+        // In-memory: scan the borrowed slice; clone only the owner, not all N txs.
+        tree.get_sealed_block(&owning_block_hash).map(|sb| {
+            let mut cursor: u128 = 0;
+            sb.transactions()
+                .get_ledger_txs(ledger)
+                .iter()
+                .find_map(|h| {
+                    if cursor == tx_leaf_min_byte_range {
+                        return Some(h.clone());
+                    }
+                    cursor += h.data_size as u128;
+                    None
+                })
+        })
+    };
+    let owner = match from_tree {
+        Some(owner) => owner,
+        // Migrated history: fetch tx headers lazily, prefix-summing as we go and breaking at
+        // the owner, so a validation reads at most `owner_index + 1` headers (not the whole
+        // ledger) and allocates no intermediate Vec.
+        None => db
+            .view_eyre(|tx| {
+                let header = irys_database::block_header_by_hash(tx, &owning_block_hash, false)?
+                    .ok_or_else(|| {
+                        eyre::eyre!("missing owning block header {owning_block_hash:?}")
+                    })?;
+                // Bounds resolution already matched this ledger at this block, so the
+                // owning header must contain it. A missing ledger is a local index/header
+                // inconsistency, not a bad block — surface it as a node fault (this closure's
+                // error maps to `BlockBoundsLookupError`) rather than letting an empty tx
+                // list fall through to the consensus-reject `PoAChunkOffsetOutOfTxBounds`.
+                let tx_ids = ledger_tx_ids_in(&header, ledger).ok_or_else(|| {
+                    eyre::eyre!(
+                        "owning block {owning_block_hash:?} header missing ledger {} that \
+                         bounds resolution already matched — local index/header inconsistency",
+                        ledger as u32
+                    )
+                })?;
+                let mut cursor: u128 = 0;
+                for txid in &tx_ids {
+                    if cursor > tx_leaf_min_byte_range {
+                        break;
+                    }
+                    let th = irys_database::tx_header_by_txid(tx, txid)?.ok_or_else(|| {
+                        eyre::eyre!("missing data tx header {txid:?} for PoA owning-tx")
+                    })?;
+                    if cursor == tx_leaf_min_byte_range {
+                        return Ok(Some(th));
+                    }
+                    cursor += th.data_size as u128;
+                }
+                Ok(None)
+            })
+            .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?,
+    };
+    owner.ok_or(PreValidationError::PoAChunkOffsetOutOfTxBounds)
+}
+
 /// Gate a `block_index` lookup on `prev_hash` being the canonical block at
 /// `prev_height` according to `MigratedBlockHashes`.  Returns `Ok(())` when
 /// the hash matches; `Err(PoAOffCanonicalAncestor)` on mismatch;
@@ -3213,7 +3366,15 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     parent_height: u64,
     ledger: DataLedger,
     ledger_chunk_offset: u64,
-) -> Result<BlockBounds, PreValidationError> {
+) -> Result<(BlockBounds, H256), PreValidationError> {
+    // Returns the resolved bounds AND the owning block's hash — the data-ledger PoA
+    // branch uses the hash to fetch the owning block's tx headers (and the recall
+    // chunk's owning `data_root`) after `prefix_hash` is folded into the leaf. Only
+    // the hash is resolved here (cheap); the header + tx-header fetch is deferred to
+    // after `tx_path` validation so an invalid proof still surfaces as
+    // `MerkleProofInvalid` rather than a lookup error. The tree-walk path has the
+    // owning header in hand; the index paths resolve the canonical hash by height.
+    //
     // Fast path: parent is migrated. Identical disambiguation to the prior
     // implementation — offsets past chain-max and ledger-not-active are
     // consensus-invalid, lookup failures past those checks are local.
@@ -3243,13 +3404,15 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 }
                 Some(_) => {}
             }
-            return index
+            let bounds = index
                 .get_block_bounds_at_height(
                     ledger,
                     LedgerChunkOffset::from(ledger_chunk_offset),
                     parent_height,
                 )
-                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
+            let owning_hash = canonical_block_hash_at(db, bounds.height)?;
+            return Ok((bounds, owning_hash));
         }
         // Either the index doesn't have parent_height yet (un-migrated window)
         // or the indexed canonical at parent_height differs from the supplied
@@ -3351,14 +3514,18 @@ fn get_data_poa_bounds_with_block_tree_fallback(
             // Found: chunk falls in [prev_total, curr_total) for `curr`.
             // `curr_tx_root` was set when we descended into `curr` (or
             // initially from the parent header) — it always reflects the
-            // tx_root of the block we're returning.
-            return Ok(BlockBounds {
-                height: curr_height,
-                ledger,
-                start_chunk_offset: prev_total,
-                end_chunk_offset: curr_total,
-                tx_root: curr_tx_root,
-            });
+            // tx_root of the block we're returning. `curr` is the owning block,
+            // so its hash is available directly (no DB fetch).
+            return Ok((
+                BlockBounds {
+                    height: curr_height,
+                    ledger,
+                    start_chunk_offset: prev_total,
+                    end_chunk_offset: curr_total,
+                    tx_root: curr_tx_root,
+                },
+                curr.block_hash,
+            ));
         }
 
         // Descend to predecessor. We already proved `ledger_chunk_offset <
@@ -3405,13 +3572,15 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                 assert_canonical_via_migrated_hashes(db, prev_hash, prev_height)?;
                 drop(tree);
                 let index = block_index_guard.read();
-                return index
+                let bounds = index
                     .get_block_bounds_at_height(
                         ledger,
                         LedgerChunkOffset::from(ledger_chunk_offset),
                         prev_height,
                     )
-                    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()));
+                    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
+                let owning_hash = canonical_block_hash_at(db, bounds.height)?;
+                return Ok((bounds, owning_hash));
             }
         }
     }
@@ -3494,7 +3663,7 @@ pub fn poa_is_valid(
         // `block_tree_depth > block_migration_depth` guarantees that the
         // un-migrated window always lives in `block_tree`; older history
         // is always in `block_index`.
-        let bb = get_data_poa_bounds_with_block_tree_fallback(
+        let (bb, owning_block_hash) = get_data_poa_bounds_with_block_tree_fallback(
             block_index_guard,
             block_tree_guard,
             db,
@@ -3526,8 +3695,38 @@ pub fn poa_is_valid(
         let tx_chunk_offset =
             block_chunk_offset * (config.chunk_size as u128) - tx_path_result.min_byte_range;
 
-        // data_path validation
-        let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
+        // After folding `prefix_hash` into the leaf, `tx_path_result.leaf_hash` is
+        // `hash_all_sha256([data_root, prefix_hash])` — no longer the raw `data_root`, so
+        // it can no longer serve as the root for the data (chunk) proof. Recover the recall
+        // chunk's owning transaction so we can (a) bind the tx_path leaf to the signed tree
+        // and (b) validate the `data_path` against the real `data_root`.
+        //
+        // The owning tx is the one whose cumulative byte range — prefix sums of `data_size`
+        // in the owning block's `tx_ids` order, the same ordering the tx_root fold uses —
+        // begins at `tx_path_result.min_byte_range`. Deferred until after tx_path validated.
+        let owning_tx = load_owning_tx_for_poa(
+            block_tree_guard,
+            db,
+            owning_block_hash,
+            ledger,
+            tx_path_result.min_byte_range,
+        )?;
+
+        // Bind the tx_path leaf to the signed tx_root tree: it must equal the folded
+        // `(data_root, prefix_hash)` value of the owning tx. This is what authenticates
+        // `prefix_hash` through PoA — a tampered `prefix_hash` (or `data_root`) no longer
+        // reproduces the leaf that the (block-signature-sealed) `tx_root` commits to.
+        let expected_leaf = DataTransactionLedger::tx_root_leaf_value(&owning_tx);
+        if H256(tx_path_result.leaf_hash) != expected_leaf {
+            return Err(PreValidationError::PoaTxRootLeafMismatch {
+                expected: expected_leaf,
+                got: H256(tx_path_result.leaf_hash),
+            });
+        }
+
+        // data_path validation — against the owning tx's real `data_root` (the root of its
+        // data-chunk tree), recovered above.
+        let data_path_result = validate_path(owning_tx.data_root.0, &data_path, tx_chunk_offset)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
         if !(data_path_result.min_byte_range..=data_path_result.max_byte_range)
@@ -5975,7 +6174,6 @@ mod tests {
 
     use irys_config::StorageSubmodulesConfig;
     use irys_database::add_genesis_commitments;
-    use irys_database::db::IrysDatabaseExt as _;
     use irys_domain::{
         BlockIndex, BlockTree, EpochSnapshot, block_index_guard::BlockIndexReadGuard,
     };
@@ -6429,7 +6627,7 @@ mod tests {
             data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
             ..Default::default()
         };
-        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block.clone()), block_txs);
         context
             .block_index
             .db()
@@ -6437,6 +6635,22 @@ mod tests {
                 BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
             .expect("Failed to index second block");
+
+        // The data-ledger PoA branch recovers the recall chunk's owning tx (and its
+        // data_root) by fetching the owning block header + tx headers from the DB.
+        // `push_block` only writes the block index, so persist the header and tx
+        // headers here too.
+        context
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                irys_database::insert_block_header(tx, &irys_block)?;
+                for th in txs.iter().map(|t| &t.header) {
+                    irys_database::insert_tx_header(tx, th)?;
+                }
+                Ok(())
+            })
+            .expect("Failed to persist owning block header + tx headers for PoA lookup");
 
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 
@@ -6685,7 +6899,7 @@ mod tests {
             data_txs: HashMap::from([(DataLedger::Submit, tx_headers)]),
             ..Default::default()
         };
-        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block), block_txs);
+        let sealed = SealedBlock::new_unchecked(Arc::new(irys_block.clone()), block_txs);
         context
             .block_index
             .db()
@@ -6693,6 +6907,22 @@ mod tests {
                 BlockIndex::push_block(tx, &sealed, context.consensus_config.chunk_size)
             })
             .expect("Failed to index second block");
+
+        // The data-ledger PoA branch recovers the recall chunk's owning tx (and its
+        // data_root) by fetching the owning block header + tx headers from the DB.
+        // `push_block` only writes the block index, so persist the header and tx
+        // headers here too.
+        context
+            .block_index
+            .db()
+            .update_eyre(|tx| {
+                irys_database::insert_block_header(tx, &irys_block)?;
+                for th in txs.iter().map(|t| &t.header) {
+                    irys_database::insert_tx_header(tx, th)?;
+                }
+                Ok(())
+            })
+            .expect("Failed to persist owning block header + tx headers for PoA lookup");
 
         let block_index_guard = BlockIndexReadGuard::new(context.block_index.clone());
 

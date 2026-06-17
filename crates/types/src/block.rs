@@ -10,7 +10,7 @@ use crate::versioning::{
 };
 use crate::{
     Arbitrary, Base64, Compact, Config, DataRootLeaf, H256, H256List, IngressProofsList,
-    IrysSignature, Proof, U256, generate_data_root, generate_leaves_from_data_roots,
+    IrysSignature, Proof, U256, generate_data_root, generate_leaves_from_data_roots, hash_sha256,
     option_u64_stringify,
     partition::PartitionHash,
     resolve_proofs,
@@ -692,24 +692,89 @@ pub struct DataTransactionLedger {
 }
 
 impl DataTransactionLedger {
-    /// Computes the tx_root and tx_paths. The TX Root is composed of taking the data_roots of each of the storage
-    /// transactions included, in order, and building a merkle tree out of them. The root of this tree is the tx_root.
+    /// The value a transaction folds to in the ledger `tx_root` tree.
+    /// Thin wrapper over [`Self::fold_tx_root_leaf`].
+    pub fn tx_root_leaf_value(tx: &DataTransactionHeader) -> H256 {
+        Self::fold_tx_root_leaf(tx.data_root, tx.prefix_hash)
+    }
+
+    /// The canonical `(data_root, prefix_hash)` fold — `hash_all_sha256([data_root,
+    /// prefix_hash])` — and the single definition of the ledger `tx_root` leaf value.
+    ///
+    /// Folding `prefix_hash` alongside `data_root` lets an indexer/light client holding
+    /// only the block-signature-sealed `tx_root` authenticate every tx's
+    /// `(data_root, prefix_hash)` pair without verifying any individual tx signature: it
+    /// reconstructs this leaf from each pair and rebuilds the tree. (This proves the pair
+    /// was *committed*; it does not prove `prefix_hash` matches the tx's actual prefix
+    /// bytes — the network never validates that. Checking
+    /// `prefix_hash == SHA-256(data[..prefix_size])` against the data is left to an
+    /// off-chain indexer.)
+    /// Every consumer that relates a `data_root`+`prefix_hash` to a tx_path leaf —
+    /// block production, validation's recompute, the PoA leaf binding, and storage's
+    /// `recover_tx_path_data_root` re-verification — goes through here, so the formula
+    /// lives in exactly one place and must stay byte-for-byte identical to the gateway's
+    /// leaf formula for cross-impl `tx_root` reconstruction.
+    pub fn fold_tx_root_leaf(data_root: H256, prefix_hash: H256) -> H256 {
+        // Byte-for-byte equal to `hash_all_sha256([data_root, prefix_hash])` —
+        // `SHA-256(SHA-256(data_root) ‖ SHA-256(prefix_hash))` — but folds through a stack
+        // `[u8; 64]` instead of allocating a `Vec` per call (this runs O(N) per block in the
+        // tx_root recompute and once per served chunk in the storage binding check). The
+        // equivalence is locked by `fold_tx_root_leaf_matches_hash_all_sha256`.
+        let mut buf = [0_u8; 64];
+        buf[..32].copy_from_slice(&hash_sha256(&data_root.0));
+        buf[32..].copy_from_slice(&hash_sha256(&prefix_hash.0));
+        H256(hash_sha256(&buf))
+    }
+
+    /// Build the folded `DataRootLeaf`s for a set of data transactions, in `tx_ids` order.
+    /// Shared by [`Self::merklize_tx_root`] and [`Self::compute_tx_root`] so the leaf
+    /// derivation is defined in exactly one place.
+    fn folded_leaves(data_txs: &[DataTransactionHeader]) -> Vec<DataRootLeaf> {
+        data_txs
+            .iter()
+            .map(|h| DataRootLeaf {
+                data_root: Self::tx_root_leaf_value(h),
+                tx_size: h.data_size as usize, // TODO: check this
+            })
+            .collect()
+    }
+
+    /// Computes the tx_root and tx_paths. The TX Root is composed of taking the
+    /// `(data_root, prefix_hash)` fold of each of the storage transactions included, in
+    /// order, and building a merkle tree out of them. The root of this tree is the
+    /// tx_root.
+    ///
+    /// Block production needs the per-leaf `tx_paths`; validation does not — it only
+    /// compares the root, so it should call the cheaper [`Self::compute_tx_root`].
     pub fn merklize_tx_root(data_txs: &[DataTransactionHeader]) -> (H256, Vec<Proof>) {
         if data_txs.is_empty() {
             return (H256::zero(), vec![]);
         }
-        let txs_data_roots = data_txs
-            .iter()
-            .map(|h| DataRootLeaf {
-                data_root: h.data_root,
-                tx_size: h.data_size as usize, // TODO: check this
-            })
-            .collect::<Vec<DataRootLeaf>>();
-        let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
-        let root = generate_data_root(data_root_leaves).unwrap();
+        let data_root_leaves = generate_leaves_from_data_roots(&Self::folded_leaves(data_txs))
+            .expect("generate_leaves_from_data_roots is infallible for non-empty input");
+        let root = generate_data_root(data_root_leaves)
+            .expect("generate_data_root is infallible for non-empty input");
         let root_id = root.id;
-        let proofs = resolve_proofs(root, None).unwrap();
+        let proofs =
+            resolve_proofs(root, None).expect("resolve_proofs is infallible for a valid tree");
         (H256(root_id), proofs)
+    }
+
+    /// Root-only variant of [`Self::merklize_tx_root`]: builds the same folded merkle tree
+    /// and returns just the `tx_root`, skipping the recursive `resolve_proofs` pass that
+    /// materializes a `Proof` per leaf (`O(N log N)` allocation/copying). Validation only
+    /// needs to recompute-and-compare the root, so it uses this to keep the consensus hot
+    /// path from building proofs it would immediately discard. The result is identical to
+    /// `merklize_tx_root(..).0` by construction (same leaves, same `generate_data_root`).
+    pub fn compute_tx_root(data_txs: &[DataTransactionHeader]) -> H256 {
+        if data_txs.is_empty() {
+            return H256::zero();
+        }
+        let data_root_leaves = generate_leaves_from_data_roots(&Self::folded_leaves(data_txs))
+            .expect("generate_leaves_from_data_roots is infallible for non-empty input");
+        let root = generate_data_root(data_root_leaves)
+            .expect("generate_data_root is infallible for non-empty input");
+        H256(root.id)
     }
 }
 
@@ -1497,7 +1562,7 @@ impl SealedBlock {
 )]
 mod tests {
     use crate::ingress::{IngressProof, IngressProofV1};
-    use crate::{Config, NodeConfig, validate_path};
+    use crate::{Config, DataTransactionHeaderV1, NodeConfig, validate_path};
 
     use super::*;
     use alloy_primitives::{Signature, keccak256};
@@ -1841,6 +1906,121 @@ mod tests {
 
         let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.total_chunks, u64::MAX);
+    }
+
+    /// Build a minimal data tx header carrying only the fields the `tx_root` fold
+    /// reads: `data_root`, `prefix_hash`, `data_size`.
+    fn folded_data_tx(data_root: H256, prefix_hash: H256, data_size: u64) -> DataTransactionHeader {
+        let tx = DataTransactionHeaderV1 {
+            data_root,
+            prefix_hash,
+            data_size,
+            ..Default::default()
+        };
+        DataTransactionHeader::V1(crate::DataTransactionHeaderV1WithMetadata {
+            tx,
+            metadata: crate::DataTransactionMetadata::new(),
+        })
+    }
+
+    /// The alloc-free `fold_tx_root_leaf` MUST stay byte-identical to
+    /// `hash_all_sha256([data_root, prefix_hash])` — this is the gateway-compatible leaf
+    /// formula, and every node test below folds on both sides so would NOT catch a drift
+    /// from the canonical/gateway definition. This test is the guard for that.
+    #[test]
+    fn fold_tx_root_leaf_matches_hash_all_sha256() {
+        let cases = [
+            (H256::zero(), H256::zero()),
+            (H256::from([1_u8; 32]), H256::from([2_u8; 32])),
+            (H256::from([0xAB_u8; 32]), H256::zero()),
+            (H256::zero(), H256::from([0xCD_u8; 32])),
+        ];
+        for (data_root, prefix_hash) in cases {
+            assert_eq!(
+                DataTransactionLedger::fold_tx_root_leaf(data_root, prefix_hash),
+                H256(crate::hash_all_sha256(vec![&data_root.0, &prefix_hash.0])),
+                "fold must equal hash_all_sha256([data_root, prefix_hash]) for ({data_root:?}, {prefix_hash:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn merklize_tx_root_empty_is_zero() {
+        assert_eq!(DataTransactionLedger::merklize_tx_root(&[]).0, H256::zero());
+        assert_eq!(DataTransactionLedger::compute_tx_root(&[]), H256::zero());
+    }
+
+    #[test]
+    fn merklize_tx_root_folds_prefix_hash() {
+        let a = folded_data_tx(H256::from([1_u8; 32]), H256::from([0xAA_u8; 32]), 256);
+        let b = folded_data_tx(H256::from([2_u8; 32]), H256::from([0xBB_u8; 32]), 512);
+
+        let root = DataTransactionLedger::merklize_tx_root(&[a.clone(), b.clone()]).0;
+
+        // Changing ONLY a tx's prefix_hash must change the tx_root — the fold is
+        // load-bearing, otherwise prefix_hash would not be authenticated by tx_root.
+        let b_tampered = folded_data_tx(H256::from([2_u8; 32]), H256::from([0xCC_u8; 32]), 512);
+        let root_tampered = DataTransactionLedger::merklize_tx_root(&[a.clone(), b_tampered]).0;
+        assert_ne!(
+            root, root_tampered,
+            "tx_root must change when a tx's prefix_hash changes"
+        );
+
+        // Changing only data_root must also change the root (data_root is folded too).
+        let a_diff_data = folded_data_tx(H256::from([9_u8; 32]), H256::from([0xAA_u8; 32]), 256);
+        let root_diff_data = DataTransactionLedger::merklize_tx_root(&[a_diff_data, b]).0;
+        assert_ne!(root, root_diff_data);
+
+        // A single-tx root equals the lone folded leaf's tree root.
+        let single = DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&a)).0;
+        let lone_leaf = generate_leaves_from_data_roots(&[DataRootLeaf {
+            data_root: DataTransactionLedger::tx_root_leaf_value(&a),
+            tx_size: 256,
+        }])
+        .unwrap();
+        assert_eq!(single, H256(generate_data_root(lone_leaf).unwrap().id));
+    }
+
+    #[test]
+    fn compute_tx_root_matches_merklize_root() {
+        // The root-only fast path (used by block validation) must produce the exact
+        // same root as the full `merklize_tx_root` (used by block production).
+        let txs = vec![
+            folded_data_tx(H256::from([1_u8; 32]), H256::from([0x11_u8; 32]), 100),
+            folded_data_tx(H256::from([2_u8; 32]), H256::from([0x22_u8; 32]), 200),
+            folded_data_tx(H256::from([3_u8; 32]), H256::from([0x33_u8; 32]), 300),
+        ];
+        for n in 0..=txs.len() {
+            let slice = &txs[..n];
+            assert_eq!(
+                DataTransactionLedger::compute_tx_root(slice),
+                DataTransactionLedger::merklize_tx_root(slice).0,
+                "compute_tx_root must equal merklize_tx_root().0 for {n} txs",
+            );
+        }
+    }
+
+    /// Indexer property: a verifier holding only each tx's `(data_root, prefix_hash)`
+    /// can reconstruct the folded `tx_root` and match the value the block signature
+    /// seals — i.e. `prefix_hash` is authenticated without verifying any tx signature.
+    #[test]
+    fn indexer_can_reconstruct_tx_root_from_data_root_and_prefix_hash() {
+        let signed_txs = vec![
+            folded_data_tx(H256::from([7_u8; 32]), H256::from([0x70_u8; 32]), 1024),
+            folded_data_tx(H256::from([8_u8; 32]), H256::from([0x80_u8; 32]), 2048),
+        ];
+        // This is the value a block header would carry (sealed by the block signature).
+        let sealed_tx_root = DataTransactionLedger::merklize_tx_root(&signed_txs).0;
+
+        // Indexer reconstructs from only (data_root, prefix_hash, data_size) pairs.
+        let reconstructed: Vec<_> = signed_txs
+            .iter()
+            .map(|t| folded_data_tx(t.data_root, t.prefix_hash, t.data_size))
+            .collect();
+        assert_eq!(
+            DataTransactionLedger::compute_tx_root(&reconstructed),
+            sealed_tx_root
+        );
     }
 
     #[test]

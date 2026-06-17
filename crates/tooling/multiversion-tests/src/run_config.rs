@@ -20,7 +20,7 @@ use serde::Deserialize;
 /// override before signing. Anything not in this list is a typo — every
 /// `keep_default` entry must match one of these exactly. Keep in sync with
 /// the override block in `data_tx::submit_data_tx`.
-pub const SUPPORTED_KEEP_DEFAULT_FIELDS: &[&str] = &["metadata_format", "header_size"];
+pub const SUPPORTED_KEEP_DEFAULT_FIELDS: &[&str] = &["metadata_format", "prefix_size"];
 
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -170,7 +170,7 @@ mod tests {
     fn validate_accepts_supported_keep_default_fields() {
         let cfg = RunConfig {
             tx_build: TxBuildConfig {
-                keep_default: vec!["metadata_format".into(), "header_size".into()],
+                keep_default: vec!["metadata_format".into(), "prefix_size".into()],
             },
             ..Default::default()
         };

@@ -944,7 +944,8 @@ async fn block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<(
             signer: test_signer.address(),
             data_root,
             data_size: data_bytes.len() as u64,
-            header_size: 0,
+            prefix_size: 0,
+            prefix_hash: H256::zero(),
             term_fee: U256::from(1000).into(),
             perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
             ledger_id: DataLedger::Publish.into(),
