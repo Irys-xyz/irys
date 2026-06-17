@@ -428,7 +428,7 @@ async fn test_prevalidation_rejects_zero_size_data_tx() -> Result<()> {
 
     // The sealed block's transactions are derived from the body, so the tx must live there too.
     let mut body = ctx.block.to_block_body();
-    body.data_transactions.push(ztx.clone());
+    body.data_transactions = vec![ztx.clone()];
     body.block_hash = header.block_hash;
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
