@@ -5,7 +5,7 @@ use actix_web::test::{self, TestRequest, call_service};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::MempoolServiceMessage;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_testing_utils::initialize_tracing;
 use irys_types::SendTraced as _;
 use irys_types::ingress::generate_ingress_proof;
@@ -710,8 +710,7 @@ async fn test_ingress_proof_anchor_edge_case(
         resp.err()
     );
 
-    genesis_node.node_ctx.db.update_eyre(|tx| {
-        use reth_db::transaction::DbTxMut as _;
+    genesis_node.node_ctx.db.update_cache_eyre(|tx| {
         tx.clear::<irys_database::tables::IngressProofs>()?; // wipe all existing ingress proofs
         // insert just our one, so it always gets included
         irys_database::store_ingress_proof_checked(tx, &edge_case_ingress_proof, &genesis_signer)

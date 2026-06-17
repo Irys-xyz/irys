@@ -5250,6 +5250,7 @@ dependencies = [
  "reth-primitives-traits",
  "rstest",
  "serde",
+ "static_assertions",
  "strum 0.27.2",
  "tempfile",
  "test-fuzz",

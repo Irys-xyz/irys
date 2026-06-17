@@ -1,10 +1,11 @@
 use crate::utils::IrysNodeTest;
+use irys_database::db::{DatabaseProviderCacheExt as _, IrysDatabaseExt as _};
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
     DataTransactionHeader, DataTransactionHeaderV1, H256, IrysTransactionCommon as _, NodeConfig,
     U256,
 };
-use reth_db::{Database as _, transaction::DbTxMut as _};
+use reth_db::transaction::DbTxMut as _;
 use tracing::info;
 
 /// Pre-populates the DB with two data roots:
@@ -161,54 +162,63 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
     // Store both data txs and all proofs in the DB.
     // We also set included_height metadata so the tx selector's canonical DB
     // fallback (`canonical_submit_height`) can find them as prior submit inclusions.
-    genesis_node.node_ctx.db.update(|tx| {
-        use irys_database::tables::{
-            CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
-        };
+    // Consensus tables (IrysDataTxHeaders, metadata) use update_eyre;
+    // cache tables (CachedDataRoots, IngressProofs) use update_cache_eyre.
+    {
+        use irys_database::tables::{CompactTxHeader, IrysDataTxHeaders};
+        genesis_node.node_ctx.db.update_eyre(|tx| {
+            tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
+            irys_database::db_index::set_data_tx_included_height(tx, &data_tx_1.id, 0)?;
+            tx.put::<IrysDataTxHeaders>(data_tx_2.id, CompactTxHeader(data_tx_2.clone()))?;
+            irys_database::db_index::set_data_tx_included_height(tx, &data_tx_2.id, 0)?;
+            Ok(())
+        })?;
+    }
+    {
+        use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
         use irys_types::ingress::CachedIngressProof;
-
-        // Insert data_root_1 proofs directly to bypass store_external_ingress_proof_checked dedup
-        tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx_1, None)?;
-        irys_database::db_index::set_data_tx_included_height(tx, &data_tx_1.id, 0)?;
-        for (proof, address) in [
-            (&proof_1a1, signer_a.address()),
-            (&proof_1a2, signer_a.address()),
-            (&proof_1b, signer_b.address()),
-        ] {
-            tx.put::<IngressProofs>(
-                proof.data_root,
-                CompactCachedIngressProof(CachedIngressProof {
-                    address,
-                    proof: proof.clone(),
-                }),
-            )?;
-        }
-        let stored_1 = irys_database::ingress_proofs_by_data_root(tx, data_root_1)?;
-        assert_eq!(
-            stored_1.len(),
-            3,
-            "expected 3 ingress proofs for data_root_1"
-        );
-
-        tx.put::<IrysDataTxHeaders>(data_tx_2.id, CompactTxHeader(data_tx_2.clone()))?;
-        irys_database::cache_data_root(tx, &data_tx_2, None)?;
-        irys_database::db_index::set_data_tx_included_height(tx, &data_tx_2.id, 0)?;
-        for (proof, address) in [
-            (&proof_2a, signer_a.address()),
-            (&proof_2b, signer_b.address()),
-        ] {
-            irys_database::store_external_ingress_proof_checked(tx, proof, address)?;
-        }
-        let stored_2 = irys_database::ingress_proofs_by_data_root(tx, data_root_2)?;
-        assert_eq!(
-            stored_2.len(),
-            2,
-            "expected 2 ingress proofs for data_root_2"
-        );
-
-        Ok::<_, eyre::Report>(())
-    })??;
+        genesis_node.node_ctx.db.update_cache_eyre(|tx| {
+            // Insert data_root_1 proofs directly to bypass store_external_ingress_proof_checked dedup
+            irys_database::cache_data_root(tx, &data_tx_1, None)?;
+            for (proof, address) in [
+                (&proof_1a1, signer_a.address()),
+                (&proof_1a2, signer_a.address()),
+                (&proof_1b, signer_b.address()),
+            ] {
+                tx.put::<IngressProofs>(
+                    proof.data_root,
+                    CompactCachedIngressProof(CachedIngressProof {
+                        address,
+                        proof: proof.clone(),
+                    }),
+                )?;
+            }
+            irys_database::cache_data_root(tx, &data_tx_2, None)?;
+            for (proof, address) in [
+                (&proof_2a, signer_a.address()),
+                (&proof_2b, signer_b.address()),
+            ] {
+                irys_database::store_external_ingress_proof_checked(tx, proof, address)?;
+            }
+            Ok(())
+        })?;
+        // Verify proofs were stored correctly
+        genesis_node.node_ctx.db.view_cache_eyre(|tx| {
+            let stored_1 = irys_database::ingress_proofs_by_data_root(tx, data_root_1)?;
+            assert_eq!(
+                stored_1.len(),
+                3,
+                "expected 3 ingress proofs for data_root_1"
+            );
+            let stored_2 = irys_database::ingress_proofs_by_data_root(tx, data_root_2)?;
+            assert_eq!(
+                stored_2.len(),
+                2,
+                "expected 2 ingress proofs for data_root_2"
+            );
+            Ok(())
+        })?;
+    }
 
     // Both txs should appear as publish candidates
     let (_submit, publish, _commit) = genesis_node

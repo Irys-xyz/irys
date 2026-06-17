@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::DatabaseProviderCacheExt as _;
 use irys_database::{
     get_cache_size,
     tables::{CachedChunks, IngressProofs},
@@ -10,8 +10,6 @@ use irys_database::{
 };
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
-use reth_db::Database as _;
-use reth_db::transaction::DbTxMut as _;
 use std::time::Duration;
 use tracing::info;
 
@@ -137,8 +135,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     }
 
     // confirm that we have the right number of CachedChunks in mdbx table
-    let (chunk_cache_count, _) = &node.node_ctx.db.view_eyre(|tx| {
-        get_cache_size::<CachedChunks, _>(tx, node.node_ctx.config.consensus.chunk_size)
+    let (chunk_cache_count, _) = &node.node_ctx.db.view_cache_eyre(|tx| {
+        get_cache_size::<CachedChunks, _>(tx.inner(), node.node_ctx.config.consensus.chunk_size)
     })?;
 
     assert_eq!(*chunk_cache_count, tx.chunks.len() as u64);
@@ -150,7 +148,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         ingress_proofs = node
             .node_ctx
             .db
-            .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
+            .view_cache(|read_tx| walk_all::<IngressProofs, _>(read_tx.inner()))
             .unwrap()
             .unwrap();
         if ingress_proofs.len() == expected_proofs {
@@ -194,10 +192,10 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.mine_blocks(9).await?;
 
     // Manually remove ingress proofs to ensure there are no active proofs for a root
-    node.node_ctx.db.update(|tx| {
+    node.node_ctx.db.update_cache_eyre(|tx| {
         tx.clear::<IngressProofs>()?;
         eyre::Ok(())
-    })??;
+    })?;
 
     node.mine_blocks(1).await?;
 

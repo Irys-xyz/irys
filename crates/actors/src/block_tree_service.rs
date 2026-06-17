@@ -10,6 +10,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
 };
 use eyre::OptionExt as _;
+use irys_database::DatabaseProvider;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::StorageModulesReadGuard;
 use irys_domain::{
@@ -19,8 +20,8 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers,
 };
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced,
+    BlockHash, Config, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock, SendTraced as _,
+    SystemLedger, TokioServiceHandle, Traced,
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
@@ -1910,20 +1911,17 @@ mod tests {
 
     impl DiscardHarness {
         fn new() -> Self {
-            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+            use irys_database::DatabaseProviderTestExt as _;
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
             use irys_types::{ConsensusConfig, NodeConfig};
-            use reth_db::mdbx::DatabaseArguments;
 
             let tmp = TempDirBuilder::new().build();
-            let db_env = open_or_create_db(
-                tmp.path(),
-                IrysTables::ALL,
-                DatabaseArguments::irys_testing().expect("irys_testing db args"),
+            let db = DatabaseProvider::for_testing(
+                &tmp.path().join("consensus"),
+                &tmp.path().join("cache"),
             )
             .expect("open temp MDBX env");
-            let db = DatabaseProvider(Arc::new(db_env));
 
             let block_index = BlockIndex::new_for_testing(db.clone());
             let block_index_guard = BlockIndexReadGuard::new(block_index);

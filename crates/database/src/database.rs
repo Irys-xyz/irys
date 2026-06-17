@@ -7,21 +7,21 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
+    CacheMetadata, CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
     CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
     IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
 
-use crate::db::IrysDatabaseExt as _;
+use crate::DatabaseProvider;
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
-    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseProvider, DatabaseVersion,
-    H256, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
-    LedgerIndexItem, MEGABYTE, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    DataRoot, DataTransactionHeader, DataTransactionMetadata, DatabaseVersion, H256, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, LedgerIndexItem, MEGABYTE,
+    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
 };
 use reth_db::TableSet;
 use reth_db::cursor::DbDupCursorRO as _;
@@ -325,8 +325,8 @@ pub fn commitment_tx_by_txid<T: DbTx>(
 ///
 /// Updates the entry with the proven data size extracted from the last leaf's merkle proof.
 /// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
-pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn confirm_data_size_for_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: &H256,
     data_size: u64,
 ) -> eyre::Result<Option<CachedDataRoot>> {
@@ -345,8 +345,8 @@ pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
 
 /// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
-pub fn cache_data_root<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn cache_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     tx_header: &DataTransactionHeader,
     block_header: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
@@ -424,8 +424,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
 }
 
 /// Gets a [`CachedDataRoot`] by it's [`DataRoot`] from [`CachedDataRoots`] .
-pub fn cached_data_root_by_data_root<T: DbTx>(
-    tx: &T,
+pub fn cached_data_root_by_data_root(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     Ok(tx.get::<CachedDataRoots>(data_root)?)
@@ -512,7 +512,10 @@ type IsDuplicate = bool;
 /// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
-pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
+pub fn cache_chunk(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
+    chunk: &UnpackedChunk,
+) -> eyre::Result<IsDuplicate> {
     if tx.get::<CachedDataRoots>(chunk.data_root)?.is_none() {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
@@ -535,14 +538,14 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
 /// callers (e.g. the write-behind writer) that have already validated the data root.
 /// Returns `true` if the chunk was a duplicate and was not inserted.
 #[tracing::instrument(level = "trace", skip_all)]
-pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn cache_chunk_verified(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     chunk: &UnpackedChunk,
 ) -> eyre::Result<IsDuplicate> {
     let data_root = chunk.data_root;
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
 
-    if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
+    if tx.get::<CachedChunks>(chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
             &chunk_path_hash, &data_root
@@ -570,8 +573,8 @@ pub fn cache_chunk_verified<T: DbTx + DbTxMut>(
 }
 
 /// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
-pub fn cached_chunk_meta_by_offset<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_meta_by_offset(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<CachedChunkIndexMetadata>> {
@@ -583,8 +586,8 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .map(|index_entry| index_entry.meta))
 }
 /// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
-pub fn cached_chunk_by_chunk_offset<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_by_chunk_offset(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     chunk_offset: TxChunkOffset,
 ) -> eyre::Result<Option<(CachedChunkIndexMetadata, CachedChunk)>> {
@@ -607,8 +610,8 @@ pub fn cached_chunk_by_chunk_offset<T: DbTx>(
 }
 
 /// Retrieves a [`CachedChunk`] from [`CachedChunks`] using its [`ChunkPathHash`]
-pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
-    tx: &T,
+pub fn cached_chunk_by_chunk_path_hash(
+    tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     key: &ChunkPathHash,
 ) -> Result<Option<CachedChunk>, DatabaseError> {
     tx.get::<CachedChunks>(*key)
@@ -616,8 +619,8 @@ pub fn cached_chunk_by_chunk_path_hash<T: DbTx>(
 
 /// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
 /// It also removes the index values
-pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
-    tx: &T,
+pub fn delete_cached_chunks_by_data_root(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<u64> {
     let mut chunks_pruned = 0;
@@ -636,8 +639,8 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
 
 /// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
 /// It also removes the index values
-pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
-    tx: &T,
+pub fn delete_cached_chunks_by_data_root_older_than(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     older_than: UnixTimestamp,
 ) -> eyre::Result<u64> {
@@ -703,8 +706,8 @@ pub fn delete_peer_list_item<T: DbTxMut>(tx: &T, peer_id: &IrysPeerId) -> eyre::
 
 /// Gets all ingress proofs associated with a specific data_root
 ///
-pub fn ingress_proofs_by_data_root<TX: DbTx>(
-    read_tx: &TX,
+pub fn ingress_proofs_by_data_root(
+    read_tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
 ) -> eyre::Result<Vec<(DataRoot, CompactCachedIngressProof)>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
@@ -715,8 +718,8 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
     Ok(proofs)
 }
 
-pub fn ingress_proof_by_data_root_address<TX: DbTx>(
-    read_tx: &TX,
+pub fn ingress_proof_by_data_root_address(
+    read_tx: &crate::scoped_tx::ScopedTx<crate::scoped_tx::Cache>,
     data_root: DataRoot,
     address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
@@ -732,7 +735,10 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
-pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
+pub fn delete_ingress_proof(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
+    data_root: DataRoot,
+) -> eyre::Result<bool> {
     Ok(tx.delete::<IngressProofs>(data_root, None)?)
 }
 
@@ -741,11 +747,12 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    db.update_scoped(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
+    use crate::db::DatabaseProviderCacheExt as _;
+    db.update_cache_eyre(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))
 }
 
-pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn store_ingress_proof_checked(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
@@ -762,9 +769,13 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     // Delete all existing proofs for this signer before inserting, as DupSort
     // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    let mut cursor = tx.cursor_dup_read::<IngressProofs>()?;
+    let walker = cursor.walk_dup(Some(ingress_proof.data_root), None)?;
+    let existing_proofs: Vec<(DataRoot, CompactCachedIngressProof)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+    for (_, existing) in existing_proofs
         .into_iter()
-        .filter(|(_, proof)| proof.address == address)
+        .filter(|(_, p)| p.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
@@ -779,8 +790,8 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     Ok(())
 }
 
-pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
-    tx: &T,
+pub fn store_external_ingress_proof_checked(
+    tx: &crate::scoped_tx::ScopedTxMut<crate::scoped_tx::Cache>,
     ingress_proof: &IngressProof,
     address: IrysAddress,
 ) -> eyre::Result<()> {
@@ -795,9 +806,13 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     }
 
     // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
-    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+    let mut cursor = tx.cursor_dup_read::<IngressProofs>()?;
+    let walker = cursor.walk_dup(Some(ingress_proof.data_root), None)?;
+    let existing_proofs: Vec<(DataRoot, CompactCachedIngressProof)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+    for (_, existing) in existing_proofs
         .into_iter()
-        .filter(|(_, proof)| proof.address == address)
+        .filter(|(_, p)| p.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
@@ -1007,11 +1022,36 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     }
 }
 
+/// Set the schema version in the cache database's `CacheMetadata` table.
+pub fn set_cache_database_schema_version<T: DbTxMut>(
+    tx: &T,
+    version: DatabaseVersion,
+) -> Result<(), DatabaseError> {
+    tx.put::<CacheMetadata>(
+        MetadataKey::DBSchemaVersion,
+        (version as u32).to_le_bytes().to_vec(),
+    )
+}
+
+/// Read the schema version from the cache database's `CacheMetadata` table.
+pub fn cache_database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
+    if let Some(bytes) = tx.get::<CacheMetadata>(MetadataKey::DBSchemaVersion)? {
+        let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
+            DatabaseError::Other(
+                "Cache DB schema version metadata does not have exactly 4 bytes".to_string(),
+            )
+        })?;
+        Ok(Some(u32::from_le_bytes(arr)))
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _,
-        insert_commitment_tx, tables::IrysTables,
+        insert_commitment_tx, tables::ConsensusTables,
     };
     use arbitrary::Arbitrary as _;
     use irys_types::{CommitmentTransaction, DataTransactionHeader, H256, IrysBlockHeader};
@@ -1044,7 +1084,7 @@ mod tests {
 
         let db = open_or_create_db(
             path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1098,13 +1138,13 @@ mod tests {
     #[test]
     fn delete_peer_list_item_removes_it() -> eyre::Result<()> {
         use super::{delete_peer_list_item, insert_peer_list_item};
-        use crate::tables::PeerListItems;
+        use crate::tables::{ConsensusTables, PeerListItems};
         use reth_db::transaction::DbTx as _;
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
             path.path(),
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
@@ -1144,7 +1184,7 @@ mod tests {
         use crate::{
             canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
             db_index::set_data_tx_included_height, db_index::set_data_tx_promoted_height,
-            insert_tx_header, tables::IrysTables, tables::MigratedBlockHashes,
+            insert_tx_header, tables::ConsensusTables, tables::MigratedBlockHashes,
         };
         use irys_types::{DataTransactionHeader, H256};
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
@@ -1179,7 +1219,7 @@ mod tests {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
-                IrysTables::ALL,
+                ConsensusTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
@@ -1234,7 +1274,7 @@ mod tests {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
-                IrysTables::ALL,
+                ConsensusTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
@@ -1289,7 +1329,7 @@ mod tests {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
-                IrysTables::ALL,
+                ConsensusTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
@@ -1339,7 +1379,7 @@ mod tests {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();
             let db = open_or_create_db(
                 path.path(),
-                IrysTables::ALL,
+                ConsensusTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
@@ -1385,25 +1425,23 @@ mod tests {
             IrysDatabaseArgs as _, cache_data_root,
             db::IrysDatabaseExt as _,
             open_or_create_db, remove_data_root_block_set_entry,
-            tables::{CachedDataRoots, IrysTables},
+            tables::{CacheTables, CachedDataRoots},
             update_data_root_block_set,
         };
         use irys_testing_utils::utils::tempfile;
         use irys_types::{DataTransactionHeader, H256};
-        use reth_db::{
-            Database as _,
-            mdbx::DatabaseArguments,
-            transaction::{DbTx as _, DbTxMut as _},
-        };
+        use reth_db::{Database as _, mdbx::DatabaseArguments, transaction::DbTx as _};
 
         /// Returns `(env, tempdir)`.  The caller must bind the tempdir to a
         /// variable that lives the duration of the test — dropping it before
         /// the env removes the underlying directory.
+        // `data_root_block_set_helpers` exercises cache-scoped CDR helpers; open
+        // the env with `CacheTables::ALL` so `CachedDataRoots` is materialised.
         fn open_db() -> (reth_db::mdbx::DatabaseEnv, tempfile::TempDir) {
             let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
             let env = open_or_create_db(
                 tmp.path(),
-                IrysTables::ALL,
+                CacheTables::ALL,
                 DatabaseArguments::irys_testing().unwrap(),
             )
             .unwrap();
@@ -1429,18 +1467,20 @@ mod tests {
                     },
                     metadata: Default::default(),
                 });
-            db.update(|tx| -> eyre::Result<()> {
-                cache_data_root(tx, &tx_header, None)?;
-                let mut cdr = tx
-                    .get::<CachedDataRoots>(data_root)?
-                    .expect("seed_cdr: cache_data_root must produce an entry");
-                cdr.block_set = initial_block_set;
-                cdr.expiry_height = expiry;
-                tx.put::<CachedDataRoots>(data_root, cdr)?;
-                Ok(())
-            })
-            .unwrap()
-            .unwrap();
+            // `cache_data_root` is typed against `ScopedTxMut<Cache>`; open the
+            // scoped rw-tx directly rather than going through `db.update`.
+            let tx = crate::scoped_tx::ScopedTxMut::<crate::scoped_tx::Cache>::begin_rw(db)
+                .expect("begin cache rw-tx");
+            cache_data_root(&tx, &tx_header, None).expect("cache_data_root");
+            let mut cdr = tx
+                .get::<CachedDataRoots>(data_root)
+                .expect("get CachedDataRoots")
+                .expect("seed_cdr: cache_data_root must produce an entry");
+            cdr.block_set = initial_block_set;
+            cdr.expiry_height = expiry;
+            tx.put::<CachedDataRoots>(data_root, cdr)
+                .expect("put CachedDataRoots");
+            tx.commit().expect("commit cache rw-tx");
         }
 
         fn read_cdr(

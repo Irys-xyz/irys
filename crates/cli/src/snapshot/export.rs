@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use irys_database::reth_db::mdbx::DatabaseArguments;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_database::snapshot::{CopyFlags, copy_dir_recursive, copy_mdbx_env, strip_node_local};
-use irys_database::tables::IrysTables;
+use irys_database::tables::ConsensusTables;
 use irys_database::{
     IrysDatabaseArgs as _, block_index_latest_height, database_schema_version, open_or_create_db,
 };
@@ -96,7 +96,7 @@ fn snapshot_irys_consensus(opts: &ExportOpts, staging: &Path) -> eyre::Result<(u
     let dest_path = staging.join(IRYS_CONSENSUS_SUBDIR);
     let copy_db = open_or_create_db(
         &dest_path,
-        IrysTables::ALL,
+        ConsensusTables::ALL,
         DatabaseArguments::irys_default(irys_types::DbSyncMode::SafeNoSync)
             .context("default db args for copy")?,
     )
@@ -253,7 +253,7 @@ mod tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let irys_db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");
@@ -353,7 +353,7 @@ mod tests {
         // but the specific block header survives.
         let copy_db = open_or_create_db(
             &extracted_irys,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open extracted irys db");
@@ -394,7 +394,7 @@ mod tests {
         let irys_path = data_dir.join(IRYS_CONSENSUS_SUBDIR);
         let db = open_or_create_db(
             &irys_path,
-            IrysTables::ALL,
+            ConsensusTables::ALL,
             DatabaseArguments::irys_testing().expect("testing args"),
         )
         .expect("open irys db");

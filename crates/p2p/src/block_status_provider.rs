@@ -256,7 +256,7 @@ impl BlockStatusProvider {
 #[cfg(test)]
 impl BlockStatusProvider {
     #[cfg(test)]
-    pub fn mock(node_config: &NodeConfig, db: irys_types::DatabaseProvider) -> Self {
+    pub fn mock(node_config: &NodeConfig, db: irys_database::DatabaseProvider) -> Self {
         use irys_domain::{BlockIndex, BlockTree};
 
         let mut genesis = IrysBlockHeader::new_mock_header();
@@ -498,21 +498,21 @@ impl BlockProvider for BlockStatusProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_domain::BlockState;
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::TempDirBuilder;
-    use irys_types::{DatabaseProvider, DbSyncMode, NodeConfig};
+    use irys_types::NodeConfig;
     use rstest::rstest;
-    use std::sync::Arc;
 
     fn mock_provider() -> (BlockStatusProvider, IrysBlockHeader, tempfile::TempDir) {
         let tmp_dir = TempDirBuilder::new()
             .prefix("block-status-provider-test-")
             .build();
-        let db_env =
-            open_or_create_irys_consensus_data_db(tmp_dir.path(), DbSyncMode::UtterlyNoSync)
-                .expect("to open consensus db");
-        let db = DatabaseProvider(Arc::new(db_env));
+        let db = irys_database::DatabaseProvider::for_testing(
+            &tmp_dir.path().join("consensus"),
+            &tmp_dir.path().join("cache"),
+        )
+        .expect("to open test db");
         let node_config = NodeConfig::testing();
         let provider = BlockStatusProvider::mock(&node_config, db);
         let genesis = provider.genesis_header();

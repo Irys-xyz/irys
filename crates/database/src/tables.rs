@@ -135,101 +135,212 @@ impl ValueWithSubKey for CompactCachedIngressProof {
     }
 }
 
-tables! {
-IrysTables;
+mod consensus_tables_inner {
+    use super::*;
 
-/// Stores block headers keyed by their hash (canonical chain).
-table IrysBlockHeaders {
-    type Key = H256;
-    type Value = CompactIrysBlockHeader;
+    tables! {
+    ConsensusTables;
+
+    /// Stores block headers keyed by their hash (canonical chain).
+    table IrysBlockHeaders {
+        type Key = H256;
+        type Value = CompactIrysBlockHeader;
+    }
+
+    // Block index table: BlockHeight -> DataLedger -> LedgerIndexItem
+    // Stores ledger metadata for each block, keyed by height with ledger type as subkey.
+    // This indexing scheme is optimized for pruning ledgers by height which is
+    // a function of expiring term ledgers.
+    table IrysBlockIndexItems {
+        type Key = BlockHeight;
+        type Value = CompactLedgerIndexItem;
+        type SubKey = DataLedger;
+    }
+
+    // Indexes migrated block hashes by height
+    table MigratedBlockHashes {
+        type Key = BlockHeight;
+        type Value = H256;
+    }
+
+    /// Stores PoA chunks
+    table IrysPoAChunks {
+        type Key = H256;
+        type Value = CompactBase64;
+    }
+
+    /// Stores confirmed transaction headers
+    table IrysDataTxHeaders {
+        type Key = H256;
+        type Value = CompactTxHeader;
+    }
+
+    /// Stores commitment transactions
+    table IrysCommitments {
+        type Key = H256;
+        type Value = CompactCommitment;
+    }
+
+    /// Stores metadata for commitment transactions
+    /// Tracks inclusion height
+    table IrysCommitmentTxMetadata {
+        type Key = H256;
+        type Value = CompactCommitmentTxMetadata;
+    }
+
+    /// Stores metadata for data transactions
+    /// Tracks inclusion height and promotion height
+    table IrysDataTxMetadata {
+        type Key = H256;
+        type Value = CompactDataTxMetadata;
+    }
+
+    /// Tracks the peer list of known peers as well as their reputation score.
+    /// While the node maintains connections to a subset of these peers - the
+    /// ones with high reputation - the PeerListItems contain all the peers
+    /// that the node is aware of and is periodically updated via peer discovery
+    table PeerListItems {
+        type Key = IrysPeerId;
+        type Value = CompactPeerListItem;
+    }
+
+    /// Table to store various metadata, such as the current db schema version
+    /// (consensus environment).
+    table Metadata {
+        type Key = MetadataKey;
+        type Value = Vec<u8>;
+    }
+    }
 }
 
-// Block index table: BlockHeight -> DataLedger -> LedgerIndexItem
-// Stores ledger metadata for each block, keyed by height with ledger type as subkey.
-// This indexing scheme is optimized for pruning ledgers by height which is
-// a function of expiring term ledgers.
-table IrysBlockIndexItems {
-    type Key = BlockHeight;
-    type Value = CompactLedgerIndexItem;
-    type SubKey = DataLedger;
+mod cache_tables_inner {
+    use super::*;
+
+    tables! {
+    CacheTables;
+
+    /// Indexes the DataRoots currently in the cache
+    table CachedDataRoots {
+        type Key = DataRoot;
+        type Value = CachedDataRoot;
+    }
+
+    /// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
+    table CachedChunksIndex {
+        type Key = DataRoot;
+        type Value = CachedChunkIndexEntry;
+        type SubKey = u32;
+    }
+
+    /// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
+    table CachedChunks {
+        type Key = ChunkPathHash;
+        type Value = CachedChunk;
+    }
+
+    /// Indexes ingress proofs by DataRoot and Address
+    table IngressProofs {
+        type Key = DataRoot;
+        type Value = CompactCachedIngressProof;
+        type SubKey = IrysAddress;
+    }
+
+    /// Schema-version metadata for the cache environment
+    /// (independent of the consensus `Metadata` table).
+    table CacheMetadata {
+        type Key = MetadataKey;
+        type Value = Vec<u8>;
+    }
+    }
 }
 
-// Indexes migrated block hashes by height
-table MigratedBlockHashes {
-    type Key = BlockHeight;
-    type Value = H256;
+pub use consensus_tables_inner::{
+    ConsensusTables, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitmentTxMetadata,
+    IrysCommitments, IrysDataTxHeaders, IrysDataTxMetadata, IrysPoAChunks, Metadata,
+    MigratedBlockHashes, PeerListItems,
+};
+
+pub use cache_tables_inner::{
+    CacheMetadata, CacheTables, CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs,
+};
+
+// Marker-trait impls — wire each table to its environment.
+use crate::scoped_tx::{Cache, CacheTable, Consensus, ConsensusTable, IrysScope};
+
+impl IrysScope for Consensus {
+    type Tables = ConsensusTables;
+    const ALL_TABLES: &'static [Self::Tables] = ConsensusTables::ALL;
 }
 
-/// Stores PoA chunks
-table IrysPoAChunks {
-    type Key = H256;
-    type Value = CompactBase64;
+impl IrysScope for Cache {
+    type Tables = CacheTables;
+    const ALL_TABLES: &'static [Self::Tables] = CacheTables::ALL;
 }
 
-/// Stores confirmed transaction headers
-table IrysDataTxHeaders {
-    type Key = H256;
-    type Value = CompactTxHeader;
+macro_rules! impl_consensus_tables {
+    ($($name:ident),* $(,)?) => {
+        $(impl ConsensusTable for $name {})*
+    };
 }
 
-/// Stores commitment transactions
-table IrysCommitments {
-    type Key = H256;
-    type Value = CompactCommitment;
+macro_rules! impl_cache_tables {
+    ($($name:ident),* $(,)?) => {
+        $(impl CacheTable for $name {})*
+    };
 }
 
-/// Stores metadata for commitment transactions
-/// Tracks inclusion height
-table IrysCommitmentTxMetadata {
-    type Key = H256;
-    type Value = CompactCommitmentTxMetadata;
+impl_consensus_tables!(
+    IrysBlockHeaders,
+    IrysBlockIndexItems,
+    MigratedBlockHashes,
+    IrysPoAChunks,
+    IrysDataTxHeaders,
+    IrysCommitments,
+    IrysCommitmentTxMetadata,
+    IrysDataTxMetadata,
+    PeerListItems,
+    Metadata,
+);
+
+impl_cache_tables!(
+    CachedDataRoots,
+    CachedChunksIndex,
+    CachedChunks,
+    IngressProofs,
+    CacheMetadata,
+);
+
+#[cfg(test)]
+mod tables_names {
+    use super::*;
+    use reth_db::table::Table as _;
+
+    #[test]
+    fn table_names_match_struct_idents() {
+        assert_eq!(IrysBlockHeaders::NAME, "IrysBlockHeaders");
+        assert_eq!(Metadata::NAME, "Metadata");
+        assert_eq!(CachedChunks::NAME, "CachedChunks");
+        assert_eq!(CacheMetadata::NAME, "CacheMetadata");
+    }
 }
 
-/// Stores metadata for data transactions
-/// Tracks inclusion height and promotion height
-table IrysDataTxMetadata {
-    type Key = H256;
-    type Value = CompactDataTxMetadata;
-}
+#[cfg(test)]
+mod marker_trait_sanity {
+    use super::*;
+    use crate::scoped_tx::{CacheTable, ConsensusTable};
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
 
-/// Indexes the DataRoots currently in the cache
-table CachedDataRoots {
-    type Key = DataRoot;
-    type Value = CachedDataRoot;
-}
+    // Consensus tables
+    assert_impl_all!(IrysBlockHeaders: ConsensusTable);
+    assert_not_impl_any!(IrysBlockHeaders: CacheTable);
+    assert_impl_all!(Metadata: ConsensusTable);
+    assert_not_impl_any!(Metadata: CacheTable);
 
-/// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
-table CachedChunksIndex {
-    type Key = DataRoot;
-    type Value = CachedChunkIndexEntry;
-    type SubKey = u32;
-}
-
-/// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
-table CachedChunks {
-    type Key = ChunkPathHash;
-    type Value = CachedChunk;
-}
-
-/// Indexes ingress proofs by DataRoot and Address
-table IngressProofs {
-    type Key = DataRoot;
-    type Value = CompactCachedIngressProof;
-    type SubKey = IrysAddress;
-}
-
-/// Tracks the peer list of known peers as well as their reputation score.
-/// While the node maintains connections to a subset of these peers - the
-/// ones with high reputation - the PeerListItems contain all the peers
-/// that the node is aware of and is periodically updated via peer discovery
-table PeerListItems {
-    type Key = IrysPeerId;
-    type Value = CompactPeerListItem;
-}
-
-/// Table to store various metadata, such as the current db schema version
-table Metadata {
-    type Key = MetadataKey;
-    type Value = Vec<u8>;
-}
+    // Cache tables
+    assert_impl_all!(CachedChunks: CacheTable);
+    assert_not_impl_any!(CachedChunks: ConsensusTable);
+    assert_impl_all!(IngressProofs: CacheTable);
+    assert_not_impl_any!(IngressProofs: ConsensusTable);
+    assert_impl_all!(CacheMetadata: CacheTable);
+    assert_not_impl_any!(CacheMetadata: ConsensusTable);
 }

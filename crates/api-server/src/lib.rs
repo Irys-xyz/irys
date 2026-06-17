@@ -16,12 +16,13 @@ use irys_actors::{
     mempool_service::MempoolServiceMessage,
     pledge_provider::MempoolPledgeProvider,
 };
+use irys_database::DatabaseProvider;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList, SupplyStateReadGuard,
 };
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{Config, IrysAddress, PeerAddress, Traced, app_state::DatabaseProvider};
+use irys_types::{Config, IrysAddress, PeerAddress, Traced};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
     mining, peer_list, post_chunk, price, proxy::proxy, storage, tip, tx,
@@ -254,7 +255,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 // #[cfg(test)]
 // #[tokio::test]
 // async fn post_tx_and_chunks_golden_path() {
-//     use irys_database::tables::IrysTables;
+//     use irys_database::tables::ConsensusTables;
 //     use reth::tasks::TaskManager;
 //     use std::sync::Arc;
 
@@ -270,7 +271,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 //     use rand::Rng;
 
 //     let path = get_data_dir();
-//     let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+//     let db = open_or_create_db(path, ConsensusTables::ALL, None).unwrap();
 //     let arc_db = Arc::new(db);
 
 //     let task_manager = TaskManager::current();
@@ -278,7 +279,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 
 //     // TODO Fixup this test, maybe with some stubs
 //     let mempool_service = MempoolService::new(
-//         irys_types::app_state::DatabaseProvider(arc_db.clone()),
+//         irys_database::DatabaseProvider(arc_db.clone()),
 //         task_manager.executor(),
 //         IrysSigner::random_signer(),
 //         storage_config.clone(),

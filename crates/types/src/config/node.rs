@@ -1385,6 +1385,10 @@ impl NodeConfig {
     pub fn irys_consensus_data_dir(&self) -> PathBuf {
         self.base_directory.join("irys_consensus_data")
     }
+    /// Get the irys cache DB directory path
+    pub fn irys_cache_data_dir(&self) -> PathBuf {
+        self.base_directory.join("irys_cache_data")
+    }
 
     /// get the irys mempool persistence path
     pub fn mempool_dir(&self) -> PathBuf {

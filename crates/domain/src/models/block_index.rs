@@ -5,13 +5,14 @@
 //! `MigratedBlockHashes` tables.
 
 use eyre::Result;
+use irys_database::DatabaseProvider;
 use irys_database::{
     block_index_item_by_height, block_index_latest_height, block_index_num_blocks,
     db::IrysDatabaseExt as _, delete_block_index_range, insert_block_index_item,
 };
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, H256, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, SealedBlock,
+    BlockIndexItem, DataLedger, DataTransactionHeader, H256, LedgerChunkOffset, LedgerIndexItem,
+    NodeConfig, SealedBlock,
 };
 use reth_db::transaction::{DbTx, DbTxMut};
 use std::fs::OpenOptions;
@@ -563,23 +564,17 @@ mod tests {
     use super::BlockIndex;
     use super::*;
     use crate::BlockBounds;
-    use irys_database::tables::IrysTables;
-    use irys_database::{IrysDatabaseArgs as _, open_or_create_db};
+    use irys_database::DatabaseProviderTestExt as _;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::H256;
-    use reth_db::mdbx::DatabaseArguments;
     use std::fs::{self, File};
     use std::io::Write as _;
-    use std::sync::Arc;
 
-    fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
-        let db = open_or_create_db(
-            path,
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-        DatabaseProvider(Arc::new(db))
+    fn create_test_db(
+        consensus_path: &std::path::Path,
+        cache_path: &std::path::Path,
+    ) -> DatabaseProvider {
+        DatabaseProvider::for_testing(consensus_path, cache_path).unwrap()
     }
 
     fn save_block_index(
@@ -656,7 +651,8 @@ mod tests {
             .with_tracing()
             .build();
         let base_path = tmp_dir.path().to_path_buf();
-        let db = create_test_db(&base_path.join("db"));
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = create_test_db(&base_path.join("db"), _cache_dir.path());
         let block_index = BlockIndex::new_for_testing(db);
 
         let block_items = make_test_items();
@@ -757,7 +753,10 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("get_block_bounds_at_height_uniform")
             .build();
-        let db = create_test_db(&tmp_dir.path().join("db"));
+        let db = create_test_db(
+            &tmp_dir.path().join("consensus"),
+            &tmp_dir.path().join("cache"),
+        );
         let block_index = BlockIndex::new_for_testing(db);
 
         for h in 0..n {
@@ -800,7 +799,10 @@ mod tests {
         let tmp_dir = TempDirBuilder::new()
             .prefix("get_block_bounds_at_height_late_publish")
             .build();
-        let db = create_test_db(&tmp_dir.path().join("db"));
+        let db = create_test_db(
+            &tmp_dir.path().join("consensus"),
+            &tmp_dir.path().join("cache"),
+        );
         let block_index = BlockIndex::new_for_testing(db);
 
         let mut items = Vec::with_capacity(n as usize);
@@ -1041,7 +1043,8 @@ mod tests {
         save_block_index(&block_items, &node_config)?;
 
         // Create DB and trigger migration
-        let db = create_test_db(&base_path.join("db"));
+        let _cache_dir = TempDirBuilder::new().build();
+        let db = create_test_db(&base_path.join("db"), _cache_dir.path());
         let block_index = BlockIndex::new(&node_config, db)?;
 
         // Verify items migrated correctly

@@ -14,11 +14,11 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use irys_database::DatabaseProvider;
 use irys_domain::{BlockTreeReadGuard, StorageModulesReadGuard};
 use irys_types::ingress::IngressProof;
 use irys_types::{
-    ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, app_state::DatabaseProvider,
-    chunk::UnpackedChunk,
+    ChunkPathHash, Config, DataRoot, TokioServiceHandle, Traced, chunk::UnpackedChunk,
 };
 use lru::LruCache;
 use reth::tasks::TaskExecutor;

@@ -1,7 +1,8 @@
 use dashmap::DashSet;
+use irys_database::DatabaseProvider;
 use irys_database::cache_chunk_verified;
-use irys_database::db::IrysDatabaseExt as _;
-use irys_types::{ChunkPathHash, DatabaseProvider, UnpackedChunk};
+use irys_database::db::DatabaseProviderCacheExt as _;
+use irys_types::{ChunkPathHash, UnpackedChunk};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -159,7 +160,7 @@ impl BackgroundWriter {
 
         let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
-        let result = self.db.update_scoped(|tx| {
+        let result = self.db.update_cache_eyre(|tx| {
             let mut written = 0_usize;
             for (chunk, hash) in batch.iter().zip(hashes.iter()) {
                 match cache_chunk_verified(tx, chunk) {
@@ -181,7 +182,7 @@ impl BackgroundWriter {
                     }
                 }
             }
-            Ok::<usize, eyre::Report>(written)
+            Ok(written)
         });
 
         for hash in &hashes {
@@ -189,17 +190,13 @@ impl BackgroundWriter {
         }
 
         match result {
-            Ok(Ok(written)) => {
+            Ok(written) => {
                 debug!(
                     "ChunkDataWriter committed batch of {} ({} written)",
                     batch.len(),
                     written
                 );
                 Ok(())
-            }
-            Ok(Err(e)) => {
-                error!("ChunkDataWriter batch inner error: {:?}", e);
-                Err(QueueError::WriteFailed)
             }
             Err(e) => {
                 error!("ChunkDataWriter MDBX transaction error: {:?}", e);

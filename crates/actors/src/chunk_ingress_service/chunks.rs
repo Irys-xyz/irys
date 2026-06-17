@@ -5,15 +5,16 @@ use super::metrics::{
     record_validation_duration,
 };
 use eyre::eyre;
+use irys_database::DatabaseProvider;
 use irys_database::{
     confirm_data_size_for_data_root,
-    db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
+    db::DatabaseProviderCacheExt as _,
     db_cache::data_size_to_chunk_count,
     tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    DataLedger, DataRoot, DatabaseProvider, H256, IngressProof, SendTraced as _,
+    DataLedger, DataRoot, H256, IngressProof, SendTraced as _,
     chunk::{UnpackedChunk, max_chunk_offset},
     hash_sha256,
     irys::IrysSigner,
@@ -22,7 +23,7 @@ use irys_types::{
 use irys_utils::ElapsedMs as _;
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _};
+use reth_db::cursor::DbDupCursorRO as _;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
@@ -139,7 +140,7 @@ impl ChunkIngressServiceInner {
         let _fetch_size_span = info_span!("chunk.fetch_data_size").entered();
         let cached_data_root = self
             .irys_db
-            .view_eyre(|read_tx| {
+            .view_cache_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
             })
             .map_err(|e| {
@@ -379,10 +380,16 @@ impl ChunkIngressServiceInner {
                 .expect("to convert U128 path_result.max_byte_range to data_size to u64");
 
             self.irys_db
-                .update_eyre(|db_tx| {
+                .update_cache_eyre(|db_tx| {
                     confirm_data_size_for_data_root(db_tx, &chunk.data_root, confirmed_data_size)
                 })
-                .expect("confirm_data_size database operation to succeed");
+                .map_err(|e| {
+                    error!(
+                        "Database error confirming data_size for data_root {:?}: {:?}",
+                        chunk.data_root, e
+                    );
+                    CriticalChunkIngressError::DatabaseError
+                })?;
         }
 
         // Use data_size to identify and validate that only the last chunk
@@ -540,7 +547,9 @@ impl ChunkIngressServiceInner {
     ) -> Result<(), ChunkIngressError> {
         let cached_data_root = self
             .irys_db
-            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
+            .view_cache_eyre(|read_tx| {
+                irys_database::cached_data_root_by_data_root(read_tx, data_root)
+            })
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         // Early out: only generate ingress proofs for confirmed data sizes
@@ -560,9 +569,9 @@ impl ChunkIngressServiceInner {
 
         // Determine existing proof state and chunk count
         let local_address = self.config.irys_signer().address();
-        let (chunk_count, existing_local_proof) = self
+        let (chunk_count, existing_local_proof): (u32, _) = self
             .irys_db
-            .view_eyre(|tx| {
+            .view_cache_eyre(|tx| {
                 let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
                     tx,
                     data_root,
@@ -570,9 +579,8 @@ impl ChunkIngressServiceInner {
                 )?;
 
                 // Count chunks (needed for generation & potential regeneration)
-                let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-                let count = cursor
-                    .dup_count(data_root)?
+                let count = tx
+                    .dup_count::<CachedChunksIndex>(data_root)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
                 Ok((count, existing_local_proof))
             })
@@ -685,10 +693,9 @@ impl ChunkIngressServiceInner {
                     size, data_root
                 );
                 // Cache the confirmed data_size so subsequent chunks skip verification
-                if let Err(e) = self
-                    .irys_db
-                    .update_eyre(|db_tx| confirm_data_size_for_data_root(db_tx, &data_root, size))
-                {
+                if let Err(e) = self.irys_db.update_cache_eyre(|db_tx| {
+                    confirm_data_size_for_data_root(db_tx, &data_root, size)
+                }) {
                     warn!(
                         "Failed to cache confirmed data_size for {:?}: {:?}",
                         data_root, e
@@ -829,7 +836,7 @@ pub fn generate_ingress_proof(
 
     let expected_chunk_count = data_size_to_chunk_count(size, chunk_size)?;
 
-    let (proof, actual_data_size, actual_chunk_count) = db.view_eyre(|tx| {
+    let (proof, actual_data_size, actual_chunk_count) = db.view_cache_eyre(|tx| {
         let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
         // start from first duplicate entry for this root_hash
@@ -895,7 +902,9 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
-    db.update_scoped(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
+    db.update_cache_eyre(|rw_tx| {
+        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)
+    })?;
 
     Ok(proof)
 }
