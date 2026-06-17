@@ -1047,6 +1047,12 @@ impl BlockTree {
             .map(|entry| -> &IrysBlockHeader { entry.block.header() })
     }
 
+    /// Read access to the consensus config backing this tree.
+    #[must_use]
+    pub const fn consensus_config(&self) -> &ConsensusConfig {
+        &self.consensus_config
+    }
+
     /// Gets the sealed block (header + body) by hash
     #[must_use]
     pub fn get_sealed_block(&self, block_hash: &BlockHash) -> Option<Arc<SealedBlock>> {

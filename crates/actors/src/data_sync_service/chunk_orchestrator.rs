@@ -7,13 +7,14 @@ use crate::{
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{
     IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
+    hardfork_config::DataLedgerLookup,
 };
 use std::{
     collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{Instrument as _, debug};
+use tracing::{Instrument as _, debug, warn};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -266,18 +267,36 @@ impl ChunkOrchestrator {
 
                 let block = most_recent_migrated_block.header();
 
-                let data_ledger = block
-                    .data_ledgers
-                    .iter()
-                    .find(|dl| dl.ledger_id == self.ledger_id)
-                    .expect("should be able to look up data_ledger by id");
-
-                // info!("block: {:#?}", block);
-
-                if data_ledger.total_chunks == 0 {
-                    None
-                } else {
-                    Some(data_ledger.total_chunks.saturating_sub(1))
+                match tree
+                    .consensus_config()
+                    .hardforks
+                    .classify_data_ledger(block, self.ledger_id)
+                {
+                    DataLedgerLookup::Present(dl) if dl.total_chunks == 0 => None,
+                    DataLedgerLookup::Present(dl) => Some(dl.total_chunks.saturating_sub(1)),
+                    // A migrated block that predates this ledger's activation
+                    // (e.g. a pre-Cascade block for the OneYear/ThirtyDay term
+                    // ledgers) legitimately has no entry for it — nothing to
+                    // sync for this ledger yet.
+                    DataLedgerLookup::ExpectedAbsent => {
+                        debug!(
+                            ledger_id = self.ledger_id,
+                            block_height = block.height,
+                            "migrated block predates this ledger's activation; nothing to sync yet"
+                        );
+                        None
+                    }
+                    // The block's shape is validated upstream, so this should be
+                    // unreachable; surface it (defense-in-depth) but still degrade
+                    // to None rather than aborting the task.
+                    DataLedgerLookup::UnexpectedAbsent => {
+                        warn!(
+                            ledger_id = self.ledger_id,
+                            block_height = block.height,
+                            "data ledger missing from migrated block where consensus expects it; nothing to sync"
+                        );
+                        None
+                    }
                 }
             } else {
                 None

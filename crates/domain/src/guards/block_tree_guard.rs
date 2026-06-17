@@ -1,6 +1,7 @@
 use crate::BlockTree;
-use irys_types::LedgerChunkOffset;
+use irys_types::{LedgerChunkOffset, hardfork_config::DataLedgerLookup};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use tracing::{debug, warn};
 
 /// Wraps the internal `Arc<RwLock<_>>` to make the reference readonly
 #[derive(Debug, Clone)]
@@ -53,12 +54,35 @@ impl BlockTreeReadGuard {
                 .get_block(&block_entry.block_hash())
                 .expect("Block to be in block tree");
 
-            let data_ledger = block
-                .data_ledgers
-                .iter()
-                .find(|dl| dl.ledger_id == ledger_id)
-                .expect("should be able to look up data_ledger by id");
-            Some(data_ledger.total_chunks.into())
+            match tree
+                .consensus_config()
+                .hardforks
+                .classify_data_ledger(block, ledger_id)
+            {
+                DataLedgerLookup::Present(data_ledger) => Some(data_ledger.total_chunks.into()),
+                // A pre-activation block legitimately predates a term ledger
+                // (e.g. a pre-Cascade block for OneYear/ThirtyDay) and carries
+                // no entry for it — report "no chunks for this ledger yet".
+                DataLedgerLookup::ExpectedAbsent => {
+                    debug!(
+                        ledger_id,
+                        block_height = block.height,
+                        "ledger not present at this height (pre-activation); reporting no chunks"
+                    );
+                    None
+                }
+                // The block's shape is validated upstream, so this should be
+                // unreachable; surface it (defense-in-depth) but still report no
+                // chunks rather than aborting the process.
+                DataLedgerLookup::UnexpectedAbsent => {
+                    warn!(
+                        ledger_id,
+                        block_height = block.height,
+                        "data ledger missing from a block where consensus expects it; reporting no chunks"
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
