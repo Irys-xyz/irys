@@ -1,4 +1,5 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
+use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::validate_tx_signature;
 use crate::mempool_service::{Inner, TxReadError};
@@ -29,31 +30,23 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
-        // Reject zero-size data txs up front: a tx with `data_size == 0` stores no data and
-        // would inject a zero-width leaf into the ledger `tx_root` tree. This mirrors the
-        // `ZeroSizeDataTx` consensus prevalidation check so such a tx is never admitted or
-        // gossiped onward. Cheap and fork-independent, so it runs before signature/anchor work.
-        if tx.data_size == 0 {
-            return Err(TxIngressError::ZeroDataSize(tx.id));
-        }
-
-        // Reject data txs whose `prefix_size` exceeds `data_size`: `prefix_hash` commits to
-        // the first `prefix_size` data bytes, so `prefix_size > data_size` is structurally
-        // impossible. Mirrors the `PrefixSizeExceedsDataSize` consensus prevalidation check.
-        if tx.prefix_size > tx.data_size {
-            return Err(TxIngressError::PrefixSizeExceedsDataSize(tx.id));
-        }
-
-        // Reject data txs carrying a foreign `chain_id`: a tx signed for another chain must
-        // never be admitted or gossiped here. The anchor already binds a tx to this chain,
-        // but `chain_id` is an explicit signed field, so reject the mismatch directly to
-        // mirror the `DataTxChainIdMismatch` consensus prevalidation check.
-        let expected_chain_id = self.config.consensus.chain_id;
-        if tx.chain_id != expected_chain_id {
-            return Err(TxIngressError::ChainIdMismatch {
-                tx_id: tx.id,
-                expected: expected_chain_id,
-                actual: tx.chain_id,
+        // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
+        // foreign chain_id) using the same shared predicate as consensus prevalidation
+        // (`data_tx_structural_defect`), so ingress and consensus enforce identical rules.
+        // Cheap and fork-independent, so it runs before signature/anchor work.
+        if let Some(defect) = data_tx_structural_defect(tx, self.config.consensus.chain_id) {
+            return Err(match defect {
+                DataTxStructuralDefect::ZeroDataSize => TxIngressError::ZeroDataSize(tx.id),
+                DataTxStructuralDefect::PrefixSizeExceedsDataSize { .. } => {
+                    TxIngressError::PrefixSizeExceedsDataSize(tx.id)
+                }
+                DataTxStructuralDefect::ChainIdMismatch { expected, actual } => {
+                    TxIngressError::ChainIdMismatch {
+                        tx_id: tx.id,
+                        expected,
+                        actual,
+                    }
+                }
             });
         }
 
