@@ -376,6 +376,13 @@ pub enum PreValidationError {
     #[error("PoA tx_path leaf mismatch: expected folded leaf {expected}, got {got}")]
     PoaTxRootLeafMismatch { expected: H256, got: H256 },
 
+    /// A data transaction with `data_size == 0` was included in a ledger. A zero-size
+    /// tx stores no data and would inject a zero-width leaf into the ledger `tx_root`
+    /// tree, colliding start offsets with the following tx and breaking PoA owning-tx
+    /// recovery (which keys the owner off the tx_path leaf's cumulative start byte).
+    #[error("zero-size data tx {txid} in ledger {ledger_id}")]
+    ZeroSizeDataTx { ledger_id: u32, txid: H256 },
+
     /// Too many commitment transactions
     #[error("Too many commitment transactions: max {max}, got {got}")]
     TooManyCommitmentTxs { max: u64, got: usize },
@@ -566,6 +573,7 @@ impl PreValidationError {
             | Self::TooManyDataTxs { .. }
             | Self::TxRootMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
+            | Self::ZeroSizeDataTx { .. }
             | Self::TransactionIdMismatch { .. }
             | Self::TxFoundInMultipleBlocks { .. }
             | Self::TxInMultipleLedgers { .. }
@@ -671,6 +679,7 @@ impl PreValidationError {
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
+            Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
             Self::MissingTransactions(_) => "missing_transactions",
             Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
@@ -1701,6 +1710,16 @@ pub async fn prevalidate_block(
             }
         })?;
         let ledger_txs = transactions.get_ledger_txs(ledger);
+        // Reject zero-size data txs: they store no data and would inject a zero-width
+        // leaf into the `tx_root` tree, colliding start offsets with the next tx and
+        // breaking PoA owning-tx recovery. Done here (consensus gate) so a hand-crafted
+        // peer block can't smuggle one past ingress.
+        if let Some(txid) = first_zero_size_data_tx(ledger_txs) {
+            return Err(PreValidationError::ZeroSizeDataTx {
+                ledger_id: dl.ledger_id,
+                txid,
+            });
+        }
         let recomputed_tx_root = DataTransactionLedger::compute_tx_root(ledger_txs);
         if recomputed_tx_root != dl.tx_root {
             return Err(PreValidationError::TxRootMismatch {
@@ -3249,6 +3268,25 @@ fn canonical_block_hash_at(db: &DatabaseProvider, height: u64) -> Result<H256, P
     .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))
 }
 
+/// The id of the first included data tx with `data_size == 0`, if any. A zero-size data
+/// tx stores no data and would inject a zero-width leaf into the ledger `tx_root` tree,
+/// breaking the unique-start-offset invariant PoA owning-tx recovery relies on, so
+/// consensus rejects any block that includes one.
+fn first_zero_size_data_tx(txs: &[DataTransactionHeader]) -> Option<H256> {
+    txs.iter().find(|tx| tx.data_size == 0).map(|tx| tx.id)
+}
+
+/// True iff the tx whose folded `tx_root` leaf starts at cumulative byte `cursor` (prefix
+/// sums of `data_size` in `tx_ids` order) is the recall chunk's owner for a tx_path leaf
+/// at `target`. A `data_size == 0` tx contributes a zero-width leaf that shares its start
+/// offset with the following tx but owns no chunks, and `validate_path` resolves an
+/// exact-boundary target to the right-hand (non-empty) leaf — so the owner is the first tx
+/// at `target` that actually holds bytes. Skipping zero-width leaves keeps recovery correct
+/// even if a zero-size tx ever slips past prevalidation.
+fn is_poa_owning_leaf(cursor: u128, data_size: u64, target: u128) -> bool {
+    cursor == target && data_size > 0
+}
+
 /// Recover the recall chunk's owning data transaction for the PoA data-ledger branch.
 ///
 /// After `prefix_hash` is folded into the tx_root leaf, a tx_path proof no longer yields the
@@ -3265,9 +3303,10 @@ fn load_owning_tx_for_poa(
     ledger: DataLedger,
     tx_leaf_min_byte_range: u128,
 ) -> Result<DataTransactionHeader, PreValidationError> {
-    // The owner is the leaf whose cumulative start byte == `tx_leaf_min_byte_range`. Both
-    // paths prefix-sum `data_size` in `tx_ids` order and STOP at the owner — never reading
-    // or cloning the ledger's trailing transactions.
+    // The owner is the first non-empty leaf whose cumulative start byte ==
+    // `tx_leaf_min_byte_range` (see `is_poa_owning_leaf` for why zero-width leaves are
+    // skipped). Both paths prefix-sum `data_size` in `tx_ids` order and STOP at the owner —
+    // never reading or cloning the ledger's trailing transactions.
     let from_tree = {
         let tree = block_tree_guard.read();
         // In-memory: scan the borrowed slice; clone only the owner, not all N txs.
@@ -3277,7 +3316,7 @@ fn load_owning_tx_for_poa(
                 .get_ledger_txs(ledger)
                 .iter()
                 .find_map(|h| {
-                    if cursor == tx_leaf_min_byte_range {
+                    if is_poa_owning_leaf(cursor, h.data_size, tx_leaf_min_byte_range) {
                         return Some(h.clone());
                     }
                     cursor += h.data_size as u128;
@@ -3316,7 +3355,7 @@ fn load_owning_tx_for_poa(
                     let th = irys_database::tx_header_by_txid(tx, txid)?.ok_or_else(|| {
                         eyre::eyre!("missing data tx header {txid:?} for PoA owning-tx")
                     })?;
-                    if cursor == tx_leaf_min_byte_range {
+                    if is_poa_owning_leaf(cursor, th.data_size, tx_leaf_min_byte_range) {
                         return Ok(Some(th));
                     }
                     cursor += th.data_size as u128;
@@ -6212,6 +6251,54 @@ mod tests {
             proofs: None,
             required_proof_count: None,
         }
+    }
+
+    /// `data_size == 0` data txs are rejected by prevalidation: `first_zero_size_data_tx`
+    /// reports the offending tx id so the recompute loop fails the block with
+    /// `ZeroSizeDataTx`. Regression for the zero-width `tx_root` leaf that breaks PoA
+    /// owning-tx recovery (see `poa_owner_recovery_skips_zero_width_leaves`).
+    #[test]
+    fn first_zero_size_data_tx_flags_zero_size_txs() {
+        let consensus = ConsensusConfig::testing();
+        let mut ok = DataTransactionHeader::new(&consensus);
+        ok.data_size = 100;
+        ok.id = H256::from_low_u64_be(1);
+        let mut zero = DataTransactionHeader::new(&consensus);
+        zero.data_size = 0;
+        zero.id = H256::from_low_u64_be(2);
+
+        assert_eq!(first_zero_size_data_tx(&[]), None);
+        assert_eq!(first_zero_size_data_tx(std::slice::from_ref(&ok)), None);
+        assert_eq!(
+            first_zero_size_data_tx(&[ok, zero.clone()]),
+            Some(zero.id),
+            "the zero-size tx must be flagged so prevalidation can reject the block",
+        );
+    }
+
+    /// PoA owning-tx recovery must attribute a recall chunk to the tx that actually holds
+    /// bytes at the tx_path leaf offset, NOT a preceding `data_size == 0` tx that shares the
+    /// same start offset via its zero-width `tx_root` leaf. Ledger [A:100, Z:0, B:200] has
+    /// leaf start offsets [0, 100, 100]; a chunk in B resolves to `min_byte_range = 100`, so
+    /// the owner must be B (index 2), not the zero-width Z (index 1).
+    #[test]
+    fn poa_owner_recovery_skips_zero_width_leaves() {
+        let data_sizes: [u64; 3] = [100, 0, 200];
+        let target: u128 = 100;
+        let mut cursor: u128 = 0;
+        let mut owner = None;
+        for (i, &ds) in data_sizes.iter().enumerate() {
+            if is_poa_owning_leaf(cursor, ds, target) {
+                owner = Some(i);
+                break;
+            }
+            cursor += ds as u128;
+        }
+        assert_eq!(
+            owner,
+            Some(2),
+            "owner must be the tx that holds bytes at offset 100, not the zero-width leaf",
+        );
     }
 
     #[test]

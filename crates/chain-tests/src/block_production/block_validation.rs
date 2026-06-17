@@ -393,6 +393,57 @@ async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
     Ok(())
 }
 
+/// A block that includes a `data_size == 0` data tx must be rejected with `ZeroSizeDataTx`.
+/// A zero-size tx stores no data and would inject a zero-width leaf into the ledger
+/// `tx_root` tree, colliding start offsets with the next tx and breaking PoA owning-tx
+/// recovery — so consensus refuses it at the authoritative gate (`prevalidate_block`), not
+/// only at mempool ingress. End-to-end companion to the `block_validation` unit tests
+/// `first_zero_size_data_tx_flags_zero_size_txs` / `poa_owner_recovery_skips_zero_width_leaves`.
+#[tokio::test]
+async fn test_prevalidation_rejects_zero_size_data_tx() -> Result<()> {
+    use irys_types::{DataTransactionLedger, H256List, IrysTransactionCommon as _};
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // A signed, otherwise-valid Submit data tx with data_size == 0 (the honest builder
+    // never emits one, but a hand-crafted peer tx is accepted by structural validation).
+    let consensus = ctx.config.consensus_config();
+    let signer = ctx.config.signer();
+    let mut ztx = DataTransactionHeader::new(&consensus);
+    ztx.data_size = 0;
+    ztx.ledger_id = DataLedger::Submit as u32;
+    let ztx = ztx.sign(&signer)?;
+
+    // Splice it into the block's Submit ledger (tx_ids + the matching folded tx_root, so the
+    // tx_root check would pass — it's the zero-size guard that must fire) and re-sign.
+    let mut header = (**ctx.block.header()).clone();
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = H256List(vec![ztx.id()]);
+    ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&ztx));
+    ctx.config.signer().sign_block_header(&mut header)?;
+
+    // The sealed block's transactions are derived from the body, so the tx must live there too.
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions.push(ztx.clone());
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::ZeroSizeDataTx { ledger_id, txid }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+            assert_eq!(txid, ztx.id());
+        }
+        other => panic!("expected ZeroSizeDataTx, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
