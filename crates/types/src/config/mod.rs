@@ -123,6 +123,25 @@ impl Config {
             "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
         );
 
+        // The reset-boundary confirmation gate (issue #1447) parks the VDF loop at a boundary
+        // until the rotation block is confirmed (block_migration_depth deep). For the gate to
+        // reopen before the next boundary — i.e. for honest mining not to wedge — a reset
+        // window must comfortably outspan the confirmation lag. With the VDF clocked at ~1
+        // step/sec a block spans ~block_time steps, so the lag is block_migration_depth blocks
+        // ≈ block_migration_depth * block_time steps; require 2x that for headroom. See
+        // design/docs/vdf-reset-seed-confirmation-gate.md.
+        let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
+        let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
+            .saturating_mul(self.consensus.difficulty_adjustment.block_time);
+        ensure!(
+            reset_window_steps >= confirmation_lag_steps.saturating_mul(2),
+            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary (issue #1447 gate)",
+            reset_window_steps,
+            confirmation_lag_steps.saturating_mul(2),
+            self.consensus.block_migration_depth,
+            self.consensus.difficulty_adjustment.block_time,
+        );
+
         // ensure that prune_at_capacity_percent is a sane value
         let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
         ensure!(
@@ -1231,6 +1250,22 @@ mod validate_tests {
         assert!(
             err_str.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_reset_frequency_below_confirmation_gate() {
+        // One step below the gate's liveness floor (2x the confirmation lag), computed from
+        // the config so the test stays correct if the testing defaults change.
+        let cfg = config_with_consensus(|c| {
+            let floor = 2 * c.block_migration_depth as u64 * c.difficulty_adjustment.block_time;
+            c.vdf.reset_frequency = floor.saturating_sub(1) as usize;
+        });
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("reset_frequency"),
+            "expected error about reset_frequency, got: {err_str}"
         );
     }
 

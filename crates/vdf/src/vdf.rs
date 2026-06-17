@@ -104,7 +104,8 @@ pub fn run_vdf<B: BlockProvider>(
     );
     let vdf_reset_frequency = config.reset_frequency as u64;
     // Timestamp of the last reset-boundary-gate warning, for rate-limiting (see
-    // `BOUNDARY_GATE_WARN_INTERVAL`). Cleared whenever the loop is not gated.
+    // `BOUNDARY_GATE_WARN_INTERVAL`). Reset when the loop pauses with mining disabled, so a
+    // gate appearing after mining resumes warns immediately.
     let mut last_boundary_gate_warning: Option<Instant> = None;
 
     loop {
@@ -135,9 +136,11 @@ pub fn run_vdf<B: BlockProvider>(
                 // it, so a competing fork whose post-boundary steps differ could — if validated
                 // first — make the canonical block be rejected. Reaching that requires a reorg
                 // ~one reset window deep (where the boundary's reset seed is pinned), far deeper
-                // than `block_migration_depth` — i.e. past finality, refused before adoption.
-                // Full mechanism, the deep-reorg bound, and the invariant relied upon:
-                // design/docs/vdf-reset-seed-confirmation-gate.md.
+                // than `block_migration_depth`. Such a fork is already refused at p2p block-pool
+                // admission (`PartOfAPrunedFork`, plus the block tree's no-reorg-past-migration
+                // rule) before its blocks are ever validated/fast-forwarded, so the FF path needs
+                // no gate. Full mechanism, the deep-reorg bound, the admission guards, and the
+                // invariant relied upon: design/docs/vdf-reset-seed-confirmation-gate.md.
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,

@@ -5,6 +5,9 @@ use crate::VDFLimiterInfo;
 /// `block_migration_depth` deep — the most recent reset seed confirmed past the migration
 /// threshold. The VDF reset-boundary gate compares against `confirmed_global_step_number`
 /// so it never applies a seed pinned by a still-forkable block (issue #1447).
+///
+/// Invariant: `confirmed_global_step_number <= vdf_info.global_step_number` — the confirmed
+/// step comes from a block at or below the tip.
 #[derive(Debug, Clone)]
 pub struct CanonicalVdfSnapshot {
     pub vdf_info: VDFLimiterInfo,
