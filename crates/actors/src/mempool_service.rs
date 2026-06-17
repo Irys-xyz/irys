@@ -2305,6 +2305,21 @@ pub enum TxIngressError {
     /// to mirror the `ZeroSizeDataTx` consensus prevalidation check.
     #[error("Data transaction {0} has zero data_size")]
     ZeroDataSize(H256),
+    /// Data transaction's committed `prefix_size` exceeds its `data_size`. `prefix_hash`
+    /// commits to the first `prefix_size` data bytes, so `prefix_size > data_size` is a
+    /// structurally impossible claim; rejected at ingress to mirror the
+    /// `PrefixSizeExceedsDataSize` consensus prevalidation check.
+    #[error("Data transaction {0} has prefix_size greater than data_size")]
+    PrefixSizeExceedsDataSize(H256),
+    /// A transaction (data or commitment) carries a `chain_id` that differs from this node's.
+    /// A tx signed for another chain must never be admitted or gossiped; mirrors the
+    /// `DataTxChainIdMismatch` / `CommitmentChainIdMismatch` consensus prevalidation checks.
+    #[error("Transaction {tx_id} has chain_id {actual}, expected {expected}")]
+    ChainIdMismatch {
+        tx_id: H256,
+        expected: u64,
+        actual: u64,
+    },
     /// Some database error occurred
     #[error("Database operation failed: {0}")]
     DatabaseError(String),

@@ -170,6 +170,16 @@ impl From<TxIngressError> for GossipError {
                 // Structurally invalid tx (no data), decrease source reputation
                 Self::InvalidData(InvalidDataError::TransactionZeroDataSize(tx_id))
             }
+            TxIngressError::PrefixSizeExceedsDataSize(tx_id) => {
+                // Structurally invalid tx (prefix_size > data_size), decrease source reputation
+                Self::InvalidData(InvalidDataError::TransactionPrefixSizeExceedsDataSize(
+                    tx_id,
+                ))
+            }
+            TxIngressError::ChainIdMismatch { tx_id, .. } => {
+                // Tx signed for another chain, decrease source reputation
+                Self::InvalidData(InvalidDataError::TransactionChainIdMismatch(tx_id))
+            }
         }
     }
 }
@@ -213,6 +223,10 @@ pub enum InvalidDataError {
     TransactionUnfunded(irys_types::H256),
     #[error("Transaction {0} has zero data_size")]
     TransactionZeroDataSize(irys_types::H256),
+    #[error("Transaction {0} has prefix_size greater than data_size")]
+    TransactionPrefixSizeExceedsDataSize(irys_types::H256),
+    #[error("Transaction {0} has a foreign chain_id")]
+    TransactionChainIdMismatch(irys_types::H256),
     #[error("Invalid chunk proof")]
     ChunkInvalidProof,
     #[error("Invalid chunk data hash")]

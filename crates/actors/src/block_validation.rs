@@ -383,6 +383,43 @@ pub enum PreValidationError {
     #[error("zero-size data tx {txid} in ledger {ledger_id}")]
     ZeroSizeDataTx { ledger_id: u32, txid: H256 },
 
+    /// A data transaction's committed `prefix_size` exceeds its `data_size`. `prefix_hash`
+    /// commits to the first `prefix_size` data bytes, so `prefix_size > data_size` is a
+    /// structurally impossible claim and is rejected at consensus.
+    #[error(
+        "prefix_size {prefix_size} exceeds data_size {data_size} for data tx {txid} in ledger {ledger_id}"
+    )]
+    PrefixSizeExceedsDataSize {
+        ledger_id: u32,
+        txid: H256,
+        prefix_size: u64,
+        data_size: u64,
+    },
+
+    /// A data transaction carries a `chain_id` that differs from this node's. `chain_id` is
+    /// a signed field, so a mismatch means the tx was signed for another chain; rejected at
+    /// consensus so a hand-crafted peer block can't smuggle a foreign-chain tx in.
+    #[error("data tx {txid} in ledger {ledger_id} has chain_id {actual}, expected {expected}")]
+    DataTxChainIdMismatch {
+        ledger_id: u32,
+        txid: H256,
+        expected: u64,
+        actual: u64,
+    },
+
+    /// A commitment transaction carries a `chain_id` that differs from this node's.
+    /// `chain_id` is a signed field, so a mismatch means the tx was signed for another
+    /// chain; rejected at consensus so a hand-crafted peer block can't smuggle one in.
+    #[error(
+        "commitment tx {tx_id} at position {position} has chain_id {actual}, expected {expected}"
+    )]
+    CommitmentChainIdMismatch {
+        tx_id: H256,
+        position: usize,
+        expected: u64,
+        actual: u64,
+    },
+
     /// Too many commitment transactions
     #[error("Too many commitment transactions: max {max}, got {got}")]
     TooManyCommitmentTxs { max: u64, got: usize },
@@ -574,6 +611,9 @@ impl PreValidationError {
             | Self::TxRootMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
             | Self::ZeroSizeDataTx { .. }
+            | Self::PrefixSizeExceedsDataSize { .. }
+            | Self::DataTxChainIdMismatch { .. }
+            | Self::CommitmentChainIdMismatch { .. }
             | Self::TransactionIdMismatch { .. }
             | Self::TxFoundInMultipleBlocks { .. }
             | Self::TxInMultipleLedgers { .. }
@@ -680,6 +720,9 @@ impl PreValidationError {
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
+            Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
+            Self::DataTxChainIdMismatch { .. } => "data_tx_chain_id_mismatch",
+            Self::CommitmentChainIdMismatch { .. } => "commitment_chain_id_mismatch",
             Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
             Self::MissingTransactions(_) => "missing_transactions",
             Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
@@ -1720,6 +1763,33 @@ pub async fn prevalidate_block(
                 txid,
             });
         }
+        // Reject data txs whose committed `prefix_size` exceeds `data_size`: `prefix_hash`
+        // commits to the first `prefix_size` data bytes, so `prefix_size > data_size` is a
+        // structurally impossible claim. Done here (consensus gate) so a hand-crafted peer
+        // block can't smuggle one past ingress.
+        if let Some((txid, prefix_size, data_size)) =
+            first_prefix_size_exceeds_data_size(ledger_txs)
+        {
+            return Err(PreValidationError::PrefixSizeExceedsDataSize {
+                ledger_id: dl.ledger_id,
+                txid,
+                prefix_size,
+                data_size,
+            });
+        }
+        // Reject data txs carrying a foreign `chain_id`: a hand-crafted peer block must not be
+        // able to smuggle in a tx signed for another chain. `chain_id` is a signed field, so
+        // this is the consensus backstop for the matching ingress check.
+        if let Some((txid, actual)) =
+            first_data_tx_chain_id_mismatch(ledger_txs, config.consensus.chain_id)
+        {
+            return Err(PreValidationError::DataTxChainIdMismatch {
+                ledger_id: dl.ledger_id,
+                txid,
+                expected: config.consensus.chain_id,
+                actual,
+            });
+        }
         let recomputed_tx_root = DataTransactionLedger::compute_tx_root(ledger_txs);
         if recomputed_tx_root != dl.tx_root {
             return Err(PreValidationError::TxRootMismatch {
@@ -1778,6 +1848,19 @@ pub async fn prevalidate_block(
     let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
 
     if let Some(commitment_ledger) = commitment_ledger {
+        // Reject commitment txs carrying a foreign `chain_id` (applies to epoch + non-epoch
+        // blocks): `chain_id` is a signed field, so a mismatch means the tx was signed for
+        // another chain. Consensus backstop for the matching ingress check.
+        if let Some((tx_id, position, actual)) =
+            find_commitment_chain_id_mismatch(commitment_txs, config.consensus.chain_id)
+        {
+            return Err(PreValidationError::CommitmentChainIdMismatch {
+                tx_id,
+                position,
+                expected: config.consensus.chain_id,
+                actual,
+            });
+        }
         // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
         let is_epoch_block = block.height.is_multiple_of(
             config
@@ -1843,6 +1926,21 @@ fn find_invalid_commitment_version(
         }
     }
     None
+}
+
+/// Finds the first commitment transaction whose `chain_id` differs from `expected_chain_id`.
+/// Returns `Some((tx_id, position, actual_chain_id))` if a foreign-chain tx is found, else
+/// `None`. `chain_id` is a signed field, so a mismatch means the tx was signed for another
+/// chain and must not be admitted into a block on this one.
+fn find_commitment_chain_id_mismatch(
+    commitment_txs: &[CommitmentTransaction],
+    expected_chain_id: u64,
+) -> Option<(H256, usize, u64)> {
+    commitment_txs
+        .iter()
+        .enumerate()
+        .find(|(_, tx)| tx.chain_id() != expected_chain_id)
+        .map(|(idx, tx)| (tx.id(), idx, tx.chain_id()))
 }
 
 /// Validate transactions against expected IDs from the block header.
@@ -3274,6 +3372,28 @@ fn canonical_block_hash_at(db: &DatabaseProvider, height: u64) -> Result<H256, P
 /// consensus rejects any block that includes one.
 fn first_zero_size_data_tx(txs: &[DataTransactionHeader]) -> Option<H256> {
     txs.iter().find(|tx| tx.data_size == 0).map(|tx| tx.id)
+}
+
+/// The `(id, prefix_size, data_size)` of the first included data tx whose committed
+/// `prefix_size` exceeds its `data_size`, if any. `prefix_hash` commits to the first
+/// `prefix_size` data bytes, so `prefix_size > data_size` is a structurally impossible
+/// claim and consensus rejects any block that includes such a tx.
+fn first_prefix_size_exceeds_data_size(txs: &[DataTransactionHeader]) -> Option<(H256, u64, u64)> {
+    txs.iter()
+        .find(|tx| tx.prefix_size > tx.data_size)
+        .map(|tx| (tx.id, tx.prefix_size, tx.data_size))
+}
+
+/// The `(id, chain_id)` of the first included data tx whose `chain_id` differs from the
+/// node's `expected_chain_id`, if any. `chain_id` is a signed field, so a mismatch means the
+/// tx was signed for another chain and must not be admitted into a block on this one.
+fn first_data_tx_chain_id_mismatch(
+    txs: &[DataTransactionHeader],
+    expected_chain_id: u64,
+) -> Option<(H256, u64)> {
+    txs.iter()
+        .find(|tx| tx.chain_id != expected_chain_id)
+        .map(|tx| (tx.id, tx.chain_id))
 }
 
 /// True iff the tx whose folded `tx_root` leaf starts at cumulative byte `cursor` (prefix
@@ -6273,6 +6393,94 @@ mod tests {
             first_zero_size_data_tx(&[ok, zero.clone()]),
             Some(zero.id),
             "the zero-size tx must be flagged so prevalidation can reject the block",
+        );
+    }
+
+    /// A data tx whose committed `prefix_size` exceeds `data_size` is rejected by
+    /// prevalidation: `first_prefix_size_exceeds_data_size` reports the offending tx so the
+    /// recompute loop fails the block with `PrefixSizeExceedsDataSize`. `prefix_size ==
+    /// data_size` (whole-data prefix) is valid and must NOT be flagged.
+    #[test]
+    fn first_prefix_size_exceeds_data_size_flags_oversized_prefix() {
+        let consensus = ConsensusConfig::testing();
+        let mut ok = DataTransactionHeader::new(&consensus);
+        ok.data_size = 100;
+        ok.prefix_size = 100;
+        ok.id = H256::from_low_u64_be(1);
+        let mut bad = DataTransactionHeader::new(&consensus);
+        bad.data_size = 100;
+        bad.prefix_size = 101;
+        bad.id = H256::from_low_u64_be(2);
+
+        assert_eq!(first_prefix_size_exceeds_data_size(&[]), None);
+        assert_eq!(
+            first_prefix_size_exceeds_data_size(std::slice::from_ref(&ok)),
+            None,
+            "prefix_size == data_size is valid (whole-data prefix)",
+        );
+        assert_eq!(
+            first_prefix_size_exceeds_data_size(&[ok, bad.clone()]),
+            Some((bad.id, 101, 100)),
+            "the oversized-prefix tx must be flagged so prevalidation can reject the block",
+        );
+    }
+
+    /// A data tx carrying a foreign `chain_id` is rejected by prevalidation:
+    /// `first_data_tx_chain_id_mismatch` reports the offending tx so the recompute loop fails
+    /// the block with `DataTxChainIdMismatch`. `chain_id` is a signed field, so a mismatch
+    /// means the tx was signed for another chain; a tx with the node's chain_id is NOT flagged.
+    #[test]
+    fn first_data_tx_chain_id_mismatch_flags_foreign_chain() {
+        let consensus = ConsensusConfig::testing();
+        // `new` stamps the node's chain_id, so `ok` already matches.
+        let mut ok = DataTransactionHeader::new(&consensus);
+        ok.data_size = 100;
+        ok.id = H256::from_low_u64_be(1);
+        let mut foreign = DataTransactionHeader::new(&consensus);
+        foreign.data_size = 100;
+        foreign.chain_id = consensus.chain_id + 1;
+        foreign.id = H256::from_low_u64_be(2);
+
+        assert_eq!(
+            first_data_tx_chain_id_mismatch(&[], consensus.chain_id),
+            None
+        );
+        assert_eq!(
+            first_data_tx_chain_id_mismatch(std::slice::from_ref(&ok), consensus.chain_id),
+            None,
+            "a tx carrying the node's chain_id must not be flagged",
+        );
+        assert_eq!(
+            first_data_tx_chain_id_mismatch(&[ok, foreign.clone()], consensus.chain_id),
+            Some((foreign.id, consensus.chain_id + 1)),
+            "the foreign-chain tx must be flagged so prevalidation can reject the block",
+        );
+    }
+
+    /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
+    /// `find_commitment_chain_id_mismatch` reports the offending tx (with its position) so the
+    /// commitment-ledger validation fails the block with `CommitmentChainIdMismatch`.
+    #[test]
+    fn find_commitment_chain_id_mismatch_flags_foreign_chain() {
+        let consensus = ConsensusConfig::testing();
+        // `new_stake` stamps the node's chain_id, so `ok` already matches.
+        let ok = CommitmentTransaction::new_stake(&consensus, H256::from_low_u64_be(1));
+        let mut foreign = CommitmentTransaction::new_stake(&consensus, H256::from_low_u64_be(2));
+        foreign.set_chain_id(consensus.chain_id + 1);
+
+        assert_eq!(
+            find_commitment_chain_id_mismatch(&[], consensus.chain_id),
+            None
+        );
+        assert_eq!(
+            find_commitment_chain_id_mismatch(std::slice::from_ref(&ok), consensus.chain_id),
+            None,
+            "a commitment carrying the node's chain_id must not be flagged",
+        );
+        assert_eq!(
+            find_commitment_chain_id_mismatch(&[ok, foreign.clone()], consensus.chain_id),
+            Some((foreign.id(), 1, consensus.chain_id + 1)),
+            "the foreign-chain commitment must be flagged so prevalidation can reject the block",
         );
     }
 

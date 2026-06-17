@@ -766,3 +766,135 @@ async fn test_api_rejects_zero_size_data_tx() -> eyre::Result<()> {
     genesis_node.stop().await;
     Ok(())
 }
+
+/// The mempool ingress gate must reject a data tx whose `prefix_size` exceeds `data_size`,
+/// mirroring the `PrefixSizeExceedsDataSize` consensus prevalidation check, so such a tx is
+/// never admitted or gossiped onward. The honest builder can't emit one, so the header is
+/// hand-crafted and signed directly.
+#[test_log::test(tokio::test)]
+async fn test_api_rejects_prefix_size_exceeds_data_size() -> eyre::Result<()> {
+    use irys_types::{DataTransactionHeader, IrysTransactionCommon as _};
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let consensus = genesis_config.consensus_config();
+    let anchor = genesis_node.get_anchor().await?;
+
+    // Hand-craft a signed, otherwise-plausible Publish data tx whose prefix_size (101)
+    // exceeds data_size (100).
+    let mut header = DataTransactionHeader::new(&consensus);
+    header.data_size = 100;
+    header.prefix_size = 101;
+    header.ledger_id = DataLedger::Publish as u32;
+    header.anchor = anchor;
+    let header = header.sign(&signer)?;
+
+    let result = genesis_node.ingest_data_tx(header.clone()).await;
+
+    match result {
+        Err(AddTxError::TxIngress(TxIngressError::PrefixSizeExceedsDataSize(txid))) => {
+            assert_eq!(txid, header.id());
+        }
+        other => panic!(
+            "expected PrefixSizeExceedsDataSize rejection, got: {:?}",
+            other
+        ),
+    }
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// The mempool ingress gate must reject a data tx carrying a foreign `chain_id`, mirroring the
+/// `DataTxChainIdMismatch` consensus prevalidation check, so a tx signed for another chain is
+/// never admitted or gossiped onward.
+#[test_log::test(tokio::test)]
+async fn test_api_rejects_data_tx_chain_id_mismatch() -> eyre::Result<()> {
+    use irys_types::{DataTransactionHeader, IrysTransactionCommon as _};
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let consensus = genesis_config.consensus_config();
+    let anchor = genesis_node.get_anchor().await?;
+
+    // Hand-craft a signed Publish data tx whose chain_id is foreign (node chain_id + 1).
+    let mut header = DataTransactionHeader::new(&consensus);
+    header.data_size = 100;
+    header.ledger_id = DataLedger::Publish as u32;
+    header.anchor = anchor;
+    header.chain_id = consensus.chain_id + 1;
+    let header = header.sign(&signer)?;
+
+    let result = genesis_node.ingest_data_tx(header.clone()).await;
+
+    match result {
+        Err(AddTxError::TxIngress(TxIngressError::ChainIdMismatch {
+            tx_id,
+            expected,
+            actual,
+        })) => {
+            assert_eq!(tx_id, header.id());
+            assert_eq!(expected, consensus.chain_id);
+            assert_eq!(actual, consensus.chain_id + 1);
+        }
+        other => panic!("expected ChainIdMismatch rejection, got: {:?}", other),
+    }
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// The mempool ingress gate must reject a COMMITMENT tx carrying a foreign `chain_id`,
+/// mirroring the `CommitmentChainIdMismatch` consensus prevalidation check, so a commitment
+/// signed for another chain is never admitted or gossiped onward.
+#[test_log::test(tokio::test)]
+async fn test_api_rejects_commitment_chain_id_mismatch() -> eyre::Result<()> {
+    use irys_types::CommitmentTransaction;
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let consensus = genesis_config.consensus_config();
+    let anchor = genesis_node.get_anchor().await?;
+
+    // Build a stake commitment, set a foreign chain_id (node chain_id + 1) BEFORE signing so
+    // the signature covers it, then sign — the signature stays valid, only chain_id is wrong.
+    let mut stake_tx = CommitmentTransaction::new_stake(&consensus, anchor);
+    stake_tx.set_chain_id(consensus.chain_id + 1);
+    signer.sign_commitment(&mut stake_tx)?;
+
+    let result = genesis_node.ingest_commitment_tx(stake_tx.clone()).await;
+
+    match result {
+        Err(AddTxError::TxIngress(TxIngressError::ChainIdMismatch {
+            tx_id,
+            expected,
+            actual,
+        })) => {
+            assert_eq!(tx_id, stake_tx.id());
+            assert_eq!(expected, consensus.chain_id);
+            assert_eq!(actual, consensus.chain_id + 1);
+        }
+        other => panic!("expected ChainIdMismatch rejection, got: {:?}", other),
+    }
+
+    genesis_node.stop().await;
+    Ok(())
+}

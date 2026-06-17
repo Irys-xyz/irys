@@ -280,6 +280,15 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Get the chain ID
+    #[inline]
+    pub fn chain_id(&self) -> u64 {
+        match self {
+            Self::V1(v1) => v1.tx.chain_id,
+            Self::V2(v2) => v2.tx.chain_id,
+        }
+    }
+
     /// Set the chain ID
     #[inline]
     pub fn set_chain_id(&mut self, chain_id: u64) {

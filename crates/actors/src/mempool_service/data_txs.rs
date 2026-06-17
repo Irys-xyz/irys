@@ -37,6 +37,26 @@ impl Inner {
             return Err(TxIngressError::ZeroDataSize(tx.id));
         }
 
+        // Reject data txs whose `prefix_size` exceeds `data_size`: `prefix_hash` commits to
+        // the first `prefix_size` data bytes, so `prefix_size > data_size` is structurally
+        // impossible. Mirrors the `PrefixSizeExceedsDataSize` consensus prevalidation check.
+        if tx.prefix_size > tx.data_size {
+            return Err(TxIngressError::PrefixSizeExceedsDataSize(tx.id));
+        }
+
+        // Reject data txs carrying a foreign `chain_id`: a tx signed for another chain must
+        // never be admitted or gossiped here. The anchor already binds a tx to this chain,
+        // but `chain_id` is an explicit signed field, so reject the mismatch directly to
+        // mirror the `DataTxChainIdMismatch` consensus prevalidation check.
+        let expected_chain_id = self.config.consensus.chain_id;
+        if tx.chain_id != expected_chain_id {
+            return Err(TxIngressError::ChainIdMismatch {
+                tx_id: tx.id,
+                expected: expected_chain_id,
+                actual: tx.chain_id,
+            });
+        }
+
         // Fast-fail if this tx targets an unsupported ledger
         let ledger = DataLedger::try_from(tx.ledger_id)
             .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;

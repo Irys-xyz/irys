@@ -110,9 +110,14 @@ async fn process_commitment_transaction(
             TxIngressError::InvalidLedger(_) => {
                 Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
             }
-            // Commitment txs have no data_size, so this is unreachable here, but the match
-            // must stay exhaustive over the shared `TxIngressError`.
-            TxIngressError::ZeroDataSize(_) => {
+            // A commitment tx signed for another chain is rejected at ingress.
+            TxIngressError::ChainIdMismatch { .. } => {
+                Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
+            }
+            // These variants are only produced by the data-tx ingress path, so they are
+            // unreachable here, but the match must stay exhaustive over the shared
+            // `TxIngressError`.
+            TxIngressError::ZeroDataSize(_) | TxIngressError::PrefixSizeExceedsDataSize(_) => {
                 Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
             }
             TxIngressError::BalanceFetchError { address, reason } => {
