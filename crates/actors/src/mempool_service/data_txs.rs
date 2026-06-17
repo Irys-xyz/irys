@@ -29,6 +29,14 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Reject zero-size data txs up front: a tx with `data_size == 0` stores no data and
+        // would inject a zero-width leaf into the ledger `tx_root` tree. This mirrors the
+        // `ZeroSizeDataTx` consensus prevalidation check so such a tx is never admitted or
+        // gossiped onward. Cheap and fork-independent, so it runs before signature/anchor work.
+        if tx.data_size == 0 {
+            return Err(TxIngressError::ZeroDataSize(tx.id));
+        }
+
         // Fast-fail if this tx targets an unsupported ledger
         let ledger = DataLedger::try_from(tx.ledger_id)
             .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;

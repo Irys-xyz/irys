@@ -166,6 +166,10 @@ impl From<TxIngressError> for GossipError {
                 // UpdateRewardAddress not allowed before Borealis hardfork
                 Self::InvalidData(InvalidDataError::TransactionCommitmentTypeNotAllowed)
             }
+            TxIngressError::ZeroDataSize(tx_id) => {
+                // Structurally invalid tx (no data), decrease source reputation
+                Self::InvalidData(InvalidDataError::TransactionZeroDataSize(tx_id))
+            }
         }
     }
 }
@@ -207,6 +211,8 @@ pub enum InvalidDataError {
     TransactionInvalidLedger(u32),
     #[error("Transaction {0} unfunded")]
     TransactionUnfunded(irys_types::H256),
+    #[error("Transaction {0} has zero data_size")]
+    TransactionZeroDataSize(irys_types::H256),
     #[error("Invalid chunk proof")]
     ChunkInvalidProof,
     #[error("Invalid chunk data hash")]

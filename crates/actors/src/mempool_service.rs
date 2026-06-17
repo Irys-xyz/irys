@@ -2300,6 +2300,11 @@ pub enum TxIngressError {
     /// Invalid ledger type specified in transaction
     #[error("Invalid or unsupported ledger ID: {0}")]
     InvalidLedger(u32),
+    /// Data transaction carries no data (`data_size == 0`). Such a tx is meaningless and
+    /// would inject a zero-width leaf into the ledger `tx_root` tree; rejected at ingress
+    /// to mirror the `ZeroSizeDataTx` consensus prevalidation check.
+    #[error("Data transaction {0} has zero data_size")]
+    ZeroDataSize(H256),
     /// Some database error occurred
     #[error("Database operation failed: {0}")]
     DatabaseError(String),

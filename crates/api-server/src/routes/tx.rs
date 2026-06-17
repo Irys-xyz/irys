@@ -139,6 +139,11 @@ pub async fn post_tx(
             TxIngressError::UpdateRewardAddressNotAllowed => {
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
+            TxIngressError::ZeroDataSize(tx_id) => Err((
+                format!("Invalid data transaction: zero data_size (tx_id: {tx_id})"),
+                StatusCode::BAD_REQUEST,
+            )
+                .into()),
         };
     }
 

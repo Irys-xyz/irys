@@ -727,3 +727,42 @@ async fn test_api_rejects_submit_ledger_target() -> eyre::Result<()> {
     genesis_node.stop().await;
     Ok(())
 }
+
+/// The mempool ingress gate must reject a data tx with `data_size == 0`, mirroring the
+/// `ZeroSizeDataTx` consensus prevalidation check, so such a tx is never admitted or
+/// gossiped onward. The honest builder can't emit one (it rejects a zero-length last
+/// chunk), so the header is hand-crafted and signed directly.
+#[test_log::test(tokio::test)]
+async fn test_api_rejects_zero_size_data_tx() -> eyre::Result<()> {
+    use irys_types::{DataTransactionHeader, IrysTransactionCommon as _};
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let consensus = genesis_config.consensus_config();
+    let anchor = genesis_node.get_anchor().await?;
+
+    // Hand-craft a signed, otherwise-plausible Publish data tx with data_size == 0.
+    let mut header = DataTransactionHeader::new(&consensus);
+    header.data_size = 0;
+    header.ledger_id = DataLedger::Publish as u32;
+    header.anchor = anchor;
+    let header = header.sign(&signer)?;
+
+    let result = genesis_node.ingest_data_tx(header.clone()).await;
+
+    match result {
+        Err(AddTxError::TxIngress(TxIngressError::ZeroDataSize(txid))) => {
+            assert_eq!(txid, header.id());
+        }
+        other => panic!("expected ZeroDataSize rejection, got: {:?}", other),
+    }
+
+    genesis_node.stop().await;
+    Ok(())
+}

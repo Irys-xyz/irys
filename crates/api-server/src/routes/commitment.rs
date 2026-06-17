@@ -110,6 +110,11 @@ async fn process_commitment_transaction(
             TxIngressError::InvalidLedger(_) => {
                 Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
             }
+            // Commitment txs have no data_size, so this is unreachable here, but the match
+            // must stay exhaustive over the shared `TxIngressError`.
+            TxIngressError::ZeroDataSize(_) => {
+                Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
+            }
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
 
