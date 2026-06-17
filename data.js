@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781628068437,
+  "lastUpdate": 1781700853558,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6523,6 +6523,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4c1d92850b7cf0b83502495c9441ad69075f0b97",
+          "message": "fix: align genesis cascade activation with the epoch-layer predicate (#1448)\n\n* fix(consensus): align genesis cascade activation with epoch predicate\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix(data_sync): source ledger-absence check from tree consensus config\n\n* fix(consensus): dedupe term-ledger absence classification and harden lookups\n\nAddress review findings on the Cascade genesis branch:\n\n- Centralize the data-ledger present / expected-absent / unexpected-absent\n  decision in IrysHardforkConfig::classify_data_ledger (DataLedgerLookup),\n  so the data-sync orchestrator and block-tree guard share one predicate and\n  cannot drift apart (the cross-layer drift behind the 2026-06-11 incident).\n- Downgrade the unexpected-absence log error!->warn!: the check is a\n  block-timestamp proxy for an epoch-aligned invariant, and a block's ledger\n  shape is already validated upstream, so it should never fire for a valid\n  block. Correct the ledger_absence_expected doc to state the proxy caveat.\n- Make chunk_migration_service's previous-block ledger lookup panic-safe: a\n  term ledger may legitimately be absent from the predecessor at a mid-chain\n  Cascade activation boundary; treat it as zero chunks instead of indexing.\n- Rework the data_sync regression test to exercise the real\n  Some(cascade)+pre-activation path (not merely cascade=None); add a\n  classify_data_ledger unit test.\n\n* docs(chunk_migration): correct start-offset comment\n\nThe comment claimed total_chunks was decremented to compute the start\noffset, but the code uses the previous block's total_chunks directly.\nThe -1 subtraction only applies to the end offset.\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-06-17T13:34:01+01:00",
+          "tree_id": "27470043da2f6376edd4c4f895e4be16dc1ee3a9",
+          "url": "https://github.com/Irys-xyz/irys/commit/4c1d92850b7cf0b83502495c9441ad69075f0b97"
+        },
+        "date": 1781700851299,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012896,
+            "range": "± 0.000323",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127451,
+            "range": "± 0.004645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.261637,
+            "range": "± 0.047834",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.411819,
+            "range": "± 1.072823",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083444,
+            "range": "± 0.000651",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 784.711351,
+            "range": "± 26.477395",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1073.959793,
+            "range": "± 57.177689",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.118129,
+            "range": "± 0.00285",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1209.355137,
+            "range": "± 13.677269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1578.916629,
+            "range": "± 16.821283",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.036302,
+            "range": "± 0.006477",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.817534,
+            "range": "± 1.550791",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 279.087364,
+            "range": "± 2.027766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
