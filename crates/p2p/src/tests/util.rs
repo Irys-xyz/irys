@@ -1046,6 +1046,7 @@ pub(crate) fn data_handler_stub(
             block_index_read_guard_stub.clone(),
             block_tree_read_guard_stub.clone(),
             config.consensus.block_tree_depth,
+            u64::from(config.consensus.block_migration_depth),
         ),
         // Reth service as a second argument
         execution_payload_cache.clone(),

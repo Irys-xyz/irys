@@ -749,6 +749,27 @@ impl BlockTree {
             .expect("canonical chain must always have an entry in it")
     }
 
+    /// Global step number of the most recent canonical block confirmed past reorg risk —
+    /// the deepest block that is both `Onchain` and at least `depth` blocks below the tip.
+    /// Used by the VDF reset-boundary gate so the loop never applies a seed pinned by a
+    /// still-forkable block (issue #1447). Reads the cache in place — no chain clone.
+    ///
+    /// The chain cache (`.0`) keeps trailing non-`Onchain` head blocks (`Validated` /
+    /// `NotOnchain(ValidBlock)`), counted in `.1`. Those are forkable, so the confirmed step
+    /// must skip them: `Onchain` ⟹ migrated ⟹ at least `block_migration_depth` deep. We skip
+    /// `max(not_onchain_count, depth)` from the tip so the result is confirmed even when
+    /// migration lags during sync or a wide reorg window (where `not_onchain_count > depth`).
+    #[must_use]
+    pub fn confirmed_canonical_step(&self, depth: u64) -> u64 {
+        let (chain, not_onchain_count) = &self.longest_chain_cache;
+        let skip = (*not_onchain_count).max(usize::try_from(depth).unwrap_or(usize::MAX));
+        let idx = chain.len().saturating_sub(skip.saturating_add(1));
+        chain
+            .get(idx)
+            .map(|entry| entry.header().vdf_limiter_info.global_step_number)
+            .unwrap_or(0)
+    }
+
     /// Find the lowest common ancestor of two tips by walking both lineages
     /// through `previous_block_hash` links in `self.blocks`, then return both
     /// divergent suffixes. Independent of `ChainState` flags — operates only on
@@ -2826,6 +2847,76 @@ mod tests {
             check_longest_chain(&[&b11, &b12, &b13b, &b14b], 0, &cache),
             Ok(())
         );
+    }
+
+    /// Regression for issue #1447 (review finding P1 #1): the chain cache keeps trailing
+    /// non-`Onchain` (still forkable) head blocks, so `confirmed_canonical_step` must skip
+    /// them — otherwise the VDF reset-boundary gate would treat a reorgable block's seed as
+    /// confirmed during a sync/reorg window.
+    #[test]
+    fn confirmed_canonical_step_skips_non_onchain_head() {
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+
+        let mut b1 = random_block(U256::from(1));
+        b1.vdf_limiter_info.global_step_number = 10;
+        b1.test_sign();
+        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing()); // b1 is Onchain
+
+        let mut b2 = random_block(U256::from(2));
+        b2.vdf_limiter_info.global_step_number = 20;
+        let mut b2 = extend_chain(b2, &b1);
+        cache
+            .add_block(
+                &seal_block(&mut b2),
+                comm_cache.clone(),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .unwrap();
+        cache
+            .add_common(
+                b2.block_hash,
+                &seal_block(&mut b2),
+                comm_cache.clone(),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
+            )
+            .unwrap();
+        cache.mark_tip(&b2.block_hash).unwrap(); // b2 becomes Onchain
+
+        // b3 is the heaviest tip but only Validated — NOT Onchain, so still forkable.
+        let mut b3 = random_block(U256::from(3));
+        b3.vdf_limiter_info.global_step_number = 30;
+        let mut b3 = extend_chain(b3, &b2);
+        cache
+            .add_block(
+                &seal_block(&mut b3),
+                comm_cache.clone(),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .unwrap();
+        cache
+            .add_common(
+                b3.block_hash,
+                &seal_block(&mut b3),
+                comm_cache,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
+            )
+            .unwrap();
+
+        // Cache = [b1, b2, b3] with one non-onchain trailing block (b3).
+        check_longest_chain(&[&b1, &b2, &b3], 1, &cache).unwrap();
+
+        // The gate must report the newest ONCHAIN block (b2, step 20), never the forkable
+        // tip b3 (step 30) — even at depth 0. Pre-fix this returned 30.
+        assert_eq!(cache.confirmed_canonical_step(0), 20);
+        assert_eq!(cache.confirmed_canonical_step(1), 20);
+        // The `depth` floor still reaches deeper than the non-onchain skip.
+        assert_eq!(cache.confirmed_canonical_step(2), 10);
     }
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {

@@ -11,10 +11,10 @@
 ext/
 config.toml
 emission_simulation.csv
-.local/
+.local
 .idea/
 ecosystem.config.js
 docker/build-output/
 .worktrees/
-.claude/local/
+.claude/local
 .claude/worktrees/
