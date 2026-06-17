@@ -47,6 +47,18 @@ impl Inner {
             return Err(TxIngressError::InvalidSignature(commitment_tx.signer()));
         }
 
+        // Reject commitment txs carrying a foreign `chain_id`: a tx signed for another chain
+        // must never be admitted or gossiped here. Mirrors the `CommitmentChainIdMismatch`
+        // consensus prevalidation check.
+        let expected_chain_id = self.config.consensus.chain_id;
+        if commitment_tx.chain_id() != expected_chain_id {
+            return Err(TxIngressError::ChainIdMismatch {
+                tx_id: commitment_tx.id(),
+                expected: expected_chain_id,
+                actual: commitment_tx.chain_id(),
+            });
+        }
+
         // Validate commitment transaction version against hardfork rules
         let now = UnixTimestamp::now()
             .map_err(|e| TxIngressError::Other(format!("System time error: {}", e)))?;

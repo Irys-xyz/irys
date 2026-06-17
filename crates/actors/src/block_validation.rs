@@ -1,4 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
@@ -376,6 +377,50 @@ pub enum PreValidationError {
     #[error("PoA tx_path leaf mismatch: expected folded leaf {expected}, got {got}")]
     PoaTxRootLeafMismatch { expected: H256, got: H256 },
 
+    /// A data transaction with `data_size == 0` was included in a ledger. A zero-size
+    /// tx stores no data and would inject a zero-width leaf into the ledger `tx_root`
+    /// tree, colliding start offsets with the following tx and breaking PoA owning-tx
+    /// recovery (which keys the owner off the tx_path leaf's cumulative start byte).
+    #[error("zero-size data tx {txid} in ledger {ledger_id}")]
+    ZeroSizeDataTx { ledger_id: u32, txid: H256 },
+
+    /// A data transaction's committed `prefix_size` exceeds its `data_size`. `prefix_hash`
+    /// commits to the first `prefix_size` data bytes, so `prefix_size > data_size` is a
+    /// structurally impossible claim and is rejected at consensus.
+    #[error(
+        "prefix_size {prefix_size} exceeds data_size {data_size} for data tx {txid} in ledger {ledger_id}"
+    )]
+    PrefixSizeExceedsDataSize {
+        ledger_id: u32,
+        txid: H256,
+        prefix_size: u64,
+        data_size: u64,
+    },
+
+    /// A data transaction carries a `chain_id` that differs from this node's. `chain_id` is
+    /// a signed field, so a mismatch means the tx was signed for another chain; rejected at
+    /// consensus so a hand-crafted peer block can't smuggle a foreign-chain tx in.
+    #[error("data tx {txid} in ledger {ledger_id} has chain_id {actual}, expected {expected}")]
+    DataTxChainIdMismatch {
+        ledger_id: u32,
+        txid: H256,
+        expected: u64,
+        actual: u64,
+    },
+
+    /// A commitment transaction carries a `chain_id` that differs from this node's.
+    /// `chain_id` is a signed field, so a mismatch means the tx was signed for another
+    /// chain; rejected at consensus so a hand-crafted peer block can't smuggle one in.
+    #[error(
+        "commitment tx {tx_id} at position {position} has chain_id {actual}, expected {expected}"
+    )]
+    CommitmentChainIdMismatch {
+        tx_id: H256,
+        position: usize,
+        expected: u64,
+        actual: u64,
+    },
+
     /// Too many commitment transactions
     #[error("Too many commitment transactions: max {max}, got {got}")]
     TooManyCommitmentTxs { max: u64, got: usize },
@@ -566,6 +611,10 @@ impl PreValidationError {
             | Self::TooManyDataTxs { .. }
             | Self::TxRootMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
+            | Self::ZeroSizeDataTx { .. }
+            | Self::PrefixSizeExceedsDataSize { .. }
+            | Self::DataTxChainIdMismatch { .. }
+            | Self::CommitmentChainIdMismatch { .. }
             | Self::TransactionIdMismatch { .. }
             | Self::TxFoundInMultipleBlocks { .. }
             | Self::TxInMultipleLedgers { .. }
@@ -671,6 +720,10 @@ impl PreValidationError {
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
+            Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
+            Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
+            Self::DataTxChainIdMismatch { .. } => "data_tx_chain_id_mismatch",
+            Self::CommitmentChainIdMismatch { .. } => "commitment_chain_id_mismatch",
             Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
             Self::MissingTransactions(_) => "missing_transactions",
             Self::TransactionIdMismatch { .. } => "tx_id_mismatch",
@@ -1701,6 +1754,37 @@ pub async fn prevalidate_block(
             }
         })?;
         let ledger_txs = transactions.get_ledger_txs(ledger);
+        // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
+        // foreign chain_id) BEFORE recomputing the tx_root, using the same shared predicate
+        // as mempool ingress (`data_tx_structural_defect`) so the two gates can't drift and a
+        // hand-crafted peer block can't smuggle past consensus what ingress rejects. One pass.
+        if let Some((tx, defect)) = ledger_txs.iter().find_map(|tx| {
+            data_tx_structural_defect(tx, config.consensus.chain_id).map(|d| (tx, d))
+        }) {
+            return Err(match defect {
+                DataTxStructuralDefect::ZeroDataSize => PreValidationError::ZeroSizeDataTx {
+                    ledger_id: dl.ledger_id,
+                    txid: tx.id,
+                },
+                DataTxStructuralDefect::PrefixSizeExceedsDataSize {
+                    prefix_size,
+                    data_size,
+                } => PreValidationError::PrefixSizeExceedsDataSize {
+                    ledger_id: dl.ledger_id,
+                    txid: tx.id,
+                    prefix_size,
+                    data_size,
+                },
+                DataTxStructuralDefect::ChainIdMismatch { expected, actual } => {
+                    PreValidationError::DataTxChainIdMismatch {
+                        ledger_id: dl.ledger_id,
+                        txid: tx.id,
+                        expected,
+                        actual,
+                    }
+                }
+            });
+        }
         let recomputed_tx_root = DataTransactionLedger::compute_tx_root(ledger_txs);
         if recomputed_tx_root != dl.tx_root {
             return Err(PreValidationError::TxRootMismatch {
@@ -1759,6 +1843,19 @@ pub async fn prevalidate_block(
     let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
 
     if let Some(commitment_ledger) = commitment_ledger {
+        // Reject commitment txs carrying a foreign `chain_id` (applies to epoch + non-epoch
+        // blocks): `chain_id` is a signed field, so a mismatch means the tx was signed for
+        // another chain. Consensus backstop for the matching ingress check.
+        if let Some((tx_id, position, actual)) =
+            find_commitment_chain_id_mismatch(commitment_txs, config.consensus.chain_id)
+        {
+            return Err(PreValidationError::CommitmentChainIdMismatch {
+                tx_id,
+                position,
+                expected: config.consensus.chain_id,
+                actual,
+            });
+        }
         // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
         let is_epoch_block = block.height.is_multiple_of(
             config
@@ -1824,6 +1921,21 @@ fn find_invalid_commitment_version(
         }
     }
     None
+}
+
+/// Finds the first commitment transaction whose `chain_id` differs from `expected_chain_id`.
+/// Returns `Some((tx_id, position, actual_chain_id))` if a foreign-chain tx is found, else
+/// `None`. `chain_id` is a signed field, so a mismatch means the tx was signed for another
+/// chain and must not be admitted into a block on this one.
+fn find_commitment_chain_id_mismatch(
+    commitment_txs: &[CommitmentTransaction],
+    expected_chain_id: u64,
+) -> Option<(H256, usize, u64)> {
+    commitment_txs
+        .iter()
+        .enumerate()
+        .find(|(_, tx)| tx.chain_id() != expected_chain_id)
+        .map(|(idx, tx)| (tx.id(), idx, tx.chain_id()))
 }
 
 /// Validate transactions against expected IDs from the block header.
@@ -3249,6 +3361,17 @@ fn canonical_block_hash_at(db: &DatabaseProvider, height: u64) -> Result<H256, P
     .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))
 }
 
+/// True iff the tx whose folded `tx_root` leaf starts at cumulative byte `cursor` (prefix
+/// sums of `data_size` in `tx_ids` order) is the recall chunk's owner for a tx_path leaf
+/// at `target`. A `data_size == 0` tx contributes a zero-width leaf that shares its start
+/// offset with the following tx but owns no chunks, and `validate_path` resolves an
+/// exact-boundary target to the right-hand (non-empty) leaf — so the owner is the first tx
+/// at `target` that actually holds bytes. Skipping zero-width leaves keeps recovery correct
+/// even if a zero-size tx ever slips past prevalidation.
+fn is_poa_owning_leaf(cursor: u128, data_size: u64, target: u128) -> bool {
+    cursor == target && data_size > 0
+}
+
 /// Recover the recall chunk's owning data transaction for the PoA data-ledger branch.
 ///
 /// After `prefix_hash` is folded into the tx_root leaf, a tx_path proof no longer yields the
@@ -3265,9 +3388,10 @@ fn load_owning_tx_for_poa(
     ledger: DataLedger,
     tx_leaf_min_byte_range: u128,
 ) -> Result<DataTransactionHeader, PreValidationError> {
-    // The owner is the leaf whose cumulative start byte == `tx_leaf_min_byte_range`. Both
-    // paths prefix-sum `data_size` in `tx_ids` order and STOP at the owner — never reading
-    // or cloning the ledger's trailing transactions.
+    // The owner is the first non-empty leaf whose cumulative start byte ==
+    // `tx_leaf_min_byte_range` (see `is_poa_owning_leaf` for why zero-width leaves are
+    // skipped). Both paths prefix-sum `data_size` in `tx_ids` order and STOP at the owner —
+    // never reading or cloning the ledger's trailing transactions.
     let from_tree = {
         let tree = block_tree_guard.read();
         // In-memory: scan the borrowed slice; clone only the owner, not all N txs.
@@ -3277,7 +3401,7 @@ fn load_owning_tx_for_poa(
                 .get_ledger_txs(ledger)
                 .iter()
                 .find_map(|h| {
-                    if cursor == tx_leaf_min_byte_range {
+                    if is_poa_owning_leaf(cursor, h.data_size, tx_leaf_min_byte_range) {
                         return Some(h.clone());
                     }
                     cursor += h.data_size as u128;
@@ -3316,7 +3440,7 @@ fn load_owning_tx_for_poa(
                     let th = irys_database::tx_header_by_txid(tx, txid)?.ok_or_else(|| {
                         eyre::eyre!("missing data tx header {txid:?} for PoA owning-tx")
                     })?;
-                    if cursor == tx_leaf_min_byte_range {
+                    if is_poa_owning_leaf(cursor, th.data_size, tx_leaf_min_byte_range) {
                         return Ok(Some(th));
                     }
                     cursor += th.data_size as u128;
@@ -6212,6 +6336,58 @@ mod tests {
             proofs: None,
             required_proof_count: None,
         }
+    }
+
+    /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
+    /// `find_commitment_chain_id_mismatch` reports the offending tx (with its position) so the
+    /// commitment-ledger validation fails the block with `CommitmentChainIdMismatch`.
+    #[test]
+    fn find_commitment_chain_id_mismatch_flags_foreign_chain() {
+        let consensus = ConsensusConfig::testing();
+        // `new_stake` stamps the node's chain_id, so `ok` already matches.
+        let ok = CommitmentTransaction::new_stake(&consensus, H256::from_low_u64_be(1));
+        let mut foreign = CommitmentTransaction::new_stake(&consensus, H256::from_low_u64_be(2));
+        foreign.set_chain_id(consensus.chain_id + 1);
+
+        assert_eq!(
+            find_commitment_chain_id_mismatch(&[], consensus.chain_id),
+            None
+        );
+        assert_eq!(
+            find_commitment_chain_id_mismatch(std::slice::from_ref(&ok), consensus.chain_id),
+            None,
+            "a commitment carrying the node's chain_id must not be flagged",
+        );
+        assert_eq!(
+            find_commitment_chain_id_mismatch(&[ok, foreign.clone()], consensus.chain_id),
+            Some((foreign.id(), 1, consensus.chain_id + 1)),
+            "the foreign-chain commitment must be flagged so prevalidation can reject the block",
+        );
+    }
+
+    /// PoA owning-tx recovery must attribute a recall chunk to the tx that actually holds
+    /// bytes at the tx_path leaf offset, NOT a preceding `data_size == 0` tx that shares the
+    /// same start offset via its zero-width `tx_root` leaf. Ledger [A:100, Z:0, B:200] has
+    /// leaf start offsets [0, 100, 100]; a chunk in B resolves to `min_byte_range = 100`, so
+    /// the owner must be B (index 2), not the zero-width Z (index 1).
+    #[test]
+    fn poa_owner_recovery_skips_zero_width_leaves() {
+        let data_sizes: [u64; 3] = [100, 0, 200];
+        let target: u128 = 100;
+        let mut cursor: u128 = 0;
+        let mut owner = None;
+        for (i, &ds) in data_sizes.iter().enumerate() {
+            if is_poa_owning_leaf(cursor, ds, target) {
+                owner = Some(i);
+                break;
+            }
+            cursor += ds as u128;
+        }
+        assert_eq!(
+            owner,
+            Some(2),
+            "owner must be the tx that holds bytes at offset 100, not the zero-width leaf",
+        );
     }
 
     #[test]

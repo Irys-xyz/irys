@@ -139,6 +139,15 @@ pub async fn post_tx(
             TxIngressError::UpdateRewardAddressNotAllowed => {
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
+            TxIngressError::ZeroDataSize(_) => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
+            TxIngressError::PrefixSizeExceedsDataSize(_) => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
+            TxIngressError::ChainIdMismatch { .. } => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
         };
     }
 

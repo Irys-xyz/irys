@@ -393,6 +393,170 @@ async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
     Ok(())
 }
 
+/// A block that includes a `data_size == 0` data tx must be rejected with `ZeroSizeDataTx`.
+/// A zero-size tx stores no data and would inject a zero-width leaf into the ledger
+/// `tx_root` tree, colliding start offsets with the next tx and breaking PoA owning-tx
+/// recovery — so consensus refuses it at the authoritative gate (`prevalidate_block`), not
+/// only at mempool ingress. End-to-end companion to the `block_validation` unit tests
+/// `first_zero_size_data_tx_flags_zero_size_txs` / `poa_owner_recovery_skips_zero_width_leaves`.
+#[tokio::test]
+async fn test_prevalidation_rejects_zero_size_data_tx() -> Result<()> {
+    use irys_types::{DataTransactionLedger, H256List, IrysTransactionCommon as _};
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // A signed, otherwise-valid Submit data tx with data_size == 0 (the honest builder
+    // never emits one, but a hand-crafted peer tx is accepted by structural validation).
+    let consensus = ctx.config.consensus_config();
+    let signer = ctx.config.signer();
+    let mut ztx = DataTransactionHeader::new(&consensus);
+    ztx.data_size = 0;
+    ztx.ledger_id = DataLedger::Submit as u32;
+    let ztx = ztx.sign(&signer)?;
+
+    // Splice it into the block's Submit ledger (tx_ids + the matching folded tx_root, so the
+    // tx_root check would pass — it's the zero-size guard that must fire) and re-sign.
+    let mut header = (**ctx.block.header()).clone();
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = H256List(vec![ztx.id()]);
+    ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&ztx));
+    ctx.config.signer().sign_block_header(&mut header)?;
+
+    // The sealed block's transactions are derived from the body, so the tx must live there too.
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![ztx.clone()];
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::ZeroSizeDataTx { ledger_id, txid }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+            assert_eq!(txid, ztx.id());
+        }
+        other => panic!("expected ZeroSizeDataTx, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// A block that includes a data tx whose committed `prefix_size` exceeds `data_size` must be
+/// rejected with `PrefixSizeExceedsDataSize`. `prefix_hash` commits to the first `prefix_size`
+/// data bytes, so `prefix_size > data_size` is a structurally impossible claim — consensus
+/// refuses it at the authoritative gate (`prevalidate_block`), not only at mempool ingress.
+/// Companion to the `block_validation` unit test `first_prefix_size_exceeds_data_size_flags_oversized_prefix`.
+#[tokio::test]
+async fn test_prevalidation_rejects_prefix_size_exceeds_data_size() -> Result<()> {
+    use irys_types::{DataTransactionLedger, H256List, IrysTransactionCommon as _};
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // A signed, otherwise-valid Submit data tx whose prefix_size (101) exceeds data_size (100).
+    // The honest builder never emits one, but a hand-crafted peer tx passes structural validation.
+    let consensus = ctx.config.consensus_config();
+    let signer = ctx.config.signer();
+    let mut ptx = DataTransactionHeader::new(&consensus);
+    ptx.data_size = 100;
+    ptx.prefix_size = 101;
+    ptx.ledger_id = DataLedger::Submit as u32;
+    let ptx = ptx.sign(&signer)?;
+
+    // Splice it into the block's Submit ledger (tx_ids + the matching folded tx_root, so the
+    // tx_root check would pass — it's the prefix_size guard that must fire) and re-sign.
+    let mut header = (**ctx.block.header()).clone();
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = H256List(vec![ptx.id()]);
+    ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&ptx));
+    ctx.config.signer().sign_block_header(&mut header)?;
+
+    // The sealed block's transactions are derived from the body, so the tx must live there too.
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![ptx.clone()];
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::PrefixSizeExceedsDataSize {
+            ledger_id,
+            txid,
+            prefix_size,
+            data_size,
+        }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+            assert_eq!(txid, ptx.id());
+            assert_eq!(prefix_size, 101);
+            assert_eq!(data_size, 100);
+        }
+        other => panic!("expected PrefixSizeExceedsDataSize, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// A block that includes a data tx carrying a foreign `chain_id` must be rejected with
+/// `DataTxChainIdMismatch`. `chain_id` is a signed field, so a tx signed for another chain
+/// must not be admitted into a block on this one — consensus refuses it at the authoritative
+/// gate (`prevalidate_block`), not only at mempool ingress.
+#[tokio::test]
+async fn test_prevalidation_rejects_data_tx_chain_id_mismatch() -> Result<()> {
+    use irys_types::{DataTransactionLedger, H256List, IrysTransactionCommon as _};
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // A signed Submit data tx whose chain_id is foreign (node chain_id + 1). sign() signs over
+    // the tx's own chain_id, so the signature is valid yet the chain_id is wrong.
+    let consensus = ctx.config.consensus_config();
+    let signer = ctx.config.signer();
+    let mut ftx = DataTransactionHeader::new(&consensus);
+    ftx.data_size = 100;
+    ftx.ledger_id = DataLedger::Submit as u32;
+    ftx.chain_id = consensus.chain_id + 1;
+    let ftx = ftx.sign(&signer)?;
+
+    // Splice it into the block's Submit ledger (tx_ids + matching folded tx_root) and re-sign.
+    let mut header = (**ctx.block.header()).clone();
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = H256List(vec![ftx.id()]);
+    ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&ftx));
+    ctx.config.signer().sign_block_header(&mut header)?;
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![ftx.clone()];
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::DataTxChainIdMismatch {
+            ledger_id,
+            txid,
+            expected,
+            actual,
+        }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+            assert_eq!(txid, ftx.id());
+            assert_eq!(expected, consensus.chain_id);
+            assert_eq!(actual, consensus.chain_id + 1);
+        }
+        other => panic!("expected DataTxChainIdMismatch, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_prevalidation_rejects_submit_targeted_tx() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;

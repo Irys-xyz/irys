@@ -1,4 +1,5 @@
 use crate::chunk_ingress_service::ChunkIngressMessage;
+use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::validate_tx_signature;
 use crate::mempool_service::{Inner, TxReadError};
@@ -29,6 +30,26 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
+        // foreign chain_id) using the same shared predicate as consensus prevalidation
+        // (`data_tx_structural_defect`), so ingress and consensus enforce identical rules.
+        // Cheap and fork-independent, so it runs before signature/anchor work.
+        if let Some(defect) = data_tx_structural_defect(tx, self.config.consensus.chain_id) {
+            return Err(match defect {
+                DataTxStructuralDefect::ZeroDataSize => TxIngressError::ZeroDataSize(tx.id),
+                DataTxStructuralDefect::PrefixSizeExceedsDataSize { .. } => {
+                    TxIngressError::PrefixSizeExceedsDataSize(tx.id)
+                }
+                DataTxStructuralDefect::ChainIdMismatch { expected, actual } => {
+                    TxIngressError::ChainIdMismatch {
+                        tx_id: tx.id,
+                        expected,
+                        actual,
+                    }
+                }
+            });
+        }
+
         // Fast-fail if this tx targets an unsupported ledger
         let ledger = DataLedger::try_from(tx.ledger_id)
             .map_err(|_| TxIngressError::InvalidLedger(tx.ledger_id))?;

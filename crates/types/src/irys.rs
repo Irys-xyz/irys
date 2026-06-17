@@ -227,6 +227,10 @@ impl IrysSigner {
             .expect("Unable to get last chunk")
             .max_byte_range as u64;
         header.data_root = data_root;
+        // Stamp the signer's chain_id so builder-produced txs target the configured chain.
+        // `DataTransactionHeader::default()` leaves chain_id = 0, and consensus/ingress now
+        // reject a foreign chain_id, so an unstamped tx would be refused on its own chain.
+        header.chain_id = self.chain_id;
 
         Ok(DataTransaction {
             header,
