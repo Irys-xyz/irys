@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781708031167,
+  "lastUpdate": 1781725874930,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6739,6 +6739,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "097e4d74e43fae8a1fb613dfa2290c0a7b6f66d2",
+          "message": "fix(vdf): limit run-ahead via reset-seed confirmation gate (#1449)\n\n* fix(vdf): gate reset boundary on confirmed chain step\n\n* refactor(vdf): drop gate_step alias, scale reset-seed test window\n\n* fix(vdf): rate-limit the reset-boundary-gate warning\n\n* chore: update gitignore to ignore symlinks\n\n* chore: add doc comment\n\n* feat(config): guard reset_frequency against the VDF confirmation-gate floor\n\nThe #1447 reset-boundary gate parks the VDF loop at a boundary until the rotation block is confirmed (block_migration_depth deep). If a reset window is too small relative to that confirmation lag, honest mining wedges at the boundary. Config::validate() now requires reset_frequency >= 2 * block_migration_depth * block_time, with a regression test; production configs satisfy it by a wide margin.\n\nAlso clarify consensus-critical VDF comments: why the fast-forward path needs no reset-boundary gate, the warning-throttle reset behavior, and the CanonicalVdfSnapshot step-ordering invariant.\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-06-17T20:36:19+01:00",
+          "tree_id": "bd21dad73348524b93a42a630acc0dc01f872908",
+          "url": "https://github.com/Irys-xyz/irys/commit/097e4d74e43fae8a1fb613dfa2290c0a7b6f66d2"
+        },
+        "date": 1781725873950,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015553,
+            "range": "± 0.000678",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154045,
+            "range": "± 0.007474",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.576179,
+            "range": "± 0.083679",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.486623,
+            "range": "± 0.41433",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.08219,
+            "range": "± 0.003335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 823.712562,
+            "range": "± 13.681516",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1026.766441,
+            "range": "± 36.927159",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147643,
+            "range": "± 0.010243",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1264.041077,
+            "range": "± 42.334602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.119145,
+            "range": "± 184.199182",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.032874,
+            "range": "± 0.000849",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.858571,
+            "range": "± 1.0046",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.354245,
+            "range": "± 1.53378",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
