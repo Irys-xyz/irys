@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781700853558,
+  "lastUpdate": 1781708031167,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6631,6 +6631,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "16475bdb5c3520e086a97b2cda992796c139b9ae",
+          "message": "feat(consensus): add prefix_hash to data tx and fold into ledger tx_root (#1450)\n\n* feat(consensus): add prefix_hash to data tx and fold into ledger tx_root\n\nAdds a signed per-tx `prefix_hash` and folds `hash_all_sha256([data_root,\nprefix_hash])` into each tx_root leaf, so an indexer holding only the\nblock-signature-sealed tx_root can trust every tx's prefix_hash without\nverifying individual tx signatures. Softfork (no block-header change;\nempty ledgers still fold to H256::zero()).\n\n- rename header_size -> prefix_size; add prefix_hash: H256\n- block validation recomputes tx_root and rejects TxRootMismatch\n- PoA data-ledger branch recovers the owning tx's data_root (the folded\n  leaf no longer yields it) and binds it via the fold\n- storage retrieval recovers data_root from a new submodule binding\n  table (tx_path_hash -> {data_root, prefix_hash}), verified by the fold\n\n* test: cover prefix_hash fold, signing, and tx_root mismatch\n\n- block.rs: fold load-bearing, compute_tx_root == merklize root,\n  indexer reconstruction, and fold == hash_all_sha256 (gateway-compat guard)\n- signature.rs: prefix_size/prefix_hash are covered by the tx signature\n- chain-tests: a block whose tx_root doesn't match its txs is rejected\n  with TxRootMismatch\n\n* fix(consensus): classify missing-ledger PoA lookup as node fault; clarify prefix field semantics\n\n- load_owning_tx_for_poa: a missing ledger in the owning block's header is a\n  local index/header inconsistency (bounds resolution already matched it), not a\n  bad block. Surface it as BlockBoundsLookupError (NodeFault) via ok_or_else\n  instead of unwrap_or_default falling through to the consensus-reject\n  PoAChunkOffsetOutOfTxBounds.\n- Note on prefix_size/prefix_hash that the network does NOT validate them against\n  the transaction data; they are signed and committed into tx_root so an off-chain\n  indexer holding the data can validate them. Align the fold_tx_root_leaf doc.\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-06-17T07:35:01-07:00",
+          "tree_id": "f1c0a8d78d20610fc3510407d759a344497defb4",
+          "url": "https://github.com/Irys-xyz/irys/commit/16475bdb5c3520e086a97b2cda992796c139b9ae"
+        },
+        "date": 1781708029958,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012598,
+            "range": "± 0.000294",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126328,
+            "range": "± 0.007179",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.2629,
+            "range": "± 0.021598",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.38424,
+            "range": "± 0.381848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078795,
+            "range": "± 0.000663",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 800.134998,
+            "range": "± 22.607153",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1027.742702,
+            "range": "± 28.394931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.122147,
+            "range": "± 0.004616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1269.321286,
+            "range": "± 114.708103",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1564.990483,
+            "range": "± 25.22997",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035051,
+            "range": "± 0.001088",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.75348,
+            "range": "± 2.139003",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.284299,
+            "range": "± 0.23358",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
