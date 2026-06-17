@@ -15,8 +15,9 @@ use irys_types::{
     Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig, DataTransaction, H256,
     IrysAddress, IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
     PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
-    StorageSyncConfig, TxChunkOffset, UnpackedChunk, irys::IrysSigner, ledger_chunk_offset_ie,
-    partition::PartitionAssignment, partition_chunk_offset_ie,
+    StorageSyncConfig, TxChunkOffset, UnixTimestamp, UnpackedChunk, hardfork_config::Cascade,
+    irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
+    partition_chunk_offset_ie,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -951,7 +952,24 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
         "precondition: mock genesis must not contain a OneYear ledger entry"
     );
 
-    let block_tree = BlockTree::new(&fake_genesis, config.consensus.clone());
+    // Configure Cascade so it activates strictly *after* the genesis timestamp.
+    // The genesis block then genuinely predates activation, so its missing
+    // OneYear ledger is an expected pre-activation gap — the realistic case
+    // (not merely "Cascade unconfigured").
+    let pre_activation_consensus = {
+        let mut consensus = config.consensus.clone();
+        consensus.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(
+                fake_genesis.timestamp_secs().as_secs() + 1_000_000,
+            ),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        consensus
+    };
+
+    let block_tree = BlockTree::new(&fake_genesis, pre_activation_consensus);
     let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
     let (service_senders, _receivers) = irys_actors::test_helpers::build_test_service_senders();
@@ -970,6 +988,8 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     );
 
     // Before the fix this panics: "should be able to look up data_ledger by id".
+    // With Cascade configured but not yet active, the absent OneYear ledger is an
+    // expected pre-activation gap, so the orchestrator degrades to None.
     assert_eq!(orchestrator.get_max_chunk_offset(), None);
 
     // Same scenario through the second lookup site: a block height whose header
@@ -985,7 +1005,6 @@ async fn term_ledger_orchestrator_handles_block_without_ledger_entry() {
     // validation would reject), both lookup sites must surface the anomaly in the
     // logs but still degrade to None rather than aborting. Reuse the same mock
     // genesis — which carries no OneYear entry — under a Cascade-active config.
-    use irys_types::{UnixTimestamp, hardfork_config::Cascade};
     let cascade = Cascade {
         activation_timestamp: UnixTimestamp::from_secs(1),
         one_year_epoch_length: 365,

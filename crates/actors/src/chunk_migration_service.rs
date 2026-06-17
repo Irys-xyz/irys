@@ -337,11 +337,18 @@ fn get_block_offsets_in_ledger(
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
     let start_chunk_offset = if block.height > 0 {
-        // We subtract 1 from `total_chunks` to get the offsets
-        block_index
-            .get_item(block.height - 1)
-            .map(|prev| prev.ledgers[ledger].total_chunks)
-            .unwrap_or(0)
+        // We subtract 1 from `total_chunks` to get the offsets.
+        // The previous block may legitimately lack this ledger entirely — e.g.
+        // a Cascade term ledger (OneYear/ThirtyDay) whose first block sits right
+        // after the prior block's epoch predates activation. Treat a missing
+        // entry as zero chunks (the ledger started at this block) instead of
+        // indexing into it, which would panic.
+        block_index.get_item(block.height - 1).map_or(0, |prev| {
+            prev.ledgers
+                .iter()
+                .find(|item| item.ledger == ledger)
+                .map_or(0, |item| item.total_chunks)
+        })
     } else {
         0
     };

@@ -7,13 +7,14 @@ use crate::{
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
 use irys_types::{
     IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset, SendTraced as _,
+    hardfork_config::DataLedgerLookup,
 };
 use std::{
     collections::{HashMap, HashSet, hash_map},
     sync::{Arc, RwLock},
     time::Instant,
 };
-use tracing::{Instrument as _, debug, error};
+use tracing::{Instrument as _, debug, warn};
 
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
@@ -266,21 +267,18 @@ impl ChunkOrchestrator {
 
                 let block = most_recent_migrated_block.header();
 
-                let data_ledger = block
-                    .data_ledgers
-                    .iter()
-                    .find(|dl| dl.ledger_id == self.ledger_id);
-
-                match data_ledger {
+                match tree
+                    .consensus_config()
+                    .hardforks
+                    .classify_data_ledger(block, self.ledger_id)
+                {
+                    DataLedgerLookup::Present(dl) if dl.total_chunks == 0 => None,
+                    DataLedgerLookup::Present(dl) => Some(dl.total_chunks.saturating_sub(1)),
                     // A migrated block that predates this ledger's activation
                     // (e.g. a pre-Cascade block for the OneYear/ThirtyDay term
                     // ledgers) legitimately has no entry for it — nothing to
                     // sync for this ledger yet.
-                    None if tree
-                        .consensus_config()
-                        .hardforks
-                        .ledger_absence_expected(self.ledger_id, block.timestamp_secs()) =>
-                    {
+                    DataLedgerLookup::ExpectedAbsent => {
                         debug!(
                             ledger_id = self.ledger_id,
                             block_height = block.height,
@@ -288,20 +286,17 @@ impl ChunkOrchestrator {
                         );
                         None
                     }
-                    // Consensus requires a block to carry the full ledger set
-                    // for its activation state, so a missing entry here is an
-                    // invariant violation. Surface it loudly instead of masking
-                    // it — but still return None rather than aborting the task.
-                    None => {
-                        error!(
+                    // The block's shape is validated upstream, so this should be
+                    // unreachable; surface it (defense-in-depth) but still degrade
+                    // to None rather than aborting the task.
+                    DataLedgerLookup::UnexpectedAbsent => {
+                        warn!(
                             ledger_id = self.ledger_id,
                             block_height = block.height,
-                            "data ledger missing from migrated block where consensus requires it; nothing to sync"
+                            "data ledger missing from migrated block where consensus expects it; nothing to sync"
                         );
                         None
                     }
-                    Some(dl) if dl.total_chunks == 0 => None,
-                    Some(dl) => Some(dl.total_chunks.saturating_sub(1)),
                 }
             } else {
                 None
