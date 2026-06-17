@@ -1,7 +1,7 @@
 //! Configurable hardfork parameters.
 
 use crate::{
-    UnixTimestamp, VersionDiscriminant,
+    DataLedger, DataTransactionLedger, IrysBlockHeader, UnixTimestamp, VersionDiscriminant,
     serialization::unix_timestamp_string_serde,
     storage_pricing::{
         Amount,
@@ -125,6 +125,24 @@ impl Cascade {
     }
 }
 
+/// Result of looking up a data ledger in a block header via
+/// [`IrysHardforkConfig::classify_data_ledger`].
+///
+/// A block in the block tree has already passed validation
+/// (`extract_data_ledgers`), which requires it to carry exactly the ledger set
+/// its epoch activation state allows. So [`Self::UnexpectedAbsent`] is not
+/// reachable for validated blocks and exists only as defense in depth.
+#[derive(Debug)]
+pub enum DataLedgerLookup<'a> {
+    /// The ledger is present in the block.
+    Present(&'a DataTransactionLedger),
+    /// The ledger is legitimately absent — a Cascade term ledger
+    /// (OneYear/ThirtyDay) on a block whose epoch predates Cascade activation.
+    ExpectedAbsent,
+    /// The ledger is absent where consensus normally requires it.
+    UnexpectedAbsent,
+}
+
 impl IrysHardforkConfig {
     /// Check if the NextNameTBD hardfork is active at a given timestamp (in seconds).
     pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
@@ -163,6 +181,73 @@ impl IrysHardforkConfig {
         self.aurora
             .as_ref()
             .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Get the Cascade hardfork config if it is active at the given timestamp
+    /// (in seconds). Raw timestamp check — epoch alignment is the caller's
+    /// concern (pass an epoch block's timestamp for epoch-aligned semantics).
+    #[must_use]
+    pub fn cascade_at(&self, timestamp: UnixTimestamp) -> Option<&Cascade> {
+        self.cascade
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Check if the Cascade hardfork is active at the given timestamp (in seconds).
+    #[must_use]
+    pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
+        self.cascade_at(timestamp).is_some()
+    }
+
+    /// Check if the Borealis hardfork is active at the given timestamp (in seconds).
+    #[must_use]
+    pub fn is_borealis_active_at(&self, timestamp: UnixTimestamp) -> bool {
+        self.borealis
+            .as_ref()
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Whether a data ledger may legitimately be absent from a block.
+    ///
+    /// Only the Cascade term ledgers (OneYear/ThirtyDay) qualify, and only before
+    /// Cascade activates. This uses the block's own `timestamp` as a proxy,
+    /// whereas the authoritative ledger-set check (`extract_data_ledgers`) is
+    /// epoch-aligned (`is_cascade_active_for_epoch`). In the window between
+    /// Cascade's activation timestamp and the next epoch boundary the two can
+    /// disagree, so callers treat an "unexpected" absence as a warning — the
+    /// block's shape is already validated upstream — and degrade gracefully
+    /// rather than aborting.
+    #[must_use]
+    pub fn ledger_absence_expected(&self, ledger_id: u32, timestamp: UnixTimestamp) -> bool {
+        matches!(
+            DataLedger::try_from(ledger_id),
+            Ok(DataLedger::OneYear | DataLedger::ThirtyDay)
+        ) && !self.is_cascade_active_at(timestamp)
+    }
+
+    /// Look up `ledger_id` in `block`, classifying a missing entry as either an
+    /// expected pre-activation gap or an invariant violation. This is the single
+    /// source of truth shared by the data-sync orchestrator and the block-tree
+    /// guard, so the "expected vs unexpected" predicate cannot drift between the
+    /// two layers — the kind of cross-layer drift that caused the 2026-06-11
+    /// genesis incident.
+    #[must_use]
+    pub fn classify_data_ledger<'a>(
+        &self,
+        block: &'a IrysBlockHeader,
+        ledger_id: u32,
+    ) -> DataLedgerLookup<'a> {
+        match block
+            .data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == ledger_id)
+        {
+            Some(dl) => DataLedgerLookup::Present(dl),
+            None if self.ledger_absence_expected(ledger_id, block.timestamp_secs()) => {
+                DataLedgerLookup::ExpectedAbsent
+            }
+            None => DataLedgerLookup::UnexpectedAbsent,
+        }
     }
 
     /// Check if a commitment transaction version is valid at a given timestamp.
@@ -255,6 +340,165 @@ mod tests {
         // After activation timestamp
         let aurora = config.aurora_at(UnixTimestamp::from_secs(1501));
         assert_eq!(aurora, config.aurora.as_ref());
+    }
+
+    #[test]
+    fn test_cascade_at() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+        };
+
+        // Before activation timestamp
+        assert!(config.cascade_at(UnixTimestamp::from_secs(1499)).is_none());
+        assert!(!config.is_cascade_active_at(UnixTimestamp::from_secs(1499)));
+
+        // At activation timestamp
+        assert_eq!(
+            config.cascade_at(UnixTimestamp::from_secs(1500)),
+            config.cascade.as_ref()
+        );
+        assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1500)));
+
+        // After activation timestamp
+        assert_eq!(
+            config.cascade_at(UnixTimestamp::from_secs(1501)),
+            config.cascade.as_ref()
+        );
+        assert!(config.is_cascade_active_at(UnixTimestamp::from_secs(1501)));
+
+        // No cascade configured
+        let no_cascade = IrysHardforkConfig {
+            cascade: None,
+            ..config
+        };
+        assert!(
+            no_cascade
+                .cascade_at(UnixTimestamp::from_secs(2000))
+                .is_none()
+        );
+        assert!(!no_cascade.is_cascade_active_at(UnixTimestamp::from_secs(2000)));
+    }
+
+    #[test]
+    fn test_ledger_absence_expected() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+        };
+
+        let before = UnixTimestamp::from_secs(1499);
+        let at = UnixTimestamp::from_secs(1500);
+
+        // Cascade term ledgers may be legitimately absent only before activation.
+        assert!(config.ledger_absence_expected(DataLedger::OneYear as u32, before));
+        assert!(config.ledger_absence_expected(DataLedger::ThirtyDay as u32, before));
+        assert!(!config.ledger_absence_expected(DataLedger::OneYear as u32, at));
+        assert!(!config.ledger_absence_expected(DataLedger::ThirtyDay as u32, at));
+
+        // Publish/Submit are never Cascade-gated: their absence is never expected.
+        assert!(!config.ledger_absence_expected(DataLedger::Publish as u32, before));
+        assert!(!config.ledger_absence_expected(DataLedger::Submit as u32, before));
+
+        // With Cascade unconfigured the term ledgers never exist, so their
+        // absence is always expected (never an invariant violation).
+        let no_cascade = IrysHardforkConfig {
+            cascade: None,
+            ..config
+        };
+        assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
+        assert!(!no_cascade.ledger_absence_expected(DataLedger::Publish as u32, at));
+    }
+
+    #[test]
+    fn test_classify_data_ledger() {
+        // Mock header carries Publish + Submit only (no term ledgers).
+        let block = IrysBlockHeader::new_mock_header();
+        let genesis_secs = block.timestamp_secs().as_secs();
+
+        let make = |activation_secs: u64| IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+        };
+
+        // Cascade active at the block's timestamp.
+        let active = make(1);
+        assert!(matches!(
+            active.classify_data_ledger(&block, DataLedger::Publish as u32),
+            DataLedgerLookup::Present(_)
+        ));
+        // Term ledger missing while Cascade is active → invariant violation.
+        assert!(matches!(
+            active.classify_data_ledger(&block, DataLedger::OneYear as u32),
+            DataLedgerLookup::UnexpectedAbsent
+        ));
+
+        // Cascade configured but not yet active at the block's timestamp →
+        // a missing term ledger is an expected pre-activation gap.
+        let pre_activation = make(genesis_secs + 1_000_000);
+        assert!(matches!(
+            pre_activation.classify_data_ledger(&block, DataLedger::OneYear as u32),
+            DataLedgerLookup::ExpectedAbsent
+        ));
+    }
+
+    #[test]
+    fn test_is_borealis_active_at() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: Some(Borealis {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+            }),
+            cascade: None,
+        };
+
+        assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
+        assert!(config.is_borealis_active_at(UnixTimestamp::from_secs(1500)));
+        assert!(config.is_borealis_active_at(UnixTimestamp::from_secs(1501)));
+
+        let no_borealis = IrysHardforkConfig {
+            borealis: None,
+            ..config
+        };
+        assert!(!no_borealis.is_borealis_active_at(UnixTimestamp::from_secs(2000)));
     }
 
     #[test]

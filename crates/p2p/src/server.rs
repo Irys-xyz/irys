@@ -32,14 +32,14 @@ use reth::builder::Block as _;
 use reth_ethereum_primitives::Block;
 use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, debug, error, info, warn};
 use tracing_actix_web::TracingLogger;
 
-/// Default deduplication window in milliseconds for data requests
-/// Prevents rapid duplicate requests within this time window
-const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
+/// Default deduplication window for data requests.
+/// Prevents rapid duplicate requests within this time window.
+const DEFAULT_DUPLICATE_REQUEST_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub struct GossipServer<M, B>
@@ -1652,7 +1652,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_WINDOW)
             .in_current_span()
             .await
         {
@@ -1748,7 +1748,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data(&peer, v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
+            .handle_get_data(&peer, v2_request, DEFAULT_DUPLICATE_REQUEST_WINDOW)
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
@@ -1785,7 +1785,7 @@ where
 
         match server
             .data_handler
-            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
+            .handle_get_data_sync(v2_request, DEFAULT_DUPLICATE_REQUEST_WINDOW)
             .in_current_span()
             .await
         {

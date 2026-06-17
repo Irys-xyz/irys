@@ -1,24 +1,15 @@
 use dashmap::DashMap;
 use irys_types::IrysPeerId;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{debug, trace};
 
 // Constants for rate limiting configuration
-const WINDOW_DURATION_MS: u128 = 60_000; // 1 minute in milliseconds
+const WINDOW_DURATION: Duration = Duration::from_secs(60); // 1 minute window
 const MAX_SCORE_PER_MINUTE: u32 = 5; // Max score points per minute
 const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per minute
-const CLEANUP_INTERVAL_SECS: u64 = 60; // Cleanup every minute
-const ENTRY_EXPIRY_MS: u128 = 120_000; // 2 minutes in milliseconds
-
-/// Get current time as milliseconds since Unix epoch
-fn now_as_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60); // Cleanup every minute
+const ENTRY_EXPIRY: Duration = Duration::from_secs(120); // 2 minutes
 
 /// Result of checking a data request for rate limiting and scoring
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,47 +37,44 @@ impl RequestCheckResult {
 /// Record of data requests from a peer
 #[derive(Debug, Clone)]
 pub struct DataRequestRecord {
-    /// Timestamp when the tracking window started (Unix timestamp in milliseconds)
-    pub window_start: u128,
+    /// When the tracking window started (monotonic clock).
+    pub window_start: Instant,
     /// Total number of requests in current window
     pub request_count: u32,
     /// Score points given in current window
     pub score_given: u32,
     /// Last request timestamp for deduplication
-    pub last_request: u128,
-    /// Consider a duplicate if within (milliseconds)
-    pub duplicate_request_milliseconds: u128,
+    pub last_request: Instant,
+    /// Consider a duplicate if within this duration
+    pub duplicate_request_window: Duration,
 }
 
 impl DataRequestRecord {
-    pub fn new(duplicate_request_milliseconds: u128) -> Self {
-        let now = now_as_millis();
+    pub fn new(duplicate_request_window: Duration) -> Self {
+        let now = Instant::now();
 
         Self {
             window_start: now,
             request_count: 1,
             score_given: 0,
             last_request: now,
-            duplicate_request_milliseconds,
+            duplicate_request_window,
         }
     }
 
     /// Check if the tracking window has expired
     pub fn is_window_expired(&self) -> bool {
-        let now = now_as_millis();
-        now.saturating_sub(self.window_start) > WINDOW_DURATION_MS
+        self.window_start.elapsed() > WINDOW_DURATION
     }
 
     /// Check if enough time has passed since last request (deduplication window)
     pub fn is_duplicate_request(&self) -> bool {
-        let now = now_as_millis();
-        // Consider duplicate if within the configured milliseconds
-        now.saturating_sub(self.last_request) < self.duplicate_request_milliseconds
+        self.last_request.elapsed() < self.duplicate_request_window
     }
 
     /// Reset for new tracking window
     pub fn reset_window(&mut self) {
-        let now = now_as_millis();
+        let now = Instant::now();
 
         self.window_start = now;
         self.request_count = 1;
@@ -96,10 +84,8 @@ impl DataRequestRecord {
 
     /// Update for new request
     pub fn update_request(&mut self) {
-        let now = now_as_millis();
-
         self.request_count += 1;
-        self.last_request = now;
+        self.last_request = Instant::now();
     }
 }
 
@@ -114,20 +100,18 @@ pub struct DataRequestTracker {
     max_requests_per_minute: u32,
     /// Interval for cleaning up old entries
     cleanup_interval: Duration,
-    /// Last cleanup timestamp (Unix timestamp in milliseconds, truncated from u128)
-    last_cleanup: Arc<AtomicU64>,
+    /// Last cleanup time (monotonic)
+    last_cleanup: Arc<Mutex<Instant>>,
 }
 
 impl DataRequestTracker {
     pub fn new() -> Self {
-        let now = now_as_millis();
-
         Self {
             request_history: Arc::new(DashMap::new()),
             max_score_per_minute: MAX_SCORE_PER_MINUTE,
             max_requests_per_minute: MAX_REQUESTS_PER_MINUTE,
-            cleanup_interval: Duration::from_secs(CLEANUP_INTERVAL_SECS),
-            last_cleanup: Arc::new(AtomicU64::new(now as u64)),
+            cleanup_interval: CLEANUP_INTERVAL,
+            last_cleanup: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -135,7 +119,7 @@ impl DataRequestTracker {
     pub fn check_request(
         &self,
         peer_id: &IrysPeerId,
-        duplicate_request_milliseconds: u128,
+        duplicate_request_window: Duration,
     ) -> RequestCheckResult {
         // Perform cleanup if needed
         self.cleanup_if_needed();
@@ -144,7 +128,7 @@ impl DataRequestTracker {
         let mut entry = self
             .request_history
             .entry(*peer_id)
-            .or_insert_with(|| DataRequestRecord::new(duplicate_request_milliseconds));
+            .or_insert_with(|| DataRequestRecord::new(duplicate_request_window));
 
         // If this is the first request ever for this peer, allow score update immediately
         let is_first_request = entry.request_count == 1 && entry.score_given == 0;
@@ -221,16 +205,13 @@ impl DataRequestTracker {
 
     /// Cleanup expired entries to prevent memory growth
     fn cleanup_expired_entries(&self) {
-        let now = now_as_millis();
-
         let _before = self.request_history.len();
         let mut removed_count = 0;
 
         // Collect keys to remove (can't remove while iterating)
         let mut keys_to_remove = Vec::new();
         for entry in self.request_history.iter() {
-            let age = now.saturating_sub(entry.window_start);
-            if age > ENTRY_EXPIRY_MS {
+            if entry.window_start.elapsed() > ENTRY_EXPIRY {
                 keys_to_remove.push(*entry.key());
             }
         }
@@ -250,25 +231,14 @@ impl DataRequestTracker {
 
     /// Check if cleanup is needed and perform it
     fn cleanup_if_needed(&self) {
-        let now = now_as_millis();
-
-        let last_cleanup = self.last_cleanup.load(Ordering::Relaxed) as u128;
-        let cleanup_interval_ms = self.cleanup_interval.as_millis();
-
-        if now.saturating_sub(last_cleanup) > cleanup_interval_ms {
-            // Use compare_exchange to ensure only one thread does cleanup
-            if self
-                .last_cleanup
-                .compare_exchange(
-                    last_cleanup as u64,
-                    now as u64,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                self.cleanup_expired_entries();
-            }
+        let now = Instant::now();
+        let Ok(mut last) = self.last_cleanup.lock() else {
+            return;
+        };
+        if now.saturating_duration_since(*last) > self.cleanup_interval {
+            *last = now;
+            drop(last);
+            self.cleanup_expired_entries();
         }
     }
 }
@@ -285,7 +255,7 @@ mod tests {
     use irys_types::{IrysAddress, IrysPeerId};
     use rstest::rstest;
 
-    const TEST_DEDUP_WINDOW_MS: u128 = 10_000;
+    const TEST_DEDUP_WINDOW: Duration = Duration::from_millis(10_000);
     const TEST_SLEEP_MS: u64 = 11_000;
     #[tokio::test]
     async fn slow_test_data_request_tracker_score_limiting() {
@@ -296,7 +266,7 @@ mod tests {
         for i in 1..=5 {
             // Wait a bit to avoid deduplication window
             tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-            let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+            let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
             assert!(result.should_serve(), "Should serve data for request {}", i);
             if i == 1 {
                 // First request always updates score
@@ -315,7 +285,7 @@ mod tests {
 
         // Nth request should not update score but still serve
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             !result.should_update_score(),
             "Should not update score after cap"
@@ -337,12 +307,12 @@ mod tests {
         let peer_id = IrysPeerId::from(IrysAddress::from([2_u8; 20]));
 
         // First request
-        let result1 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result1 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(result1.should_update_score());
         assert!(result1.should_serve());
 
         // Immediate second request should be deduplicated
-        let result2 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result2 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             !result2.should_update_score(),
             "Should not update score for duplicate"
@@ -354,7 +324,7 @@ mod tests {
 
         // After deduplication window, should allow score update
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result3 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
+        let result3 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW);
         assert!(
             result3.should_update_score(),
             "Should update score after dedup window"
@@ -364,13 +334,15 @@ mod tests {
 
     #[test]
     fn test_data_request_record_expiry() {
-        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW);
 
         // Fresh record should not be expired
         assert!(!record.is_window_expired());
 
-        // Simulate old record
-        record.window_start = now_as_millis().saturating_sub(WINDOW_DURATION_MS + 10_000); // Over 1 minute ago
+        // Simulate old record (back-date past the window)
+        record.window_start = Instant::now()
+            .checked_sub(WINDOW_DURATION + Duration::from_secs(10))
+            .expect("monotonic clock must be at least WINDOW_DURATION+10s past zero in tests");
 
         assert!(record.is_window_expired());
 
@@ -385,8 +357,11 @@ mod tests {
         let peer_id = IrysPeerId::from(IrysAddress::from([4_u8; 20]));
 
         // Simulate the race / backward-clock case: an entry whose window_start is
-        // slightly ahead of the wall clock that cleanup will read.
-        let future = now_as_millis() + 5_000;
+        // slightly ahead of the "now" cleanup reads. Monotonic Instant math must
+        // saturate to elapsed 0, never panic or evict a fresh entry.
+        let future = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("instant + 5s must not overflow");
         tracker.request_history.insert(
             peer_id,
             DataRequestRecord {
@@ -394,7 +369,7 @@ mod tests {
                 request_count: 1,
                 score_given: 0,
                 last_request: future,
-                duplicate_request_milliseconds: 0,
+                duplicate_request_window: Duration::ZERO,
             },
         );
 
@@ -407,8 +382,10 @@ mod tests {
 
     #[test]
     fn record_checks_do_not_panic_when_timestamps_are_in_the_future() {
-        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW_MS);
-        let future = now_as_millis() + 5_000;
+        let mut record = DataRequestRecord::new(TEST_DEDUP_WINDOW);
+        let future = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("instant + 5s must not overflow");
         record.window_start = future;
         record.last_request = future;
 
@@ -419,8 +396,13 @@ mod tests {
     #[test]
     fn cleanup_if_needed_does_not_panic_when_last_cleanup_is_in_the_future() {
         let tracker = DataRequestTracker::new();
-        let future = (now_as_millis() + 5_000) as u64;
-        tracker.last_cleanup.store(future, Ordering::Relaxed);
+        let future = Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .expect("instant + 5s must not overflow");
+        *tracker
+            .last_cleanup
+            .lock()
+            .expect("last_cleanup mutex poisoned") = future;
 
         tracker.cleanup_if_needed();
     }
@@ -436,9 +418,9 @@ mod tests {
         let tracker = DataRequestTracker::new();
         let peer_id = IrysPeerId::from(IrysAddress::from([3_u8; 20]));
 
-        let mut last_result = tracker.check_request(&peer_id, 0);
+        let mut last_result = tracker.check_request(&peer_id, Duration::ZERO);
         for _ in 1..total_requests {
-            last_result = tracker.check_request(&peer_id, 0);
+            last_result = tracker.check_request(&peer_id, Duration::ZERO);
         }
 
         assert_eq!(

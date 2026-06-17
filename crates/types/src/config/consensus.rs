@@ -546,9 +546,7 @@ impl ConsensusConfig {
         &self,
         timestamp: UnixTimestamp,
     ) -> Amount<(CostPerGb, Usd)> {
-        if let Some(cascade) = self.hardforks.cascade.as_ref()
-            && timestamp >= cascade.activation_timestamp
-        {
+        if let Some(cascade) = self.hardforks.cascade_at(timestamp) {
             return cascade.annual_cost_per_gb;
         }
         self.annual_cost_per_gb

@@ -103,6 +103,45 @@ fn test_config() -> Config {
     Config::new_with_random_peer_id(node_config)
 }
 
+fn test_config_with_cascade(activation_secs: u64) -> Config {
+    use irys_types::{UnixTimestamp, hardfork_config::Cascade};
+    let node_config = NodeConfig::testing().with_consensus(|c| {
+        // Ensure deterministic timestamp — testing() defaults to 0 which means "use now()"
+        if c.genesis.timestamp_millis == 0 {
+            c.genesis.timestamp_millis = 1_700_000_000_000;
+        }
+        c.genesis.initial_packed_partitions = Some(5.0);
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+    Config::new_with_random_peer_id(node_config)
+}
+
+/// Regression for the devnet cascade-from-genesis incident: a positive
+/// activation timestamp at or before the resolved genesis timestamp
+/// (1_700_000_000 s) must produce a genesis header with all four data ledgers
+/// (>= comparison, matching the epoch-layer predicate); a later activation
+/// leaves the two pre-Cascade ledgers. Before the fix, only a literal zero
+/// activation timestamp produced four.
+#[rstest::rstest]
+#[case::before_genesis(1_600_000_000, 4)]
+#[case::at_exact_genesis_timestamp(1_700_000_000, 4)]
+#[case::after_genesis(1_800_000_000, 2)]
+#[tokio::test]
+async fn cascade_activation_genesis_ledger_count(
+    #[case] activation_secs: u64,
+    #[case] expected_ledgers: usize,
+) {
+    let config = test_config_with_cascade(activation_secs);
+    let miners = test_miners();
+    let output = build_signed_genesis_block(&config, &miners).await.unwrap();
+    assert_eq!(output.block.data_ledgers.len(), expected_ledgers);
+}
+
 fn test_miners() -> Vec<GenesisMinerEntry> {
     let key_a = SigningKey::from_slice(&hex::decode(KEY_A).unwrap()).unwrap();
     let key_b = SigningKey::from_slice(&hex::decode(KEY_B).unwrap()).unwrap();

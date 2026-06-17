@@ -100,6 +100,8 @@ HTTP-based gossip protocol. Routes: `/gossip/block`, `/gossip/tx`, `/gossip/chun
 
 When refactoring or simplifying code, preserve existing comments that explain *why* something is done or map code to external concepts (CLI flags, config fields, protocol steps, etc.). Only remove comments that are genuinely redundant or stale.
 
+For guidance on choosing between monotonic (`Instant`) and wall-clock (`SystemTime` / `UnixTimestamp`) time when writing or reviewing timing code, see the `monotonic-time` skill.
+
 ## Git Conventions
 
 Never add "Co-Authored-By" lines to commit messages.

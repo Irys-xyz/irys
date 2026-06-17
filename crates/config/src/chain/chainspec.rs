@@ -1,10 +1,16 @@
 use alloy_primitives::B256;
 use irys_types::{
     DataLedger, DataTransactionLedger, GenesisConfig, H256, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, hardfork_config::Cascade, partition::PartitionHash,
+    IrysBlockHeaderV1, IrysSignature, PoaData, U256, UnixTimestampMs, VDFLimiterInfo,
+    hardfork_config::Cascade, partition::PartitionHash,
 };
 
+/// Builds the unsigned genesis block header.
+///
+/// `cascade` must be `Some` only when the Cascade hardfork is active at the
+/// genesis timestamp — callers filter via `IrysHardforkConfig::cascade_at`.
+/// When present, the OneYear and ThirtyDay term ledgers are included in the
+/// genesis header.
 pub fn build_unsigned_irys_genesis_block(
     config: &GenesisConfig,
     evm_block_hash: B256,
@@ -38,9 +44,10 @@ pub fn build_unsigned_irys_genesis_block(
             required_proof_count: None,
         },
     ];
-    // Only include OneYear/ThirtyDay ledgers if Cascade activates at genesis (timestamp 0)
-    if let Some(cascade) = cascade.filter(|c| c.activation_timestamp == UnixTimestamp::from_secs(0))
-    {
+    // Include OneYear/ThirtyDay ledgers when Cascade is active at genesis.
+    // The caller passes the cascade config only in that case (filtered via
+    // IrysHardforkConfig::cascade_at against the resolved genesis timestamp).
+    if let Some(cascade) = cascade {
         data_ledgers.push(DataTransactionLedger {
             ledger_id: DataLedger::OneYear.into(),
             tx_root: H256::zero(),
@@ -108,7 +115,7 @@ pub fn build_unsigned_irys_genesis_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{Amount, Decimal, IrysAddress};
+    use irys_types::{Amount, Decimal, IrysAddress, UnixTimestamp};
     use proptest::prelude::*;
 
     fn test_genesis_config() -> GenesisConfig {
@@ -179,9 +186,11 @@ mod tests {
     }
 
     #[test]
-    fn test_genesis_block_with_cascade_at_genesis_has_four_ledgers() {
+    fn test_genesis_block_with_active_cascade_has_four_ledgers() {
+        // The activation timestamp no longer gates the builder — the caller
+        // passes the cascade config only when it is active at genesis.
         let cascade = Cascade {
-            activation_timestamp: UnixTimestamp::from_secs(0),
+            activation_timestamp: UnixTimestamp::from_secs(1000),
             one_year_epoch_length: 365,
             thirty_day_epoch_length: 30,
             annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
@@ -201,20 +210,6 @@ mod tests {
         assert_eq!(block.data_ledgers[3].expires, Some(30));
         assert!(block.data_ledgers[2].proofs.is_none());
         assert!(block.data_ledgers[3].required_proof_count.is_none());
-    }
-
-    #[test]
-    fn test_genesis_block_with_cascade_not_at_genesis_has_two_ledgers() {
-        let cascade = Cascade {
-            activation_timestamp: UnixTimestamp::from_secs(1000),
-            one_year_epoch_length: 365,
-            thirty_day_epoch_length: 30,
-            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-        };
-        let block =
-            build_unsigned_irys_genesis_block(&genesis_config(), B256::ZERO, 2, Some(&cascade))
-                .unwrap();
-        assert_eq!(block.data_ledgers.len(), 2);
     }
 
     #[test]
