@@ -38,6 +38,7 @@ use irys_types::{
     SystemTransactionLedger, TokioServiceHandle, Traced, U256, UnixTimestamp, UnixTimestampMs,
     VDFLimiterInfo, app_state::DatabaseProvider, block_production::SolutionContext,
     calculate_difficulty, next_cumulative_diff, storage_pricing::Amount,
+    u256_from_le_bytes as hash_to_number,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -119,6 +120,12 @@ pub enum InvalidReason {
     VdfTooOld {
         parent_vdf_step: u64,
         solution_vdf_step: u64,
+    },
+    /// Solution hash no longer clears the new parent's difficulty (e.g. the tip
+    /// advanced onto a difficulty-adjustment block that raised `diff`).
+    BelowDifficulty {
+        parent_diff: U256,
+        solution_diff: U256,
     },
 }
 
@@ -513,11 +520,10 @@ pub trait BlockProdStrategy {
             return ParentCheckResult::ParentStillBest;
         }
 
-        // Parent changed - get new parent's VDF step
-        let new_parent_vdf_step = tree
-            .get_block(&current_best)
-            .map(|b| b.vdf_limiter_info.global_step_number)
-            .unwrap_or(0);
+        // Parent changed - inspect the new parent's VDF step and difficulty.
+        let new_parent_block = tree.get_block(&current_best);
+        let new_parent_vdf_step =
+            new_parent_block.map_or(0, |b| b.vdf_limiter_info.global_step_number);
 
         // Check if solution is too old (at or before new parent's VDF step)
         if solution.vdf_step <= new_parent_vdf_step {
@@ -528,6 +534,23 @@ pub trait BlockProdStrategy {
                     solution_vdf_step: solution.vdf_step,
                 },
             };
+        }
+
+        // Check the solution still clears the new parent's difficulty. When the tip
+        // advances onto a difficulty-adjustment block that raised `diff`, a solution
+        // mined against the lower target no longer qualifies — discard it instead of
+        // rebuilding into a block that can only fail its own pre-validation.
+        if let Some(new_parent_block) = new_parent_block {
+            let solution_diff = hash_to_number(&solution.solution_hash.0);
+            if solution_diff < new_parent_block.diff {
+                return ParentCheckResult::SolutionInvalid {
+                    new_parent: current_best,
+                    reason: InvalidReason::BelowDifficulty {
+                        parent_diff: new_parent_block.diff,
+                        solution_diff,
+                    },
+                };
+            }
         }
 
         // Parent changed but solution is valid - must rebuild on new parent
@@ -555,6 +578,25 @@ pub trait BlockProdStrategy {
                 "Skipping solution for old step number {}, previous block step number {} for block {}",
                 solution.vdf_step,
                 prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
+
+        // Reject solutions that don't clear the parent's difficulty before building.
+        // A miner targets its own (possibly stale) difficulty, so a solution can clear
+        // that target yet fall below the canonical parent's `diff`; the same can happen
+        // on a rebuild against a higher-difficulty parent. Without this gate the block is
+        // built and only rejected at terminal pre-validation (`SolutionHashBelowDifficulty`),
+        // whose failure panics the producer service. Discard early and re-mine,
+        // mirroring `solution_hash_is_valid` exactly: valid iff `solution_diff >= diff`.
+        let solution_diff = hash_to_number(&solution.solution_hash.0);
+        if solution_diff < prev_block_header.diff {
+            warn!(
+                "Skipping solution {} below parent difficulty (got {}, need >= {}) for block {}",
+                solution.solution_hash,
+                solution_diff,
+                prev_block_header.diff,
                 prev_block_header.block_hash
             );
             return Ok(None);
@@ -798,6 +840,19 @@ pub trait BlockProdStrategy {
                                 "Solution is too old for new parent (vdf_step {} <= {}), discarding",
                                 solution_vdf_step,
                                 parent_vdf_step
+                            );
+                        }
+                        InvalidReason::BelowDifficulty {
+                            parent_diff,
+                            solution_diff,
+                        } => {
+                            warn!(
+                                solution.hash = %solution.solution_hash,
+                                solution.vdf_step = solution.vdf_step,
+                                block.new_parent = %new_parent,
+                                "Solution below new parent difficulty (got {} < {}), discarding",
+                                solution_diff,
+                                parent_diff
                             );
                         }
                     }
