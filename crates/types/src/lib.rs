@@ -6,6 +6,7 @@ pub mod app_state;
 pub mod arbiter_handle;
 pub mod block;
 pub mod block_production;
+pub mod block_stream;
 pub mod chainspec;
 pub mod chunk;
 pub mod chunked;
