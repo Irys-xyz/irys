@@ -181,7 +181,10 @@ pub async fn submit_data_tx(
         tx.header.metadata_format = 1;
     }
     if !tx_build.keep_default.iter().any(|f| f == "prefix_size") {
-        tx.header.prefix_size = 64;
+        // Clamp to data_size: consensus rejects prefix_size > data_size
+        // (prefix_hash commits to the first prefix_size data bytes), and the
+        // test payloads here are all smaller than this 64-byte sentinel.
+        tx.header.prefix_size = data_size.min(64);
     }
     let tx = signer
         .sign_transaction(tx)
