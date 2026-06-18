@@ -103,16 +103,17 @@ fn validate_supply_invariants(
         "Total supply should equal genesis + emitted"
     );
 
-    let expected_genesis: U256 = ctx
-        .node_ctx
-        .config
-        .consensus
-        .reth
-        .alloc
-        .values()
-        .fold(U256::zero(), |acc, account| {
-            acc + U256::from_le_bytes(account.balance.to_le_bytes())
-        });
+    let expected_genesis: U256 =
+        ctx.node_ctx
+            .config
+            .consensus
+            .reth
+            .alloc()
+            .map_or(U256::zero(), |alloc| {
+                alloc.values().fold(U256::zero(), |acc, account| {
+                    acc + U256::from_le_bytes(account.balance.to_le_bytes())
+                })
+            });
     eyre::ensure!(
         amounts.genesis == expected_genesis,
         "Genesis supply should match config"

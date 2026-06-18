@@ -1094,7 +1094,7 @@ mod tests {
         };
         config
             .reth
-            .alloc
+            .alloc_mut()
             .insert(genesis_signer.address().into(), genesis_account);
 
         // Fixed private key for the peer handshake (different from genesis)

@@ -15,8 +15,8 @@ use std::time::Duration;
 use tokio::time::{Instant, sleep};
 
 /// Pre-funded test signing key. Its address (`0x64f1a282…`) is in
-/// `consensus.Custom.reth.alloc` for both OLD and NEW testing configs, so we
-/// can pay the term + perm fees on every test cluster without setup.
+/// `consensus.Custom.reth.genesis_evm_state.alloc` for both OLD and NEW testing
+/// configs, so we can pay the term + perm fees on every test cluster without setup.
 pub const DEV_PRIVATE_KEY_HEX: &str =
     "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
 

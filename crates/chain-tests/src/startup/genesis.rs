@@ -73,9 +73,10 @@ async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
     // wipe the reth folder
     remove_dir_all(reth_data_dir)?;
 
-    // init genesis with the saved state
-    // this function has existing checks to make sure the state_root is correct
-    // between the captured state and the actual computed state root
+    // init genesis with the saved state. init-state derives the genesis state root
+    // from the dump itself, so it succeeds without anything pinned in config — `cs`
+    // here is the running node's alloc-based spec. Pinning the dumped state root via
+    // `consensus.reth.genesis_evm_state` is a boot-time config concern, not init-state's.
     init_state(config, cs.clone(), dump_path, reth::tasks::Runtime::test()).await?;
 
     Ok(())

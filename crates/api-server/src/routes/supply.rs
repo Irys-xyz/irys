@@ -69,13 +69,11 @@ fn calculate_supply(state: &ApiState) -> Result<SupplyResponse> {
 
     let config = &state.config.consensus;
 
-    let genesis_supply: U256 = config
-        .reth
-        .alloc
-        .values()
-        .fold(U256::zero(), |acc, account| {
+    let genesis_supply: U256 = config.reth.alloc().map_or(U256::zero(), |alloc| {
+        alloc.values().fold(U256::zero(), |acc, account| {
             acc + U256::from_le_bytes(account.balance.to_le_bytes())
-        });
+        })
+    });
 
     // Use actual supply if available, otherwise fall back to estimated
     let (emitted_amount, calculation_method) = if let Some(supply_state) = &state.supply_state {
