@@ -8,8 +8,9 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
-    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
-    IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
+    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems,
+    IrysBlockStreamEvents, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata,
+    MigratedBlockHashes, PeerListItems,
 };
 
 use crate::db::IrysDatabaseExt as _;
@@ -1275,6 +1276,54 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     }
 }
 
+/// Appends a block-stream event to the durable log, assigning and returning the next monotonic
+/// `seq`.
+///
+/// The block-stream producer is the sole writer, so reading the last key and incrementing within
+/// the same write transaction is race-free. `seq` keys sort numerically because reth encodes
+/// integer DB keys big-endian (the same property the block-index range scans rely on).
+pub fn append_block_stream_event<T: DbTx + DbTxMut>(tx: &T, value: Vec<u8>) -> eyre::Result<u64> {
+    let next_seq = {
+        let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
+        cursor.last()?.map_or(0, |(seq, _)| seq + 1)
+    };
+    tx.put::<IrysBlockStreamEvents>(next_seq, value)?;
+    Ok(next_seq)
+}
+
+/// Reads block-stream events with `seq >= from_seq`, ascending — the replay suffix served on
+/// `subscribe(from_seq)`.
+pub fn read_block_stream_from<T: DbTx>(tx: &T, from_seq: u64) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+    let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
+    let mut events = Vec::new();
+    for entry in cursor.walk(Some(from_seq))? {
+        events.push(entry?);
+    }
+    Ok(events)
+}
+
+/// Returns the highest `seq` in the block-stream log, or `None` if empty. Lets the producer rebuild
+/// its in-memory de-dup state from just the log tail on startup, without reading the whole log.
+pub fn block_stream_latest_seq<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
+    let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
+    Ok(cursor.last()?.map(|(seq, _)| seq))
+}
+
+/// Prunes block-stream events with `seq < keep_from_seq` — count-based retention, deleting the
+/// oldest beyond the configured window.
+pub fn prune_block_stream_below<T: DbTxMut>(tx: &T, keep_from_seq: u64) -> eyre::Result<()> {
+    if keep_from_seq == 0 {
+        return Ok(());
+    }
+    let mut cursor = tx.cursor_write::<IrysBlockStreamEvents>()?;
+    let mut range_walker = cursor.walk_range(0..keep_from_seq)?;
+    while let Some(result) = range_walker.next() {
+        result?;
+        range_walker.delete_current()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -1291,6 +1340,59 @@ mod tests {
         tx_header_by_txid,
     };
     use reth_db::mdbx::DatabaseArguments;
+
+    #[test]
+    fn block_stream_log_append_read_prune() -> eyre::Result<()> {
+        use super::{append_block_stream_event, prune_block_stream_below, read_block_stream_from};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.update_eyre(|tx| append_block_stream_event(tx, b"a".to_vec()))?,
+            0
+        );
+        assert_eq!(
+            db.update_eyre(|tx| append_block_stream_event(tx, b"b".to_vec()))?,
+            1
+        );
+        assert_eq!(
+            db.update_eyre(|tx| append_block_stream_event(tx, b"c".to_vec()))?,
+            2
+        );
+
+        let suffix = db.view_eyre(|tx| read_block_stream_from(tx, 1))?;
+        assert_eq!(suffix, vec![(1, b"b".to_vec()), (2, b"c".to_vec())]);
+
+        // Cross the 0xFF byte boundary to prove numeric (big-endian) key ordering.
+        for _ in 0..260 {
+            db.update_eyre(|tx| append_block_stream_event(tx, b"x".to_vec()))?;
+        }
+        let seqs: Vec<u64> = db
+            .view_eyre(|tx| read_block_stream_from(tx, 0))?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "seq must sort numerically across the byte boundary"
+        );
+        assert_eq!(seqs.last().copied(), Some(262)); // 3 + 260 events ⇒ last seq 262
+
+        db.update_eyre(|tx| prune_block_stream_below(tx, 260))?;
+        let kept: Vec<u64> = db
+            .view_eyre(|tx| read_block_stream_from(tx, 0))?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(kept, vec![260, 261, 262]);
+        Ok(())
+    }
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {

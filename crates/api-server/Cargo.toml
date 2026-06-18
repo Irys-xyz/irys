@@ -20,6 +20,7 @@ socket2.workspace = true
 base58.workspace = true
 hex.workspace = true
 tokio.workspace = true
+tokio-stream = "0.1"
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
 actix-web.workspace = true

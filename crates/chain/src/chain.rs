@@ -108,6 +108,9 @@ pub struct IrysNodeCtx {
     pub mempool_guard: MempoolReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
+    /// Shared handle to the block-stream producer; cloned into [`ApiState`] so the `/internal`
+    /// SSE handlers can call `subscribe(from_seq)`.
+    pub block_stream_handle: Arc<irys_actors::block_stream_service::BlockStreamHandle>,
     pub partition_controllers: Vec<PartitionMiningController>,
     pub packing_waiter: irys_actors::packing_service::PackingIdleWaiter,
     // Shutdown channel — send a ShutdownReason to trigger graceful shutdown of the lifecycle task
@@ -162,6 +165,7 @@ impl IrysNodeCtx {
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
             block_tree_lifecycle: self.block_tree_lifecycle.clone(),
+            block_stream: self.block_stream_handle.clone(),
         }
     }
 
@@ -1686,6 +1690,16 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
+        // Start the block-stream producer: consumes the `block_stream` signal feed and exposes the
+        // shared handle the `/internal` SSE handlers call `subscribe(from_seq)` on.
+        let (block_stream_service_handle, block_stream_handle) =
+            irys_actors::block_stream_service::BlockStreamService::spawn_service(
+                receivers.block_stream,
+                irys_db.clone(),
+                config.consensus.chunk_size,
+                runtime_handle.clone(),
+            );
+
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
         if let Err(e) =
@@ -2011,6 +2025,7 @@ impl IrysNode {
             vdf_steps_guard: vdf_state_readonly,
             mempool_guard: mempool_guard.clone(),
             service_senders: service_senders.clone(),
+            block_stream_handle,
             partition_controllers,
             packing_waiter: packing_handle.waiter(),
             shutdown_sender: tokio::sync::mpsc::channel::<ShutdownReason>(1).0,
@@ -2096,6 +2111,7 @@ impl IrysNode {
 
             // 6. Chain management
             services.push(block_tree_handle);
+            services.push(block_stream_service_handle);
 
             // 7. State management
             services.push(mempool_handle);
@@ -2129,6 +2145,7 @@ impl IrysNode {
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
                 block_tree_lifecycle: irys_node_ctx.block_tree_lifecycle.clone(),
+                block_stream: irys_node_ctx.block_stream_handle.clone(),
             },
             http_listener,
         );

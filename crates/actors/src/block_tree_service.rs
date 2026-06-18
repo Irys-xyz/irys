@@ -169,6 +169,26 @@ pub struct ReorgEvent {
     pub db: Option<DatabaseProvider>,
 }
 
+/// A per-block signal fed to the block-stream producer over a dedicated unbounded channel.
+///
+/// Emitted from the node's authoritative sites — the `blocks_to_confirm` loop (`observed`), the
+/// reorg construction (`reorged`), and the per-block migration loop (`finalized`) — each carrying
+/// the `Arc<SealedBlock>` already in hand. Unbounded so it cannot drop under backpressure; the
+/// producer turns these into durable, fanned-out `StreamFrame`s.
+#[derive(Debug, Clone)]
+pub enum BlockStreamSignal {
+    /// A block reached canonical confirmation ⇒ `observed`.
+    Confirmed(Arc<SealedBlock>),
+    /// A block migrated to the index ⇒ `finalized`.
+    Finalized(Arc<SealedBlock>),
+    /// A reorg occurred ⇒ one batched `reorged` frame.
+    Reorged {
+        fork_parent: Arc<IrysBlockHeader>,
+        old_fork: Arc<Vec<Arc<SealedBlock>>>,
+        new_fork: Arc<Vec<Arc<SealedBlock>>>,
+    },
+}
+
 /// Event broadcast when a block's state changes in the block tree.
 #[derive(Debug, Clone)]
 pub struct BlockStateUpdated {
@@ -550,7 +570,15 @@ impl BlockTreeServiceInner {
 
     /// Migrates finalized blocks into the block index and DB via `BlockMigrationService`.
     fn migrate_block(&mut self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        self.block_migration_service.migrate_blocks(block)
+        let migrated = self.block_migration_service.migrate_blocks(block)?;
+        // One `finalized` signal per migrated block — a single migrate call migrates a batch.
+        for sealed in &migrated {
+            let _ = self
+                .service_senders
+                .block_stream
+                .send(BlockStreamSignal::Finalized(Arc::clone(sealed)));
+        }
+        Ok(())
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -1210,6 +1238,16 @@ impl BlockTreeServiceInner {
             // Deep reorg may poison VDF seeds; re-anchor before reorg fans out.
             self.maybe_reanchor_vdf_after_reorg(&arc_block, &reorg_event);
 
+            // Feed the block-stream producer one batched `reorged` signal (cheap Arc clones of the
+            // forks already in hand) before the broadcast send consumes the event.
+            let _ = self
+                .service_senders
+                .block_stream
+                .send(BlockStreamSignal::Reorged {
+                    fork_parent: Arc::clone(&reorg_event.fork_parent),
+                    old_fork: Arc::clone(&reorg_event.old_fork),
+                    new_fork: Arc::clone(&reorg_event.new_fork),
+                });
             if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
                 error!(
                     "Failed to broadcast reorg event - mempool state may be stale: {:?}",
@@ -1252,6 +1290,12 @@ impl BlockTreeServiceInner {
             // — block confirmation itself is still valid, the mempool just
             // won't be informed of this particular block.
             for sealed_block in &blocks_to_confirm {
+                // Feed the block-stream producer one `observed` signal per confirmed block — the
+                // authoritative per-block confirmation set (includes ancestors on a fork switch).
+                let _ = self
+                    .service_senders
+                    .block_stream
+                    .send(BlockStreamSignal::Confirmed(Arc::clone(sealed_block)));
                 if let Err(e) =
                     self.service_senders
                         .mempool

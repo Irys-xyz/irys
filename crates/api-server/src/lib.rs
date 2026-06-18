@@ -65,6 +65,9 @@ pub struct ApiState {
     /// Shared with `BlockTreeService` so `/v1/tip` reads the same in-process
     /// canonical-advance / reorg timestamps the OTEL gauges record.
     pub block_tree_lifecycle: Arc<BlockTreeLifecycleTimestamps>,
+    /// Shared handle to the block-stream producer; the `/internal` SSE handlers call
+    /// `subscribe(from_seq)` on it.
+    pub block_stream: Arc<irys_actors::block_stream_service::BlockStreamHandle>,
 }
 
 impl ApiState {
@@ -228,6 +231,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             // not a permanent redirect, so we can redirect to the highest API version
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
+            .service(routes::internal::internal_routes())
             .wrap(Cors::permissive())
             .wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
