@@ -92,6 +92,19 @@ where
     let mut accounts_saved = 0;
     let log_batch = 100;
 
+    // peer 2, 3, 4, 5, 6, 7, 8, 9, 10
+    let peer_addresses = [
+        "0x81c23e4bde4c7086400cdcbca2dfe9a96dbd0fad",
+        "0x12268eae1d5a3607bfa6e0c7f5fd1407f03e3bd7",
+        "0x2a506815924e0db0b9e226f4aa362c0e3f6944a4",
+        "0x5f9e44ec965f44a5bd941b620b409206d21ce176",
+        "0x94cb7dec3942722cf1f9cf9d4e0fb95c2d235aad",
+        "0x50ff82c6aa8ccddae1674b1f936f3b171d49761f",
+        "0x11901031b594465477fd7408e0a5d3c6a6d89ff8",
+        "0x60267208d1fa09d2b392fbb2e0ce60dfcc195312",
+        "0x577b412bc03804496a1f787280c66dcd82873375",
+    ];
+
     while let Some((address, account)) = walker.next().transpose()? {
         // bytecode
         let bytecode = account
@@ -110,7 +123,12 @@ where
 
         let genesis_account = GenesisAccount {
             nonce: Some(account.nonce),
-            balance: account.balance,
+            balance: if peer_addresses.contains(&address.to_string().to_lowercase().as_str()) {
+                // give the peers 10mil
+                alloy_primitives::U256::from(10_000_000_u128 * 1000000000000000000_u128)
+            } else {
+                account.balance
+            },
             code: bytecode,
             storage: Some(storage_map),
             private_key: None,
