@@ -16,7 +16,7 @@ use reth_chainspec::{
 };
 use reth_primitives_traits::SealedHeader;
 
-use crate::config::consensus::IrysRethConfig;
+use crate::config::consensus::{GenesisEvmState, IrysRethConfig};
 use crate::hardfork_config::IrysHardforkConfig;
 
 hardfork!(
@@ -135,6 +135,14 @@ pub fn irys_chain_spec(
     // Build hardfork schedule from Irys hardfork config
     let chain_hardforks = IrysChainHardforks::new(hardforks);
 
+    // Genesis EVM state is specified either inline (`alloc`) or by a pinned
+    // state root (loaded out-of-band via `init-state`). These are mutually
+    // exclusive by construction (see `GenesisEvmState`).
+    let (alloc, pinned_state_root) = match &reth_config.genesis_evm_state {
+        GenesisEvmState::Alloc(alloc) => (alloc.clone(), None),
+        GenesisEvmState::StateRoot(root) => (Default::default(), Some(*root)),
+    };
+
     // Construct Genesis internally with sensible defaults
     // All Ethereum hardfork fields default to None (we manage hardforks separately)
     let genesis = Genesis {
@@ -144,7 +152,7 @@ pub fn irys_chain_spec(
             ..Default::default()
         },
         gas_limit: reth_config.gas_limit,
-        alloc: reth_config.alloc.clone(),
+        alloc,
         timestamp,
         nonce: 0,
         difficulty: U256::ZERO,
@@ -159,7 +167,13 @@ pub fn irys_chain_spec(
         parent_hash: None,
     };
 
-    let genesis_header = make_genesis_header(&genesis, &chain_hardforks.inner);
+    let mut genesis_header = make_genesis_header(&genesis, &chain_hardforks.inner);
+    // When the genesis state is supplied out-of-band via `init-state`, the dumped
+    // state root is pinned here so that init-state, the genesis node, and peers
+    // all reconstruct the identical genesis header (and thus genesis block hash).
+    if let Some(state_root) = pinned_state_root {
+        genesis_header.state_root = state_root;
+    }
     let header_hash = genesis_header.hash_slow();
 
     let chainspec = ChainSpec {
@@ -177,4 +191,56 @@ pub fn irys_chain_spec(
     };
 
     Ok(Arc::new(chainspec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::irys_chain_spec;
+    use crate::config::consensus::{ConsensusConfig, GenesisEvmState, IrysRethConfig};
+    use alloy_primitives::B256;
+    use std::collections::BTreeMap;
+
+    /// A pinned `GenesisEvmState::StateRoot` (e.g. an `init-state` dump root)
+    /// must be reflected in the genesis header so a booting node reconstructs
+    /// the same genesis block that `init-state` wrote — instead of re-deriving
+    /// the root from an inline `alloc`.
+    #[test]
+    fn pinned_genesis_state_root_overrides_header_root() {
+        let consensus = ConsensusConfig::testing();
+        let hardforks = consensus.hardforks.clone();
+        let gas_limit = consensus.reth.gas_limit;
+
+        // Baseline: empty inline alloc -> empty-state-trie genesis root.
+        let inline = IrysRethConfig {
+            gas_limit,
+            genesis_evm_state: GenesisEvmState::Alloc(BTreeMap::new()),
+        };
+        let inline_spec = irys_chain_spec(1, &inline, &hardforks, 0).unwrap();
+
+        // Pin a state root that differs from the empty-trie root.
+        let pinned = B256::repeat_byte(0xAB);
+        let pinned_cfg = IrysRethConfig {
+            gas_limit,
+            genesis_evm_state: GenesisEvmState::StateRoot(pinned),
+        };
+        let pinned_spec = irys_chain_spec(1, &pinned_cfg, &hardforks, 0).unwrap();
+
+        assert_eq!(pinned_spec.genesis_header.state_root, pinned);
+        assert_ne!(pinned_spec.genesis_hash(), inline_spec.genesis_hash());
+    }
+
+    /// Operators configure a state-preserving reset by pinning the dumped root
+    /// in TOML, so the `StateRoot` variant must round-trip through the config.
+    #[test]
+    fn state_root_variant_toml_roundtrip() {
+        let toml = "\
+gas_limit = 30000000
+
+[genesis_evm_state]
+state_root = \"0x1111111111111111111111111111111111111111111111111111111111111111\"
+";
+        let cfg: IrysRethConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.genesis_state_root(), Some(B256::repeat_byte(0x11)));
+        assert!(cfg.alloc().is_none());
+    }
 }

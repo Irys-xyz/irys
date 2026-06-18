@@ -13,7 +13,7 @@ use crate::{UnixTimestamp, serde_utils, unix_timestamp_string_serde};
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -243,6 +243,31 @@ pub struct BlockRewardConfig {
     pub half_life_secs: u64,
 }
 
+/// Specifies the genesis EVM state.
+///
+/// `Alloc` and `StateRoot` are mutually exclusive *by construction*: a network's
+/// genesis EVM state is described **either** by an inline account allocation
+/// **or** by a pinned state root — never both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenesisEvmState {
+    /// Inline account allocations (address -> balance/code/storage). Use when
+    /// the genesis state is small enough to embed directly in config.
+    Alloc(BTreeMap<Address, GenesisAccount>),
+    /// Pinned genesis EVM state root. Use when the genesis state is loaded
+    /// out-of-band via `init-state` from a state dump (too large for `alloc`).
+    /// The dumped root must be a pinned consensus value so that every node — the
+    /// one that ran `init-state`, the genesis node, and peers — reconstructs the
+    /// identical genesis header instead of re-deriving the root from `alloc`.
+    StateRoot(B256),
+}
+
+impl Default for GenesisEvmState {
+    fn default() -> Self {
+        Self::Alloc(BTreeMap::new())
+    }
+}
+
 /// # Reth Configuration
 ///
 /// Minimal configuration needed for reth integration.
@@ -254,9 +279,10 @@ pub struct IrysRethConfig {
     #[serde(default = "default_gas_limit")]
     pub gas_limit: u64,
 
-    /// Initial account allocations (address -> balance/code/storage)
+    /// How the genesis EVM state is specified — inline `alloc` or a pinned state
+    /// root. Defaults to an empty inline allocation.
     #[serde(default)]
-    pub alloc: BTreeMap<Address, GenesisAccount>,
+    pub genesis_evm_state: GenesisEvmState,
 }
 
 fn default_gas_limit() -> u64 {
@@ -264,12 +290,43 @@ fn default_gas_limit() -> u64 {
 }
 
 impl IrysRethConfig {
+    /// The inline genesis allocation, or `None` when the genesis state is pinned
+    /// via a state root.
+    pub fn alloc(&self) -> Option<&BTreeMap<Address, GenesisAccount>> {
+        match &self.genesis_evm_state {
+            GenesisEvmState::Alloc(alloc) => Some(alloc),
+            GenesisEvmState::StateRoot(_) => None,
+        }
+    }
+
+    /// The pinned genesis EVM state root, or `None` when the genesis state is
+    /// specified inline via `alloc`.
+    pub fn genesis_state_root(&self) -> Option<B256> {
+        match &self.genesis_evm_state {
+            GenesisEvmState::StateRoot(root) => Some(*root),
+            GenesisEvmState::Alloc(_) => None,
+        }
+    }
+
+    /// Mutable access to the inline genesis allocation.
+    ///
+    /// Panics if the genesis state is pinned via a state root, since inline
+    /// allocations and a pinned state root are mutually exclusive.
+    pub fn alloc_mut(&mut self) -> &mut BTreeMap<Address, GenesisAccount> {
+        match &mut self.genesis_evm_state {
+            GenesisEvmState::Alloc(alloc) => alloc,
+            GenesisEvmState::StateRoot(_) => {
+                panic!("cannot mutate `alloc`: genesis state is pinned via a state root")
+            }
+        }
+    }
+
     /// Extend the genesis allocations with additional accounts
     pub fn extend_accounts(
         &mut self,
         accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
     ) {
-        self.alloc.extend(accounts);
+        self.alloc_mut().extend(accounts);
     }
 }
 
@@ -613,7 +670,7 @@ impl ConsensusConfig {
             // Reth config
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                alloc: {
+                genesis_evm_state: GenesisEvmState::Alloc({
                     let mut map = BTreeMap::new();
                     map.insert(
                         Address::from_slice(
@@ -629,7 +686,7 @@ impl ConsensusConfig {
                         },
                     );
                     map
-                },
+                }),
             },
             genesis: GenesisConfig {
                 // The timestamp in milliseconds used for the genesis block
@@ -829,7 +886,7 @@ impl ConsensusConfig {
             },
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                alloc: {
+                genesis_evm_state: GenesisEvmState::Alloc({
                     let mut map = BTreeMap::new();
                     map.insert(
                         Address::from_slice(
@@ -854,7 +911,7 @@ impl ConsensusConfig {
                         },
                     );
                     map
-                },
+                }),
             },
             block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
@@ -967,7 +1024,7 @@ impl ConsensusConfig {
             },
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                alloc: BTreeMap::new(),
+                genesis_evm_state: GenesisEvmState::Alloc(BTreeMap::new()),
             },
             block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
