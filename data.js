@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781736401322,
+  "lastUpdate": 1781798402141,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -6955,6 +6955,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1190cb816aee659d18f5bdcf1ad1f0d935a3854e",
+          "message": "fix(multiversion-tests): clamp data tx prefix_size to data_size (#1454)\n\nThe harness forced `prefix_size = 64` on every submitted data tx to\nexercise a non-default Compact encoding. After #1451 added the consensus\nrule rejecting `prefix_size > data_size`, every test payload (all < 64\nbytes) was rejected at `/v1/tx` with \"has prefix_size greater than\ndata_size\", failing all 8 multiversion tests deterministically.\n\nClamp the sentinel to `data_size.min(64)` so it respects the invariant\nwhile staying non-default (payloads are >= 38 bytes), keeping the\nround-trip check meaningful.",
+          "timestamp": "2026-06-18T16:43:53+01:00",
+          "tree_id": "a821cb6a35f7c512b741835891aebc41f06b6d7b",
+          "url": "https://github.com/Irys-xyz/irys/commit/1190cb816aee659d18f5bdcf1ad1f0d935a3854e"
+        },
+        "date": 1781798400035,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015204,
+            "range": "± 0.000304",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155396,
+            "range": "± 0.005214",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.582692,
+            "range": "± 0.197607",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.380534,
+            "range": "± 0.711808",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.084155,
+            "range": "± 0.002763",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 790.681416,
+            "range": "± 42.018573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1004.366894,
+            "range": "± 17.170075",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121314,
+            "range": "± 0.003196",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1238.376826,
+            "range": "± 81.369799",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1566.937696,
+            "range": "± 16.985094",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034274,
+            "range": "± 0.00123",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.126963,
+            "range": "± 2.124663",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.721846,
+            "range": "± 1.133249",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000121,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
