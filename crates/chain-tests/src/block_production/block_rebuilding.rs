@@ -8,9 +8,13 @@
 //! Test scenarios covered:
 //! 1. VDF too old - solution's VDF step is not greater than parent's VDF step
 //! 2. Valid solution reuse - parent changes but solution remains valid
+//! 3. Below difficulty - solution hash does not clear the parent's difficulty
 
-use irys_actors::{BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait};
-use irys_types::{NodeConfig, block_production::SolutionContext};
+use irys_actors::{
+    BlockProdStrategy, BlockProducerInner, InvalidReason, ParentCheckResult, ProductionStrategy,
+    async_trait,
+};
+use irys_types::{H256, NodeConfig, U256, block_production::SolutionContext};
 use std::sync::Arc;
 use tokio::sync::{Mutex, oneshot};
 use tracing::info;
@@ -166,6 +170,151 @@ async fn heavy_solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Cleanup
     node1.stop().await;
     node2.stop().await;
+    Ok(())
+}
+
+/// Test that solutions below the parent's difficulty are discarded during
+/// production rather than built and shipped to pre-validation.
+///
+/// A miner can surface a solution that clears its own difficulty target but
+/// falls below the canonical parent's `diff` (e.g. the miner's target lags the
+/// tip, or a higher-difficulty parent became canonical mid-production). Without
+/// the producer-side gate, such a solution is built into a block and only
+/// rejected at terminal pre-validation (`SolutionHashBelowDifficulty`), whose
+/// error panics the block producer service. The gate must discard it early
+/// (`Ok(None)`), so it is never built.
+#[test_log::test(tokio::test)]
+async fn heavy_solution_discarded_below_difficulty() -> eyre::Result<()> {
+    // Setup
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
+
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Mine a couple of blocks so we have a stable parent and an advancing VDF.
+    for _ in 0..2 {
+        let block = node.mine_block().await?;
+        node.wait_for_block_at_height(block.height, 10).await?;
+    }
+
+    // The parent the producer will build on, and its difficulty.
+    let prev_block = {
+        let read = node.node_ctx.block_tree_guard.read();
+        let parent_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&parent_hash)
+            .cloned()
+            .expect("parent block present in block tree")
+    };
+    assert!(
+        prev_block.diff > U256::zero(),
+        "test premise requires a non-zero parent difficulty"
+    );
+
+    // Start from a real, otherwise-valid solution. Retry until its VDF step is
+    // strictly greater than the parent's, so the VDF-too-old gate cannot be the
+    // reason for a discard — otherwise this test would pass without exercising
+    // the difficulty gate at all.
+    let mut solution = solution_context(&node.node_ctx).await?;
+    let mut attempts = 0;
+    while solution.vdf_step <= prev_block.vdf_limiter_info.global_step_number {
+        attempts += 1;
+        assert!(
+            attempts < 30,
+            "VDF did not advance past parent step {} after {} attempts",
+            prev_block.vdf_limiter_info.global_step_number,
+            attempts
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        solution = solution_context(&node.node_ctx).await?;
+    }
+
+    // Force the solution hash just below the parent difficulty. Crafting
+    // `diff - 1` in little-endian (the same interpretation the validator uses
+    // via `hash_to_number`/`u256_from_le_bytes`) guarantees
+    // `hash_to_number(solution_hash) < parent.diff` while every other field
+    // stays genuine.
+    let below_difficulty = prev_block.diff - U256::one();
+    solution.solution_hash = H256(below_difficulty.to_le_bytes());
+
+    let strategy = ProductionStrategy {
+        inner: node.node_ctx.block_producer_inner.clone(),
+    };
+
+    // Must be discarded, not built. Without the gate this returns `Err`
+    // (terminal pre-validation failure), which the service turns into a panic.
+    let result = strategy.fully_produce_new_block(solution).await?;
+    assert!(
+        result.is_none(),
+        "a sub-difficulty solution must be discarded (Ok(None)), not built"
+    );
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Directly exercises the parent-change rebuild guard: a solution that was valid
+/// for the parent it was built on, but whose hash no longer clears a
+/// *higher-difficulty* tip that became canonical mid-production. The guard must
+/// report `SolutionInvalid { BelowDifficulty }` (so the candidate loop discards
+/// it) rather than `MustRebuild` it into a block that can only fail its own
+/// pre-validation.
+#[test_log::test(tokio::test)]
+async fn heavy_rebuild_guard_rejects_below_difficulty_parent() -> eyre::Result<()> {
+    // Setup
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = 32;
+    config.consensus.get_mut().epoch.num_blocks_in_epoch = 4;
+
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Mine so the tip has a real parent (height 2 on parent height 1).
+    for _ in 0..2 {
+        let block = node.mine_block().await?;
+        node.wait_for_block_at_height(block.height, 10).await?;
+    }
+
+    // The current canonical tip plays the role of the higher-difficulty parent
+    // that became canonical while a block was being produced on its parent.
+    let tip = {
+        let read = node.node_ctx.block_tree_guard.read();
+        let tip_hash = read.get_max_cumulative_difficulty_block().1;
+        read.get_block(&tip_hash)
+            .cloned()
+            .expect("tip block present in block tree")
+    };
+    assert!(tip.diff > U256::one(), "test premise requires tip diff > 1");
+
+    // A solution the producer was building on the tip's parent: still ahead on
+    // VDF (so the VDF-too-old branch cannot be the reason), but with a hash that
+    // falls below the tip's difficulty.
+    let mut solution = solution_context(&node.node_ctx).await?;
+    solution.vdf_step = tip.vdf_limiter_info.global_step_number + 1;
+    solution.solution_hash = H256((tip.diff - U256::one()).to_le_bytes());
+
+    let strategy = ProductionStrategy {
+        inner: node.node_ctx.block_producer_inner.clone(),
+    };
+
+    // Evaluate against the tip's parent, so the guard sees the tip as a *changed*,
+    // higher-difficulty parent.
+    let result = strategy
+        .check_parent_and_solution_validity(&tip.previous_block_hash, &solution)
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            ParentCheckResult::SolutionInvalid {
+                reason: InvalidReason::BelowDifficulty { .. },
+                ..
+            }
+        ),
+        "expected SolutionInvalid::BelowDifficulty for a higher-difficulty new parent, got {:?}",
+        result
+    );
+
+    node.stop().await;
     Ok(())
 }
 
