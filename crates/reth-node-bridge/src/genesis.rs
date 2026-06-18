@@ -9,7 +9,7 @@ use std::{
     fs::File,
     io::{BufRead as _, BufReader},
     ops::Deref as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -26,12 +26,28 @@ pub async fn init_state(
     state_path: PathBuf,
     runtime: reth::tasks::Runtime,
 ) -> eyre::Result<()> {
+    // Refuse to re-initialize over an existing reth database: reth will not overwrite
+    // an existing genesis, so a stale datadir silently keeps the old genesis and the
+    // mismatch only surfaces at boot ("genesis hash in storage does not match the
+    // specified chainspec"). Fail fast with actionable guidance instead.
+    let reth_data_dir = config.reth_data_dir();
+    eyre::ensure!(
+        !reth_db_is_initialized(&reth_data_dir),
+        "reth data directory `{}` already contains an initialized database; init-state will not \
+         overwrite its genesis, so a stale genesis would surface as a genesis-hash mismatch at \
+         boot. Wipe it first (e.g. `rm -rf {}`) and re-run init-state.",
+        reth_data_dir.display(),
+        reth_data_dir.display(),
+    );
+
     // read the expected state root from the file
     let state_dump = File::open(&state_path)?;
     let mut reader = BufReader::new(state_dump);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
+    // init-state derives the genesis state root from the dump itself; pinning it for
+    // boot is a config concern (`consensus.reth.genesis_evm_state`), not init-state's.
     let expected_state_root = serde_json::from_str::<StateRoot>(&line)?.root;
 
     let mut cmd = InitStateCommand::<EthereumChainSpecParser>::parse_from([
@@ -52,4 +68,39 @@ pub async fn init_state(
     cmd.execute::<IrysEthereumNode>(runtime).await?;
 
     Ok(())
+}
+
+/// Whether `reth_data_dir` already holds an initialized reth database.
+///
+/// reth writes its mdbx environment to `<datadir>/db/mdbx.dat`; its presence means
+/// a genesis block has already been written. `init-state` will not overwrite an
+/// existing genesis, so callers must refuse to re-initialize over it (otherwise the
+/// stale genesis silently survives and only surfaces as a genesis-hash mismatch at
+/// boot).
+fn reth_db_is_initialized(reth_data_dir: &Path) -> bool {
+    reth_data_dir.join("db").join("mdbx.dat").exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reth_db_is_initialized;
+    use irys_testing_utils::utils::TempDirBuilder;
+
+    #[test]
+    fn reth_db_initialization_is_detected_by_mdbx_file() {
+        let tmp = TempDirBuilder::new().build();
+        let reth_dir = tmp.path();
+
+        // Empty datadir: not initialized.
+        assert!(!reth_db_is_initialized(reth_dir));
+
+        // `db/` exists but the mdbx env hasn't been written yet: still not initialized.
+        let db = reth_dir.join("db");
+        std::fs::create_dir_all(&db).unwrap();
+        assert!(!reth_db_is_initialized(reth_dir));
+
+        // mdbx env present: initialized.
+        std::fs::write(db.join("mdbx.dat"), b"").unwrap();
+        assert!(reth_db_is_initialized(reth_dir));
+    }
 }
