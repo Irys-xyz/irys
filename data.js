@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781798402141,
+  "lastUpdate": 1781800722154,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7063,6 +7063,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000121,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "63d0572b10b239a102ea54c0437ad2c21c59e2b0",
+          "message": "fix(block-producer): reject sub-difficulty solutions before production (#1452)\n\nA mining solution valid for the difficulty at solve-time could be rebuilt\nonto a newer, higher-difficulty canonical parent without re-checking the\nsolution against that parent's difficulty. The rebuilt block then failed its\nown pre-validation (SolutionHashBelowDifficulty), which the producer treated\nas irrecoverable and panicked the block producer service.\n\nAdd a difficulty gate to the production path, mirroring the validator's\nsolution_hash_is_valid (valid iff solution_diff >= parent.diff):\n\n- check_parent_and_solution_validity now reports a new\n  InvalidReason::BelowDifficulty when the tip advances onto a\n  higher-difficulty parent, so the candidate loop discards the solution at the\n  rebuild-decision point instead of building a doomed block.\n- produce_block_with_parent gates every production (initial and rebuild)\n  against the parent's diff, the single chokepoint before a block is built.\n\nA sub-difficulty solution is now discarded (Ok(None)) and re-mined rather than\nreaching pre-validation, so the producer never panics for this case.\n\nAdds two regression tests covering the initial-production gate and the\nparent-change rebuild guard.",
+          "timestamp": "2026-06-18T17:21:52+01:00",
+          "tree_id": "ac69348ac1fc11a8c211b58cad1bc2ffcce3a8a3",
+          "url": "https://github.com/Irys-xyz/irys/commit/63d0572b10b239a102ea54c0437ad2c21c59e2b0"
+        },
+        "date": 1781800721103,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015364,
+            "range": "± 0.000528",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.163593,
+            "range": "± 0.022856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.569192,
+            "range": "± 0.073804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.408032,
+            "range": "± 0.198169",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.084853,
+            "range": "± 0.002174",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 819.390203,
+            "range": "± 23.499653",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 991.170262,
+            "range": "± 11.851576",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.123914,
+            "range": "± 0.005573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1232.341486,
+            "range": "± 68.858425",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1537.502094,
+            "range": "± 18.416539",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033829,
+            "range": "± 0.001822",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.468541,
+            "range": "± 1.03831",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.748939,
+            "range": "± 1.575836",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
