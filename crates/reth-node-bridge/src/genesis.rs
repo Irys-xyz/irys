@@ -2,6 +2,7 @@ use clap::Parser as _;
 use irys_reth::IrysEthereumNode;
 use irys_types::NodeConfig;
 use reth::chainspec::EthereumChainSpecParser;
+use reth::primitives::SealedHeader;
 use reth_chainspec::ChainSpec;
 use reth_cli_commands::init_state::InitStateCommand;
 use std::{
@@ -58,8 +59,14 @@ pub async fn init_state(
     ]);
 
     let mut chainspec = chainspec.deref().clone();
-    // override the state root, null out the genesis allocation
-    chainspec.genesis_header.set_state_root(expected_state_root);
+    // Override the state root and null out the genesis allocation. Re-seal the
+    // header from the patched value rather than calling `set_state_root` on the
+    // already-sealed header: `set_state_root` mutates the inner header but leaves
+    // `SealedHeader`'s cached block hash stale, so reth would persist a genesis
+    // hash that disagrees with the stored header's state root.
+    let mut genesis_header = chainspec.genesis_header.clone_header();
+    genesis_header.state_root = expected_state_root;
+    chainspec.genesis_header = SealedHeader::seal_slow(genesis_header);
     chainspec.genesis.alloc = BTreeMap::new();
 
     cmd.env.chain = Arc::new(chainspec);
@@ -70,15 +77,17 @@ pub async fn init_state(
     Ok(())
 }
 
-/// Whether `reth_data_dir` already holds an initialized reth database.
+/// Whether `reth_data_dir` already holds an initialized (or partially initialized)
+/// reth database.
 ///
-/// reth writes its mdbx environment to `<datadir>/db/mdbx.dat`; its presence means
-/// a genesis block has already been written. `init-state` will not overwrite an
-/// existing genesis, so callers must refuse to re-initialize over it (otherwise the
-/// stale genesis silently survives and only surfaces as a genesis-hash mismatch at
-/// boot).
+/// reth will not overwrite an existing genesis, so callers must refuse to
+/// re-initialize over one (otherwise the stale genesis silently survives and only
+/// surfaces as a genesis-hash mismatch at boot). This mirrors reth's own emptiness
+/// check (`is_database_empty`): any entry under `<datadir>/db` counts as
+/// initialized. Checking only `mdbx.dat` would miss a partially-initialized datadir,
+/// since reth writes `db/database.version` before the mdbx environment.
 fn reth_db_is_initialized(reth_data_dir: &Path) -> bool {
-    reth_data_dir.join("db").join("mdbx.dat").exists()
+    std::fs::read_dir(reth_data_dir.join("db")).is_ok_and(|mut entries| entries.next().is_some())
 }
 
 #[cfg(test)]
@@ -87,17 +96,22 @@ mod tests {
     use irys_testing_utils::utils::TempDirBuilder;
 
     #[test]
-    fn reth_db_initialization_is_detected_by_mdbx_file() {
+    fn reth_db_initialization_is_detected_by_nonempty_db_dir() {
         let tmp = TempDirBuilder::new().build();
         let reth_dir = tmp.path();
 
         // Empty datadir: not initialized.
         assert!(!reth_db_is_initialized(reth_dir));
 
-        // `db/` exists but the mdbx env hasn't been written yet: still not initialized.
+        // `db/` exists but is empty: still not initialized.
         let db = reth_dir.join("db");
         std::fs::create_dir_all(&db).unwrap();
         assert!(!reth_db_is_initialized(reth_dir));
+
+        // reth writes `database.version` before the mdbx env; a partially
+        // initialized datadir already counts as initialized.
+        std::fs::write(db.join("database.version"), b"2").unwrap();
+        assert!(reth_db_is_initialized(reth_dir));
 
         // mdbx env present: initialized.
         std::fs::write(db.join("mdbx.dat"), b"").unwrap();
