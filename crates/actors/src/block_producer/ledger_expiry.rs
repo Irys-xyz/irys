@@ -61,7 +61,7 @@ use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, eyre};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
+use irys_database::{block_header_by_hash, canonical_submit_height, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
@@ -86,6 +86,7 @@ use std::sync::Arc;
 #[tracing::instrument(skip_all, fields(block.height = block_height, ledger.type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
     parent_epoch_snapshot: &EpochSnapshot,
+    parent_block_header: &IrysBlockHeader,
     block_height: u64,
     ledger_type: DataLedger,
     config: &Config,
@@ -138,7 +139,13 @@ pub async fn calculate_expired_ledger_fees(
     }
 
     // Step 2: Find block ranges
-    let block_range = match find_block_range(expired_slots, config, &block_index, ledger_type)? {
+    let block_range = match find_block_range(
+        expired_slots,
+        config,
+        &block_index,
+        ledger_type,
+        parent_ledger_total_chunks(parent_block_header, ledger_type),
+    )? {
         Some(br) => br,
         None => {
             // Check to see if there were no chunks uploaded to this ledger slot!
@@ -301,12 +308,9 @@ async fn collect_tx_to_miners_from_range(
 /// **expired as of `block_height`** — i.e. the txs that are (or will be at the
 /// next epoch) perm-fee-refunded and therefore must never be promoted.
 ///
-/// This is the authoritative non-promotability predicate shared by the producer
-/// filter (`tx_selector::get_publish_txs_and_proofs`) and the validator check
-/// (`block_validation`). It is derived from the *same* expired-partition →
-/// block → tx walk that `calculate_expired_ledger_fees` uses for refunds, so the
-/// "is this tx refunded?" and "may this tx be promoted?" decisions cannot
-/// diverge.
+/// It is derived from the *same* expired-partition → block → tx walk that
+/// `calculate_expired_ledger_fees` uses for refunds, so the "is this tx
+/// refunded?" and "may this tx be promoted?" decisions cannot diverge.
 ///
 /// Unlike the refund pipeline (which keys on *newly* expiring slots, acting once
 /// per slot), this keys on [`EpochSnapshot::get_all_expired_term_slot_indexes`]
@@ -317,9 +321,20 @@ async fn collect_tx_to_miners_from_range(
 /// Miners are irrelevant here (no fee attribution), so a sentinel miner is used
 /// purely to satisfy the boundary-filter's non-empty-miners requirement; the
 /// returned value is the tx-id set only.
+///
+/// # Retained as a test-only oracle
+///
+/// Production no longer materializes this whole-history set on every block — it
+/// was O(expired-partition history) per produced/validated block. The producer
+/// filter and validator check now use the per-candidate `is_submit_storage_expired`
+/// (O(candidate txs) per block). This walk is kept as the **differential-test
+/// oracle**: a tx is in this set iff `is_submit_storage_expired` returns `true`
+/// for it, and that equivalence is asserted against real chain state.
+#[cfg(any(test, feature = "test-utils"))]
 #[tracing::instrument(skip_all, fields(block.height = block_height))]
 pub async fn expired_submit_tx_ids(
     parent_epoch_snapshot: &EpochSnapshot,
+    parent_block_header: &IrysBlockHeader,
     block_height: u64,
     config: &Config,
     block_index: BlockIndex,
@@ -341,12 +356,17 @@ pub async fn expired_submit_tx_ids(
         .map(|i| (SlotIndex::new(i as u64), vec![IrysAddress::ZERO]))
         .collect();
 
-    let block_range =
-        match find_block_range(expired_slots, config, &block_index, DataLedger::Submit)? {
-            Some(br) => br,
-            // No chunks were ever uploaded into the expired slot ranges.
-            None => return Ok(std::collections::BTreeSet::new()),
-        };
+    let block_range = match find_block_range(
+        expired_slots,
+        config,
+        &block_index,
+        DataLedger::Submit,
+        parent_ledger_total_chunks(parent_block_header, DataLedger::Submit),
+    )? {
+        Some(br) => br,
+        // No chunks were ever uploaded into the expired slot ranges.
+        None => return Ok(std::collections::BTreeSet::new()),
+    };
 
     let tx_to_miners = collect_tx_to_miners_from_range(
         block_range,
@@ -360,6 +380,270 @@ pub async fn expired_submit_tx_ids(
     .await?;
 
     Ok(tx_to_miners.into_keys().collect())
+}
+
+/// NC-0042 §4b/§4c per-candidate non-promotability predicate: returns whether
+/// `txid`'s Submit-ledger storage has expired as of `block_height` (the block
+/// being produced/validated).
+///
+/// This is the O(candidate-tx) replacement for the O(expired-partition-history)
+/// `expired_submit_tx_ids` set: instead of walking every expired partition on
+/// every block, it resolves only *this* tx's Submit inclusion block and tests it
+/// against the expired chunk range.
+///
+/// ## Equivalence (differential-tested)
+///
+/// It reproduces, for a single candidate, exactly what `expired_submit_tx_ids`
+/// computes for the whole set. The expired slots are a contiguous prefix
+/// starting at slot 0 (slot `last_height` is the allocation height, monotonic in
+/// slot index), so the expired chunk range is `[0, range_end)` spanning blocks
+/// `[min_block, max_block]`. A candidate's inclusion block is then tested with
+/// the *same boundary rules* the walk applies:
+/// - block before/after that range → not expired;
+/// - an earliest or middle block of the range, or the whole range packed into a
+///   single block (`min_block == max_block`, only reachable with tiny test
+///   partitions) → expired (the walk includes every tx of those blocks);
+/// - the latest block of a multi-block range → expired iff the tx's start chunk
+///   offset is before `range_end` (the walk trims here).
+///
+/// ## Metadata dependency (vs. the metadata-free walk)
+///
+/// This resolves the tx's Submit inclusion height from local `included_height`
+/// metadata (`canonical_submit_height`), whereas the walk derives everything
+/// from canonical block contents. The dependency is sound for the candidates we
+/// check: they are unpromoted at check time (so the Publish-migration
+/// `included_height` overwrite has not happened), and the height comes from the
+/// node's own canonical chain, never the peer's block. A `None` resolution
+/// yields `false` (a tx with no canonical Submit inclusion cannot have expired
+/// Submit storage).
+#[tracing::instrument(level = "debug", skip_all, fields(tx.id = %txid, block.height = block_height))]
+pub async fn is_submit_storage_expired(
+    txid: IrysTransactionId,
+    block_height: u64,
+    parent_epoch_snapshot: &EpochSnapshot,
+    parent_block_header: &IrysBlockHeader,
+    config: &Config,
+    block_index: &BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<bool> {
+    let Some(range) = expired_submit_range(
+        block_height,
+        parent_epoch_snapshot,
+        parent_block_header,
+        config,
+        block_index,
+    )?
+    else {
+        return Ok(false);
+    };
+    submit_tx_expired(
+        txid,
+        None,
+        &range,
+        config,
+        block_index,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await
+}
+
+/// Block-level inputs for the §4b/§4c Submit-expiry check, computed **once per
+/// block** and reused across every publish candidate via [`submit_tx_expired`].
+///
+/// Scanning the expired-slot set and the two `block_index` boundary lookups do
+/// not depend on the candidate, so hoisting them here keeps the per-candidate
+/// cost to a single `canonical_submit_height` read — plus, only on the latest
+/// boundary block of a multi-block range, one inclusion-block walk.
+#[derive(Debug, Clone, Copy)]
+pub struct ExpiredSubmitRange {
+    /// The block being produced/validated (caps the canonical Submit lookup).
+    block_height: u64,
+    /// Block span of the expired chunk range `[0, range_end)`.
+    min_block_height: u64,
+    max_block_height: u64,
+    /// Exclusive end of the expired chunk range, clamped to data actually written.
+    range_end: u64,
+    /// Hash of `max_block_height`'s block — the only block whose per-tx offsets
+    /// a candidate check might need to reconstruct.
+    max_block_hash: H256,
+}
+
+/// Computes the [`ExpiredSubmitRange`] for `block_height`, or `None` if no Submit
+/// storage has expired as of this block (nothing to filter). The equivalence
+/// argument with the `expired_submit_tx_ids` walk is documented on
+/// [`is_submit_storage_expired`].
+pub fn expired_submit_range(
+    block_height: u64,
+    parent_epoch_snapshot: &EpochSnapshot,
+    parent_block_header: &IrysBlockHeader,
+    config: &Config,
+    block_index: &BlockIndex,
+) -> eyre::Result<Option<ExpiredSubmitRange>> {
+    // The expired Submit slots — the exact set `expired_submit_tx_ids` keys on
+    // (also handles the "not enough blocks elapsed → empty" case).
+    let slot_indexes =
+        parent_epoch_snapshot.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height);
+    let Some(&max_expired_slot) = slot_indexes.iter().max() else {
+        return Ok(None);
+    };
+
+    // End of the expired chunk range = end of the highest expired slot, clamped
+    // to the data actually written (mirrors `find_block_range`'s
+    // `compute_chunk_range` — same min(parent header total, index total) bound,
+    // see the comment there for why both terms are needed). Expired slots are a
+    // prefix from slot 0, so the range starts at 0 and the walk's earliest-block
+    // skip never fires.
+    let p = config.consensus.num_chunks_in_partition;
+    let max_offset = block_index
+        .get_latest_item()
+        .map(|item| item.ledgers[DataLedger::Submit].total_chunks)
+        .unwrap_or(0)
+        .min(parent_ledger_total_chunks(
+            parent_block_header,
+            DataLedger::Submit,
+        ));
+    let range_end = (max_expired_slot as u64 + 1)
+        .saturating_mul(p)
+        .min(max_offset);
+    if range_end == 0 {
+        return Ok(None);
+    }
+
+    // Block range holding the expired chunks.
+    let (min_block_height, _) = block_index.get_block_index_item(DataLedger::Submit, 0)?;
+    let (max_block_height, max_block_item) =
+        block_index.get_block_index_item(DataLedger::Submit, range_end - 1)?;
+
+    Ok(Some(ExpiredSubmitRange {
+        block_height,
+        min_block_height,
+        max_block_height,
+        range_end,
+        max_block_hash: max_block_item.block_hash,
+    }))
+}
+
+/// Per-candidate verdict against a precomputed [`ExpiredSubmitRange`]: is
+/// `txid`'s Submit storage expired as of `range.block_height`?
+///
+/// `submit_height` lets a caller that already resolved the candidate's canonical
+/// Submit inclusion height (e.g. the tx selector's prior-Submit check) pass it in
+/// to avoid a duplicate `canonical_submit_height` read; pass `None` to resolve it
+/// here. A `None` resolution (no canonical Submit inclusion) yields `false`.
+#[tracing::instrument(level = "debug", skip_all, fields(tx.id = %txid))]
+pub async fn submit_tx_expired(
+    txid: IrysTransactionId,
+    submit_height: Option<u64>,
+    range: &ExpiredSubmitRange,
+    config: &Config,
+    block_index: &BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<bool> {
+    // Submit inclusion is strictly before this block, so cap the lookup at the parent.
+    let submit_height = match submit_height {
+        Some(h) => h,
+        None => {
+            let max_height = range.block_height.saturating_sub(1);
+            match db.view_eyre(|tx| canonical_submit_height(tx, &txid, max_height))? {
+                Some(h) => h,
+                None => return Ok(false),
+            }
+        }
+    };
+
+    // The verdict depends on the candidate's exact start offset only on the
+    // latest boundary of a multi-block range (the only place the walk trims).
+    // Everywhere else the inclusion-block height alone decides, so skip the
+    // inclusion-block fetch.
+    let needs_start_offset =
+        range.min_block_height != range.max_block_height && submit_height == range.max_block_height;
+    let start_offset = if needs_start_offset {
+        // Reconstruct the candidate's Submit start offset from its inclusion
+        // block (== the max boundary block here). `get_data_tx_in_parallel`
+        // preserves input order — the same helper the walk uses, so the
+        // reconstructed offsets match.
+        let base_chunks = get_previous_max_offset(block_index, submit_height, DataLedger::Submit)?;
+        let block = get_block_by_hash(range.max_block_hash, block_tree_guard, db).await?;
+        let ordered_ids = block
+            .get_data_ledger_tx_ids_ordered(DataLedger::Submit)
+            .ok_or_eyre("Submit ledger required for the expiry inclusion block")?;
+        let headers = get_data_tx_in_parallel(ordered_ids.to_vec(), mempool_guard, db).await?;
+        let ordered: Vec<(IrysTransactionId, u64)> =
+            headers.iter().map(|h| (h.id, h.data_size)).collect();
+        submit_tx_start_offset(txid, &ordered, *base_chunks, config.consensus.chunk_size)
+    } else {
+        None
+    };
+
+    Ok(submit_tx_in_expired_range(
+        submit_height,
+        range.min_block_height,
+        range.max_block_height,
+        range.range_end,
+        start_offset,
+    ))
+}
+
+/// Pure boundary decision for [`is_submit_storage_expired`]: given the expired
+/// chunk range's block span `[min_block_height, max_block_height]` and its
+/// `range_end` offset, decides whether a candidate whose Submit inclusion is
+/// block `submit_height` is in the set — mirroring `find_block_range` /
+/// `filter_transactions_by_chunk_range`.
+///
+/// `start_offset` (the candidate's Submit start chunk offset) is consulted only
+/// on the latest boundary of a multi-block range — the one place the walk trims
+/// — so callers may pass `None` in every other case. The expired range always
+/// begins at slot 0, so the earliest-block skip never applies.
+fn submit_tx_in_expired_range(
+    submit_height: u64,
+    min_block_height: u64,
+    max_block_height: u64,
+    range_end: u64,
+    start_offset: Option<u64>,
+) -> bool {
+    // Inclusion block outside the expired block span.
+    if submit_height < min_block_height || submit_height > max_block_height {
+        return false;
+    }
+    // Whole range packed into one block (`same_block`, only reachable with tiny
+    // test partitions), or an earliest/middle block → the walk includes every tx
+    // of these blocks.
+    if min_block_height == max_block_height || submit_height < max_block_height {
+        return true;
+    }
+    // Latest boundary of a multi-block range → the walk trims at `range_end`.
+    start_offset.is_some_and(|offset| offset < range_end)
+}
+
+/// Reconstructs `target`'s Submit-ledger **start chunk offset**: the cumulative
+/// chunk offset at the end of the previous block (`base_chunks`) plus the chunks
+/// of every Submit tx ordered before `target` in its inclusion block — exactly
+/// as `filter_transactions_by_chunk_range` accumulates `current_offset`.
+/// `block_submit_txs` is that block's Submit txs as `(tx_id, data_size)` in
+/// on-chain order. `None` if `target` is not in the block.
+fn submit_tx_start_offset(
+    target: IrysTransactionId,
+    block_submit_txs: &[(IrysTransactionId, u64)],
+    base_chunks: u64,
+    chunk_size: u64,
+) -> Option<u64> {
+    if chunk_size == 0 {
+        return None;
+    }
+    let mut offset = base_chunks;
+    for (id, data_size) in block_submit_txs {
+        if *id == target {
+            return Some(offset);
+        }
+        offset = offset.saturating_add(data_size.div_ceil(chunk_size));
+    }
+    None
 }
 
 /// Fetches a block header from block tree or database
@@ -453,21 +737,55 @@ fn collect_expired_partitions(
     Ok(expired_ledger_slot_indexes)
 }
 
+/// The parent block header's recorded total chunk count for `ledger`. Headers
+/// carry per-ledger totals, so this is a pure function of the parent block —
+/// unlike the node's block-index tip, which moves as the chain grows. `0` when
+/// the ledger is absent from the header (e.g. pre-Cascade blocks without
+/// OneYear/ThirtyDay entries).
+fn parent_ledger_total_chunks(parent_block_header: &IrysBlockHeader, ledger: DataLedger) -> u64 {
+    parent_block_header
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == ledger as u32)
+        .map(|dl| dl.total_chunks)
+        .unwrap_or(0)
+}
+
 /// Finds all blocks containing data in the expired chunk ranges
 fn find_block_range(
     expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>>,
     config: &Config,
     block_index: &BlockIndex,
     ledger_type: DataLedger,
+    parent_total_chunks: u64,
 ) -> eyre::Result<Option<BlockRange>> {
     let mut blocks_with_expired_ledgers = BTreeMap::new();
 
-    // Ensure that we don't start reading a partition that's only partially populated
+    // Ensure that we don't start reading a partition that's only partially populated.
+    //
+    // Bounded by min(parent_total_chunks, index total):
+    // - `parent_total_chunks` (the parent header's recorded ledger size) makes the
+    //   result a function of the block being built/validated, not of this node's
+    //   current tip — a validator replaying an old block (sync) must not see data
+    //   that landed *after* that block in a partially-filled expired slot.
+    // - the block-index total caps lookups to migrated blocks (the index lags the
+    //   tip by `block_migration_depth`, so offsets beyond it are unresolvable).
+    // At the live tip the index term binds (index ≤ parent — unchanged behavior);
+    // during historical validation the parent term binds (deterministic verdict).
+    // Residual: expired-range chunks inside the not-yet-migrated tail are invisible
+    // until migration catches up to the parent, so verdicts there can still differ
+    // across nodes for up to `block_migration_depth` blocks. Only reachable when a
+    // partially-filled expired slot is still receiving data (allocation runs ahead
+    // of fill — see `calculate_additional_slots`); resolving it would require
+    // walking unmigrated tree blocks by chunk offset, which the index can't do.
     let last_item = block_index
         .get_latest_item()
         .expect("expected block index to contain at least one item");
-    let max_chunk_offset_across_all_partitions =
-        LedgerChunkOffset::from(last_item.ledgers[ledger_type].total_chunks);
+    let max_chunk_offset_across_all_partitions = LedgerChunkOffset::from(
+        last_item.ledgers[ledger_type]
+            .total_chunks
+            .min(parent_total_chunks),
+    );
 
     // Track min and max blocks as we iterate
     let mut min_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
@@ -1108,5 +1426,188 @@ mod tests {
         delta1.merge(delta2);
         assert!(delta1.reward_balance_increment.is_empty());
         assert!(delta1.user_perm_fee_refunds.is_empty());
+    }
+
+    // --- NC-0042 §4b/§4c per-candidate pure cores. The full DB-backed
+    //     equivalence vs. the `expired_submit_tx_ids` walk oracle is asserted in
+    //     chain-tests; these pin the offset math and boundary rules directly. ---
+
+    // `submit_tx_start_offset`: chunk_size = 1 ⇒ data_size == chunk count unless
+    // noted.
+
+    #[test]
+    fn start_offset_sums_preceding_txs_from_base() {
+        let a = H256::random();
+        let b = H256::random();
+        // base 8: A occupies chunks [8,10), so B starts at chunk 10.
+        let block = [(a, 2), (b, 5)];
+        assert_eq!(submit_tx_start_offset(a, &block, 8, 1), Some(8));
+        assert_eq!(submit_tx_start_offset(b, &block, 8, 1), Some(10));
+    }
+
+    #[test]
+    fn start_offset_rounds_each_tx_up_to_whole_chunks() {
+        // chunk_size 10: A data_size 15 → 2 chunks (div_ceil), so B starts at 2.
+        let a = H256::random();
+        let b = H256::random();
+        assert_eq!(
+            submit_tx_start_offset(b, &[(a, 15), (b, 5)], 0, 10),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn start_offset_none_when_target_absent_or_chunk_size_zero() {
+        let absent = H256::random();
+        assert_eq!(
+            submit_tx_start_offset(absent, &[(H256::random(), 3)], 0, 1),
+            None
+        );
+        let a = H256::random();
+        assert_eq!(submit_tx_start_offset(a, &[(a, 3)], 0, 0), None);
+    }
+
+    // `submit_tx_in_expired_range`: expired chunk range ends at `range_end`,
+    // spanning blocks `[min, max]`.
+
+    #[test]
+    fn block_after_expired_range_is_not_expired() {
+        // Recent tx (block 9) past the expired span [2,5] → not expired.
+        assert!(!submit_tx_in_expired_range(9, 2, 5, 100, None));
+    }
+
+    #[test]
+    fn block_before_expired_range_is_not_expired() {
+        assert!(!submit_tx_in_expired_range(1, 2, 5, 100, None));
+    }
+
+    #[test]
+    fn same_block_range_includes_every_tx_of_that_block() {
+        // Whole expired range packed into one block (min == max), as in tiny
+        // test partitions: every tx of that block is in the set, regardless of
+        // start offset — this is the walk's `same_block` over-inclusion.
+        assert!(submit_tx_in_expired_range(3, 3, 3, 10, None));
+    }
+
+    #[test]
+    fn earliest_and_middle_blocks_are_fully_included() {
+        // Multi-block range [2,6]: earliest (2) and middle (4) blocks include
+        // every tx without consulting the start offset.
+        assert!(submit_tx_in_expired_range(2, 2, 6, 1000, None));
+        assert!(submit_tx_in_expired_range(4, 2, 6, 1000, None));
+    }
+
+    #[test]
+    fn latest_block_of_multiblock_range_trims_at_range_end() {
+        // The production path: a partition spans many blocks, so the highest
+        // expired slot's data ends mid-block. On that latest block the walk keeps
+        // only txs whose start offset is before range_end.
+        assert!(
+            submit_tx_in_expired_range(6, 2, 6, 1000, Some(999)),
+            "tx starting before range_end is expired"
+        );
+        assert!(
+            !submit_tx_in_expired_range(6, 2, 6, 1000, Some(1000)),
+            "tx starting at/after range_end is in the next (unexpired) slot"
+        );
+        // Defensive: a tx not found in its inclusion block (None) is not expired.
+        assert!(!submit_tx_in_expired_range(6, 2, 6, 1000, None));
+    }
+
+    /// NC-0042 determinism regression: `find_block_range` must bound the
+    /// expired chunk range by the *parent block's* recorded ledger size, not
+    /// this node's block-index tip. With a partially-filled expired slot, a
+    /// tip-based bound sweeps in chunks that landed *after* the validated
+    /// block's parent, so the verdict would change with when a node evaluates
+    /// it (live vs. catching up) — a consensus divergence.
+    #[test]
+    fn find_block_range_bounds_by_parent_not_index_tip() -> eyre::Result<()> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use reth_db::mdbx::DatabaseArguments;
+
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.consensus.get_mut().num_chunks_in_partition = 10;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Index of 5 blocks with Submit totals 0,4,7,12,15. Slot 0 covers
+        // chunks [0,10). At height 2 (the "parent") slot 0 is only 7/10 full;
+        // heights 3-4 grew the index past the slot boundary into slot 1.
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db);
+        for (height, submit_total) in [0_u64, 4, 7, 12, 15].into_iter().enumerate() {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: H256::random(),
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: submit_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+        let expired_slot_0 = || {
+            let mut m = BTreeMap::new();
+            m.insert(SlotIndex::new(0), vec![IrysAddress::ZERO]);
+            m
+        };
+
+        // Parent at height 2 (total 7): the range must stop at the block
+        // holding chunk 6 (height 2), even though the index tip (total 15)
+        // covers slot 0's full [0,10) range.
+        let range = find_block_range(
+            expired_slot_0(),
+            &config,
+            &block_index,
+            DataLedger::Submit,
+            7,
+        )?
+        .expect("expired slot 0 holds data");
+        assert_eq!(range.min_block.height, 1, "chunk 0 lands at height 1");
+        assert_eq!(
+            range.max_block.height, 2,
+            "parent-bounded range must exclude chunks written after the parent"
+        );
+
+        // Parent == tip: identical to the old tip-based bound (slot 0 truncated
+        // at the partition end 10 → chunk 9 lands at height 3).
+        let range = find_block_range(
+            expired_slot_0(),
+            &config,
+            &block_index,
+            DataLedger::Submit,
+            15,
+        )?
+        .expect("expired slot 0 holds data");
+        assert_eq!(range.max_block.height, 3);
+
+        // Parent ahead of the migrated index (unmigrated tail): the index term
+        // caps lookups — no out-of-range error, same blocks as parent == tip.
+        let range = find_block_range(
+            expired_slot_0(),
+            &config,
+            &block_index,
+            DataLedger::Submit,
+            20,
+        )?
+        .expect("expired slot 0 holds data");
+        assert_eq!(range.max_block.height, 3);
+
+        Ok(())
     }
 }

@@ -16,7 +16,9 @@ pub struct LedgerSlot {
     pub partitions: Vec<H256>,
     /// Flag marking weather this ledger slot is expired or not
     pub is_expired: bool,
-    /// Block height of most recently added transaction data (chunks)
+    /// Block height at which this slot was allocated. Set once at allocation and
+    /// never mutated, so slot expiry (`last_height <= expiry_height`) is a pure
+    /// function of canonical slot state — see `get_all_expired_slot_indexes`.
     pub last_height: u64,
 }
 

@@ -4533,6 +4533,7 @@ async fn generate_expected_shadow_transactions(
             .is_cascade_active_at(block.timestamp_secs());
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
+            &prev_block,
             block.height,
             DataLedger::Submit,
             config,
@@ -4557,6 +4558,7 @@ async fn generate_expected_shadow_transactions(
             for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
                 let delta = ledger_expiry::calculate_expired_ledger_fees(
                     &parent_epoch_snapshot,
+                    &prev_block,
                     block.height,
                     ledger,
                     config,
@@ -4630,28 +4632,41 @@ async fn generate_expected_shadow_transactions(
     // are both in the set. A tx whose Submit inclusion is in this very block
     // (same-block Submit→Publish) is not — its slot can't have expired yet.
     {
-        let expired_submit_tx_ids = ledger_expiry::expired_submit_tx_ids(
-            &parent_epoch_snapshot,
+        // The expired-Submit range is the same for every publish tx in this block,
+        // so resolve it once and reuse it per-candidate. Locally derived (parent
+        // epoch snapshot, our block_index/mempool/DB); a failure here is a hard
+        // node-local fault, not a peer statement. `None` → nothing expired.
+        let expired_range = ledger_expiry::expired_submit_range(
             block.height,
+            &parent_epoch_snapshot,
+            &prev_block,
             config,
-            block_index.clone(),
-            block_tree_guard,
-            mempool_guard,
-            db,
+            &block_index,
         )
-        .await
-        // Locally derived (parent epoch snapshot, our block_index/mempool/DB);
-        // a failure here is a hard node-local fault, not a peer statement.
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
-
-        for tx in &publish_ledger_with_txs.txs {
-            if expired_submit_tx_ids.contains(&tx.id) {
-                return Err(consensus(format!(
-                    "Transaction {} is in the publish ledger but its Submit-ledger \
-                     storage has already expired as of block {} (it is/was perm_fee \
-                     refunded; promoted txs must not be refunded). See NC-0042.",
-                    tx.id, block.height,
-                )));
+        if let Some(range) = &expired_range {
+            for tx in &publish_ledger_with_txs.txs {
+                // Per-candidate form of the (refund-pipeline-shared) expired-tx set.
+                let expired = ledger_expiry::submit_tx_expired(
+                    tx.id,
+                    None,
+                    range,
+                    config,
+                    &block_index,
+                    block_tree_guard,
+                    mempool_guard,
+                    db,
+                )
+                .await
+                .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
+                if expired {
+                    return Err(consensus(format!(
+                        "Transaction {} is in the publish ledger but its Submit-ledger \
+                         storage has already expired as of block {} (it is/was perm_fee \
+                         refunded; promoted txs must not be refunded). See NC-0042.",
+                        tx.id, block.height,
+                    )));
+                }
             }
         }
     }

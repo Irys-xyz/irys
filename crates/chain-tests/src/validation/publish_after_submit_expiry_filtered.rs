@@ -229,8 +229,14 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         .read()
         .get_epoch_snapshot(&expiry_block.previous_block_hash)
         .expect("epoch snapshot for the expiry block's parent");
+    let expiry_parent_block = genesis_node.get_block_by_height(expiry_height - 1).await?;
+    assert_eq!(
+        expiry_parent_block.block_hash, expiry_block.previous_block_hash,
+        "parent header must be the expiry block's parent"
+    );
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &expiry_parent_snapshot,
+        &expiry_parent_block,
         expiry_height,
         &genesis_node.node_ctx.config,
         genesis_node

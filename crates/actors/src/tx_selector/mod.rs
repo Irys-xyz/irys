@@ -3,6 +3,7 @@ pub(crate) mod helpers;
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
+use crate::mempool_guard::MempoolReadGuard;
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
@@ -15,7 +16,7 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
+    BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
     HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -77,13 +78,12 @@ pub struct TxSelectionContext<'a> {
     pub config: &'a Config,
     pub mempool_state: &'a AtomicMempoolState,
     pub chunk_ingress_state: &'a ChunkIngressState,
-    /// Submit-ledger tx ids whose storage has expired as of the block being
-    /// produced (NC-0042 §4b). Such txs are perm-fee-refunded by the expiry
-    /// pipeline and must not be promoted; `get_publish_txs_and_proofs` drops any
-    /// publish candidate in this set. Computed by the producer via
-    /// `ledger_expiry::expired_submit_tx_ids` from the same walk that schedules
-    /// the refunds, so the two cannot diverge. Empty for non-producer callers.
-    pub expired_submit_tx_ids: &'a std::collections::BTreeSet<H256>,
+    /// Canonical block index — the NC-0042 §4b publish-candidate filter uses it
+    /// to resolve each candidate's Submit inclusion block.
+    pub block_index: &'a BlockIndex,
+    /// Mempool guard — used by the §4b filter to read the inclusion block's
+    /// Submit-ledger tx headers (same lookup path as the expiry walk).
+    pub mempool_guard: &'a MempoolReadGuard,
 }
 
 /// Main entry point: selects the best transactions from the mempool for block production.
@@ -776,6 +776,13 @@ async fn get_publish_txs_and_proofs(
     let mut publish_proofs: Vec<IngressProof> = Vec::new();
     // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
     let next_block_height = current_height + 1;
+    // Parent of the block we're producing (`select_best_txs` truncates the
+    // canonical chain at the parent, so it is the last entry). Bounds the §4b
+    // expiry check to data as of the parent rather than this node's moving tip.
+    let parent_block_header = canonical
+        .last()
+        .ok_or_eyre("canonical chain must contain the parent block")?
+        .header();
 
     // only max anchor age is constrained for ingress proofs
     let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
@@ -890,6 +897,18 @@ async fn get_publish_txs_and_proofs(
             acc
         });
 
+        // NC-0042 §4b: the expired-Submit range is the same for every candidate,
+        // so compute it once here and reuse it per-candidate via `submit_tx_expired`
+        // (which then costs at most one canonical Submit-height read each). `None`
+        // means nothing has expired as of this block → no candidate is filtered.
+        let expired_submit_range = crate::block_producer::ledger_expiry::expired_submit_range(
+            next_block_height,
+            epoch_snapshot,
+            parent_block_header,
+            ctx.config,
+            ctx.block_index,
+        )?;
+
         for tx_header in &tx_headers {
             debug!(
                 "Processing publish candidate tx {} {:#?}",
@@ -912,14 +931,19 @@ async fn get_publish_txs_and_proofs(
             // ledgers (OneYear / ThirtyDay) reject `ledger_id == Publish` at
             // structural validation, so a `Some` from the canonical DB index
             // is sufficient evidence of prior Submit.
-            if !submit_txs_from_canonical.contains(&tx_header.id) {
+            //
+            // Capture the resolved height (DB-fallback path only) so the §4b
+            // expiry check below can reuse it instead of looking it up again.
+            // Live-tree candidates hit the HashSet — their height is resolved
+            // lazily inside `submit_tx_expired` (a recent tx can't have expired).
+            let submit_height: Option<u64> = if submit_txs_from_canonical.contains(&tx_header.id) {
+                None
+            } else {
                 match ctx
                     .db
                     .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
                 {
-                    Ok(Some(_)) => {
-                        // canonical Submit inclusion past the live-tree window
-                    }
+                    Ok(Some(h)) => Some(h),
                     Ok(None) => {
                         warn!(
                             tx.id = ?tx_header.id,
@@ -946,17 +970,28 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                 }
-            }
+            };
 
             // NC-0042 §4b: drop publish candidates whose Submit-ledger storage has
-            // expired as of the block we're producing. `ctx.expired_submit_tx_ids`
-            // is computed by the producer from the *same* expired-partition → block
-            // → tx walk that schedules `user_perm_fee_refunds` (Pipeline B,
-            // `ledger_expiry::expired_submit_tx_ids`), so "is this tx refunded?" and
-            // "may this tx be promoted?" cannot diverge. A tx in this set is (or
-            // will be, at the next epoch) perm-fee-refunded; promoting it would be a
+            // expired as of the block we're producing. `submit_tx_expired` is the
+            // per-candidate form of the expired-tx set that the refund pipeline
+            // (Pipeline B) acts on, so "is this tx refunded?" and "may this tx be
+            // promoted?" cannot diverge. A tx that is expired here is (or will be,
+            // at the next epoch) perm-fee-refunded; promoting it would be a
             // same-block or cross-block double-pay.
-            if ctx.expired_submit_tx_ids.contains(&tx_header.id) {
+            if let Some(range) = &expired_submit_range
+                && crate::block_producer::ledger_expiry::submit_tx_expired(
+                    tx_header.id,
+                    submit_height,
+                    range,
+                    ctx.config,
+                    ctx.block_index,
+                    ctx.block_tree,
+                    ctx.mempool_guard,
+                    ctx.db,
+                )
+                .await?
+            {
                 warn!(
                     tx.id = ?tx_header.id,
                     tx.data_root = ?tx_header.data_root,

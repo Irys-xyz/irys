@@ -132,10 +132,9 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
     // --- 4. Pick a target tx and confirm it is genuinely expired at the NEXT
     //         (cross-block) height we'll produce the evil block at. ---
     let evil_height = expiry_height + 1; // E+1: cross-block, not the epoch block
-    let tip_hash = genesis_node
-        .get_block_by_height(expiry_height)
-        .await?
-        .block_hash;
+    // The current tip is the parent of the evil block we'll produce at E+1.
+    let evil_parent_block = genesis_node.get_block_by_height(expiry_height).await?;
+    let tip_hash = evil_parent_block.block_hash;
     // Bind the snapshot in its own scope so the block-tree read guard is dropped
     // before the await below (held-guard-across-await is a clippy deny).
     let tip_snapshot = genesis_node
@@ -146,6 +145,7 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         .expect("epoch snapshot for the current tip");
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &tip_snapshot,
+        &evil_parent_block,
         evil_height,
         &genesis_node.node_ctx.config,
         genesis_node
@@ -158,6 +158,32 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         &genesis_node.node_ctx.db,
     )
     .await?;
+
+    // Differential check (the equivalence the inversion relies on): the
+    // per-candidate predicate that the producer filter and validator check now
+    // use must agree with the `expired_submit_tx_ids` walk oracle — in both
+    // directions — for every posted Submit tx, against real chain state.
+    for tx in &txs {
+        let per_candidate = irys_actors::block_producer::ledger_expiry::is_submit_storage_expired(
+            tx.header.id,
+            evil_height,
+            &tip_snapshot,
+            &evil_parent_block,
+            &genesis_node.node_ctx.config,
+            &genesis_node.node_ctx.block_producer_inner.block_index,
+            &genesis_node.node_ctx.block_tree_guard,
+            &genesis_node.node_ctx.mempool_guard,
+            &genesis_node.node_ctx.db,
+        )
+        .await?;
+        assert_eq!(
+            per_candidate,
+            expired_set.contains(&tx.header.id),
+            "is_submit_storage_expired must match the expired_submit_tx_ids walk oracle for tx {}",
+            tx.header.id,
+        );
+    }
+
     let target = txs
         .iter()
         .find(|tx| expired_set.contains(&tx.header.id))

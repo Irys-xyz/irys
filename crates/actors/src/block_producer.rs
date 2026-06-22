@@ -1672,28 +1672,13 @@ pub trait BlockProdStrategy {
         prev_block_header: &IrysBlockHeader,
         block_timestamp: UnixTimestampMs,
     ) -> Result<MempoolTxs, crate::tx_selector::TxSelectorError> {
-        // NC-0042 §4b: compute the set of Submit-ledger txs whose storage has
-        // expired as of the block we're about to produce, from the same expired
-        // -partition → block → tx walk that schedules perm_fee refunds. The tx
-        // selector drops any publish candidate in this set so the producer never
-        // both promotes and refunds the same tx (panic) or promotes a tx that was
-        // refunded in an earlier block (silent cross-block double-pay).
-        let next_block_height = prev_block_header.height + 1;
-        let (parent_epoch_snapshot, _) = self
-            .fetch_parent_snapshots(prev_block_header)
-            .map_err(crate::tx_selector::TxSelectorError::Other)?;
-        let expired_submit_tx_ids = ledger_expiry::expired_submit_tx_ids(
-            &parent_epoch_snapshot,
-            next_block_height,
-            &self.inner().config,
-            self.inner().block_index.clone(),
-            &self.inner().block_tree_guard,
-            &self.inner().mempool_guard,
-            &self.inner().db,
-        )
-        .await
-        .map_err(crate::tx_selector::TxSelectorError::Other)?;
-
+        // NC-0042 §4b: the tx selector drops any publish candidate whose Submit
+        // -ledger storage has expired as of the block we're about to produce
+        // (per candidate, via `ledger_expiry::is_submit_storage_expired`), so the
+        // producer never both promotes and refunds the same tx (panic) or
+        // promotes a tx that was refunded in an earlier block (silent cross-block
+        // double-pay). It resolves that from `block_index` + the parent epoch
+        // snapshot — the same inputs the refund walk uses.
         let ctx = crate::tx_selector::TxSelectionContext {
             block_tree: &self.inner().block_tree_guard,
             db: &self.inner().db,
@@ -1701,7 +1686,8 @@ pub trait BlockProdStrategy {
             config: &self.inner().config,
             mempool_state: self.inner().mempool_guard.atomic_state(),
             chunk_ingress_state: &self.inner().chunk_ingress_state,
-            expired_submit_tx_ids: &expired_submit_tx_ids,
+            block_index: &self.inner().block_index,
+            mempool_guard: &self.inner().mempool_guard,
         };
         crate::tx_selector::select_best_txs(
             prev_block_header.block_hash,
@@ -1879,6 +1865,7 @@ pub trait BlockProdStrategy {
 
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
+            prev_block_header,
             block_height,
             DataLedger::Submit,
             &self.inner().config,
@@ -1908,6 +1895,7 @@ pub trait BlockProdStrategy {
             ] {
                 let delta = ledger_expiry::calculate_expired_ledger_fees(
                     parent_epoch_snapshot,
+                    prev_block_header,
                     block_height,
                     ledger,
                     &self.inner().config,
