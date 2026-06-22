@@ -85,6 +85,10 @@ max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 8
+# Raised from the 15s default: under this cluster's load a node's VDF clock can pause
+# >15s during fast-forward catch-up, tripping the never-mislabel stall panic. Node-local,
+# NOT consensus-hashed. See design/docs/vdf-validation-stall-detection.md
+progress_timeout_secs = 120
 
 [consensus.Custom]
 expected_genesis_hash = ""
@@ -109,8 +113,8 @@ minimum_term_fee_usd = 0.01
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
-miner_address = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
-reward_address = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+miner_address = "0x10605A299777D44BE5373D120d5479f07860325d"
+reward_address = "0x10605A299777D44BE5373D120d5479f07860325d"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
 genesis_price = 1.0
@@ -158,7 +162,7 @@ min_difficulty_adjustment_factor = "0.25"
 [consensus.Custom.vdf]
 reset_frequency = 2000
 num_checkpoints_in_vdf_step = 25
-max_allowed_vdf_fork_steps = 120000
+max_allowed_vdf_fork_steps = 60000
 sha_1s_difficulty = 100000
 
 [consensus.Custom.block_reward_config]

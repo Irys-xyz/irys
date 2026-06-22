@@ -85,6 +85,10 @@ max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 1
+# Raised from the 15s default: under this cluster's load a node's VDF clock can pause
+# >15s during fast-forward catch-up, tripping the never-mislabel stall panic. Node-local,
+# NOT consensus-hashed. See design/docs/vdf-validation-stall-detection.md
+progress_timeout_secs = 120
 
 [consensus.Custom]
 chain_id = 1270
