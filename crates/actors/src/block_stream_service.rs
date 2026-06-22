@@ -18,7 +18,7 @@ use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
 use tracing::{Instrument as _, error, info, warn};
 
 /// Count-based retention: keep at most this many events; older ones are pruned. Sized to comfortably
@@ -30,14 +30,19 @@ const PRUNE_INTERVAL: u64 = 1_000;
 /// De-dup window for emitted `observed` block hashes. Must comfortably exceed the reorg depth so a
 /// re-adopted block is still remembered.
 const DEDUP_CAPACITY: usize = 10_000;
+/// Per-subscriber live buffer. A consumer that lags beyond this many frames is dropped (its SSE
+/// stream ends) and reconnects with `from_seq` to replay from the durable log — bounding memory
+/// instead of letting a stuck follower accumulate frames without limit.
+const SUBSCRIBER_BUFFER: usize = 1_024;
 
 /// Shared handle: the live fan-out registry plus DB access. Held by the producer task and cloned
 /// into `ApiState` so every SSE handler shares the one producer.
 #[derive(Debug)]
 pub struct BlockStreamHandle {
     /// Live SSE subscribers. The lock is shared with [`Self::append_and_fanout`] so a subscribe's
-    /// snapshot+register pair cannot interleave with an append.
-    live: Mutex<Vec<UnboundedSender<StreamFrame>>>,
+    /// snapshot+register pair cannot interleave with an append. Bounded senders: a lagging
+    /// subscriber is dropped rather than buffered without limit.
+    live: Mutex<Vec<Sender<StreamFrame>>>,
     db: DatabaseProvider,
 }
 
@@ -54,7 +59,7 @@ impl BlockStreamHandle {
     pub fn subscribe(
         &self,
         from_seq: u64,
-    ) -> eyre::Result<(Vec<StreamFrame>, UnboundedReceiver<StreamFrame>)> {
+    ) -> eyre::Result<(Vec<StreamFrame>, Receiver<StreamFrame>)> {
         let mut live = self
             .live
             .lock()
@@ -66,7 +71,7 @@ impl BlockStreamHandle {
         for (seq, bytes) in stored {
             replay.push(decode_frame(seq, &bytes)?);
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_BUFFER);
         live.push(tx);
         Ok((replay, rx))
     }
@@ -83,8 +88,9 @@ impl BlockStreamHandle {
             .db
             .update_eyre(|tx| irys_database::append_block_stream_event(tx, payload))?;
         let frame = StreamFrame { seq, event };
-        // Drop subscribers whose receiver has been closed.
-        live.retain(|sender| sender.send(frame.clone()).is_ok());
+        // Drop subscribers whose receiver is closed or lagging past `SUBSCRIBER_BUFFER`; a dropped
+        // follower reconnects and replays from the durable log via `subscribe(from_seq)`.
+        live.retain(|sender| sender.try_send(frame.clone()).is_ok());
         Ok(seq)
     }
 
@@ -142,8 +148,10 @@ struct Producer {
     /// `block_hash`es already emitted as `observed` (or carried in a reorg's `new_fork`), so a
     /// re-confirmed block is not re-emitted.
     emitted: LruCache<H256, ()>,
-    /// Highest finalised height, to guard against a double `finalized` for the same block.
-    last_finalized_height: Option<u64>,
+    /// `block_hash`es already emitted as `finalized`, to guard against a double `finalized` for the
+    /// same block. Keyed by hash (not height) so a block re-migrated at a previously-finalised
+    /// height after deep-reorg recovery (`recover_from_network_partition`) still emits.
+    finalized: LruCache<H256, ()>,
     appends_since_prune: u64,
 }
 
@@ -154,14 +162,14 @@ impl Producer {
         shutdown: Shutdown,
         signal_rx: UnboundedReceiver<BlockStreamSignal>,
     ) -> Self {
-        let (emitted, last_finalized_height) = rebuild_state(&handle.db);
+        let (emitted, finalized) = rebuild_state(&handle.db);
         Self {
             handle,
             chunk_size,
             shutdown,
             signal_rx,
             emitted,
-            last_finalized_height,
+            finalized,
             appends_since_prune: 0,
         }
     }
@@ -178,7 +186,11 @@ impl Producer {
                     match maybe_signal {
                         Some(signal) => {
                             if let Err(e) = self.handle_signal(signal) {
-                                error!(error = ?e, "block-stream producer failed to process signal");
+                                // A durable append failed: halt rather than silently skip the event
+                                // and keep assigning later `seq`s, which would break the lossless-log
+                                // contract. Followers reconnect and replay up to the last good `seq`.
+                                error!(error = ?e, "block-stream producer halting: durable append failed");
+                                break;
                             }
                         }
                         None => {
@@ -203,17 +215,14 @@ impl Producer {
                 self.emitted.put(hash, ());
             }
             BlockStreamSignal::Finalized(block) => {
-                let height = block.header().height;
-                if self
-                    .last_finalized_height
-                    .is_some_and(|last| height <= last)
-                {
+                let hash = block.header().block_hash;
+                if self.finalized.contains(&hash) {
                     return Ok(());
                 }
                 let event =
                     StreamEvent::Finalized(BlockEvent::from_sealed(&block, self.chunk_size));
                 self.append(event)?;
-                self.last_finalized_height = Some(height);
+                self.finalized.put(hash, ());
             }
             BlockStreamSignal::Reorged {
                 fork_parent,
@@ -236,7 +245,8 @@ impl Producer {
                 };
                 self.append(event)?;
                 // Mark the new-fork hashes seen so the `Confirmed` signals that follow this tick do
-                // not also emit `observed` for them (`:1174` precedes `:1205` in `propagate_block`).
+                // not also emit `observed` for them: `propagate_block` sends the `Reorged` signal
+                // before the per-block `Confirmed` signals, and the signal channel is FIFO.
                 for block in new_fork.iter() {
                     self.emitted.put(block.header().block_hash, ());
                 }
@@ -261,12 +271,12 @@ impl Producer {
     }
 }
 
-/// Rebuilds the producer's in-memory de-dup state from the durable log tail on startup, so a
-/// restart does not re-emit `observed` for blocks already in the log.
-fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, Option<u64>) {
-    let mut emitted =
-        LruCache::new(NonZeroUsize::new(DEDUP_CAPACITY).expect("non-zero dedup capacity"));
-    let mut last_finalized_height: Option<u64> = None;
+/// Rebuilds the producer's in-memory de-dup state (`observed` and `finalized` hashes) from the
+/// durable log tail on startup, so a restart does not re-emit for blocks already in the log.
+fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, ()>) {
+    let cap = NonZeroUsize::new(DEDUP_CAPACITY).expect("non-zero dedup capacity");
+    let mut emitted = LruCache::new(cap);
+    let mut finalized = LruCache::new(cap);
 
     let tail = (|| -> eyre::Result<Vec<(u64, Vec<u8>)>> {
         let Some(latest) = db.view_eyre(irys_database::block_stream_latest_seq)? else {
@@ -284,10 +294,7 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, Option<u64>) {
                         emitted.put(block.header.block_hash, ());
                     }
                     Ok(StreamEvent::Finalized(block)) => {
-                        last_finalized_height = Some(
-                            last_finalized_height
-                                .map_or(block.header.height, |last| last.max(block.header.height)),
-                        );
+                        finalized.put(block.header.block_hash, ());
                     }
                     Ok(StreamEvent::Reorged { new_fork, .. }) => {
                         for block in new_fork {
@@ -305,5 +312,5 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, Option<u64>) {
         }
     }
 
-    (emitted, last_finalized_height)
+    (emitted, finalized)
 }

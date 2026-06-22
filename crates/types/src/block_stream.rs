@@ -68,7 +68,6 @@ pub struct TxMeta {
     pub signer: OwnerId,
     pub data_root: H256,
     pub data_size: u64,
-    /// PR 1450; `0` / zeroed until it lands.
     pub prefix_size: u64,
     pub prefix_hash: H256,
     pub ledger_id: u32,
@@ -183,7 +182,10 @@ impl BlockEvent {
                 tx_ids: dl.tx_ids.0.clone(),
                 total_chunks: dl.total_chunks,
                 required_proof_count: u32::from(dl.required_proof_count.unwrap_or(0)),
-                proof_count: dl.proofs.as_ref().map_or(0, |p| p.0.len() as u32),
+                proof_count: dl
+                    .proofs
+                    .as_ref()
+                    .map_or(0, |p| u32::try_from(p.0.len()).unwrap_or(u32::MAX)),
             });
 
             let Ok(ledger) = DataLedger::try_from(dl.ledger_id) else {
@@ -200,11 +202,11 @@ impl BlockEvent {
                     signer: OwnerId::ethereum(&tx.signer),
                     data_root: tx.data_root,
                     data_size: tx.data_size,
-                    prefix_size: 0,
-                    prefix_hash: H256::zero(),
+                    prefix_size: tx.prefix_size,
+                    prefix_hash: tx.prefix_hash,
                     ledger_id: dl.ledger_id,
                     metadata_format: tx.metadata_format,
-                    tx_position: i as u32,
+                    tx_position: u32::try_from(i).unwrap_or(u32::MAX),
                     tx_start_offset: offsets[i],
                     promoted_height: tx.promoted_height(),
                 });
@@ -216,7 +218,7 @@ impl BlockEvent {
                 height: header.height,
                 block_hash: header.block_hash,
                 previous_block_hash: header.previous_block_hash,
-                timestamp: header.timestamp.as_millis() as u64,
+                timestamp: u64::try_from(header.timestamp.as_millis()).unwrap_or(u64::MAX),
                 miner_address: OwnerId::ethereum(&header.miner_address),
                 data_ledgers,
             },

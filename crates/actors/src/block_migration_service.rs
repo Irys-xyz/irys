@@ -504,13 +504,16 @@ impl BlockMigrationService {
     ///
     /// The cache read lock is held only while collecting blocks, then released
     /// before performing DB writes and block index mutations.
+    ///
+    /// Migrates the slice of blocks (oldest-first) from the index head up to `migration_block`,
+    /// invoking `on_migrated` for each block the moment it is fully persisted — so a mid-batch
+    /// failure still signals the blocks that did migrate.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %migration_block.block_hash, block.height = migration_block.height))]
-    /// Migrates the slice of blocks from the index head up to `migration_block` and returns them
-    /// (oldest-first), so the caller can emit one `finalized` block-stream signal per migrated block.
     pub fn migrate_blocks(
         &self,
         migration_block: &Arc<IrysBlockHeader>,
-    ) -> eyre::Result<Vec<Arc<SealedBlock>>> {
+        mut on_migrated: impl FnMut(&Arc<SealedBlock>),
+    ) -> eyre::Result<()> {
         debug!("migrating block via BlockMigrationService");
 
         // Collect blocks under the cache read lock, then release it.
@@ -541,9 +544,12 @@ impl BlockMigrationService {
                 supply_state.add_block_reward(block.height, block.reward_amount)?;
             }
             self.send_chunk_migration(sealed_block)?;
+            // Signal this block as finalized now that it is fully persisted, so a failure on a
+            // later block in the batch cannot strand an already-migrated block without its frame.
+            on_migrated(sealed_block);
         }
 
-        Ok(prepared)
+        Ok(())
     }
 
     /// Validates height continuity and chain linkage across the migration slice.
