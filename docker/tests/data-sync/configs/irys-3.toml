@@ -146,6 +146,10 @@ balance = "0x152cf4e72a974f1c0000"
 [consensus.Custom.reth.alloc.0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC]
 balance = "0x152cf4e72a974f1c0000"
 
+# netwatch data-upload probe signer (key.hex)
+[consensus.Custom.reth.alloc.0x8b2e5fbf97c990dfc06b3c1fe1639a4a694901ee]
+balance = "0x152cf4e72a974f1c0000"
+
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
