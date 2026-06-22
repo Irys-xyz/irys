@@ -3,6 +3,11 @@
 //! These routes serve the gateway block follower. The wire shapes live in
 //! [`irys_types::block_stream`]. `stream` is registered before `{height}` so it is matched as a
 //! literal segment rather than captured as a height.
+//!
+//! SECURITY: these endpoints carry no application-layer authentication and ride the same HTTP
+//! listener as the public API. They expose internal block data and a long-lived SSE stream, so the
+//! deployment MUST restrict `/internal/*` at the network layer (firewall / reverse proxy / bind
+//! address) to the trusted gateway.
 
 use crate::ApiState;
 use crate::error::ApiError;
@@ -13,7 +18,7 @@ use irys_types::block_stream::{BlockEvent, StreamFrame};
 use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, app_state::DatabaseProvider};
 use serde::Deserialize;
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::warn;
 
 pub fn internal_routes() -> impl HttpServiceFactory {
@@ -41,7 +46,7 @@ async fn blocks_stream(
         .map_err(|e| ApiError::Internal { err: e.to_string() })?;
 
     let body = tokio_stream::iter(replay)
-        .chain(UnboundedReceiverStream::new(live))
+        .chain(ReceiverStream::new(live))
         .map(frame_to_sse);
 
     Ok(HttpResponse::Ok()
@@ -74,11 +79,23 @@ struct RangeQuery {
     to_height: u64,
 }
 
+/// Max number of heights one range request may span, to bound the per-request DB work.
+const MAX_BLOCK_RANGE: u64 = 1_000;
+
 /// `GET /internal/blocks?from_height=&to_height=` — the canonical blocks in `[from, to]`, ascending.
 async fn blocks_range(
     state: web::Data<ApiState>,
     query: web::Query<RangeQuery>,
 ) -> Result<web::Json<Vec<BlockEvent>>, ApiError> {
+    let span = query.to_height.saturating_sub(query.from_height);
+    if span > MAX_BLOCK_RANGE {
+        return Err(ApiError::InvalidBlockParameter {
+            parameter: format!(
+                "block range {}..={} spans {span} heights, exceeding the maximum {MAX_BLOCK_RANGE}",
+                query.from_height, query.to_height
+            ),
+        });
+    }
     let mut events = Vec::new();
     for height in query.from_height..=query.to_height {
         if let Some(event) = resolve_block_event(&state, height)? {

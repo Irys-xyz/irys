@@ -13,13 +13,13 @@ use irys_types::{H256, NodeConfig};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 
 const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
 /// Receives frames until `predicate` matches, or times out.
 async fn next_frame_for(
-    live: &mut UnboundedReceiver<StreamFrame>,
+    live: &mut Receiver<StreamFrame>,
     predicate: impl Fn(&StreamFrame) -> bool,
 ) -> eyre::Result<StreamFrame> {
     loop {
@@ -185,6 +185,15 @@ async fn internal_reads_by_height_and_range() -> eyre::Result<()> {
         .send()
         .await?;
     assert_eq!(resp.status(), 404);
+
+    // range span exceeding the cap: 400, rejected before any per-height work.
+    let resp = client
+        .get(format!(
+            "{address}/internal/blocks?from_height=0&to_height=5000"
+        ))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
 
     Ok(())
 }
