@@ -19,7 +19,6 @@ use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, app_state::
 use serde::Deserialize;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::warn;
 
 pub fn internal_routes() -> impl HttpServiceFactory {
     web::scope("internal")
@@ -139,35 +138,54 @@ fn resolve_block_event(state: &ApiState, height: u64) -> Result<Option<BlockEven
     };
 
     let db = &state.db;
+    // Fail the read if any ledger's tx headers cannot be fully resolved, rather than returning a
+    // silently truncated block. The closure stashes the first error; the event built alongside it
+    // is discarded when one is present.
+    let mut resolve_err: Option<ApiError> = None;
     let event = BlockEvent::from_header_and_txs(
         &header,
-        |ledger| resolve_ledger_txs(db, &header, ledger),
+        |ledger| match resolve_ledger_txs(db, &header, ledger) {
+            Ok(txs) => txs,
+            Err(e) => {
+                resolve_err.get_or_insert(e);
+                Vec::new()
+            }
+        },
         chunk_size,
     );
+    if let Some(e) = resolve_err {
+        return Err(e);
+    }
     Ok(Some(event))
 }
 
 /// Resolves the ordered transaction headers for one ledger of a migrated block from the DB.
+///
+/// Fails closed: a tx id with no header row (or a DB error) aborts the read rather than yielding a
+/// truncated ledger. A dropped tx would also shift the computed `tx_start_offset` of every
+/// surviving tx in the ledger, so a short block silently misrepresents canonical contents.
 fn resolve_ledger_txs(
     db: &DatabaseProvider,
     header: &IrysBlockHeader,
     ledger: DataLedger,
-) -> Vec<DataTransactionHeader> {
+) -> Result<Vec<DataTransactionHeader>, ApiError> {
     let ledger_id = ledger.get_id();
     let Some(data_ledger) = header
         .data_ledgers
         .iter()
         .find(|dl| dl.ledger_id == ledger_id)
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut txs = Vec::with_capacity(data_ledger.tx_ids.0.len());
     for tx_id in &data_ledger.tx_ids.0 {
-        match db.view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id)) {
-            Ok(Some(header)) => txs.push(header),
-            Ok(None) => {}
-            Err(e) => warn!(?tx_id, error = ?e, "internal read: tx header lookup failed"),
-        }
+        let header = db
+            .view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id))
+            .map_err(|e| ApiError::Internal { err: e.to_string() })?
+            .ok_or_else(|| ApiError::Internal {
+                err: format!("canonical block missing tx header for {tx_id}"),
+            })?;
+        txs.push(header);
     }
-    txs
+    Ok(txs)
 }
