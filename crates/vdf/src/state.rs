@@ -292,12 +292,18 @@ impl VdfStateReadonly {
 }
 
 /// create VDF state using the latest block in db
+///
+/// Returns the rebuilt [`VdfState`] together with the anchor (latest) block's
+/// `next_seed` — the reset seed the VDF loop must start from. The seed is
+/// returned alongside the state so callers re-anchoring the VDF after a deep
+/// reorg (network-partition recovery) get a consistent snapshot from a single
+/// read of the canonical index, rather than re-deriving it separately.
 pub fn create_state(
-    block_index: BlockIndex,
-    db: DatabaseProvider,
+    block_index: &BlockIndex,
+    db: &DatabaseProvider,
     is_vdf_mining_enabled: Arc<AtomicBool>,
     config: &Config,
-) -> VdfState {
+) -> (VdfState, H256) {
     let capacity = calc_capacity(config);
 
     let block_hash = block_index
@@ -311,6 +317,9 @@ pub fn create_state(
         .unwrap()
         .unwrap();
     let global_step_number = block.vdf_limiter_info.global_step_number;
+    // Captured from the anchor (latest) block before the walk-back loop below
+    // reassigns `block` to its ancestors.
+    let next_seed = block.vdf_limiter_info.next_seed;
     let mut steps_remaining = capacity;
 
     while steps_remaining > 0 && block.height > 0 {
@@ -337,14 +346,17 @@ pub fn create_state(
         global_step_number
     );
 
-    VdfState {
-        global_step: global_step_number,
-        global_step_from_the_latest_canonical_block: global_step_number,
-        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-        seeds,
-        capacity,
-        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-    }
+    (
+        VdfState {
+            global_step: global_step_number,
+            global_step_from_the_latest_canonical_block: global_step_number,
+            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
+            seeds,
+            capacity,
+            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
+        },
+        next_seed,
+    )
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
