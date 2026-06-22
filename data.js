@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781800722154,
+  "lastUpdate": 1782164532534,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7171,6 +7171,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1e21087df1a70ef7a0d901d16b065b47f165dae2",
+          "message": "feat(backport): pin genesis EVM state root (genesis_evm_state) + init-state fail-fast guard (#1455)\n\n* fix(consensus): pin genesis EVM state root via genesis_evm_state config\n\nWhen a network's genesis EVM state is loaded out-of-band with `init-state`\nfrom a state dump (state too large to inline in `alloc`), every node must\nreconstruct the same genesis block. Boot derived the genesis state root\nfrom `reth.alloc`, so it diverged from the dump-derived root that init-state\nwrote to the reth DB, and reth aborted at startup with a genesis-hash\nmismatch (\"genesis hash in storage does not match the specified chainspec\").\n\nReplace `IrysRethConfig.alloc` with `GenesisEvmState { Alloc(map) |\nStateRoot(B256) }` — inline allocation or a pinned state root, mutually\nexclusive by construction. `irys_chain_spec` applies the pinned root (and\nclears alloc), so a node configured with `genesis_evm_state.state_root`\nreconstructs the same genesis the dump produced and boots cleanly. The\ngenesis state root is a boot-time config value; `init-state` itself stays\nconfig-agnostic (it derives the root from the dump).\n\nTests: pinned-root override + StateRoot/Alloc TOML round-trips; the genesis\ndump/restore integration test confirms init-state runs without a config pin.\n\n* fix(reth-bridge): fail fast when init-state runs over an existing reth DB\n\ninit-state will not overwrite an existing reth genesis, so running it over a non-wiped datadir silently leaves the stale genesis in place and the mismatch only surfaces later at boot (\"genesis hash in storage does not match the specified chainspec\"). Detect an already-initialized datadir via <datadir>/db/mdbx.dat up front and bail with instructions to wipe.\n\n* test(consensus): update consensus-hash regression for genesis_evm_state\n\nThe genesis_evm_state rename changed the canonical-JSON serialization of ConsensusConfig (reth.alloc -> reth.genesis_evm_state.alloc), so the keccak256_hash pinned in test_consensus_hash_regression no longer matched and the test failed. Update the expected value to the hash this branch's ConsensusConfig::testing() now produces.\n\n* fix(reth-bridge): re-seal genesis header in init-state; broaden db-init guard\n\ninit_state patched the genesis state root via SealedHeader::set_state_root, which mutates the inner header but leaves the cached block hash stale, so reth would persist a genesis hash that disagrees with the stored header's state root. Re-seal the header from the patched value (clone_header -> seal_slow) so the persisted genesis hash is recomputed.\n\nAlso broaden reth_db_is_initialized to treat any entry under <datadir>/db as initialized, mirroring reth's own is_database_empty check: reth writes db/database.version before the mdbx env, so checking only mdbx.dat missed a partially-initialized datadir.\n\n* test(consensus): update canonical camelCase test for genesis_evm_state\n\n`eab0064fe` moved the genesis allocation from `reth.alloc` to the\n`genesis_evm_state` enum, so the alloc map now serializes under\n`reth.genesisEvmState.alloc`. Update the stale assertion path; the\ncommit that introduced the refactor missed this test.",
+          "timestamp": "2026-06-22T22:23:30+01:00",
+          "tree_id": "a3b6df09c755f8901cdac6ae5974940232cdf147",
+          "url": "https://github.com/Irys-xyz/irys/commit/1e21087df1a70ef7a0d901d16b065b47f165dae2"
+        },
+        "date": 1782164530567,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011922,
+            "range": "± 0.000097",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120283,
+            "range": "± 0.002847",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.271967,
+            "range": "± 0.063855",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.380339,
+            "range": "± 0.277585",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075041,
+            "range": "± 0.00178",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 757.080914,
+            "range": "± 11.133803",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1007.745691,
+            "range": "± 40.895672",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117485,
+            "range": "± 0.001087",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1184.509526,
+            "range": "± 18.456",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.676918,
+            "range": "± 26.122992",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035304,
+            "range": "± 0.00067",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.805031,
+            "range": "± 0.227763",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.468494,
+            "range": "± 0.158847",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
