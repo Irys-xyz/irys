@@ -2277,6 +2277,25 @@ impl IrysNode {
                                     break;
                                 }
                             }
+
+                            // Discard any fast-forward steps queued before the re-anchor. They
+                            // may carry steps pinned by the orphaned fork's (minority) reset
+                            // seed; applying them after the buffer was rebuilt to the canonical
+                            // LCA would re-poison it via store_step's exact-sequential accept.
+                            // Canonical steps above the anchor are reproduced deterministically
+                            // by local stepping (and by fast-forward of the canonical blocks as
+                            // they validate), so dropping the queue loses no correct work.
+                            let mut drained = 0_u64;
+                            while vdf_fast_forward_receiver.try_recv().is_ok() {
+                                drained += 1;
+                            }
+                            if drained > 0 {
+                                debug!(
+                                    vdf.drained_fast_forward_steps = drained,
+                                    "Discarded stale fast-forward steps during VDF re-anchor"
+                                );
+                            }
+
                             atomic_global_step_number
                                 .store(rebuilt_step, std::sync::atomic::Ordering::Relaxed);
                             anchor_step = rebuilt_step;
