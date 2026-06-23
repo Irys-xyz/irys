@@ -59,8 +59,9 @@ impl BlockStreamHandle {
         }
     }
 
-    /// Atomic replay→live handover: under one lock, snapshot the durable suffix `[from_seq..]` and
-    /// register a live sender, so no append interleaves between the snapshot and the registration.
+    /// Atomic replay→live handover: under one lock, snapshot the durable replay suffix (from `from_seq`,
+    /// or the retained floor when the cursor is stale past the tip) and register a live sender, so no
+    /// append interleaves between the snapshot and the registration.
     pub fn subscribe(
         &self,
         from_seq: u64,
@@ -69,9 +70,23 @@ impl BlockStreamHandle {
             .live
             .lock()
             .expect("block-stream fan-out lock poisoned");
-        let stored = self
-            .db
-            .view_eyre(|tx| irys_database::read_block_stream_from(tx, from_seq))?;
+        let stored = self.db.view_eyre(|tx| {
+            let logical_len = match irys_database::block_stream_latest_seq(tx)? {
+                Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
+                None => 0,
+            };
+            // A cursor beyond the tip is stale — only reachable after a log reset shrank the log. Replay
+            // from the retained floor so the follower sees below-cursor frames and rewinds, matching the
+            // `/events` beyond-tip clamp; otherwise the SSE follower would silently continue onto the new
+            // chain at the same seq. In-window / caught-up cursors replay from `from_seq` (empty at the
+            // tip); a below-floor cursor already starts at the floor via the range walk.
+            let start = if from_seq > logical_len {
+                irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0)
+            } else {
+                from_seq
+            };
+            irys_database::read_block_stream_from(tx, start)
+        })?;
         let mut replay = Vec::with_capacity(stored.len());
         for (seq, bytes) in stored {
             replay.push(decode_frame(seq, &bytes)?);
@@ -502,5 +517,18 @@ mod tests {
             serde_json::to_value(&replay).unwrap(),
             "poll frames must be byte-identical to the SSE replay"
         );
+    }
+
+    #[test]
+    fn subscribe_clamps_stale_cursor_to_floor() {
+        let (handle, _tmp) = handle_with_events(3); // seqs 0,1,2 → logical_len = 3
+        // A cursor beyond the tip (only reachable after a reset shrank the log) replays from the floor,
+        // so the follower sees below-cursor frames and rewinds — not an empty replay.
+        let (replay, _live) = handle.subscribe(99).unwrap();
+        assert_eq!(replay.first().map(|f| f.seq), Some(0));
+        assert_eq!(replay.len(), 3);
+        // Caught up at the tip replays nothing — no re-stream of the whole log.
+        let (replay, _live) = handle.subscribe(3).unwrap();
+        assert!(replay.is_empty());
     }
 }
