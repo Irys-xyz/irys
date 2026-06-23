@@ -165,7 +165,6 @@ pub async fn calculate_expired_ledger_fees(
         block_range,
         ledger_type,
         config,
-        &block_index,
         block_tree_guard,
         mempool_guard,
         db,
@@ -222,7 +221,6 @@ async fn collect_tx_to_miners_from_range(
     block_range: BlockRange,
     ledger_type: DataLedger,
     config: &Config,
-    block_index: &BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
@@ -235,6 +233,10 @@ async fn collect_tx_to_miners_from_range(
         same_block
     );
 
+    // Per-tx attribution is keyed on the slot containing each tx's START offset
+    // (NC-0042 R4), so every block — boundary or middle — is processed against the
+    // same un-merged `slot_miners` map rather than a per-block miner union.
+    let slot_miners = &block_range.slot_miners;
     let earliest_miners;
     let latest_miners;
 
@@ -246,12 +248,11 @@ async fn collect_tx_to_miners_from_range(
         let miners = process_boundary_block(
             &block_range.min_block,
             block_range.min_block.block_hash,
-            Arc::clone(&block_range.min_block_miners),
             true, // is_earliest
             true, // is_latest — sole boundary block (min == max), so trim BOTH ends
             ledger_type,
             config,
-            block_index,
+            slot_miners,
             block_tree_guard,
             mempool_guard,
             db,
@@ -265,12 +266,11 @@ async fn collect_tx_to_miners_from_range(
         let e_miners = process_boundary_block(
             &block_range.min_block,
             block_range.min_block.block_hash,
-            Arc::clone(&block_range.min_block_miners),
             true,  // is_earliest — min block trims only the start
             false, // is_latest
             ledger_type,
             config,
-            block_index,
+            slot_miners,
             block_tree_guard,
             mempool_guard,
             db,
@@ -280,12 +280,11 @@ async fn collect_tx_to_miners_from_range(
         let l_miners = process_boundary_block(
             &block_range.max_block,
             block_range.max_block.block_hash,
-            Arc::clone(&block_range.max_block_miners),
             false, // is_earliest
             true,  // is_latest — max block trims only the end
             ledger_type,
             config,
-            block_index,
+            slot_miners,
             block_tree_guard,
             mempool_guard,
             db,
@@ -296,9 +295,21 @@ async fn collect_tx_to_miners_from_range(
         latest_miners = l_miners;
     }
 
-    // Process middle blocks
-    let middle_miners =
-        process_middle_blocks(block_range.middle_blocks, ledger_type, block_tree_guard, db).await?;
+    // Middle (fully-interior) blocks: no trim (they lie entirely within the
+    // expired range), but still attributed per-slot by tx start offset — a middle
+    // block can straddle a slot boundary too. The boundary blocks share the same
+    // global range, so reuse it for the (unused) trim arguments.
+    let middle_miners = process_middle_blocks(
+        &block_range.middle_blocks,
+        block_range.min_block.chunk_range,
+        ledger_type,
+        config,
+        slot_miners,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await?;
 
     tracing::info!(
         "Collected transactions: earliest={}, latest={}, middle={}",
@@ -386,7 +397,6 @@ pub async fn expired_submit_tx_ids(
         block_range,
         DataLedger::Submit,
         config,
-        &block_index,
         block_tree_guard,
         mempool_guard,
         db,
@@ -779,8 +789,12 @@ fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> e
 /// Branch-correct resolution of the canonical block that introduced chunk
 /// `offset` in `ledger`, as a pure function of the block's **own parent
 /// ancestry** (`parent_hash`) — never the node's canonical tip or migration-
-/// lagged index frontier (NC-0042 R1). Returns `(height, block_hash, block_total)`
-/// where `block_total` is that block's cumulative `ledger` total.
+/// lagged index frontier (NC-0042 R1). Returns `(height, block_hash, base,
+/// block_total)` where `base` is the cumulative `ledger` total *before* the block
+/// (its start offset) and `block_total` is the cumulative total *through* it.
+/// `base` is resolved from the same branch-correct ancestry as the block itself,
+/// so a boundary block's start offset never falls back to the migrated-only index
+/// (NC-0042 R1: that fallback errored on an un-migrated boundary predecessor).
 ///
 /// Fast path: offsets below the migrated index tip resolve via the index binary
 /// search (finalized ⇒ branch-invariant, O(log n)). Slow path: offsets in the
@@ -799,7 +813,7 @@ fn resolve_ledger_offset_to_block(
     block_tree_guard: &BlockTreeReadGuard,
     block_index: &BlockIndex,
     db: &DatabaseProvider,
-) -> eyre::Result<(BlockHeight, H256, u64)> {
+) -> eyre::Result<(BlockHeight, H256, u64, u64)> {
     // Fast path: finalized/migrated region — binary search is branch-invariant.
     let index_tip_total = block_index
         .get_latest_item()
@@ -810,6 +824,7 @@ fn resolve_ledger_offset_to_block(
         return Ok((
             height,
             item.block_hash,
+            migrated_predecessor_total(block_index, ledger, height),
             ledger_total_of_index_item(&item, ledger),
         ));
     }
@@ -836,7 +851,7 @@ fn resolve_ledger_offset_to_block(
                 )?
         };
         if (prev_total..total).contains(&offset) {
-            return Ok((header.height, cursor, total));
+            return Ok((header.height, cursor, prev_total, total));
         }
         cursor = header.previous_block_hash;
     }
@@ -847,8 +862,30 @@ fn resolve_ledger_offset_to_block(
     Ok((
         height,
         item.block_hash,
+        migrated_predecessor_total(block_index, ledger, height),
         ledger_total_of_index_item(&item, ledger),
     ))
+}
+
+/// Cumulative `ledger` total *before* a migrated block at `height` (its base
+/// offset): the predecessor's indexed total, or `0` at genesis. Sound only for
+/// **migrated** heights — then `height - 1` is itself migrated (below the reorg
+/// floor, branch-invariant), so the index read is exact. Used by
+/// [`resolve_ledger_offset_to_block`]'s index fast paths; the un-migrated tail
+/// instead carries `prev_total` straight from the by-hash ancestry walk.
+fn migrated_predecessor_total(
+    block_index: &BlockIndex,
+    ledger: DataLedger,
+    height: BlockHeight,
+) -> u64 {
+    if height == 0 {
+        0
+    } else {
+        block_index
+            .get_item(height - 1)
+            .map(|i| ledger_total_of_index_item(&i, ledger))
+            .unwrap_or(0)
+    }
 }
 
 /// Reconstructs `target`'s Submit-ledger **start chunk offset**: the cumulative
@@ -992,7 +1029,13 @@ fn find_block_range(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<BlockRange>> {
-    let mut blocks_with_expired_ledgers = BTreeMap::new();
+    // Per-block branch-correct base offset (hash → base). Miner attribution is
+    // per-slot (`slot_miners` below), NOT per-block: a block straddling two
+    // expired slots with different miners must split the txs by their start
+    // offset, not pay every tx to the union of both slots' miners (NC-0042 R4).
+    let mut block_bases: BTreeMap<H256, u64> = BTreeMap::new();
+    // Slot index → its miners (un-merged), for per-tx attribution by start offset.
+    let mut slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>> = BTreeMap::new();
 
     // Bound the expired chunk range by the *parent header's* recorded ledger size
     // only — a pure function of the block being built/validated, identical on every
@@ -1010,8 +1053,8 @@ fn find_block_range(
 
     // Track min and max blocks as we iterate. Keyed by hash (not block-index item)
     // so un-migrated tail blocks — which have no index entry yet — are representable.
-    let mut min_height: Option<(BlockHeight, H256)> = None;
-    let mut max_height: Option<(BlockHeight, H256)> = None;
+    let mut min_height: Option<(BlockHeight, H256, u64)> = None;
+    let mut max_height: Option<(BlockHeight, H256, u64)> = None;
     // The boundary trim must span the UNION of all expired slots, not one slot's
     // range. When several expired slots share a block (small partitions), trimming
     // to a single slot's range would drop the others — under-refunding / halving
@@ -1021,6 +1064,9 @@ fn find_block_range(
     let mut global_end: Option<u64> = None;
 
     for (slot_index, miners) in expired_slots {
+        // Per-slot miners (un-merged) — the attribution source keyed by tx start
+        // offset's slot, instead of a per-block union (NC-0042 R4).
+        slot_miners.insert(slot_index, Arc::new(miners));
         let chunk_range = slot_index.compute_chunk_range(
             config.consensus.num_chunks_in_partition,
             max_chunk_offset_across_all_partitions,
@@ -1033,7 +1079,7 @@ fn find_block_range(
         while chunk_offset < *chunk_range.end() {
             // Branch-correct: resolve the offset against the parent's own ancestry
             // (tree-then-index, C1-gated), not the migrated-only index.
-            let (height, block_hash, block_total) = resolve_ledger_offset_to_block(
+            let (height, block_hash, block_base, block_total) = resolve_ledger_offset_to_block(
                 chunk_offset,
                 parent_block_hash,
                 ledger_type,
@@ -1042,26 +1088,24 @@ fn find_block_range(
                 db,
             )?;
 
-            // Update min_height if this is the first block or a lower height
-            if min_height.as_ref().is_none_or(|(h, _)| height < *h) {
-                min_height = Some((height, block_hash));
+            // Update min_height if this is the first block or a lower height.
+            // Carry the block's branch-correct base (start offset) so boundary
+            // trimming reads it from the parent ancestry, never re-deriving it
+            // from the migrated-only index (NC-0042 R1 — the un-migrated boundary
+            // predecessor errored / could diverge there).
+            if min_height.as_ref().is_none_or(|(h, _, _)| height < *h) {
+                min_height = Some((height, block_hash, block_base));
             }
 
             // Update max_height if this is the first block or a higher height
-            if max_height.as_ref().is_none_or(|(h, _)| height > *h) {
-                max_height = Some((height, block_hash));
+            if max_height.as_ref().is_none_or(|(h, _, _)| height > *h) {
+                max_height = Some((height, block_hash, block_base));
             }
 
-            // If the block already exists, merge the miners
-            blocks_with_expired_ledgers
-                .entry(block_hash)
-                .and_modify(|existing_miners: &mut Arc<Vec<IrysAddress>>| {
-                    // Merge the new miners with existing ones
-                    let mut combined = (**existing_miners).clone();
-                    combined.extend(miners.clone());
-                    *existing_miners = Arc::new(combined);
-                })
-                .or_insert_with(|| Arc::new(miners.clone()));
+            // Record the block's branch-correct base offset (the same for every
+            // offset that resolves to it). Miners are NOT merged here — each tx is
+            // attributed to its own start-offset slot in `slot_miners` (NC-0042 R4).
+            block_bases.entry(block_hash).or_insert(block_base);
 
             // Advance to the first chunk of the NEXT block. `block_total` is the
             // exclusive end of this block's chunks (offsets `[base, block_total)`),
@@ -1081,9 +1125,9 @@ fn find_block_range(
     }
 
     // Extract min and max block data - these must exist if we have expired slots
-    let (min_height, min_hash) =
+    let (min_height, min_hash, min_base) =
         min_height.expect("min_height must be populated after iterating expired slots");
-    let (max_height, max_hash) =
+    let (max_height, max_hash, max_base) =
         max_height.expect("max_height must be populated after iterating expired slots");
 
     // Both boundary blocks trim against the full expired span [global_start,
@@ -1098,51 +1142,28 @@ fn find_block_range(
     let min_block = BoundaryBlock {
         height: min_height,
         block_hash: min_hash,
+        base: min_base,
         chunk_range: global_range,
     };
 
     let max_block = BoundaryBlock {
         height: max_height,
         block_hash: max_hash,
+        base: max_base,
         chunk_range: global_range,
     };
 
-    // Get miners for boundary blocks before removing them
-    let min_block_miners = blocks_with_expired_ledgers
-        .remove(&min_block.block_hash)
-        .unwrap_or_else(|| Arc::new(vec![]));
-
-    let max_block_miners = blocks_with_expired_ledgers
-        .remove(&max_block.block_hash)
-        .unwrap_or_else(|| Arc::new(vec![]));
+    // The boundaries are processed explicitly; drop them so `block_bases` holds
+    // only the fully-interior ("middle") blocks.
+    block_bases.remove(&min_block.block_hash);
+    block_bases.remove(&max_block.block_hash);
 
     Ok(Some(BlockRange {
         min_block,
         max_block,
-        min_block_miners,
-        max_block_miners,
-        middle_blocks: blocks_with_expired_ledgers,
+        middle_blocks: block_bases,
+        slot_miners,
     }))
-}
-
-/// Helper to get the previous block's max chunk offset
-fn get_previous_max_offset(
-    block_index_guard: &BlockIndex,
-    block_height: BlockHeight,
-    ledger_type: DataLedger,
-) -> eyre::Result<LedgerChunkOffset> {
-    if block_height == 0 {
-        Ok(LedgerChunkOffset::from(0))
-    } else {
-        let prev_height = block_height - 1;
-        Ok(LedgerChunkOffset::from(
-            block_index_guard
-                .get_item(prev_height)
-                .ok_or_eyre("previous block must exist")?
-                .ledgers[ledger_type]
-                .total_chunks,
-        ))
-    }
 }
 
 /// Processes transactions from a boundary block (first or last).
@@ -1155,12 +1176,11 @@ fn get_previous_max_offset(
 async fn process_boundary_block(
     boundary: &BoundaryBlock,
     block_hash: H256,
-    miners: Arc<Vec<IrysAddress>>,
     is_earliest: bool,
     is_latest: bool,
     ledger_type: DataLedger,
     config: &Config,
-    block_index: &BlockIndex,
+    slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
@@ -1179,8 +1199,13 @@ async fn process_boundary_block(
     let ledger_data_txs =
         get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
 
-    // Get the previous block's max offset
-    let prev_max_offset = get_previous_max_offset(block_index, boundary.height, ledger_type)?;
+    // The boundary block's branch-correct start offset, carried from
+    // `find_block_range`'s parent-ancestry resolution. NOT re-derived from the
+    // migrated-only block index: that read errored when the boundary block's
+    // predecessor was in the un-migrated tail, and could return the canonical
+    // (wrong-branch) total on a side fork — re-introducing the R1 index-lag
+    // divergence in the refund/fee walk (NC-0042).
+    let prev_max_offset = LedgerChunkOffset::from(boundary.base);
 
     // Filter transactions based on chunk positions
     let filtered_txs = filter_transactions_by_chunk_range(
@@ -1190,7 +1215,8 @@ async fn process_boundary_block(
         is_earliest,
         is_latest,
         config.consensus.chunk_size,
-        miners,
+        config.consensus.num_chunks_in_partition,
+        slot_miners,
     );
 
     Ok(filtered_txs)
@@ -1233,7 +1259,8 @@ fn filter_transactions_by_chunk_range(
     is_earliest: bool,
     is_latest: bool,
     chunk_size: u64,
-    miners: Arc<Vec<IrysAddress>>,
+    num_chunks_in_partition: u64,
+    slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
 ) -> BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>> {
     let mut current_offset = prev_max_offset;
     let mut tx_to_miners = BTreeMap::new();
@@ -1247,67 +1274,104 @@ fn filter_transactions_by_chunk_range(
         *partition_range.end()
     );
 
-    if !miners.is_empty() {
-        for (idx, tx) in transactions.iter().enumerate() {
-            let chunks = tx.data_size.div_ceil(chunk_size);
-            let tx_start = current_offset;
-            let tx_end = current_offset + chunks;
+    for (idx, tx) in transactions.iter().enumerate() {
+        let chunks = tx.data_size.div_ceil(chunk_size);
+        let tx_start = current_offset;
+        let tx_end = current_offset + chunks;
 
-            tracing::debug!(
-                "Tx {}: id={}, data_size={}, chunks={}, tx_start={}, tx_end={}",
-                idx,
-                tx.id,
-                tx.data_size,
-                chunks,
-                *tx_start,
-                *tx_end
-            );
+        tracing::debug!(
+            "Tx {}: id={}, data_size={}, chunks={}, tx_start={}, tx_end={}",
+            idx,
+            tx.id,
+            tx.data_size,
+            chunks,
+            *tx_start,
+            *tx_end
+        );
 
-            // Start trim (earliest boundary): skip transactions that start before
-            // the partition; we only include transactions starting within it.
-            if is_earliest && tx_start < partition_range.start() {
-                tracing::debug!("  Skipping (starts before partition)");
-                current_offset = tx_end;
-                continue;
-            }
-            // End trim (latest boundary): stop at the first transaction that starts
-            // at or after the partition end (one starting exactly at the end belongs
-            // to the next partition). Independent of the start trim so a sole block
-            // (min == max) applies both.
-            if is_latest && tx_start >= partition_range.end() {
-                tracing::debug!("  Breaking (starts at or after partition end)");
-                break;
-            }
-
-            // Include this transaction
-            tracing::debug!("  Including transaction");
-            tx_to_miners.insert(tx.id, Arc::clone(&miners));
+        // Start trim (earliest boundary): skip transactions that start before
+        // the partition; we only include transactions starting within it.
+        if is_earliest && tx_start < partition_range.start() {
+            tracing::debug!("  Skipping (starts before partition)");
             current_offset = tx_end;
+            continue;
         }
+        // End trim (latest boundary): stop at the first transaction that starts
+        // at or after the partition end (one starting exactly at the end belongs
+        // to the next partition). Independent of the start trim so a sole block
+        // (min == max) applies both.
+        if is_latest && tx_start >= partition_range.end() {
+            tracing::debug!("  Breaking (starts at or after partition end)");
+            break;
+        }
+
+        // Per-slot attribution: the slot containing this tx's START offset owns it
+        // (the module's ownership rule). NOT a per-block miner union — that
+        // cross-paid adjacent expired slots owned by different miners when they
+        // shared a block (NC-0042 R4). Expired slots tile [global_start,
+        // global_end) contiguously, so an in-range tx always maps to a present
+        // slot; the `None` arm is a defensive guard, not an expected path.
+        if num_chunks_in_partition != 0 {
+            let slot = SlotIndex::new(*tx_start / num_chunks_in_partition);
+            match slot_miners.get(&slot) {
+                Some(miners) => {
+                    tracing::debug!("  Including transaction (slot {})", slot.0);
+                    tx_to_miners.insert(tx.id, Arc::clone(miners));
+                }
+                None => tracing::warn!(
+                    tx.id = ?tx.id,
+                    slot = slot.0,
+                    "tx start offset maps to a non-expired slot; skipping (unexpected)"
+                ),
+            }
+        }
+        current_offset = tx_end;
     }
 
     tracing::info!("Filtered to {} transactions", tx_to_miners.len());
     tx_to_miners
 }
 
-/// Processes all middle blocks (non-boundary blocks)
+/// Processes all middle (fully-interior) blocks. Unlike the boundaries these need
+/// no trim — every tx lies within the expired range — but they DO need per-slot
+/// attribution: a middle block can straddle a slot boundary, so each tx is paid to
+/// the miners of the slot containing its start offset, computed from the block's
+/// branch-correct base offset (NC-0042 R4 — previously every middle-block tx was
+/// paid to the per-block miner union).
 async fn process_middle_blocks(
-    middle_blocks: BTreeMap<H256, Arc<Vec<IrysAddress>>>,
+    middle_blocks: &BTreeMap<H256, u64>,
+    global_range: LedgerChunkRange,
     ledger_type: DataLedger,
+    config: &Config,
+    slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
     block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
     let mut tx_to_miners = BTreeMap::new();
 
-    for (block_hash, miners) in middle_blocks {
-        let block = get_block_by_hash(block_hash, block_tree_guard, db).await?;
+    for (block_hash, base) in middle_blocks {
+        let block = get_block_by_hash(*block_hash, block_tree_guard, db).await?;
         let ledger_tx_ids = block
             .get_data_ledger_tx_ids_ordered(ledger_type)
             .ok_or_eyre(format!("{:?} ledger is required", ledger_type))?;
+        let ledger_data_txs =
+            get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
 
-        for tx_id in ledger_tx_ids.iter() {
-            tx_to_miners.insert(*tx_id, Arc::clone(&miners));
-        }
+        // No trim (`is_earliest = is_latest = false`): a middle block lies entirely
+        // within the expired range. `global_range` is passed only for logging
+        // parity. Each tx is attributed by the slot containing its start offset.
+        let filtered = filter_transactions_by_chunk_range(
+            ledger_data_txs,
+            LedgerChunkOffset::from(*base),
+            global_range,
+            false,
+            false,
+            config.consensus.chunk_size,
+            config.consensus.num_chunks_in_partition,
+            slot_miners,
+        );
+        tx_to_miners.extend(filtered);
     }
 
     Ok(tx_to_miners)
@@ -1457,6 +1521,11 @@ impl SlotIndex {
 struct BoundaryBlock {
     height: BlockHeight,
     block_hash: H256,
+    /// The block's branch-correct Submit start offset (cumulative chunks *before*
+    /// it), resolved from the parent ancestry in [`find_block_range`]. Used as the
+    /// boundary trim's starting `current_offset` instead of an index lookup, so a
+    /// boundary block in the un-migrated tail is handled correctly (NC-0042 R1).
+    base: u64,
     chunk_range: LedgerChunkRange,
 }
 
@@ -1464,9 +1533,17 @@ struct BoundaryBlock {
 struct BlockRange {
     min_block: BoundaryBlock,
     max_block: BoundaryBlock,
-    min_block_miners: Arc<Vec<IrysAddress>>,
-    max_block_miners: Arc<Vec<IrysAddress>>,
-    middle_blocks: BTreeMap<H256, Arc<Vec<IrysAddress>>>,
+    /// Fully-interior blocks (strictly between the boundaries): hash → branch-
+    /// correct base offset. Attributed per-slot by tx start offset just like the
+    /// boundary blocks, so a middle block straddling a slot boundary splits
+    /// correctly across miners.
+    middle_blocks: BTreeMap<H256, u64>,
+    /// Slot index → the miners that stored it (un-merged). A tx is attributed to
+    /// the miners of the slot containing its START offset — the module's ownership
+    /// rule. Keeping this per-slot (not a per-block union) is what stops adjacent
+    /// expired slots owned by different miners from cross-paying when they share a
+    /// block (NC-0042 R4).
+    slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
 }
 
 #[cfg(test)]
@@ -2049,8 +2126,15 @@ mod tests {
     /// block must be the tree block at height 4. Pre-R1 the range was capped at
     /// the index tip → max block height 2, silently dropping the tail's
     /// refunds/miner payouts (an epoch-block accounting + determinism gap).
-    #[test]
-    fn find_block_range_resolves_unmigrated_tail() -> eyre::Result<()> {
+    ///
+    /// Also covers the R1 boundary-base fix: the resolved boundary blocks must
+    /// carry their branch-correct start offset (`base`), and the downstream
+    /// `collect_tx_to_miners_from_range` walk must succeed on an un-migrated
+    /// boundary block. Pre-fix the boundary base was re-derived from
+    /// `block_index.get_item(height - 1)`, which returned `None` for the
+    /// un-migrated height 3 and errored "previous block must exist".
+    #[tokio::test]
+    async fn find_block_range_resolves_unmigrated_tail() -> eyre::Result<()> {
         use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
         use irys_domain::{
             BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
@@ -2130,7 +2214,9 @@ mod tests {
         for (height, submit_total) in [0_u64, 8, 14].into_iter().enumerate() {
             block_index.push_item(
                 &BlockIndexItem {
-                    block_hash: H256::random(),
+                    // Migrated index agrees with the tree on block hashes (as in
+                    // reality), so the boundary walk can fetch the fast-path block.
+                    block_hash: headers[height].block_hash,
                     num_ledgers: 2,
                     ledgers: vec![
                         irys_types::LedgerIndexItem {
@@ -2177,6 +2263,224 @@ mod tests {
         assert_eq!(
             range.max_block.block_hash, tree_tail_hash,
             "the max boundary block must be the tree block, not an indexed one"
+        );
+
+        // R1 boundary-base fix: each boundary block carries its branch-correct
+        // start offset, resolved from the parent ancestry. min_block (height 2)
+        // base = Submit total through height 1 = 8 (present in the index);
+        // max_block (height 4) base = total through height 3 = 18, which is PAST
+        // the migrated index tip (14) and is obtainable ONLY from the tree walk.
+        assert_eq!(
+            range.min_block.base, 8,
+            "min_block base = Submit total through height 1"
+        );
+        assert_eq!(
+            range.max_block.base, 18,
+            "max_block base = Submit total through the un-migrated height 3 — \
+             tree-only; pre-R1 the index lookup of height 3 errored"
+        );
+
+        // End-to-end: the boundary/middle walk must succeed on the un-migrated
+        // max boundary block. Pre-fix this errored with "previous block must
+        // exist" because the boundary base was read from the migrated-only index.
+        // (Fixture blocks carry no Submit tx_ids, so the result is empty — the
+        // point is that resolution completes without error.)
+        let tx_to_miners = collect_tx_to_miners_from_range(
+            range,
+            DataLedger::Submit,
+            &config,
+            &guard,
+            &MempoolReadGuard::stub(),
+            &db,
+        )
+        .await?;
+        assert!(
+            tx_to_miners.is_empty(),
+            "fixture blocks carry no Submit tx_ids, so no txs are attributed"
+        );
+
+        Ok(())
+    }
+
+    /// NC-0042 R4: when two expired slots owned by DIFFERENT miners share one
+    /// block (a block straddling the slot boundary), each tx must be attributed
+    /// to the miners of the slot containing its **start offset** — the module's
+    /// ownership rule — NOT the union of both slots' miners. Pre-fix
+    /// `find_block_range` merged miners per block, so every tx in the straddle
+    /// block was paid to both miner sets (mis-distributed term fees + a wrong
+    /// reward rolling-hash). Deterministic across nodes (not a fork), but a real
+    /// fee-accounting bug invisible to the single-miner heavy fixtures.
+    #[tokio::test]
+    async fn collect_attributes_each_tx_to_its_start_offset_slot_miners() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_tx_header, open_or_create_db, tables::IrysTables,
+        };
+        use irys_domain::{
+            BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
+        };
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{BlockTransactions, DataTransactionHeaderV1, H256List, SealedBlock};
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        // chunk_size = 1 ⇒ data_size N occupies N chunks. Partition = 4 chunks, so
+        // slot 0 = [0,4), slot 1 = [4,8). A single block (height 1) holds all 8
+        // chunks, straddling the slot-0/slot-1 boundary.
+        let mut node_config = irys_types::NodeConfig::testing();
+        {
+            let c = node_config.consensus.get_mut();
+            c.chunk_size = 1;
+            c.num_chunks_in_partition = 4;
+        }
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Four 2-chunk txs: tx0 [0,2) + tx1 [2,4) start in slot 0; tx2 [4,6) +
+        // tx3 [6,8) start in slot 1.
+        let mk_tx = |id_byte: u8| -> DataTransactionHeader {
+            let mut id = [0_u8; 32];
+            id[0] = id_byte;
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256::from(id),
+                    data_size: 2,
+                    ..Default::default()
+                },
+                metadata: irys_types::DataTransactionMetadata::new(),
+            })
+        };
+        let txs = [mk_tx(1), mk_tx(2), mk_tx(3), mk_tx(4)];
+        let tx_ids: Vec<H256> = txs.iter().map(|t| t.id).collect();
+
+        fn submit_header(height: u64, total_chunks: u64, tx_ids: Vec<H256>) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: H256List(tx_ids),
+                total_chunks,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        }
+        // Tree: genesis (Submit total 0) → block 1 (Submit total 8, the 4 txs).
+        let mut genesis = submit_header(0, 0, vec![]);
+        genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
+        let mut block1 = submit_header(1, 8, tx_ids.clone());
+        block1.previous_block_hash = genesis.block_hash;
+        block1.cumulative_diff = 1.into();
+        block1.test_sign();
+        let block1_hash = block1.block_hash;
+        let guard = {
+            let mut tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
+            tree.mark_tip(&genesis.block_hash).unwrap();
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(block1.clone()),
+                BlockTransactions::default(),
+            ));
+            tree.add_block(
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                dummy_ema_snapshot(),
+            )?;
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+        };
+
+        // DB: seeded tx headers + a migrated index agreeing with the tree.
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        db.update_eyre(|wtx| {
+            for t in &txs {
+                insert_tx_header(wtx, t)?;
+            }
+            Ok(())
+        })?;
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        for (height, (hash, submit_total)) in [(genesis.block_hash, 0_u64), (block1_hash, 8)]
+            .into_iter()
+            .enumerate()
+        {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: submit_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+
+        // Slot 0 stored by miner A, slot 1 by miner B; both expired this epoch.
+        let miner_a = IrysAddress::repeat_byte(0xAA);
+        let miner_b = IrysAddress::repeat_byte(0xBB);
+        let mut expired = BTreeMap::new();
+        expired.insert(SlotIndex::new(0), vec![miner_a]);
+        expired.insert(SlotIndex::new(1), vec![miner_b]);
+
+        let range = find_block_range(
+            expired,
+            &config,
+            &block_index,
+            DataLedger::Submit,
+            8, // parent_total
+            block1_hash,
+            &guard,
+            &db,
+        )?
+        .expect("expired slots hold data");
+
+        let tx_to_miners = collect_tx_to_miners_from_range(
+            range,
+            DataLedger::Submit,
+            &config,
+            &guard,
+            &MempoolReadGuard::stub(),
+            &db,
+        )
+        .await?;
+
+        // Each tx is attributed to ONLY the miners of its start-offset slot.
+        // Pre-fix every tx in the straddle block was attributed to [A, B].
+        let miners_of = |id: &H256| tx_to_miners.get(id).map(|m| m.to_vec());
+        assert_eq!(
+            miners_of(&tx_ids[0]),
+            Some(vec![miner_a]),
+            "tx0 (offset 0, slot 0) → miner A only"
+        );
+        assert_eq!(
+            miners_of(&tx_ids[1]),
+            Some(vec![miner_a]),
+            "tx1 (offset 2, slot 0) → miner A only"
+        );
+        assert_eq!(
+            miners_of(&tx_ids[2]),
+            Some(vec![miner_b]),
+            "tx2 (offset 4, slot 1) → miner B only"
+        );
+        assert_eq!(
+            miners_of(&tx_ids[3]),
+            Some(vec![miner_b]),
+            "tx3 (offset 6, slot 1) → miner B only"
         );
 
         Ok(())
