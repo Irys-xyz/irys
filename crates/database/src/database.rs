@@ -740,18 +740,35 @@ pub fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
     data_root: DataRoot,
     address: IrysAddress,
 ) -> eyre::Result<bool> {
-    let matches: Vec<CompactCachedIngressProof> = ingress_proofs_by_data_root(tx, data_root)?
-        .into_iter()
-        .filter(|(_, proof)| proof.address == address)
-        .map(|(_, proof)| proof)
-        .collect();
-
-    let mut deleted = false;
-    for existing in matches {
+    // O(1) seek: no need to scan all dup values for this data_root.
+    if let Some(existing) = ingress_proof_by_data_root_address(tx, data_root, address)? {
         tx.delete::<IngressProofs>(data_root, Some(existing))?;
-        deleted = true;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(deleted)
+}
+
+/// Deletes the ingress proof for (data_root, address) ONLY if the stored row
+/// still matches `expected`. Used by the prune loop to close the TOCTOU window
+/// between the scan and the delete: if another task stored a fresh proof for the
+/// same key between the scan and this call, the stale scanned value will not
+/// match and the fresh proof is preserved.
+/// Returns `true` if the row was deleted, `false` if absent or content differs.
+pub fn delete_ingress_proof_if_unchanged<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    expected: CompactCachedIngressProof,
+) -> eyre::Result<bool> {
+    let address = expected.address;
+    match ingress_proof_by_data_root_address(tx, data_root, address)? {
+        // Compare inner CachedIngressProof (derives PartialEq); the wrapper does not.
+        Some(current) if current.0 == expected.0 => {
+            tx.delete::<IngressProofs>(data_root, Some(current))?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 pub fn store_ingress_proof(

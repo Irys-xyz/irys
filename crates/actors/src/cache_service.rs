@@ -5,18 +5,18 @@ use crate::chunk_ingress_service::ingress_proofs::{
 use crate::metrics;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than,
-    get_data_tx_metadata, tx_header_by_txid,
+    delete_ingress_proof_if_unchanged, get_data_tx_metadata, tx_header_by_txid,
 };
 use irys_database::{
     db::IrysDatabaseExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
-    tables::{CachedChunks, CachedDataRoots, IngressProofs},
+    tables::{CachedChunks, CachedDataRoots, CompactCachedIngressProof, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof, IrysAddress,
+    Config, DataLedger, DataRoot, DatabaseProvider, GIGABYTE, H256, IngressProof,
     LedgerChunkOffset, SendTraced as _, TokioServiceHandle, Traced, UnixTimestamp,
 };
 use reth::tasks::shutdown::Shutdown;
@@ -799,7 +799,10 @@ impl InnerCacheTask {
         // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
         // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
-        let mut to_delete: Vec<(DataRoot, IrysAddress)> = Vec::new();
+        // Carries the full proof content so the delete phase can compare before deleting
+        // (closes the TOCTOU window: a fresh proof stored between the scan and the delete
+        // will not match the scanned content and will be preserved).
+        let mut to_delete: Vec<(DataRoot, CompactCachedIngressProof)> = Vec::new();
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
@@ -822,12 +825,12 @@ impl InnerCacheTask {
                 break;
             }
             processed += 1;
-            let CachedIngressProof { address, proof } = compact.0;
+            let CachedIngressProof { address, proof } = compact.0.clone();
 
             // Associated txids
             let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
                 debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
-                to_delete.push((data_root, address));
+                to_delete.push((data_root, compact));
                 continue;
             };
 
@@ -855,7 +858,7 @@ impl InnerCacheTask {
 
             if at_capacity {
                 // Unpromoted + expired + at capacity: delete
-                to_delete.push((data_root, address));
+                to_delete.push((data_root, compact));
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
             } else if is_locally_produced && any_unpromoted {
                 match check_result.regeneration_action {
@@ -876,24 +879,38 @@ impl InnerCacheTask {
                 }
             } else {
                 // Not local + expired: delete
-                to_delete.push((data_root, address));
-                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
+                to_delete.push((data_root, compact));
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (remote or fully-promoted)");
             }
         }
 
-        // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same data_root
+        // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same
+        // data_root. Content-aware delete closes the TOCTOU window: a fresh proof stored
+        // between the scan and this delete will not match the scanned value and is preserved.
         if !to_delete.is_empty() {
-            for (root, addr) in to_delete.iter() {
-                if let Err(e) =
-                    ChunkIngressServiceInner::remove_ingress_proof_by_signer(&self.db, *root, *addr)
-                {
-                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+            let mut deleted_count = 0_usize;
+            for (root, scanned) in to_delete.iter() {
+                match self.db.update_eyre(|rw_tx| {
+                    delete_ingress_proof_if_unchanged(rw_tx, *root, scanned.clone())
+                }) {
+                    Ok(true) => deleted_count += 1,
+                    Ok(false) => {
+                        debug!(
+                            ingress_proof.data_root = ?root,
+                            "Skipping stale delete: proof was refreshed since scan"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                    }
                 }
             }
-            info!(
-                proofs.deleted = to_delete.len(),
-                "Deleted expired ingress proofs"
-            );
+            if deleted_count > 0 {
+                info!(
+                    proofs.deleted = deleted_count,
+                    "Deleted expired ingress proofs"
+                );
+            }
         }
 
         // Regenerate local expired proofs (only when under capacity)
@@ -1318,8 +1335,8 @@ mod tests {
     use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, NodeConfig, TxChunkOffset,
-        UnpackedChunk, app_state::DatabaseProvider,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, IrysAddress, NodeConfig,
+        TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use reth_db::mdbx::DatabaseArguments;
