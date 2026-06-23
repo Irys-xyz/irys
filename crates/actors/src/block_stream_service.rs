@@ -87,8 +87,9 @@ impl BlockStreamHandle {
     /// fan-out lock.
     ///
     /// Three cursor regimes, all valid: an in-window `from_seq` pages from itself (the caught-up
-    /// `from_seq == logical_len` is a normal empty page); a `from_seq` below the retained floor pages from
-    /// the floor with `truncated = true`; a `from_seq` past the tip clamps to the floor.
+    /// `from_seq == logical_len` is a normal empty page); a `from_seq` below the retained floor returns an
+    /// empty `truncated` page whose `next_seq` is the floor (the follower discards frames and resyncs
+    /// forward to it); a `from_seq` past the tip clamps to the floor.
     pub fn events_page(&self, from_seq: u64, limit: u64) -> eyre::Result<EventsPage> {
         // checked conversions / arithmetic only — never silently manufacture a wrong cursor
         let limit = usize::try_from(limit.min(MAX_PAGE))?;
@@ -98,14 +99,19 @@ impl BlockStreamHandle {
                 Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
                 None => 0,
             };
-            let (start, truncated) = if from_seq < lowest {
-                (lowest, true) // below the retained floor
+            // A below-floor (truncated) page is a pure resync signal: the follower discards any frames
+            // and force-resets its cursor forward to `next_seq` (the floor), so carry no frames — with an
+            // empty page `next_seq == lowest` is exactly that floor. A beyond-tip cursor clamps to the
+            // floor so the follower instead sees a below-cursor frame and rewinds (chain reset, not a
+            // gap). In-window pages from `from_seq`, empty when caught up at `from_seq == logical_len`.
+            let (start, read_limit, truncated) = if from_seq < lowest {
+                (lowest, 0, true) // below the retained floor → signal only, no frames
             } else if from_seq > logical_len {
-                (lowest, false) // beyond the tip → clamp to the floor (0 on a fresh log)
+                (lowest, limit, false) // beyond the tip → clamp to the floor (0 on a fresh log)
             } else {
-                (from_seq, false) // in-window / at-tip (== logical_len yields an empty page)
+                (from_seq, limit, false) // in-window / at-tip (== logical_len yields an empty page)
             };
-            let raw = irys_database::read_block_stream_range(tx, start, limit)?;
+            let raw = irys_database::read_block_stream_range(tx, start, read_limit)?;
             let mut frames = Vec::with_capacity(raw.len());
             for (seq, bytes) in raw {
                 frames.push(decode_frame(seq, &bytes)?);
@@ -478,10 +484,12 @@ mod tests {
 
         let page = handle.events_page(0, 1).unwrap();
         assert!(page.truncated);
-        assert_eq!(page.frames.first().map(|f| f.seq), Some(3));
+        // A truncated page is a resync signal: no frames, and next_seq is the floor the follower
+        // force-resets forward to (it discards frames and resumes from next_seq).
+        assert!(page.frames.is_empty());
         assert_eq!(page.lowest_retained_seq, 3);
-        assert_eq!(page.next_seq, 4);
-        assert!(page.has_more);
+        assert_eq!(page.next_seq, 3);
+        assert!(page.has_more); // floor (3) < logical_len (5)
     }
 
     #[test]
