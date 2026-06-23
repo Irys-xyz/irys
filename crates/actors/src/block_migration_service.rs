@@ -539,14 +539,15 @@ impl BlockMigrationService {
 
         for sealed_block in &prepared {
             self.persist_block(sealed_block)?;
+            // Signal this block as finalized the moment its DB/index commit lands: that commit is
+            // irreversible, so the later reward and chunk-migration steps may fail without stranding
+            // an already-migrated block in the index but absent from the follower stream.
+            on_migrated(sealed_block);
             if let Some(supply_state) = &self.supply_state {
                 let block = sealed_block.header();
                 supply_state.add_block_reward(block.height, block.reward_amount)?;
             }
             self.send_chunk_migration(sealed_block)?;
-            // Signal this block as finalized now that it is fully persisted, so a failure on a
-            // later block in the batch cannot strand an already-migrated block without its frame.
-            on_migrated(sealed_block);
         }
 
         Ok(())

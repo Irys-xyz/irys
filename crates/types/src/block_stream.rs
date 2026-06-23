@@ -9,9 +9,10 @@
 use crate::{DataLedger, DataTransactionHeader, H256, IrysAddress, IrysBlockHeader, SealedBlock};
 use base58::{FromBase58 as _, ToBase58 as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 
 /// One stream frame: a monotonic `seq` flattened beside a `kind`-tagged event.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct StreamFrame {
     pub seq: u64,
     #[serde(flatten)]
@@ -21,7 +22,7 @@ pub struct StreamFrame {
 /// A page of [`StreamFrame`]s served by the `GET /internal/blocks/events` poll endpoint, with the cursor
 /// metadata a follower needs to advance: the next `seq` to request, whether more is available now, the
 /// lowest `seq` still retained, and whether the requested cursor fell below that retained floor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct EventsPage {
     pub from_seq: u64,
     pub frames: Vec<StreamFrame>,
@@ -166,7 +167,7 @@ impl BlockEvent {
         let header = block.header();
         let txns = block.transactions();
         Self::build(header, chunk_size, |ledger| {
-            txns.get_ledger_txs(ledger).to_vec()
+            Cow::Borrowed(txns.get_ledger_txs(ledger))
         })
     }
 
@@ -174,16 +175,16 @@ impl BlockEvent {
     /// resolver returns the ordered tx headers for a ledger (e.g. from the DB).
     pub fn from_header_and_txs(
         header: &IrysBlockHeader,
-        ledger_txs: impl FnMut(DataLedger) -> Vec<DataTransactionHeader>,
+        mut ledger_txs: impl FnMut(DataLedger) -> Vec<DataTransactionHeader>,
         chunk_size: u64,
     ) -> Self {
-        Self::build(header, chunk_size, ledger_txs)
+        Self::build(header, chunk_size, |ledger| Cow::Owned(ledger_txs(ledger)))
     }
 
-    fn build(
+    fn build<'a>(
         header: &IrysBlockHeader,
         chunk_size: u64,
-        mut ledger_txs: impl FnMut(DataLedger) -> Vec<DataTransactionHeader>,
+        mut ledger_txs: impl FnMut(DataLedger) -> Cow<'a, [DataTransactionHeader]>,
     ) -> Self {
         let mut data_ledgers = Vec::with_capacity(header.data_ledgers.len());
         let mut txs = Vec::new();
@@ -192,7 +193,7 @@ impl BlockEvent {
             data_ledgers.push(DataLedgerEntry {
                 ledger_id: dl.ledger_id,
                 tx_root: dl.tx_root,
-                tx_ids: dl.tx_ids.0.clone(),
+                tx_ids: dl.tx_ids.0.clone(), // clone: the response owns its serialized tx-id list
                 total_chunks: dl.total_chunks,
                 required_proof_count: u32::from(dl.required_proof_count.unwrap_or(0)),
                 proof_count: dl
@@ -221,7 +222,11 @@ impl BlockEvent {
                     metadata_format: tx.metadata_format,
                     tx_position: u32::try_from(i).unwrap_or(u32::MAX),
                     tx_start_offset: offsets[i],
-                    promoted_height: tx.promoted_height(),
+                    promoted_height: if ledger == DataLedger::Publish {
+                        Some(header.height)
+                    } else {
+                        tx.promoted_height()
+                    },
                 });
             }
         }
@@ -272,6 +277,7 @@ impl StreamFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DataTransactionLedger, H256List};
 
     fn sample_block_event(h: H256) -> BlockEvent {
         BlockEvent {
@@ -401,5 +407,21 @@ mod tests {
         assert_eq!(start_offsets(3, &[1, 2], 1), vec![0, 1]);
         // rounding up: 3 bytes at chunk_size 2 ⇒ 2 chunks
         assert_eq!(start_offsets(2, &[3], 2), vec![0]);
+    }
+
+    #[test]
+    fn publish_transaction_uses_containing_block_as_promotion_height() {
+        let mut header = IrysBlockHeader::default();
+        header.height = 23;
+        header.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_ids: H256List(vec![H256::zero()]),
+            ..Default::default()
+        }];
+
+        let event =
+            BlockEvent::from_header_and_txs(&header, |_| vec![DataTransactionHeader::default()], 1);
+
+        assert_eq!(event.txs[0].promoted_height, Some(23));
     }
 }

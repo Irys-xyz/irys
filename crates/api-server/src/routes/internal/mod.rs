@@ -14,9 +14,14 @@ use crate::error::ApiError;
 use actix_web::{HttpResponse, dev::HttpServiceFactory, web};
 use irys_actors::block_tree_service::get_block_header;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_domain::BlockTreeEntry;
 use irys_types::block_stream::{BlockEvent, EventsPage, StreamFrame};
-use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, app_state::DatabaseProvider};
+use irys_types::{
+    DataLedger, DataTransactionHeader, H256, IrysBlockHeader, app_state::DatabaseProvider,
+};
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -45,8 +50,8 @@ async fn blocks_stream(
         .subscribe(query.from_seq)
         .map_err(|e| ApiError::Internal { err: e.to_string() })?;
 
-    let body = tokio_stream::iter(replay)
-        .chain(ReceiverStream::new(live))
+    let body = replay
+        .chain(ReceiverStream::new(live).map(Ok::<_, eyre::Report>))
         .map(frame_to_sse);
 
     Ok(HttpResponse::Ok()
@@ -54,8 +59,10 @@ async fn blocks_stream(
         .streaming(body))
 }
 
-fn frame_to_sse(frame: StreamFrame) -> Result<web::Bytes, actix_web::Error> {
-    let json = serde_json::to_string(&frame).map_err(actix_web::error::ErrorInternalServerError)?;
+fn frame_to_sse(frame: eyre::Result<Arc<StreamFrame>>) -> Result<web::Bytes, actix_web::Error> {
+    let frame = frame.map_err(actix_web::error::ErrorInternalServerError)?;
+    let json = serde_json::to_string(frame.as_ref())
+        .map_err(actix_web::error::ErrorInternalServerError)?;
     Ok(web::Bytes::from(format!("data: {json}\n\n")))
 }
 
@@ -105,6 +112,7 @@ struct RangeQuery {
 
 /// Max number of heights one range request may span, to bound the per-request DB work.
 const MAX_BLOCK_RANGE: u64 = 1_000;
+const CANONICAL_SNAPSHOT_ATTEMPTS: usize = 3;
 
 /// `GET /internal/blocks?from_height=&to_height=` — the canonical blocks in `[from, to]`, ascending.
 async fn blocks_range(
@@ -120,13 +128,103 @@ async fn blocks_range(
             ),
         });
     }
-    let mut events = Vec::new();
-    for height in query.from_height..=query.to_height {
-        if let Some(event) = resolve_block_event(&state, height)? {
-            events.push(event);
-        }
+    let snapshot = snapshot_canonical_range(&state, query.from_height, query.to_height)?;
+    let events = snapshot
+        .into_iter()
+        .map(|source| resolve_snapshot_block(&state, source))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !events.windows(2).all(|pair| {
+        pair[0].header.height.checked_add(1) == Some(pair[1].header.height)
+            && pair[1].header.previous_block_hash == pair[0].header.block_hash
+    }) {
+        return Err(ApiError::Internal {
+            err: "canonical block range snapshot is not a contiguous parent-linked chain"
+                .to_string(),
+        });
     }
     Ok(web::Json(events))
+}
+
+enum CanonicalBlockSource {
+    InTree(BlockTreeEntry),
+    Migrated { height: u64, block_hash: H256 },
+}
+
+fn snapshot_canonical_range(
+    state: &ApiState,
+    from_height: u64,
+    to_height: u64,
+) -> Result<Vec<CanonicalBlockSource>, ApiError> {
+    for _ in 0..CANONICAL_SNAPSHOT_ATTEMPTS {
+        let entries = state.block_tree.read().get_canonical_chain().0;
+        let signature: Vec<(u64, H256)> = entries
+            .iter()
+            .map(|entry| (entry.height(), entry.block_hash()))
+            .collect();
+        let mut in_tree: BTreeMap<u64, BlockTreeEntry> = entries
+            .into_iter()
+            .filter(|entry| (from_height..=to_height).contains(&entry.height()))
+            .map(|entry| (entry.height(), entry))
+            .collect();
+        let snapshot = snapshot_with_index(state, from_height, to_height, &mut in_tree)?;
+        let unchanged = state
+            .block_tree
+            .read()
+            .get_canonical_chain()
+            .0
+            .iter()
+            .map(|entry| (entry.height(), entry.block_hash()))
+            .eq(signature.into_iter());
+        if unchanged {
+            return Ok(snapshot);
+        }
+    }
+    Err(ApiError::Internal {
+        err: "canonical chain changed repeatedly while snapshotting block range".to_string(),
+    })
+}
+
+fn snapshot_with_index(
+    state: &ApiState,
+    from_height: u64,
+    to_height: u64,
+    in_tree: &mut BTreeMap<u64, BlockTreeEntry>,
+) -> Result<Vec<CanonicalBlockSource>, ApiError> {
+    state
+        .db
+        .view_eyre(|tx| {
+            let mut snapshot = Vec::new();
+            for height in from_height..=to_height {
+                if let Some(entry) = in_tree.remove(&height) {
+                    snapshot.push(CanonicalBlockSource::InTree(entry));
+                } else if let Some(block_hash) =
+                    irys_database::block_index_hash_by_height(tx, height)?
+                {
+                    snapshot.push(CanonicalBlockSource::Migrated { height, block_hash });
+                }
+            }
+            Ok(snapshot)
+        })
+        .map_err(|e| ApiError::Internal { err: e.to_string() })
+}
+
+fn resolve_snapshot_block(
+    state: &ApiState,
+    source: CanonicalBlockSource,
+) -> Result<BlockEvent, ApiError> {
+    match source {
+        CanonicalBlockSource::InTree(entry) => Ok(BlockEvent::from_sealed(
+            entry.sealed_block(),
+            state.config.consensus.chunk_size,
+        )),
+        CanonicalBlockSource::Migrated { height, block_hash } => {
+            resolve_block_hash(state, block_hash)?.ok_or_else(|| ApiError::Internal {
+                err: format!(
+                    "canonical range snapshot block {block_hash} at height {height} is unavailable"
+                ),
+            })
+        }
+    }
 }
 
 /// Resolves the canonical block at `height` to a `BlockEvent`, or `None` if there is none.
@@ -135,8 +233,6 @@ async fn blocks_range(
 /// `IrysDataTxHeaders`); migrated blocks are rebuilt from the header plus per-tx headers resolved
 /// from the DB via `tx_header_by_txid`.
 fn resolve_block_event(state: &ApiState, height: u64) -> Result<Option<BlockEvent>, ApiError> {
-    let chunk_size = state.config.consensus.chunk_size;
-
     let in_tree = state
         .block_tree
         .read()
@@ -152,6 +248,11 @@ fn resolve_block_event(state: &ApiState, height: u64) -> Result<Option<BlockEven
         },
     };
 
+    resolve_block_hash(state, block_hash)
+}
+
+fn resolve_block_hash(state: &ApiState, block_hash: H256) -> Result<Option<BlockEvent>, ApiError> {
+    let chunk_size = state.config.consensus.chunk_size;
     if let Some(sealed) = state.block_tree.read().get_sealed_block(&block_hash) {
         return Ok(Some(BlockEvent::from_sealed(&sealed, chunk_size)));
     }

@@ -7,6 +7,8 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::ruint::aliases::U256;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
+use futures::TryStreamExt as _;
+use irys_actors::block_stream_service::ReplayStream;
 use irys_types::block_stream::{StreamEvent, StreamFrame};
 use irys_types::irys::IrysSigner;
 use irys_types::{H256, NodeConfig};
@@ -19,9 +21,9 @@ const TEST_USER_BALANCE_IRYS: U256 = U256::from_limbs([1_000_000_000_000_000_000
 
 /// Receives frames until `predicate` matches, or times out.
 async fn next_frame_for(
-    live: &mut Receiver<StreamFrame>,
+    live: &mut Receiver<Arc<StreamFrame>>,
     predicate: impl Fn(&StreamFrame) -> bool,
-) -> eyre::Result<StreamFrame> {
+) -> eyre::Result<Arc<StreamFrame>> {
     loop {
         let frame = tokio::time::timeout(Duration::from_secs(30), live.recv())
             .await?
@@ -30,6 +32,10 @@ async fn next_frame_for(
             return Ok(frame);
         }
     }
+}
+
+async fn collect_replay(replay: ReplayStream) -> eyre::Result<Vec<Arc<StreamFrame>>> {
+    replay.try_collect().await
 }
 
 #[test_log::test(tokio::test)]
@@ -67,6 +73,7 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
     // A late subscriber replays history (including that frame at its original seq) with strictly
     // increasing, gapless seqs — the replay→live handover property.
     let (replay_late, _live_late) = handle.subscribe(0)?;
+    let replay_late = collect_replay(replay_late).await?;
     assert!(
         replay_late.iter().any(|f| f.seq == seq_with_data),
         "replay must include the earlier frame at its original seq"
@@ -80,7 +87,7 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
     let mut observed_hashes: Vec<_> = replay_late
         .iter()
         .filter(|f| f.kind() == "observed")
-        .filter_map(StreamFrame::block_hash)
+        .filter_map(|frame| frame.block_hash())
         .collect();
     let total = observed_hashes.len();
     observed_hashes.sort();
@@ -271,8 +278,13 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
 
     // Snapshot the complete durable log and assert the whole-log invariants on it.
     let (log, _live_snapshot) = handle.subscribe(0)?;
+    let log = collect_replay(log).await?;
 
-    let reorged: Vec<&StreamFrame> = log.iter().filter(|f| f.kind() == "reorged").collect();
+    let reorged: Vec<&StreamFrame> = log
+        .iter()
+        .filter(|f| f.kind() == "reorged")
+        .map(Arc::as_ref)
+        .collect();
     assert_eq!(
         reorged.len(),
         1,
@@ -325,7 +337,7 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
     let duplicate = log
         .iter()
         .filter(|f| f.kind() == "observed")
-        .filter_map(StreamFrame::block_hash)
+        .filter_map(|frame| frame.block_hash())
         .find(|h| winning.contains(h));
     assert!(
         duplicate.is_none(),
@@ -497,6 +509,7 @@ async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
     // SSE side: the durable replay from seq 0 is the whole log. The log is append-only, so comparing the
     // poll set against the equal-length SSE prefix is stable against any frame appended afterwards.
     let (sse_frames, _live) = handle.subscribe(0)?;
+    let sse_frames = collect_replay(sse_frames).await?;
     assert!(
         sse_frames.len() >= poll_frames.len(),
         "SSE replay covers at least the polled range"
