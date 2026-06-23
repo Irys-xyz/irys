@@ -12,9 +12,11 @@
 //   expiring at this block, both pipelines selected X and `ShadowTxGenerator::new`
 //   panicked the producer with `BlockProductionError::Irrecoverable`
 //   (the defence-in-depth guard at `shadow_tx_generator.rs:258`).
-//   The fix drops any publish candidate that is in the *same* expired-Submit-tx
-//   set the refund pipeline acts on (`ledger_expiry::expired_submit_tx_ids`), so
-//   "is this tx refunded?" and "may this tx be promoted?" cannot diverge.
+//   The fix is a per-candidate predicate in `tx_selector::get_publish_txs_and_proofs`
+//   that calls `ledger_expiry::is_submit_storage_expired` for each publish candidate.
+//   Any candidate whose Submit storage has expired is dropped before it can reach
+//   the `ShadowTxGenerator`, so "is this tx refunded?" and "is this tx promoted?"
+//   cannot both be true for the same tx.
 //
 // What this test proves end-to-end:
 //   1. The producer does NOT panic when forced into the scenario.
@@ -51,63 +53,34 @@
 //   writes at the same height and crashes BlockTreeService. DO NOT do that —
 //   drive the txs through the real flow.
 
-use crate::utils::IrysNodeTest;
+use crate::validation::submit_expiry_two_node_setup;
 use irys_database::{db::IrysDatabaseExt as _, store_external_ingress_proof_checked};
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{DataLedger, NodeConfig, ingress::generate_ingress_proof};
+use irys_types::{DataLedger, H256, ingress::generate_ingress_proof};
 use reth::rpc::types::TransactionTrait as _;
 use std::collections::BTreeSet;
 use tracing::info;
 
 #[test_log::test(tokio::test)]
 async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -> eyre::Result<()> {
-    // --- 1. Config: small cycle + tiny partition so the genesis Submit slot
-    //         expires (a 2nd slot gets allocated once we overflow the partition).
-    // num_blocks_in_epoch = 5, submit_ledger_epoch_length = 2 → blocks_per_cycle = 10.
-    let num_blocks_in_epoch: usize = 5;
-    let submit_ledger_epoch_length: u64 = 2;
-    let chunk_size: u64 = 32;
-    let num_chunks_in_partition: u64 = 10;
-    let blocks_per_cycle = num_blocks_in_epoch as u64 * submit_ledger_epoch_length;
-    let seconds_to_wait = 40;
+    // --- 1 + 2 + 3. Shared config + two-node startup + overflow data posting ---
+    // (See submit_expiry_two_node_setup for the parameter rationale.)
+    let setup = submit_expiry_two_node_setup().await?;
+    let genesis_config = setup.genesis_config;
+    let genesis_node = setup.genesis_node;
+    let peer_node = setup.peer_node;
+    let txs = setup.txs;
+    let user_signer = setup.user_signer;
+    let blocks_per_cycle = setup.blocks_per_cycle;
+    let num_blocks_in_epoch = setup.num_blocks_in_epoch;
+    let seconds_to_wait = setup.seconds_to_wait;
 
-    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
-    {
-        let c = genesis_config.consensus.get_mut();
-        c.chunk_size = chunk_size;
-        c.num_chunks_in_partition = num_chunks_in_partition;
-        c.block_migration_depth = 1;
-        c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
-        // testing() already defaults to 1, but make the assumption explicit.
-        c.hardforks.frontier.number_of_ingress_proofs_total = 1;
-    }
-
-    let user_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&user_signer]);
-
-    // --- 2. Start genesis + peer ---
-    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
-        .await;
-    let peer_config = genesis_node.testing_peer_with_signer(&user_signer);
-    let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
-
-    // --- 3. Post enough single-chunk data txs to overflow one partition,
-    //         forcing a 2nd Submit slot (so the genesis slot 0 is non-last and
-    //         can expire). Each tx carries a perm_fee (create_publish_transaction),
-    //         so every unpromoted one is perm-fee-refundable at expiry. ---
-    let num_txs = (num_chunks_in_partition + 2) as usize; // 12 chunks > 10 capacity
-    let anchor = genesis_node.get_anchor().await?;
-    let mut txs = Vec::with_capacity(num_txs);
-    for i in 0..num_txs {
-        let data = vec![100 + i as u8; chunk_size as usize];
-        let tx = genesis_node.post_data_tx(anchor, data, &user_signer).await;
-        genesis_node
-            .wait_for_mempool(tx.header.id, seconds_to_wait)
-            .await?;
-        txs.push(tx);
-    }
-    let data_block = genesis_node.mine_block().await?;
+    // Verify all posted txs landed in the Submit ledger.
+    // The data block was already mined by submit_expiry_two_node_setup.
+    let data_block = genesis_node
+        .get_block_by_height(genesis_node.get_canonical_chain_height().await)
+        .await?;
+    let num_txs = txs.len();
     let submit_ids: BTreeSet<_> = data_block
         .get_data_ledger_tx_ids()
         .get(&DataLedger::Submit)
@@ -182,11 +155,13 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         .collect();
 
     // Decode the EVM payload to find which txs were perm-fee-refunded.
+    // `BalanceIncrement::irys_ref` carries the CL tx_id, enabling identity-based
+    // comparison against the expired set rather than a count-only check.
     let evm_block = genesis_node
         .wait_for_evm_block(expiry_block.evm_block_hash, seconds_to_wait)
         .await?;
     let user_addr = user_signer.address().to_alloy_address();
-    let refund_count = evm_block
+    let refunded_tx_ids: BTreeSet<H256> = evm_block
         .body
         .transactions
         .into_iter()
@@ -195,14 +170,17 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
             let shadow_tx = ShadowTransaction::decode(&mut tx.input().as_ref()).ok()?;
             let packet = shadow_tx.as_v1()?;
             match packet {
-                TransactionPacket::PermFeeRefund(refund) if refund.target == user_addr => Some(()),
+                TransactionPacket::PermFeeRefund(refund) if refund.target == user_addr => {
+                    // irys_ref is the CL tx_id encoded as FixedBytes<32>
+                    Some(H256(refund.irys_ref.into()))
+                }
                 _ => None,
             }
         })
-        .count();
+        .collect();
 
     info!(
-        refund_count,
+        refund_count = refunded_tx_ids.len(),
         publish_count = publish_ids.len(),
         "expiry block produced without panic"
     );
@@ -213,7 +191,7 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
     // proves expired candidates existed and were diverted to a refund rather than
     // promoted (verified out-of-band: the producer logs N "non-promotable" drops).
     assert!(
-        refund_count > 0,
+        !refunded_tx_ids.is_empty(),
         "at least one expired tx must be perm-fee-refunded (else the test is vacuous)"
     );
 
@@ -260,14 +238,12 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         );
     }
 
-    // No-divergence property: every tx the producer dropped from promotion is
-    // exactly a tx the refund pipeline acted on. All txs are from `user_signer`,
-    // so the count of `PermFeeRefund`s to that address must equal the expired set.
+    // No-divergence (identity): the set of txs the refund pipeline acted on must
+    // equal the expired set the producer used — the two must not diverge (NC-0042 §4b).
     assert_eq!(
-        refund_count,
-        expired_set.len(),
-        "A2's dropped (expired) set must match Pipeline B's refund set exactly — \
-         the two must not diverge (NC-0042 §4b)"
+        refunded_tx_ids, expired_set,
+        "refunded tx-id set must equal the expired set exactly — \
+         Pipeline A's drop list and Pipeline B's refund list must not diverge (NC-0042 §4b)"
     );
 
     // --- 8. Peer must accept the block (it is a valid canonical block) ---
