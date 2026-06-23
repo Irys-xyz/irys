@@ -1008,6 +1008,13 @@ mod tests {
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
+    /// Watchdog deadline for `select!`s that expect a spawned `JoinHandle` to resolve.
+    /// The timer branch only exists to fail fast instead of hanging the suite if the
+    /// handle never wakes the select; it is NOT a timing assertion. A tight bound (e.g.
+    /// 1s) spuriously fires under parallel-CI CPU starvation on a current-thread runtime
+    /// (the spawned task can't be polled in time), so keep it generously loose.
+    const HANDLE_RESOLVE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]
     fn test_validation_priority_ordering() {
@@ -1417,7 +1424,7 @@ mod tests {
 
         let result = tokio::select! {
             r = &mut handle => r.unwrap(),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                 panic!("Handle did not resolve — select was not woken");
             }
         };
@@ -1435,7 +1442,7 @@ mod tests {
 
         let result = tokio::select! {
             r = &mut handle => r,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                 panic!("Handle did not resolve after panic");
             }
         };
@@ -1902,7 +1909,7 @@ mod tests {
 
             let result = tokio::select! {
                 r = &mut handle => r.unwrap(),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                     panic!("Handle {} did not resolve within timeout", i);
                 }
             };
