@@ -57,12 +57,13 @@ registers no live subscriber and reads in a single transaction.
 | `from_seq` vs the window | behaviour | `truncated` |
 | --- | --- | --- |
 | in-window / at-tip (`lowest_retained_seq..=logical_len`) | page from `from_seq`; `from_seq == logical_len` is a normal empty page (caught up) | `false` |
-| below the floor (`< lowest_retained_seq`) | page from `lowest_retained_seq`; the requested span was pruned | `true` |
+| below the floor (`< lowest_retained_seq`) | empty page; `next_seq` is the floor the follower resyncs forward to; the requested span was pruned | `true` |
 | beyond the tip (`> logical_len`) | clamp to `lowest_retained_seq` (`0` on a fresh log) | `false` |
 
-A `truncated` page tells the follower its requested span is gone; it re-bootstraps current state (the
-reads below) and resumes streaming from `lowest_retained_seq`. The endpoint never silently returns a page
-whose first `seq` exceeds `from_seq` without `truncated`.
+A `truncated` page is a resync signal: it carries no frames, and `next_seq` is the floor
+(`lowest_retained_seq`). The follower discards any frames, force-resets its cursor forward to `next_seq`,
+re-bootstraps current state (the reads below) up to the floor, and resumes streaming from there. The
+endpoint never silently returns a page whose first `seq` exceeds `from_seq` without `truncated`.
 
 **Equivalence.** For every in-window `seq`, the frame `/events` returns equals the frame the SSE stream
 would push for that `seq`; concatenating poll pages from `from_seq=0` yields the identical sequence as the
