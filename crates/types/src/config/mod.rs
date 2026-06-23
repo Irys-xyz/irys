@@ -734,10 +734,10 @@ mod tests {
         [reth]
         gas_limit = 30000000
 
-        [reth.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+        [reth.genesis_evm_state.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
         balance = "0x152cf4e72a974f1c0000"
 
-        [reth.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+        [reth.genesis_evm_state.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
