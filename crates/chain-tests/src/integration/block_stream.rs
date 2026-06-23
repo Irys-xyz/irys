@@ -335,3 +335,192 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
     tokio::join!(genesis_node.stop(), peer_node.stop());
     Ok(())
 }
+
+/// `GET /internal/blocks/events` pages the same log over HTTP and honours the three cursor regimes:
+/// in-window pagination, the caught-up empty page, and the beyond-tip clamp — plus the error/probe codes.
+#[test_log::test(tokio::test)]
+async fn internal_events_endpoint_pages_and_regimes() -> eyre::Result<()> {
+    let node = IrysNodeTest::default_async().start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.bind_port
+    );
+    let client = reqwest::Client::new();
+
+    let blk = node.mine_block().await?;
+    node.wait_until_height(blk.height, 10).await?;
+    node.mine_blocks(2).await?;
+    node.wait_until_height(blk.height + 2, 10).await?;
+
+    // Page from 0 with a small limit, following next_seq/has_more to exhaustion.
+    let mut from = 0_u64;
+    let mut seqs = Vec::new();
+    loop {
+        let page: serde_json::Value = client
+            .get(format!(
+                "{address}/internal/blocks/events?from_seq={from}&limit=2"
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+        for f in page["frames"].as_array().expect("frames array") {
+            seqs.push(f["seq"].as_u64().expect("seq"));
+        }
+        from = page["next_seq"].as_u64().expect("next_seq");
+        if !page["has_more"].as_bool().expect("has_more") {
+            break;
+        }
+    }
+    // At exhaustion (`has_more=false`), the last `next_seq` is the log's logical length.
+    let logical_len = from;
+    assert_eq!(seqs.first(), Some(&0), "log starts at seq 0");
+    assert!(
+        seqs.windows(2).all(|w| w[1] == w[0] + 1),
+        "contiguous, each seq visited once: {seqs:?}"
+    );
+    assert!(logical_len >= 1);
+
+    // Caught-up (from_seq == logical_len): a normal empty page, not a clamp.
+    let resp = client
+        .get(format!(
+            "{address}/internal/blocks/events?from_seq={logical_len}"
+        ))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let page: serde_json::Value = resp.json().await?;
+    assert!(page["frames"].as_array().unwrap().is_empty());
+    assert_eq!(page["next_seq"].as_u64(), Some(logical_len));
+    assert_eq!(page["has_more"].as_bool(), Some(false));
+    assert_eq!(page["truncated"].as_bool(), Some(false));
+
+    // Beyond tip (from_seq > logical_len): clamp to floor 0 (log not pruned), truncated false, not empty.
+    let page: serde_json::Value = client
+        .get(format!(
+            "{address}/internal/blocks/events?from_seq={}",
+            logical_len + 5
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(
+        page["frames"].as_array().unwrap().first().unwrap()["seq"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(page["truncated"].as_bool(), Some(false));
+
+    // Over-size limit is clamped, not rejected.
+    assert_eq!(
+        client
+            .get(format!(
+                "{address}/internal/blocks/events?from_seq=0&limit=100000"
+            ))
+            .send()
+            .await?
+            .status(),
+        200
+    );
+
+    // Malformed query → 400.
+    assert_eq!(
+        client
+            .get(format!("{address}/internal/blocks/events?from_seq=abc"))
+            .send()
+            .await?
+            .status(),
+        400
+    );
+
+    // `events` is the literal route, not captured as `{height}`: a valid page shape proves it.
+    let page: serde_json::Value = client
+        .get(format!(
+            "{address}/internal/blocks/events?from_seq=0&limit=1"
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(
+        page["frames"].is_array()
+            && page["next_seq"].is_u64()
+            && page["lowest_retained_seq"].is_u64()
+    );
+
+    Ok(())
+}
+
+/// The poll endpoint and the SSE stream carry byte-identical frames over the same range. Driven with
+/// `observed` + `finalized` frames; `reorged` equivalence follows from the same kind-agnostic
+/// `StreamFrame` serializer (unit-tested via `events_page_frames_match_sse_replay`) and is exercised
+/// end-to-end by `reorged_emitted_for_fork_switch_without_duplicate_observed`.
+#[test_log::test(tokio::test)]
+async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
+    let mut node = IrysNodeTest::default_async();
+    node.cfg.consensus.get_mut().block_migration_depth = 2;
+    let node = node.start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.bind_port
+    );
+    let client = reqwest::Client::new();
+    let handle = node.node_ctx.block_stream_handle.clone();
+
+    // Produce observed + finalized frames: mine, advance past the migration depth, await the index.
+    let blk1 = node.mine_block().await?;
+    node.wait_until_height(blk1.height, 10).await?;
+    node.mine_blocks(3).await?;
+    node.wait_until_block_index_height(blk1.height, 30).await?;
+
+    // Poll side: page /events from 0 to exhaustion over HTTP.
+    let mut poll_frames: Vec<serde_json::Value> = Vec::new();
+    let mut from = 0_u64;
+    loop {
+        let page: serde_json::Value = client
+            .get(format!(
+                "{address}/internal/blocks/events?from_seq={from}&limit=3"
+            ))
+            .send()
+            .await?
+            .json()
+            .await?;
+        for f in page["frames"].as_array().expect("frames array") {
+            poll_frames.push(f.clone());
+        }
+        from = page["next_seq"].as_u64().expect("next_seq");
+        if !page["has_more"].as_bool().expect("has_more") {
+            break;
+        }
+    }
+
+    // SSE side: the durable replay from seq 0 is the whole log. The log is append-only, so comparing the
+    // poll set against the equal-length SSE prefix is stable against any frame appended afterwards.
+    let (sse_frames, _live) = handle.subscribe(0)?;
+    assert!(
+        sse_frames.len() >= poll_frames.len(),
+        "SSE replay covers at least the polled range"
+    );
+    for (i, poll) in poll_frames.iter().enumerate() {
+        assert_eq!(
+            *poll,
+            serde_json::to_value(&sse_frames[i]).expect("serialize sse frame"),
+            "poll frame {i} must be byte-identical to the SSE frame"
+        );
+    }
+    // The range genuinely exercised both frame kinds.
+    assert!(
+        poll_frames
+            .iter()
+            .any(|f| f["kind"].as_str() == Some("observed")),
+        "expected an observed frame"
+    );
+    assert!(
+        poll_frames
+            .iter()
+            .any(|f| f["kind"].as_str() == Some("finalized")),
+        "expected a finalized frame"
+    );
+
+    Ok(())
+}

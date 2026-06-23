@@ -18,6 +18,19 @@ pub struct StreamFrame {
     pub event: StreamEvent,
 }
 
+/// A page of [`StreamFrame`]s served by the `GET /internal/blocks/events` poll endpoint, with the cursor
+/// metadata a follower needs to advance: the next `seq` to request, whether more is available now, the
+/// lowest `seq` still retained, and whether the requested cursor fell below that retained floor.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventsPage {
+    pub from_seq: u64,
+    pub frames: Vec<StreamFrame>,
+    pub next_seq: u64,
+    pub has_more: bool,
+    pub lowest_retained_seq: u64,
+    pub truncated: bool,
+}
+
 /// The tagged event payload. `kind` is lowercase; `observed`/`finalized` flatten a [`BlockEvent`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
