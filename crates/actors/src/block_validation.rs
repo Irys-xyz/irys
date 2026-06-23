@@ -39,7 +39,7 @@ use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as
 use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
 use irys_types::{IrysTransactionId, u256_from_le_bytes as hash_to_number};
 use irys_vdf::last_step_checkpoints_is_valid;
-use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::state::{VdfStateReadonly, build_fork_local_view};
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
@@ -3289,6 +3289,66 @@ pub async fn recall_recall_range_is_valid(
         &block.poa.partition_hash,
     )
     .map_err(RecallRangeError::Mismatch)
+}
+
+/// Build a transient VDF step view covering `block`'s recall-range window
+/// `[reset_step_number ..= global_step_number]`, sourced from the block's OWN lineage (its
+/// ancestors' recorded steps, walked through the block tree) rather than this node's live VDF
+/// buffer.
+///
+/// Used to re-validate the recall range of a block on a competing fork whose post-boundary steps
+/// differ from the (possibly poisoned) local buffer — without trusting that buffer. This is the
+/// single fork-aware step-resolution seam for recall-range validation; it reuses
+/// `irys_vdf::state::build_fork_local_view`. The recall window is only one reset interval wide (a
+/// few blocks back to the last reset boundary), all of which are in-tree for a reorg representable
+/// within `block_tree_depth`.
+pub(crate) fn build_fork_local_recall_view(
+    block: &IrysBlockHeader,
+    config: &ConsensusConfig,
+    block_tree: &BlockTreeReadGuard,
+) -> eyre::Result<VdfStateReadonly> {
+    let global_step = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
+    let capacity = global_step
+        .saturating_sub(reset_step_number)
+        .saturating_add(1) as usize;
+    build_fork_local_view(block, capacity, |hash| {
+        block_tree.read().get_block(hash).cloned().ok_or_else(|| {
+            eyre::eyre!("ancestor {hash} not in block tree for fork-local recall view")
+        })
+    })
+}
+
+/// Build a transient VDF step view sized to include `block`'s *previous* step
+/// (`first_step_number - 1`), sourced from the block's OWN lineage (its ancestors' recorded steps,
+/// walked through the block tree) rather than this node's live VDF buffer.
+///
+/// Used by the previous-step continuity check in `ensure_vdf_is_valid` so a node recovering from a
+/// network partition can validate the canonical fork it must adopt even while its live buffer still
+/// holds the poisoned minority lineage past a reset boundary. The partition-recovery re-anchor is
+/// signalled at reorg-detect time but applied asynchronously by the VDF supervisor; a canonical
+/// straggler block whose previous step lands on the divergent boundary and is validated in that
+/// window would otherwise be rejected as terminally `Invalid` with no retry. Unlike the recall
+/// view, this also covers the previous step when it sits *below* the block's reset boundary (a
+/// boundary-crossing block), so `get_step(first_step - 1)` is always in range. Reuses
+/// `irys_vdf::state::build_fork_local_view` — the single fork-aware step-resolution seam.
+pub(crate) fn build_fork_local_step_view(
+    block: &IrysBlockHeader,
+    config: &ConsensusConfig,
+    block_tree: &BlockTreeReadGuard,
+) -> eyre::Result<VdfStateReadonly> {
+    let global_step = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
+    let prev_step = block.vdf_limiter_info.first_step_number().saturating_sub(1);
+    // Cover from the lower of {reset boundary, previous step} up to the block's global step so the
+    // previous step is in range even when the block crosses a reset boundary.
+    let lower = reset_step_number.min(prev_step);
+    let capacity = global_step.saturating_sub(lower).saturating_add(1) as usize;
+    build_fork_local_view(block, capacity, |hash| {
+        block_tree.read().get_block(hash).cloned().ok_or_else(|| {
+            eyre::eyre!("ancestor {hash} not in block tree for fork-local step view")
+        })
+    })
 }
 
 pub fn get_recall_range(

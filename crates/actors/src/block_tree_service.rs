@@ -1071,9 +1071,11 @@ impl BlockTreeServiceInner {
                         // The minority fork may have crossed a VDF reset boundary, leaving the
                         // VDF loop's running hash and the shared step buffer poisoned with reset
                         // entropy pinned by an orphaned block. Signal the VDF supervisor to
-                        // re-anchor to the (now-truncated) canonical index and restart. Sent
-                        // strictly AFTER the index truncation above so the rebuild reads the
-                        // canonical chain. See design/docs/vdf-partition-recovery-reanchor.md.
+                        // re-anchor to the new canonical tip and restart; it rebuilds the step
+                        // buffer from the block tree's canonical chain. (The index rollback above
+                        // is independent — it only reverts the orphaned fork's storage/supply side
+                        // effects; the VDF rebuild does not read the index.) See
+                        // design/docs/vdf-partition-recovery-reanchor.md.
                         if let Err(e) = self.service_senders.vdf_reanchor.send(()) {
                             error!(
                                 "Failed to signal VDF re-anchor after partition recovery: {e}. \

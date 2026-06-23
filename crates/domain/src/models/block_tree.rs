@@ -749,6 +749,27 @@ impl BlockTree {
             .expect("canonical chain must always have an entry in it")
     }
 
+    /// The canonical block with the GREATEST `global_step_number <= step` — i.e. the last block
+    /// whose VDF range ENDS at or before `step`. Found by binary search over the cached canonical
+    /// chain (ordered oldest→newest, so `global_step_number` is monotonic). Searches in place (no
+    /// chain clone); only the matched entry's `Arc` is cloned.
+    ///
+    /// NB: this is deliberately NOT "the block whose range *covers* `step`". A single block can
+    /// SPAN a reset boundary (its range straddles a multiple of `reset_frequency`), and such a
+    /// block's `next_seed` targets the boundary ABOVE its range — the wrong seed for a boundary
+    /// INSIDE its range. The block ending at or before `step` is the one whose `next_seed` pins the
+    /// reset seed for the next boundary above `step` (the boundary the VDF crosses when it is at
+    /// `step`). Returns `None` only when `step` is below the earliest cached block.
+    #[must_use]
+    pub fn canonical_entry_at_or_below_step(&self, step: u64) -> Option<BlockTreeEntry> {
+        let (chain, _) = &self.longest_chain_cache;
+        // chain is ascending by global_step_number; partition_point gives the count of entries with
+        // global_step_number <= step, so idx-1 is the last such entry.
+        let idx = chain
+            .partition_point(|entry| entry.header().vdf_limiter_info.global_step_number <= step);
+        chain.get(idx.checked_sub(1)?).cloned()
+    }
+
     /// Global step number of the most recent canonical block confirmed past reorg risk —
     /// the deepest block that is both `Onchain` and at least `depth` blocks below the tip.
     /// Used by the VDF reset-boundary gate so the loop never applies a seed pinned by a

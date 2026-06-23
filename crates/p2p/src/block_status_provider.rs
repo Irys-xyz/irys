@@ -503,6 +503,15 @@ impl BlockProvider for BlockStatusProvider {
                 .confirmed_canonical_step(self.block_migration_depth),
         })
     }
+
+    fn canonical_vdf_info_at_or_below_step(&self, step_number: u64) -> Option<H256> {
+        let binding = self.block_tree_read_guard.read();
+        let entry = binding.canonical_entry_at_or_below_step(step_number)?;
+        // Only the reset seed is needed by the VDF loop; return it directly rather than
+        // cloning the whole vdf_limiter_info (steps/checkpoints) and recomputing the
+        // confirmed step (the caller already has that from latest_canonical_vdf_info).
+        Some(entry.header().vdf_limiter_info.next_seed)
+    }
 }
 
 #[cfg(test)]

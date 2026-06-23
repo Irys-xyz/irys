@@ -164,16 +164,20 @@ pub fn run_vdf<B: BlockProvider>(
                 // runs the loop ahead, so it cannot reproduce the #1447 run-ahead bug (the local
                 // loop applying a reset seed pinned by a still-forkable block).
                 //
-                // A residual, *theoretical* concern remains: the step buffer is a single
-                // append-only sequence and validation rejects a block whose steps disagree with
-                // it, so a competing fork whose post-boundary steps differ could — if validated
-                // first — make the canonical block be rejected. Reaching that requires a reorg
-                // ~one reset window deep (where the boundary's reset seed is pinned), far deeper
-                // than `block_migration_depth`. Such a fork is already refused at p2p block-pool
-                // admission (`PartOfAPrunedFork`, plus the block tree's no-reorg-past-migration
-                // rule) before its blocks are ever validated/fast-forwarded, so the FF path needs
-                // no gate. Full mechanism, the deep-reorg bound, the admission guards, and the
-                // invariant relied upon: design/docs/vdf-reset-seed-confirmation-gate.md.
+                // The step buffer is a single append-only sequence reflecting THIS node's lineage,
+                // so a competing fork whose post-boundary steps differ mismatches it. That is NOT
+                // treated as invalidity: `vdf_step_batch_is_valid` RECOMPUTES from the block's own
+                // seed on a buffer mismatch (it does not conflate "differs from my lineage" with
+                // "invalid"), so a heavier competing fork validates on its own merits. This is
+                // load-bearing for partition recovery: a reorg in the band
+                // `block_migration_depth < depth <= block_tree_depth` IS admitted and validated
+                // against a possibly-poisoned buffer — admission keys on `block_tree_depth`
+                // (`PartOfAPrunedFork` only refuses forks older than that), NOT
+                // `block_migration_depth` — so an earlier comment here claiming such forks are
+                // refused before validation was wrong. Recompute-on-mismatch is what lets the
+                // recovering node validate and adopt the canonical chain (and then re-anchor).
+                // See design/docs/vdf-reset-seed-confirmation-gate.md and
+                // design/docs/vdf-partition-recovery-reanchor.md.
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,
@@ -231,9 +235,23 @@ pub fn run_vdf<B: BlockProvider>(
             confirmed_global_step_number: confirmed_step,
         }) = block_provider.latest_canonical_vdf_info()
         {
-            next_reset_seed = vdf_info.next_seed;
             canonical_global_step_number = vdf_info.global_step_number;
             confirmed_global_step_number = confirmed_step;
+            // Source the reset seed from the canonical block ENDING at or before the current step,
+            // not the chain tip. During partition-recovery CATCH-UP the re-anchored VDF local-steps
+            // across reset boundaries the canonical tip has ALREADY passed; the tip's `next_seed`
+            // targets the boundary above the tip, so applying it at an earlier boundary XORs in the
+            // wrong seed and re-poisons the post-boundary steps (the Finding #1 wedge, which then
+            // never heals because `store_step` is forward-only). The block with the greatest
+            // `global_step_number <= global_step_number` pins (via its `next_seed`) the seed for the
+            // boundary the VDF is about to cross — and is correct even when a later canonical block
+            // SPANS that boundary (whose own `next_seed` targets a higher boundary). When the VDF
+            // runs AHEAD of the canonical chain (normal forward operation) that block IS the tip, so
+            // this equals the prior behavior — a no-op. The confirmed-step gate (below) is
+            // unaffected: it still uses `confirmed_global_step_number`.
+            next_reset_seed = block_provider
+                .canonical_vdf_info_at_or_below_step(global_step_number)
+                .unwrap_or(vdf_info.next_seed);
             debug!(
                 "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, confirmed step: {}, global_step: {:?}",
                 canonical_global_step_number,
@@ -1411,9 +1429,14 @@ mod tests {
             "loser vs winner reset seed must diverge the VDF buffer after the boundary"
         );
 
-        // --- The wedge: the canonical (winner) block is REJECTED by the poisoned buffer but
-        //     ACCEPTED by the clean one. `vdf_steps_are_valid` is exactly what the validation
-        //     service runs, so this is the real rejection a poisoned node would hit. ---
+        // --- NOTE (post recompute-on-mismatch fix): a buffer MISMATCH alone no longer rejects —
+        //     `vdf_step_batch_is_valid` now recomputes from the block's own seed. This simplified
+        //     `canonical_block` carries DEFAULT seed/prev_output, so it is self-inconsistent: the
+        //     poisoned buffer rejects it via that recompute (its steps don't reproduce from its own
+        //     seed), while the clean buffer accepts it via the fast-path match (it already holds
+        //     these exact steps). The validation-level wedge proper — a poisoned buffer rejecting an
+        //     HONEST canonical block — is FIXED and covered by
+        //     `state::tests::vdf_step_batch_recomputes_on_buffer_mismatch`. ---
         let canonical_block = VDFLimiterInfo {
             global_step_number: 20,
             steps: clean_steps,
@@ -1430,7 +1453,8 @@ mod tests {
         );
         assert!(
             rejected.is_err(),
-            "poisoned buffer must REJECT the canonical winner block — this is the #1447 wedge"
+            "poisoned buffer rejects this self-inconsistent simplified block via recompute (the \
+             honest-fork wedge itself is fixed — see vdf_step_batch_recomputes_on_buffer_mismatch)"
         );
 
         let accepted = vdf_steps_are_valid(

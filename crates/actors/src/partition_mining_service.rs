@@ -106,6 +106,22 @@ impl PartitionMiningServiceInner {
         self.difficulty = new_diff;
     }
 
+    /// Reset the stateful efficient-sampling recall-range rotation after a VDF re-anchor (deep
+    /// partition recovery rewound and rebuilt the step buffer at a lower global step). The rotation
+    /// tracks `last_step_num` and assumes forward-only progress, so a re-anchor leaves it pointing
+    /// at the old, discarded lineage; mining against it produces recall ranges that no longer match
+    /// the (re-anchored) VDF steps and get rejected by validation. Clearing it forces the next
+    /// `get_recall_range` to rebuild the rotation from the re-anchored steps (back to the nearest
+    /// reset boundary). Unconditional + idempotent, so it is safe even when this partition is idle
+    /// or unassigned. Belt-and-suspenders with `get_recall_range`'s own backward-jump detection,
+    /// which alone misses the case where mining resumes only after the VDF has climbed back to the
+    /// stale `last_step_num + 1`.
+    fn handle_reanchor(&mut self) {
+        debug!("VDF re-anchored: resetting partition recall-range rotation state");
+        self.ranges.reinitialize();
+        self.ranges.last_step_num = 0;
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_partitions_expiration(&mut self, expired: &H256List) {
         if let Some(partition_hash) = self.storage_module.partition_hash()
@@ -157,12 +173,19 @@ impl PartitionMiningServiceInner {
         partition_hash: &irys_types::H256,
     ) -> eyre::Result<u64> {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
-        if next_ranges_step >= step {
-            debug!("Step {} already processed or next consecutive one", step);
+        // Fast path ONLY for the exact next consecutive step. Anything else — `step` AHEAD of the
+        // iterator (a gap) OR BEHIND it (a VDF re-anchor rewound the steps below the iterator's
+        // stateful rotation position, e.g. partition-recovery) — must rebuild the rotation rather
+        // than advance it. The previous `>=` fast-pathed every `step <= last_step_num + 1`, which
+        // silently computed a WRONG recall range after a re-anchor rewind (the rotation state was
+        // for a higher, now-discarded step), making the node mine blocks whose recall range no
+        // longer matches its (re-anchored) VDF steps.
+        if next_ranges_step == step {
+            debug!("Step {} is the next consecutive step", step);
         } else {
             debug!(
-                "Non consecutive step {} may need to reconstruct ranges",
-                step
+                "Non consecutive step {} (iterator at {}) may need to reconstruct ranges",
+                step, self.ranges.last_step_num
             );
             // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
             let reset_step = self.ranges.reset_step(step);
@@ -170,13 +193,17 @@ impl PartitionMiningServiceInner {
                 "Near reset step is {} num recall ranges in partition {}",
                 reset_step, self.ranges.num_recall_ranges_in_partition
             );
-            let start = if reset_step > next_ranges_step {
+            // Reinitialize when the iterator cannot incrementally reach `step` from
+            // `next_ranges_step`: either the reset boundary is past where the iterator is (a
+            // forward gap across a boundary), or the iterator is AHEAD of `step` (a backward
+            // re-anchor rewind — its rotation must be rebuilt from the boundary, not advanced).
+            let start = if reset_step > next_ranges_step || step < next_ranges_step {
                 debug!(
-                    "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
+                    "Step {} not incrementally reachable from last processed step {}, reinitializing ranges ...",
                     step, self.ranges.last_step_num
                 );
                 self.ranges.reinitialize();
-                self.ranges.last_step_num = reset_step - 1; // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
+                self.ranges.last_step_num = reset_step.saturating_sub(1); // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
                 reset_step
             } else {
                 next_ranges_step
@@ -458,6 +485,9 @@ impl PartitionMiningService {
                             }
                             MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
                                 self.state.handle_partitions_expiration(list);
+                            }
+                            MiningBroadcastEvent::Reanchored => {
+                                self.state.handle_reanchor();
                             }
                         },
                         None => {

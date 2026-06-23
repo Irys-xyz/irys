@@ -2,10 +2,12 @@ use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::submodule::db::{get_data_root_infos_for_data_root, get_path_hashes_by_offset};
 use irys_domain::ChunkType;
+use irys_storage::ii;
 use irys_types::{
-    BoundedFee, DataLedger, DataTransaction, H256, LedgerChunkOffset, NodeConfig,
+    BoundedFee, DataLedger, DataTransaction, H256, IrysBlockHeader, LedgerChunkOffset, NodeConfig,
     PartitionChunkOffset, UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
 };
+use std::sync::Arc;
 use tracing::info;
 
 /// Tests that network partition recovery is surgical: shared data from the common
@@ -574,4 +576,378 @@ async fn post_tx_with_chunks(
         chunks.len()
     );
     Ok(tx)
+}
+
+/// Mine `node`'s OWN fork past `target_step` via NATURAL mining: mine in 2-block steps and
+/// `wait_for_packing` after each, until the tip's VDF step exceeds `target_step`. `mine_blocks`
+/// calls `start_mining()`, so the VDF free-runs and partition mining finds real PoA solutions
+/// against the node's assigned (entropy-packed) partition; blocks validate → `mark_tip` →
+/// `confirmed_canonical_step` advances → the #1449 reset-boundary gate releases, so the node
+/// crosses reset boundaries on its own isolated fork exactly as production does. The per-step
+/// `wait_for_packing` keeps the continuous miner from stalling on an epoch boundary's partition
+/// reassignment. `start_height` must be epoch-aligned (even, with num_blocks_in_epoch=2).
+///
+/// Sequential use across nodes is safe: a node not currently being mined has its VDF paused
+/// (`mine_blocks` stops mining on return), so it never free-runs to the boundary and parks. Returns
+/// the new tip height and the fork's block headers above `start_height` for the reorg gossip. The
+/// solutions are capacity (data-independent), so a peer can validate another node's blocks by
+/// recomputing entropy — no chunk-data sync is required for the reorg.
+async fn mine_fork_past_step_natural(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    start_height: u64,
+    target_step: u64,
+    seconds_to_wait: usize,
+) -> eyre::Result<(u64, Vec<Arc<IrysBlockHeader>>)> {
+    for _ in 0..40 {
+        let step = node
+            .get_max_difficulty_block()
+            .vdf_limiter_info
+            .global_step_number;
+        if step > target_step {
+            break;
+        }
+        node.mine_blocks(2).await?;
+        node.wait_for_packing(seconds_to_wait).await;
+    }
+    let tip_block = node.get_max_difficulty_block();
+    let tip_step = tip_block.vdf_limiter_info.global_step_number;
+    eyre::ensure!(
+        tip_step > target_step,
+        "fork did not reach target step {target_step} (tip step {tip_step})"
+    );
+    let tip = tip_block.height;
+    let mut blocks = Vec::new();
+    for h in (start_height + 1)..=tip {
+        blocks.push(Arc::new(node.get_block_by_height(h).await?));
+    }
+    Ok((tip, blocks))
+}
+
+/// Validates the VDF re-anchor fix (review Finding #1) END-TO-END: a network-partition recovery
+/// whose recovered range CROSSES a VDF reset boundary must leave the recovering node's VDF buffer
+/// matching the canonical chain — not re-stepped with the wrong reset seed — so the node
+/// converges instead of re-wedging.
+///
+/// `heavy4_network_partition_recovery` never reaches a reset boundary (default `reset_frequency`,
+/// few blocks), so it passes regardless of the bug. This test lowers `reset_frequency` and mines
+/// the forks far enough that the recovered range spans a reset boundary, then asserts:
+///   (A) the recovering node's VDF steps over the boundary-crossing range equal the canonical
+///       chain's recorded steps — the direct fix check. The broken LCA re-anchor re-derives those
+///       steps locally with the canonical tip's single reset seed, diverging at the boundary.
+///   (B) the node keeps producing/validating blocks after recovery (no wedge).
+///
+/// Continuous mining (`mine_blocks`) is used throughout: single-block mining can panic when the
+/// VDF parks at a reset boundary (`capacity_chunk_solution` fallback). `block_migration_depth=1`
+/// keeps the confirmation lag below `reset_frequency`, so the #1449 gate does not park.
+/// Name: `slow_` → 180s kill budget; `heavy4_` → 4 reserved threads.
+///
+/// Both forks must cross the poisoning boundary, which is ALWAYS gated by the #1449 confirmation
+/// gate (its rotation block lies in the divergent fork region — that is what makes the forks' reset
+/// seeds differ). Crossing requires each node's CONFIRMED step to advance past the rotation step,
+/// which happens as its own fork blocks become `Onchain` — i.e. it must MINE its own fork. The key
+/// to making this work for the peer (the prior version was shelved as "infeasible"): provision the
+/// peer as a REAL miner (stake → pledge → epoch assignment → pack) and use NATURAL mining
+/// (`mine_blocks` → `start_mining()` → VDF free-runs → real PoA solutions → `mark_tip` → confirmed
+/// advances → gate releases). The earlier attempt funded but never staked the peer, so it had no
+/// mineable partition and fell back to forced capacity solutions that never free-ran the VDF and
+/// parked at the boundary — an artifact of the harness setup, not a structural wall.
+#[test_log::test(tokio::test)]
+async fn heavy4_slow_partition_recovery_crosses_reset_boundary() -> eyre::Result<()> {
+    let seconds_to_wait = 45;
+    let block_migration_depth: u32 = 1;
+    // reset_frequency in VDF steps. Must comfortably exceed steps-per-block (~35-80 here, growing
+    // with difficulty) so the #1449 confirmation gate's run-ahead budget lets a block be mined
+    // before the VDF parks at a boundary — otherwise confirmation can never advance and the loop
+    // deadlocks at the boundary. The poisoning boundary is the 2nd reset boundary above the LCA
+    // (the 1st boundary's rotation block sits at/below the shared LCA).
+    let reset_frequency: u64 = 150;
+
+    let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
+        c.chunk_size = 32;
+        c.num_chunks_in_partition = 10;
+        c.num_chunks_in_recall_range = 2;
+        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_term_ledger_slot = 1;
+        c.epoch.num_blocks_in_epoch = 2;
+        c.block_migration_depth = block_migration_depth;
+        c.entropy_packing_iterations = 1_000;
+        c.genesis.initial_packed_partitions = Some(5.0);
+        c.vdf.reset_frequency = reset_frequency as usize;
+    });
+    genesis_config.storage.num_writes_before_sync = 1;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_test = IrysNodeTest::new_genesis(genesis_config.clone());
+    StorageSubmodulesConfig::load_for_test(genesis_test.cfg.base_directory.clone(), 10)?;
+    let genesis = genesis_test
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // No packing on the peer yet — it has no partition assignment until it stakes/pledges.
+    let peer_config = genesis.testing_peer_with_signer(&peer_signer);
+    let peer_test = IrysNodeTest::new(peer_config);
+    StorageSubmodulesConfig::load_for_test(peer_test.cfg.base_directory.clone(), 10)?;
+    let peer = peer_test.start_with_name("PEER").await;
+
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+
+    // ─── Provision the peer as a REAL miner so it can mine its OWN fork: stake → pledge → epoch
+    // assignment → pack. Without an assignment the peer has no packed partition to mine, which is
+    // why the earlier forced-capacity approach (no start_mining) parked the peer's VDF at the
+    // boundary. The assigned partition is entropy-packed, so its PoA solutions are data-independent
+    // and genesis can validate them on reorg without syncing chunk data.
+    let stake_tx = peer.post_stake_commitment(None).await?;
+    let pledge_tx = peer.post_pledge_commitment(None).await?;
+    genesis
+        .wait_for_mempool(stake_tx.id(), seconds_to_wait)
+        .await?;
+    genesis
+        .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
+        .await?;
+
+    // ─── Shared base (gossip ON): heights 1-4. Height 1 includes the commitments; the epochs at 2
+    // and 4 assign the peer a partition (two epochs of margin). Height 4 is the LCA / fork point.
+    genesis.mine_blocks(4).await?;
+    let fork_height = 4_u64;
+    let lca = genesis.get_block_by_height(fork_height).await?;
+    assert_eq!(
+        genesis
+            .get_partition_assignments(peer_signer.address())
+            .len(),
+        1,
+        "peer must be assigned a partition to mine its own fork"
+    );
+    peer.wait_for_block(&lca.block_hash, seconds_to_wait)
+        .await?;
+    peer.wait_for_packing(seconds_to_wait).await;
+    // Freeze the peer's VDF immediately after packing. `wait_for_packing` auto-starts the VDF
+    // (`ensure_vdf_running_for_sync`) but NOT partition mining; left running while the peer sits
+    // idle during genesis's fork-mining phase below, it free-runs to the gated poison boundary and
+    // parks there (no blocks produced → confirmed stuck at the LCA → the #1449 gate never releases
+    // → the peer can never mine its own fork). That was the flaky "PEER stuck at the LCA" deadlock.
+    // Stopping it holds the peer at the LCA until `mine_fork_past_step_natural` resumes it.
+    peer.stop_mining();
+    assert_eq!(
+        peer.get_partition_assignments(peer_signer.address()).len(),
+        1,
+        "peer must see its own assignment before mining"
+    );
+    let lca_step = lca.vdf_limiter_info.global_step_number;
+    info!(
+        fork_height,
+        lca_step, reset_frequency, "Shared base complete; fork point (LCA) established"
+    );
+
+    // ─── Fork (gossip OFF): minority (genesis) and majority (peer) mine independently ───
+    genesis.gossip_disable();
+    peer.gossip_disable();
+    // Pack genesis for the height-4 epoch reassignment before it mines. The peer is already packed
+    // and deliberately left FROZEN (above) — do NOT `wait_for_packing` it here, as that would
+    // re-auto-start its idle VDF and let it drift to the gated boundary while genesis mines.
+    genesis.wait_for_packing(seconds_to_wait).await;
+    peer.stop_mining(); // ensure the peer stays frozen through genesis's fork-mining phase
+
+    // The poisoning reset boundary is the 2nd boundary above the LCA: its rotation block (at
+    // poison_boundary - reset_frequency) is the FIRST boundary above the LCA, which lies in the
+    // divergent fork region — so the two forks pin DIFFERENT reset seeds there. (The 1st boundary
+    // above the LCA has its rotation block at/below the shared LCA, so it does not poison.)
+    let poison_boundary = (lca_step / reset_frequency + 2) * reset_frequency;
+    info!(
+        poison_boundary,
+        rotation_step = poison_boundary - reset_frequency,
+        "Poisoning reset boundary the forks must cross"
+    );
+
+    // Mine genesis's fork FIRST, then the peer's, via NATURAL mining (real PoA solutions; the VDF
+    // free-runs and each node self-confirms its own fork, releasing the #1449 gate). Each node is
+    // held FROZEN while the other mines: `mine_blocks` resumes a node's VDF + partition mining and
+    // stops it again on return, and the peer was explicitly frozen above — so neither node idle-
+    // drifts its VDF to the gated poison boundary and parks (the deadlock that made this flaky).
+    let (genesis_tip, genesis_blocks) =
+        mine_fork_past_step_natural(&genesis, fork_height, poison_boundary, seconds_to_wait)
+            .await?;
+    let (mut peer_tip, _) =
+        mine_fork_past_step_natural(&peer, fork_height, poison_boundary, seconds_to_wait).await?;
+    // Extend the majority (peer) fork to be strictly longer so it wins fork choice on reorg.
+    while peer_tip <= genesis_tip {
+        peer.mine_blocks(2).await?;
+        peer.wait_for_packing(seconds_to_wait).await;
+        peer_tip = peer.get_max_difficulty_block().height;
+    }
+    // Collect the peer's full divergent fork (above the LCA) for the reorg gossip.
+    let mut peer_blocks = Vec::new();
+    for h in (fork_height + 1)..=peer_tip {
+        peer_blocks.push(Arc::new(peer.get_block_by_height(h).await?));
+    }
+    info!(
+        genesis_tip,
+        peer_tip, "Forks mined independently past the poisoning boundary"
+    );
+
+    // Precondition: locate the canonical (peer) block that crosses the POISONING boundary — the
+    // block whose steps the recovering node must reproduce exactly (with the canonical seed).
+    let boundary_block = peer_blocks
+        .iter()
+        .find(|b| b.vdf_limiter_info.reset_step(reset_frequency) == Some(poison_boundary))
+        .cloned()
+        .expect("a canonical block must cross the poisoning reset boundary");
+    info!(
+        height = boundary_block.height,
+        step = boundary_block.vdf_limiter_info.global_step_number,
+        "Canonical block crosses the poisoning boundary"
+    );
+
+    // Confirm the minority fork also crossed the poisoning boundary (so genesis's buffer was
+    // poisoned pre-fix and the recovery genuinely exercises the re-anchor).
+    assert!(
+        genesis_blocks
+            .iter()
+            .any(|b| b.vdf_limiter_info.reset_step(reset_frequency) == Some(poison_boundary)),
+        "minority fork must also cross the poisoning reset boundary above the LCA"
+    );
+
+    // ─── Reorg: gossip the peer's longer fork to genesis ───
+    genesis.gossip_enable();
+    peer.gossip_enable();
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    for block in &peer_blocks {
+        peer.gossip_block_to_peers(block)?;
+        genesis
+            .wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+    genesis.wait_until_height(peer_tip, seconds_to_wait).await?;
+    let adopted = genesis.get_canonical_chain_height().await;
+    assert_eq!(
+        adopted, peer_tip,
+        "genesis must adopt the peer's longer canonical chain"
+    );
+    info!(
+        adopted,
+        "Genesis adopted peer's chain (deep reorg → VDF re-anchor)"
+    );
+
+    // ─── Assertion A (the fix): recovering node's VDF buffer == canonical over the boundary range ─
+    let first = boundary_block.vdf_limiter_info.first_step_number();
+    let last = boundary_block.vdf_limiter_info.global_step_number;
+    let expected_steps = &boundary_block.vdf_limiter_info.steps.0;
+    // The re-anchor is applied ASYNCHRONOUSLY by the VDF supervisor after the deep reorg fires
+    // (signal → supervisor picks it up on its next loop iteration → rebuilds + restarts run_vdf).
+    // Before it lands, genesis's buffer still holds its OWN (poisoned) free-ran lineage past the
+    // reset boundary AND its `global_step` has already run well past `last` — so a bare
+    // `global_step >= last` wait is satisfied immediately by the poisoned buffer and races the
+    // heal (read ~0.7ms after adoption, before the ~one-loop re-anchor latency). Poll the ACTUAL
+    // heal condition (the boundary range matching canonical) and only fail on a PERSISTENT mismatch
+    // after the full timeout, which is a genuine wedge (re-anchor never healed the range).
+    let mut recovered_steps = Vec::new();
+    let mut healed = false;
+    for _ in 0..(seconds_to_wait * 20) {
+        let snapshot = {
+            let guard = genesis.node_ctx.vdf_steps_guard.read();
+            (guard.global_step >= last)
+                .then(|| guard.get_steps(ii(first, last)).ok())
+                .flatten()
+        };
+        if let Some(steps) = snapshot {
+            recovered_steps = steps.0;
+            if &recovered_steps == expected_steps {
+                healed = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        healed,
+        "after re-anchor, genesis's VDF steps over the boundary-crossing range [{first}..={last}] \
+         never converged to the canonical chain's steps (last observed: {recovered_steps:?}, \
+         expected: {expected_steps:?}); a persistent mismatch means the re-anchor did not heal the \
+         recovered range — it re-stepped with the wrong reset seed (Finding #1 wedge)"
+    );
+    info!("Assertion A passed: recovered VDF buffer matches canonical across the reset boundary");
+
+    // ─── Assertion B (no wedge): VDF settles + advances, THEN genesis resumes producing ───
+    // The re-anchor is a BACKWARD VDF rewind; the rebuilt buffer is then filled forward (re-anchor
+    // anchored at the canonical tip-at-that-instant + fast-forward of the remaining adopted steps),
+    // and the recall-range rotation realigns over a few steps. Mining DURING that turbulence
+    // computes a recall range against transitional step state and self-rejects (the node retries —
+    // nothing invalid is ever adopted). In production a partition-recovered node FOLLOWS the network
+    // (ungated fast-forward) rather than mining into that window. So let the VDF SETTLE first:
+    // confirm it advanced past the recovered tip (the heal landed and the node is live, not wedged)
+    // and then either parked at the #1449 confirmation gate or climbed a clear margin, so the
+    // re-anchored buffer and the rotation are stable before we mine.
+    let recovered_tip = last;
+    let settle_margin = reset_frequency / 4; // several efficient-sampling rotation cycles
+    let mut prev_step = genesis.node_ctx.vdf_steps_guard.read().global_step;
+    let mut advanced = prev_step > recovered_tip;
+    let mut stable = 0_u32;
+    for _ in 0..(seconds_to_wait * 20) {
+        if (advanced && stable >= 3) || prev_step >= recovered_tip + settle_margin {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let cur = genesis.node_ctx.vdf_steps_guard.read().global_step;
+        if cur > prev_step {
+            advanced = true;
+            stable = 0;
+        } else {
+            stable += 1;
+        }
+        prev_step = cur;
+    }
+    assert!(
+        advanced,
+        "genesis VDF did not advance past the recovered tip step {recovered_tip} after re-anchor \
+         (wedged?); stuck at {prev_step}"
+    );
+    info!(
+        settled_step = prev_step,
+        "genesis VDF settled after re-anchor (live, not wedged)"
+    );
+
+    // BINDING no-wedge guarantee: after the re-anchor settles, genesis STILL holds the full adopted
+    // canonical chain (the heal did not regress it). Together with Assertion A (buffer healed across
+    // the boundary) and the VDF-advanced check above, this is exactly what the re-anchor fix delivers.
+    let recovered_height = genesis.get_canonical_chain_height().await;
+    assert_eq!(
+        recovered_height, peer_tip,
+        "after the re-anchor settled, genesis must still hold the full adopted canonical chain \
+         (height {recovered_height} != peer_tip {peer_tip})"
+    );
+
+    // Continued operation after recovery: the canonical-fork miner (the PEER) produces the next
+    // block and the recovered node (genesis) FOLLOWS it. This is the production recovery path — a
+    // node back from a partition catches up by FOLLOWING the network (ungated fast-forward), not by
+    // mining into the re-anchor turbulence. Driving production from the PEER (whose efficient-
+    // sampling recall-range rotation was never re-anchored, so it is intact and its blocks are
+    // always valid) sidesteps the post-re-anchor mining recall-range rotation race entirely:
+    // genesis only has to VALIDATE the peer's (correct) block against its freshly HEALED buffer
+    // (Assertion A) and fast-forward — which is ungated and does NO local recall-range computation.
+    // Genesis reaching the peer's new tip proves it is not wedged and resumes normal operation.
+    peer.mine_blocks(1).await?;
+    let advanced_tip = peer.get_canonical_chain_height().await;
+    assert!(
+        advanced_tip > peer_tip,
+        "peer must extend the canonical chain past the recovered tip (got {advanced_tip}, \
+         recovered tip {peer_tip})"
+    );
+    genesis
+        .wait_until_height(advanced_tip, seconds_to_wait)
+        .await?;
+    let final_height = genesis.get_canonical_chain_height().await;
+    assert!(
+        final_height >= advanced_tip,
+        "genesis must follow the peer's new block past the recovered tip after recovery \
+         (genesis at {final_height}, peer at {advanced_tip})"
+    );
+    info!(
+        final_height,
+        "Assertion B passed: recovered node followed the network past the recovered tip (no wedge, continued operation)"
+    );
+
+    genesis.stop().await;
+    peer.stop().await;
+    Ok(())
 }
