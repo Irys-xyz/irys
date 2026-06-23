@@ -61,7 +61,11 @@ impl IrysDatabaseArgs for DatabaseArguments {
     }
 
     fn irys_testing() -> eyre::Result<DatabaseArguments> {
-        Self::irys_default(DbSyncMode::UtterlyNoSync)
+        // Cap the geometry so each unit-test DB doesn't reserve reth's 8 TiB
+        // default map — many concurrent test envs would otherwise exhaust the
+        // process's virtual address space (see `TEST_DB_GEOMETRY_MAX_SIZE`).
+        Ok(Self::irys_default(DbSyncMode::UtterlyNoSync)?
+            .with_geometry_max_size(Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE)))
     }
 
     fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
@@ -75,6 +79,36 @@ impl IrysDatabaseArgs for DatabaseArguments {
             // caller-provided sync_mode, not by this preset.
             .with_sync_mode(Some(sync_mode.into())))
     }
+}
+
+/// Builds [`DatabaseArguments`] for the **main consensus** database from a
+/// [`irys_types::DatabaseConfig`]. Production uses reth's large default geometry;
+/// when the config sets `geometry_max_size` (test configs do) that caps both the
+/// max DB size and the virtual address-space reservation MDBX makes at open, so
+/// many concurrent node databases don't exhaust the process's address space.
+pub fn consensus_db_args(
+    db_config: &irys_types::DatabaseConfig,
+) -> eyre::Result<DatabaseArguments> {
+    let mut args = DatabaseArguments::irys_default(db_config.sync_mode)?;
+    if let Some(max_size) = db_config.geometry_max_size {
+        args = args.with_geometry_max_size(Some(max_size));
+    }
+    Ok(args)
+}
+
+/// Builds [`DatabaseArguments`] for a **storage submodule** database from a
+/// [`irys_types::DatabaseConfig`]. Production reserves 2 TiB; `geometry_max_size`
+/// (set by test configs) overrides that with a small cap.
+pub fn submodule_db_args(
+    db_config: &irys_types::DatabaseConfig,
+) -> eyre::Result<DatabaseArguments> {
+    let max_size = db_config
+        .geometry_max_size
+        .unwrap_or(2 * irys_types::TERABYTE);
+    Ok(
+        DatabaseArguments::irys_default(db_config.sync_mode)?
+            .with_geometry_max_size(Some(max_size)),
+    )
 }
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if

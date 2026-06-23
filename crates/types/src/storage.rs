@@ -18,6 +18,19 @@ pub const MEGABYTE: usize = 1024 * 1024;
 pub const GIGABYTE: usize = MEGABYTE * 1024;
 pub const TERABYTE: usize = GIGABYTE * 1024;
 
+/// MDBX geometry upper bound for irys-owned databases in `RunMode::Test`.
+///
+/// MDBX maps the geometry's *upper bound* as virtual address space at open time
+/// (it pre-reserves the whole range so the mapping base never moves, keeping its
+/// zero-copy value pointers valid as the DB grows). The production caps are huge
+/// (consensus inherits reth's 8 TiB default; submodules use 2 TiB) — harmless as
+/// sparse reservations on a real disk, but when many test nodes run concurrently
+/// (each mapping several such envs) the summed reservations can exhaust the
+/// process's ~128 TiB user address space → `mmap` `ENOMEM` at DB open. Tests hold
+/// only KB–MB, so a few GB is ample headroom (the cap is a hard ceiling — exceeding
+/// it is `MDBX_MAP_FULL`, not an auto-grow) while shrinking the reservation ~1000x.
+pub const TEST_DB_GEOMETRY_MAX_SIZE: usize = 4 * GIGABYTE;
+
 /// Partition relative chunk offsets
 #[derive(
     Default,

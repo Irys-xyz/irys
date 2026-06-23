@@ -318,7 +318,8 @@ impl StorageModule {
             debug!("submodule_db_path: {:?}", submodule_db_path);
             let submodule_db = create_or_open_submodule_db(
                 &submodule_db_path,
-                config.node_config.database.sync_mode,
+                // Args (incl. the test geometry cap) derived from the DatabaseConfig.
+                irys_database::submodule_db_args(&config.node_config.database)?,
             )
             .map_err(|e| {
                 eyre!(

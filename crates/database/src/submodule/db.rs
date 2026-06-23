@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, DbSyncMode, PartitionChunkOffset, TERABYTE, TxPath,
-    TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
 };
 use reth_db::{
     DatabaseEnv,
@@ -11,7 +10,7 @@ use reth_db::{
 };
 
 use crate::{
-    IrysDatabaseArgs as _, open_or_create_db,
+    open_or_create_db,
     submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
 };
 
@@ -20,16 +19,16 @@ use super::tables::{
     SubmoduleTables, TxLeafBinding, TxLeafBindingByTxPathHash, TxPathByTxPathHash,
 };
 
-/// Creates or opens a *submodule* MDBX database
+/// Creates or opens a *submodule* MDBX database with the given [`DatabaseArguments`].
+///
+/// The caller supplies fully-built args (sync mode, geometry, etc.) — typically
+/// via [`crate::submodule_db_args`] — so DB tuning lives in one place instead of
+/// being threaded through as individual parameters.
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(
     path: P,
-    sync_mode: DbSyncMode,
+    args: DatabaseArguments,
 ) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(
-        path,
-        SubmoduleTables::ALL,
-        DatabaseArguments::irys_default(sync_mode)?.with_geometry_max_size(Some(2 * TERABYTE)),
-    )
+    open_or_create_db(path, SubmoduleTables::ALL, args)
 }
 
 /// gets the full data path for the chunk with the provided offset

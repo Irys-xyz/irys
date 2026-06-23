@@ -64,6 +64,16 @@ pub struct DatabaseConfig {
     /// Sync mode for the cache database.
     #[serde(default = "default_cache_db_sync_mode")]
     pub cache_sync_mode: DbSyncMode,
+
+    /// Optional override for the MDBX geometry upper bound — the max DB size
+    /// *and* the virtual address-space reservation made at open — of irys-owned
+    /// databases (consensus + storage submodules). `None` = production defaults
+    /// (consensus inherits reth's 8 TiB; submodules use 2 TiB), harmless as sparse
+    /// reservations on real disks. Test configs set a small value so many
+    /// concurrent node databases don't exhaust the process's ~128 TiB user
+    /// address space. See `TEST_DB_GEOMETRY_MAX_SIZE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_max_size: Option<usize>,
 }
 
 fn default_db_sync_mode() -> DbSyncMode {
@@ -78,6 +88,7 @@ impl Default for DatabaseConfig {
         Self {
             sync_mode: default_db_sync_mode(),
             cache_sync_mode: default_cache_db_sync_mode(),
+            geometry_max_size: None,
         }
     }
 }
@@ -1211,6 +1222,9 @@ impl NodeConfig {
             database: DatabaseConfig {
                 sync_mode: DbSyncMode::UtterlyNoSync,
                 cache_sync_mode: DbSyncMode::UtterlyNoSync,
+                // Small MDBX geometry so many concurrent test node databases don't
+                // exhaust virtual address space (see TEST_DB_GEOMETRY_MAX_SIZE).
+                geometry_max_size: Some(crate::TEST_DB_GEOMETRY_MAX_SIZE),
             },
         }
     }
