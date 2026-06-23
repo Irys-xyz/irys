@@ -1034,11 +1034,35 @@ pub fn read_block_stream_from<T: DbTx>(tx: &T, from_seq: u64) -> eyre::Result<Ve
     Ok(events)
 }
 
+/// Reads up to `limit` block-stream events with `seq >= from_seq`, ascending — the bounded page served
+/// on `GET /internal/blocks/events`. Unlike [`read_block_stream_from`], the walk is capped at `limit` so
+/// a large log cannot be drained into a single response.
+pub fn read_block_stream_range<T: DbTx>(
+    tx: &T,
+    from_seq: u64,
+    limit: usize,
+) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
+    let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
+    let mut events = Vec::new();
+    for entry in cursor.walk(Some(from_seq))?.take(limit) {
+        events.push(entry?);
+    }
+    Ok(events)
+}
+
 /// Returns the highest `seq` in the block-stream log, or `None` if empty. Lets the producer rebuild
 /// its in-memory de-dup state from just the log tail on startup, without reading the whole log.
 pub fn block_stream_latest_seq<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
     let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
     Ok(cursor.last()?.map(|(seq, _)| seq))
+}
+
+/// Returns the lowest `seq` still retained in the block-stream log (the first key), or `None` if the log
+/// is empty. Count-based pruning advances this floor over time, so a poll cursor below it is a truncation
+/// rather than a contiguous resume point.
+pub fn block_stream_lowest_seq<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
+    let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
+    Ok(cursor.first()?.map(|(seq, _)| seq))
 }
 
 /// Prunes block-stream events with `seq < keep_from_seq` — count-based retention, deleting the
@@ -1123,6 +1147,54 @@ mod tests {
             .map(|(seq, _)| seq)
             .collect();
         assert_eq!(kept, vec![260, 261, 262]);
+        Ok(())
+    }
+
+    #[test]
+    fn block_stream_lowest_and_range() -> eyre::Result<()> {
+        use super::{
+            append_block_stream_event, block_stream_lowest_seq, prune_block_stream_below,
+            read_block_stream_range,
+        };
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        // Empty log: no floor, empty range.
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, None);
+        assert!(
+            db.view_eyre(|tx| read_block_stream_range(tx, 0, 10))?
+                .is_empty()
+        );
+
+        for b in [b"a", b"b", b"c", b"d"] {
+            db.update_eyre(|tx| append_block_stream_event(tx, b.to_vec()))?;
+        } // seqs 0..=3
+
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(0));
+
+        // Bounded range honours both from_seq and limit.
+        let seqs: Vec<u64> = db
+            .view_eyre(|tx| read_block_stream_range(tx, 1, 2))?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
+
+        // limit 0 → empty page.
+        assert!(
+            db.view_eyre(|tx| read_block_stream_range(tx, 0, 0))?
+                .is_empty()
+        );
+
+        // Pruning advances the retained floor.
+        db.update_eyre(|tx| prune_block_stream_below(tx, 2))?;
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(2));
         Ok(())
     }
 

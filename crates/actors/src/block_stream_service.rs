@@ -11,8 +11,9 @@
 //! receiver under one lock so the replay→live handover has no gap or duplicate.
 
 use crate::block_tree_service::BlockStreamSignal;
+use eyre::OptionExt as _;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::block_stream::{BlockEvent, BlockRef, StreamEvent, StreamFrame};
+use irys_types::block_stream::{BlockEvent, BlockRef, EventsPage, StreamEvent, StreamFrame};
 use irys_types::{DatabaseProvider, H256, TokioServiceHandle};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
@@ -34,6 +35,10 @@ const DEDUP_CAPACITY: usize = 10_000;
 /// stream ends) and reconnects with `from_seq` to replay from the durable log — bounding memory
 /// instead of letting a stuck follower accumulate frames without limit.
 const SUBSCRIBER_BUFFER: usize = 1_024;
+
+/// Max frames a single `GET /internal/blocks/events` page may return; an over-size `limit` is clamped to
+/// this rather than rejected, bounding per-request work.
+const MAX_PAGE: u64 = 1_024;
 
 /// Shared handle: the live fan-out registry plus DB access. Held by the producer task and cloned
 /// into `ApiState` so every SSE handler shares the one producer.
@@ -74,6 +79,50 @@ impl BlockStreamHandle {
         let (tx, rx) = mpsc::channel(SUBSCRIBER_BUFFER);
         live.push(tx);
         Ok((replay, rx))
+    }
+
+    /// One-shot page over the durable log for `GET /internal/blocks/events`, read in a single
+    /// transaction (first key + last key + bounded range) and decoded with the same [`decode_frame`] the
+    /// SSE replay uses, so the frames are byte-identical. Registers no live subscriber and takes no
+    /// fan-out lock.
+    ///
+    /// Three cursor regimes, all valid: an in-window `from_seq` pages from itself (the caught-up
+    /// `from_seq == logical_len` is a normal empty page); a `from_seq` below the retained floor pages from
+    /// the floor with `truncated = true`; a `from_seq` past the tip clamps to the floor.
+    pub fn events_page(&self, from_seq: u64, limit: u64) -> eyre::Result<EventsPage> {
+        // checked conversions / arithmetic only — never silently manufacture a wrong cursor
+        let limit = usize::try_from(limit.min(MAX_PAGE))?;
+        self.db.view_eyre(|tx| {
+            let lowest = irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0);
+            let logical_len = match irys_database::block_stream_latest_seq(tx)? {
+                Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
+                None => 0,
+            };
+            let (start, truncated) = if from_seq < lowest {
+                (lowest, true) // below the retained floor
+            } else if from_seq > logical_len {
+                (lowest, false) // beyond the tip → clamp to the floor (0 on a fresh log)
+            } else {
+                (from_seq, false) // in-window / at-tip (== logical_len yields an empty page)
+            };
+            let raw = irys_database::read_block_stream_range(tx, start, limit)?;
+            let mut frames = Vec::with_capacity(raw.len());
+            for (seq, bytes) in raw {
+                frames.push(decode_frame(seq, &bytes)?);
+            }
+            let count = u64::try_from(frames.len())?;
+            let next_seq = start
+                .checked_add(count)
+                .ok_or_eyre("page cursor overflow")?;
+            Ok(EventsPage {
+                from_seq,
+                next_seq,
+                has_more: next_seq < logical_len,
+                lowest_retained_seq: lowest,
+                truncated,
+                frames,
+            })
+        })
     }
 
     /// Producer-only. Append `event` to the durable log (assigning `seq`) and fan it out, holding
@@ -313,4 +362,137 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
     }
 
     (emitted, finalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_database::{
+        IrysDatabaseArgs as _, append_block_stream_event, open_or_create_db,
+        prune_block_stream_below, tables::IrysTables,
+    };
+    use irys_types::block_stream::{BlockEvent, BlockHeaderView, OwnerId};
+    use reth_db::mdbx::DatabaseArguments;
+
+    /// A minimal but well-formed `observed` event, so `decode_frame` round-trips it. The frame's `seq`
+    /// comes from the DB key, not this body, so a constant body is fine for the regime assertions.
+    fn sample_event() -> Vec<u8> {
+        let event = StreamEvent::Observed(BlockEvent {
+            header: BlockHeaderView {
+                height: 0,
+                block_hash: H256::zero(),
+                previous_block_hash: H256::zero(),
+                timestamp: 0,
+                miner_address: OwnerId {
+                    sig_type: 0,
+                    bytes: vec![0_u8; 20],
+                },
+                data_ledgers: vec![],
+            },
+            txs: vec![],
+        });
+        serde_json::to_vec(&event).expect("serialize sample event")
+    }
+
+    fn handle_with_events(
+        n: u64,
+    ) -> (
+        BlockStreamHandle,
+        irys_testing_utils::utils::tempfile::TempDir,
+    ) {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let db = DatabaseProvider(Arc::new(db_env));
+        for _ in 0..n {
+            db.update_eyre(|tx| append_block_stream_event(tx, sample_event()))
+                .unwrap();
+        }
+        (BlockStreamHandle::new(db), tmp)
+    }
+
+    #[test]
+    fn events_page_regimes() {
+        let (handle, _tmp) = handle_with_events(3); // seqs 0,1,2 → logical_len = 3
+
+        // in-window: contiguous suffix from from_seq
+        let page = handle.events_page(1, 10).unwrap();
+        assert_eq!(
+            page.frames.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(page.from_seq, 1);
+        assert_eq!(page.next_seq, 3);
+        assert!(!page.has_more);
+        assert!(!page.truncated);
+        assert_eq!(page.lowest_retained_seq, 0);
+
+        // limit honoured
+        let page = handle.events_page(0, 1).unwrap();
+        assert_eq!(page.frames.len(), 1);
+        assert_eq!(page.next_seq, 1);
+        assert!(page.has_more);
+
+        // caught-up (== logical_len): empty page, not a clamp
+        let page = handle.events_page(3, 10).unwrap();
+        assert!(page.frames.is_empty());
+        assert_eq!(page.next_seq, 3);
+        assert!(!page.has_more);
+        assert!(!page.truncated);
+
+        // beyond tip (> logical_len): clamp to floor 0
+        let page = handle.events_page(8, 10).unwrap();
+        assert_eq!(page.frames.first().map(|f| f.seq), Some(0));
+        assert!(!page.truncated);
+
+        // limit == 0 probe: empty frames, correct envelope
+        let page = handle.events_page(1, 0).unwrap();
+        assert!(page.frames.is_empty());
+        assert_eq!(page.next_seq, 1);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn events_page_empty_log() {
+        let (handle, _tmp) = handle_with_events(0);
+        let page = handle.events_page(0, 10).unwrap();
+        assert!(page.frames.is_empty());
+        assert_eq!(page.next_seq, 0);
+        assert!(!page.has_more);
+        assert!(!page.truncated);
+        assert_eq!(page.lowest_retained_seq, 0);
+    }
+
+    #[test]
+    fn events_page_below_floor_truncates() {
+        let (handle, _tmp) = handle_with_events(5); // seqs 0..=4 → logical_len = 5
+        // Drive pruning directly (RETENTION_EVENTS is a non-configurable const): floor → 3.
+        handle
+            .db
+            .update_eyre(|tx| prune_block_stream_below(tx, 3))
+            .unwrap();
+
+        let page = handle.events_page(0, 1).unwrap();
+        assert!(page.truncated);
+        assert_eq!(page.frames.first().map(|f| f.seq), Some(3));
+        assert_eq!(page.lowest_retained_seq, 3);
+        assert_eq!(page.next_seq, 4);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn events_page_frames_match_sse_replay() {
+        let (handle, _tmp) = handle_with_events(3);
+        let page = handle.events_page(0, 10).unwrap();
+        let (replay, _live) = handle.subscribe(0).unwrap();
+        assert_eq!(
+            serde_json::to_value(&page.frames).unwrap(),
+            serde_json::to_value(&replay).unwrap(),
+            "poll frames must be byte-identical to the SSE replay"
+        );
+    }
 }

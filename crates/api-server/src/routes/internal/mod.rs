@@ -14,7 +14,7 @@ use crate::error::ApiError;
 use actix_web::{HttpResponse, dev::HttpServiceFactory, web};
 use irys_actors::block_tree_service::get_block_header;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::block_stream::{BlockEvent, StreamFrame};
+use irys_types::block_stream::{BlockEvent, EventsPage, StreamFrame};
 use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, app_state::DatabaseProvider};
 use serde::Deserialize;
 use tokio_stream::StreamExt as _;
@@ -23,6 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 pub fn internal_routes() -> impl HttpServiceFactory {
     web::scope("internal")
         .route("/blocks/stream", web::get().to(blocks_stream))
+        .route("/blocks/events", web::get().to(blocks_events))
         .route("/blocks/{height}", web::get().to(block_by_height))
         .route("/blocks", web::get().to(blocks_range))
 }
@@ -56,6 +57,30 @@ async fn blocks_stream(
 fn frame_to_sse(frame: StreamFrame) -> Result<web::Bytes, actix_web::Error> {
     let json = serde_json::to_string(&frame).map_err(actix_web::error::ErrorInternalServerError)?;
     Ok(web::Bytes::from(format!("data: {json}\n\n")))
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    from_seq: u64,
+    limit: Option<u64>,
+}
+
+/// Default page size for `GET /internal/blocks/events` when `limit` is omitted.
+const DEFAULT_EVENTS_PAGE: u64 = 256;
+
+/// `GET /internal/blocks/events?from_seq=&limit=` — a bounded JSON page over the same durable event log
+/// the SSE stream tails (the poll half of the follower contract). The page envelope (`next_seq`,
+/// `has_more`, `truncated`, `lowest_retained_seq`) is built by `events_page` on the block-stream handle.
+async fn blocks_events(
+    state: web::Data<ApiState>,
+    query: web::Query<EventsQuery>,
+) -> Result<web::Json<EventsPage>, ApiError> {
+    let page = state
+        .block_stream
+        .events_page(query.from_seq, query.limit.unwrap_or(DEFAULT_EVENTS_PAGE))
+        .map_err(|e| ApiError::Internal { err: e.to_string() })?;
+    Ok(web::Json(page))
 }
 
 /// `GET /internal/blocks/{height}` — the canonical block at `height` as a `BlockEvent`, or `404`.
