@@ -1083,20 +1083,24 @@ impl ValidationServiceInner {
                     canonical_prev,
                 ),
                 Err(err) => {
-                    // The live buffer mismatched, but we could not build the block's
-                    // fork-local lineage view to cross-check it — an ancestor is
-                    // transiently absent from the block tree (depth-prune / reorg /
-                    // in-flight re-anchor race). With no authoritative verdict, the bare
-                    // mismatch must NOT be peer-attributed as `Invalid`: that would
-                    // permanently reject an honest canonical block in the re-anchor
-                    // window — the exact failure this fork-local check exists to prevent.
-                    // Requeue via the peer-innocent Cancelled lane; on retry the re-anchor
-                    // has typically landed (live buffer matches) or the ancestry is present
-                    // (fork-local view then yields a definitive accept/reject).
+                    // The live buffer mismatched, but we have no authoritative fork-local
+                    // cross-check — EITHER the view could not be BUILT (an ancestor is
+                    // transiently absent from the block tree: depth-prune / reorg /
+                    // in-flight re-anchor race) OR it built but does not COVER
+                    // `prev_output_step_number` (a near-genesis block whose lineage bottoms
+                    // out at genesis before that step). Both are "no verdict", NOT proof of
+                    // invalidity, so the bare mismatch must NOT be peer-attributed as
+                    // `Invalid`: that would permanently reject an honest canonical block in
+                    // the re-anchor window — the exact failure this fork-local check exists
+                    // to prevent. (A resolvable-but-disagreeing step is the separate
+                    // `Ok(_) => bail` arm above, which IS a terminal reject.) Both share the
+                    // peer-innocent Cancelled lane; on retry the re-anchor has typically
+                    // landed (live buffer matches, so this branch is skipped) or the ancestry
+                    // is present (fork-local view then yields a definitive accept/reject).
                     warn!(
                         custom.error = ?err,
                         vdf.prev_output_step_number = prev_output_step_number,
-                        "ensure_vdf_is_valid: could not build fork-local step view for prev-step check (ancestor eviction race); requeueing instead of failing terminally"
+                        "ensure_vdf_is_valid: no authoritative fork-local prev-step cross-check (view unbuildable or does not cover the step); requeuing instead of failing terminally"
                     );
                     return Err(VdfPrevStepForkViewUnavailable.into());
                 }

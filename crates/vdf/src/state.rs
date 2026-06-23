@@ -329,6 +329,14 @@ pub fn create_state(
                 break;
             }
         }
+        // Buffer full — stop before fetching the parent. The inner break only exits the
+        // for-loop; falling through to fetch the parent would, when that parent is genesis,
+        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
+        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
+        // mis-mapping the buffer's oldest step.
+        if steps_remaining == 0 {
+            break;
+        }
         // get the previous block
         block = block_header_by_hash(&tx, &block.previous_block_hash, false)
             .unwrap()
@@ -374,6 +382,14 @@ fn build_vdf_seed_buffer(
             if steps_remaining == 0 {
                 break;
             }
+        }
+        // Buffer full — stop before fetching the parent. The inner break only exits the
+        // for-loop; falling through to fetch the parent would, when that parent is genesis,
+        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
+        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
+        // mis-mapping the buffer's oldest step.
+        if steps_remaining == 0 {
+            break;
         }
         // get the previous block
         block = fetch_parent(&block.previous_block_hash)?;
@@ -799,6 +815,59 @@ mod tests {
             seeds.back().map(|s| s.0),
             Some(H256::repeat_byte(0x14)),
             "buffer must be anchored at the canonical TIP's last step (the re-anchor-to-tip fix)"
+        );
+    }
+
+    /// Regression: when `capacity` is exhausted exactly while consuming the height-1 block's
+    /// steps, the walk-back must stop at exactly `capacity` seeds and NOT fall through to fetch
+    /// genesis and prepend its first step (which produced a capacity+1 buffer). The extra front
+    /// seed inflates `seeds.len()`, dragging `get_steps`' `first_global_step` one too low and
+    /// mis-mapping the buffer's oldest step onto genesis entropy.
+    #[test]
+    fn build_vdf_seed_buffer_stops_at_capacity_without_appending_genesis() {
+        fn mock_header(height: u64, hash: u8, prev: u8, steps: &[u8]) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.block_hash = H256::repeat_byte(hash);
+            h.previous_block_hash = H256::repeat_byte(prev);
+            h.vdf_limiter_info.steps =
+                H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
+            h
+        }
+
+        // Same chain as the verbatim-reproduction test: genesis(0x10) <- b1(0x11,0x12) <- tip(0x13,0x14).
+        let genesis = mock_header(0, 0x00, 0xFF, &[0x10]);
+        let b1 = mock_header(1, 0x01, 0x00, &[0x11, 0x12]);
+        let tip = mock_header(2, 0x02, 0x01, &[0x13, 0x14]);
+        let by_hash: std::collections::HashMap<H256, IrysBlockHeader> = [genesis, b1, tip.clone()]
+            .into_iter()
+            .map(|h| (h.block_hash, h))
+            .collect();
+
+        // capacity=3 is reached while consuming b1 (whose parent IS genesis), exercising the
+        // off-by-one path. Want the 3 most-recent steps; genesis's 0x10 must NOT appear.
+        let seeds = build_vdf_seed_buffer(&tip, 3, |hash| {
+            Ok(by_hash.get(hash).cloned().expect("ancestor present"))
+        })
+        .expect("walk-back must succeed");
+
+        let got: Vec<H256> = seeds.iter().map(|s| s.0).collect();
+        let expected: Vec<H256> = [0x12, 0x13, 0x14]
+            .iter()
+            .map(|b| H256::repeat_byte(*b))
+            .collect();
+        assert_eq!(
+            got, expected,
+            "buffer must hold exactly the `capacity` most-recent steps, not capacity+1 with genesis prepended"
+        );
+        assert_eq!(
+            seeds.len(),
+            3,
+            "buffer length must equal capacity, not capacity+1"
+        );
+        assert!(
+            !seeds.iter().any(|s| s.0 == H256::repeat_byte(0x10)),
+            "genesis's first step must not be appended once capacity is already filled"
         );
     }
 

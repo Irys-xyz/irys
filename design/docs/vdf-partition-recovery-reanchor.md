@@ -283,8 +283,11 @@ current step* — exactly the boundary the VDF is about to cross. Plumbing:
 default `None`) → `BlockTree::canonical_entry_at_or_below_step`
 (`crates/domain/src/models/block_tree.rs`, an in-place binary search by `global_step_number` over
 the canonical-chain cache) → overridden in `BlockStatusProvider` (`crates/p2p/...`). `run_vdf`'s
-local-stepping read uses it and falls back to the tip's `next_seed` when no block ends at/before
-the step (the VDF running *ahead* of the chain — normal forward operation, a no-op).
+local-stepping read uses it: when the VDF runs *ahead* of the tip the query returns the tip itself
+(the greatest `global_step_number <= S` is the tip), yielding the tip's `next_seed` — equal to the
+prior behavior, a no-op. The `unwrap_or` fallback to the tip's `next_seed` is a defensive default
+for the distinct edge case where *no* canonical block ends at/before the step (the step is below the
+earliest cached block in the bounded canonical-chain cache).
 
 Two subtleties this resolves:
 
