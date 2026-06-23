@@ -26,7 +26,9 @@ the retained count is ~100k with up to `PRUNE_INTERVAL` overshoot). Two quantiti
 
 A Server-Sent Events stream. Replays the durable suffix from `from_seq`, then tails live frames, each
 framed as `data: {json}\n\n`. A lagging subscriber is dropped and reconnects with `from_seq` to replay
-from the log. The connection does not close on its own; a reader stops at a chosen `seq`.
+from the log. The connection does not close on its own; a reader stops at a chosen `seq`. A cursor past
+the tip (`from_seq > logical_len`, only after a reset) replays from the retained floor — the same
+beyond-tip clamp as the poll endpoint — so the follower sees below-`seq` frames and rewinds.
 
 ## `GET /internal/blocks/events?from_seq=&limit=`
 
