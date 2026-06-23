@@ -4641,7 +4641,6 @@ async fn generate_expected_shadow_transactions(
             &parent_epoch_snapshot,
             &prev_block,
             config,
-            &block_index,
         )
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
         if let Some(range) = &expired_range {
@@ -4649,7 +4648,6 @@ async fn generate_expected_shadow_transactions(
                 // Per-candidate form of the (refund-pipeline-shared) expired-tx set.
                 let expired = ledger_expiry::submit_tx_expired(
                     tx.id,
-                    None,
                     range,
                     config,
                     &block_index,

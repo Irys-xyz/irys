@@ -61,7 +61,10 @@ use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, eyre};
-use irys_database::{block_header_by_hash, canonical_submit_height, db::IrysDatabaseExt as _};
+use irys_database::{
+    block_header_by_hash, canonical_submit_height, db::IrysDatabaseExt as _,
+    reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
+};
 use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
@@ -145,6 +148,9 @@ pub async fn calculate_expired_ledger_fees(
         &block_index,
         ledger_type,
         parent_ledger_total_chunks(parent_block_header, ledger_type),
+        parent_block_header.block_hash,
+        block_tree_guard,
+        db,
     )? {
         Some(br) => br,
         None => {
@@ -221,7 +227,7 @@ async fn collect_tx_to_miners_from_range(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
-    let same_block = block_range.min_block.item.block_hash == block_range.max_block.item.block_hash;
+    let same_block = block_range.min_block.block_hash == block_range.max_block.block_hash;
     tracing::info!(
         "Processing boundary blocks: min_block height={}, max_block height={}, same_block={}",
         block_range.min_block.height,
@@ -233,13 +239,16 @@ async fn collect_tx_to_miners_from_range(
     let latest_miners;
 
     if same_block {
-        // When min and max are the same block, process it only once to avoid double-counting
-        // Process as earliest block (will include all transactions in the partition range)
+        // When min and max are the same block, process it once as BOTH the earliest
+        // and latest boundary so both ends of the expired range are trimmed. (Trimming
+        // only the start — the old behavior — over-included the next slot's txs, which
+        // diverged from the exact per-candidate promotion filter; see NC-0042 §4b.)
         let miners = process_boundary_block(
             &block_range.min_block,
-            block_range.min_block.item.block_hash,
+            block_range.min_block.block_hash,
             Arc::clone(&block_range.min_block_miners),
             true, // is_earliest
+            true, // is_latest — sole boundary block (min == max), so trim BOTH ends
             ledger_type,
             config,
             block_index,
@@ -255,9 +264,10 @@ async fn collect_tx_to_miners_from_range(
         // Different blocks - process both boundaries
         let e_miners = process_boundary_block(
             &block_range.min_block,
-            block_range.min_block.item.block_hash,
+            block_range.min_block.block_hash,
             Arc::clone(&block_range.min_block_miners),
-            true, // is_earliest
+            true,  // is_earliest — min block trims only the start
+            false, // is_latest
             ledger_type,
             config,
             block_index,
@@ -269,9 +279,10 @@ async fn collect_tx_to_miners_from_range(
 
         let l_miners = process_boundary_block(
             &block_range.max_block,
-            block_range.max_block.item.block_hash,
+            block_range.max_block.block_hash,
             Arc::clone(&block_range.max_block_miners),
             false, // is_earliest
+            true,  // is_latest — max block trims only the end
             ledger_type,
             config,
             block_index,
@@ -362,6 +373,9 @@ pub async fn expired_submit_tx_ids(
         &block_index,
         DataLedger::Submit,
         parent_ledger_total_chunks(parent_block_header, DataLedger::Submit),
+        parent_block_header.block_hash,
+        block_tree_guard,
+        db,
     )? {
         Some(br) => br,
         // No chunks were ever uploaded into the expired slot ranges.
@@ -386,36 +400,19 @@ pub async fn expired_submit_tx_ids(
 /// `txid`'s Submit-ledger storage has expired as of `block_height` (the block
 /// being produced/validated).
 ///
-/// This is the O(candidate-tx) replacement for the O(expired-partition-history)
-/// `expired_submit_tx_ids` set: instead of walking every expired partition on
-/// every block, it resolves only *this* tx's Submit inclusion block and tests it
-/// against the expired chunk range.
+/// The verdict is an exact offset comparison: `txid` is expired iff its Submit
+/// **start chunk offset** is `< range_end`, where `[0, range_end)` is the expired
+/// chunk prefix bounded by the parent header's recorded Submit total (see
+/// [`expired_submit_range`]).
 ///
-/// ## Equivalence (differential-tested)
-///
-/// It reproduces, for a single candidate, exactly what `expired_submit_tx_ids`
-/// computes for the whole set. The expired slots are a contiguous prefix
-/// starting at slot 0 (slot `last_height` is the allocation height, monotonic in
-/// slot index), so the expired chunk range is `[0, range_end)` spanning blocks
-/// `[min_block, max_block]`. A candidate's inclusion block is then tested with
-/// the *same boundary rules* the walk applies:
-/// - block before/after that range → not expired;
-/// - an earliest or middle block of the range, or the whole range packed into a
-///   single block (`min_block == max_block`, only reachable with tiny test
-///   partitions) → expired (the walk includes every tx of those blocks);
-/// - the latest block of a multi-block range → expired iff the tx's start chunk
-///   offset is before `range_end` (the walk trims here).
-///
-/// ## Metadata dependency (vs. the metadata-free walk)
-///
-/// This resolves the tx's Submit inclusion height from local `included_height`
-/// metadata (`canonical_submit_height`), whereas the walk derives everything
-/// from canonical block contents. The dependency is sound for the candidates we
-/// check: they are unpromoted at check time (so the Publish-migration
-/// `included_height` overwrite has not happened), and the height comes from the
-/// node's own canonical chain, never the peer's block. A `None` resolution
-/// yields `false` (a tx with no canonical Submit inclusion cannot have expired
-/// Submit storage).
+/// Branch-deterministic by construction: both `range_end` and the candidate's
+/// Submit inclusion are resolved from the block's **own parent ancestry**, never
+/// this node's canonical tip or its migration-lagged block-index frontier, so
+/// every node reaches the same verdict (NC-0042 F2). See
+/// [`resolve_submit_inclusion`] for the migrated (fast, via
+/// `canonical_submit_height`) vs un-migrated (by-hash parent walk) resolution. A
+/// candidate with no resolvable Submit inclusion on this branch yields `false`
+/// (it cannot have expired Submit storage).
 #[tracing::instrument(level = "debug", skip_all, fields(tx.id = %txid, block.height = block_height))]
 pub async fn is_submit_storage_expired(
     txid: IrysTransactionId,
@@ -433,14 +430,12 @@ pub async fn is_submit_storage_expired(
         parent_epoch_snapshot,
         parent_block_header,
         config,
-        block_index,
     )?
     else {
         return Ok(false);
     };
     submit_tx_expired(
         txid,
-        None,
         &range,
         config,
         block_index,
@@ -451,40 +446,39 @@ pub async fn is_submit_storage_expired(
     .await
 }
 
-/// Block-level inputs for the §4b/§4c Submit-expiry check, computed **once per
-/// block** and reused across every publish candidate via [`submit_tx_expired`].
+/// Block-level inputs for the §4b/§4c Submit-expiry check, computed once per
+/// block and reused across every publish candidate via [`submit_tx_expired`].
 ///
-/// Scanning the expired-slot set and the two `block_index` boundary lookups do
-/// not depend on the candidate, so hoisting them here keeps the per-candidate
-/// cost to a single `canonical_submit_height` read — plus, only on the latest
-/// boundary block of a multi-block range, one inclusion-block walk.
+/// Every field is a pure function of the block's **own parent** — never this
+/// node's canonical tip or migration-lagged block index — so the verdict is
+/// identical across nodes (NC-0042 F2 branch-determinism).
 #[derive(Debug, Clone, Copy)]
 pub struct ExpiredSubmitRange {
     /// The block being produced/validated (caps the canonical Submit lookup).
     block_height: u64,
-    /// Block span of the expired chunk range `[0, range_end)`.
-    min_block_height: u64,
-    max_block_height: u64,
-    /// Exclusive end of the expired chunk range, clamped to data actually written.
+    /// Exclusive end of the expired chunk range `[0, range_end)`, bounded by the
+    /// parent header's recorded Submit total.
     range_end: u64,
-    /// Hash of `max_block_height`'s block — the only block whose per-tx offsets
-    /// a candidate check might need to reconstruct.
-    max_block_hash: H256,
+    /// The block's own parent hash — root of the branch-correct ancestry walk
+    /// used to resolve a candidate's Submit inclusion. Never the node's tip.
+    parent_block_hash: H256,
 }
 
 /// Computes the [`ExpiredSubmitRange`] for `block_height`, or `None` if no Submit
-/// storage has expired as of this block (nothing to filter). The equivalence
-/// argument with the `expired_submit_tx_ids` walk is documented on
-/// [`is_submit_storage_expired`].
+/// storage has expired as of this block (nothing to filter).
+///
+/// `range_end` is bounded by the **parent header's** recorded Submit total only —
+/// a pure function of the block's own parent, identical on every node regardless
+/// of that node's migration-lagged block-index tip (NC-0042 F2). The branch-
+/// correct mapping from a candidate's inclusion to a chunk offset happens later,
+/// per candidate, in [`submit_tx_expired`].
 pub fn expired_submit_range(
     block_height: u64,
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
     config: &Config,
-    block_index: &BlockIndex,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
-    // The expired Submit slots — the exact set `expired_submit_tx_ids` keys on
-    // (also handles the "not enough blocks elapsed → empty" case).
+    // The expired Submit slots (also handles "not enough blocks elapsed → empty").
     let slot_indexes =
         parent_epoch_snapshot.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height);
     let Some(&max_expired_slot) = slot_indexes.iter().max() else {
@@ -492,52 +486,39 @@ pub fn expired_submit_range(
     };
 
     // End of the expired chunk range = end of the highest expired slot, clamped
-    // to the data actually written (mirrors `find_block_range`'s
-    // `compute_chunk_range` — same min(parent header total, index total) bound,
-    // see the comment there for why both terms are needed). Expired slots are a
-    // prefix from slot 0, so the range starts at 0 and the walk's earliest-block
-    // skip never fires.
+    // to data actually written *as of the parent*. Expired slots form a prefix
+    // from slot 0, so the range is `[0, range_end)`. Bounding by the parent
+    // header (not this node's block-index tip) is what makes the verdict
+    // branch-deterministic.
     let p = config.consensus.num_chunks_in_partition;
-    let max_offset = block_index
-        .get_latest_item()
-        .map(|item| item.ledgers[DataLedger::Submit].total_chunks)
-        .unwrap_or(0)
-        .min(parent_ledger_total_chunks(
-            parent_block_header,
-            DataLedger::Submit,
-        ));
+    let parent_total = parent_ledger_total_chunks(parent_block_header, DataLedger::Submit);
     let range_end = (max_expired_slot as u64 + 1)
         .saturating_mul(p)
-        .min(max_offset);
+        .min(parent_total);
     if range_end == 0 {
         return Ok(None);
     }
 
-    // Block range holding the expired chunks.
-    let (min_block_height, _) = block_index.get_block_index_item(DataLedger::Submit, 0)?;
-    let (max_block_height, max_block_item) =
-        block_index.get_block_index_item(DataLedger::Submit, range_end - 1)?;
-
     Ok(Some(ExpiredSubmitRange {
         block_height,
-        min_block_height,
-        max_block_height,
         range_end,
-        max_block_hash: max_block_item.block_hash,
+        parent_block_hash: parent_block_header.block_hash,
     }))
 }
 
 /// Per-candidate verdict against a precomputed [`ExpiredSubmitRange`]: is
 /// `txid`'s Submit storage expired as of `range.block_height`?
 ///
-/// `submit_height` lets a caller that already resolved the candidate's canonical
-/// Submit inclusion height (e.g. the tx selector's prior-Submit check) pass it in
-/// to avoid a duplicate `canonical_submit_height` read; pass `None` to resolve it
-/// here. A `None` resolution (no canonical Submit inclusion) yields `false`.
+/// Branch-correct: `txid`'s Submit inclusion is resolved from the block's **own
+/// parent ancestry** (migrated inclusions via `canonical_submit_height`, which is
+/// finalized and branch-invariant; un-migrated inclusions via a by-hash parent
+/// walk — never the node's canonical tip or migration-lagged index). The verdict
+/// is then a pure offset comparison: expired iff the candidate's Submit start
+/// offset is `< range_end`. A candidate with no resolvable Submit inclusion on
+/// this branch yields `false`.
 #[tracing::instrument(level = "debug", skip_all, fields(tx.id = %txid))]
 pub async fn submit_tx_expired(
     txid: IrysTransactionId,
-    submit_height: Option<u64>,
     range: &ExpiredSubmitRange,
     config: &Config,
     block_index: &BlockIndex,
@@ -545,80 +526,329 @@ pub async fn submit_tx_expired(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<bool> {
-    // Submit inclusion is strictly before this block, so cap the lookup at the parent.
-    let submit_height = match submit_height {
-        Some(h) => h,
+    let Some(inc) =
+        resolve_submit_inclusion(txid, range, config, block_index, block_tree_guard, db)?
+    else {
+        // No Submit inclusion resolvable on this branch → cannot have expired.
+        return Ok(false);
+    };
+
+    // Offset verdict against the expired range `[0, range_end)`. The block span
+    // decides outright unless `range_end` falls strictly inside the inclusion
+    // block, in which case the candidate's exact start offset settles it.
+    match submit_span_verdict(inc.base, inc.total, range.range_end) {
+        Some(verdict) => Ok(verdict),
         None => {
-            let max_height = range.block_height.saturating_sub(1);
-            match db.view_eyre(|tx| canonical_submit_height(tx, &txid, max_height))? {
-                Some(h) => h,
-                None => return Ok(false),
-            }
+            let block = get_block_by_hash(inc.block_hash, block_tree_guard, db).await?;
+            let ordered_ids = block
+                .get_data_ledger_tx_ids_ordered(DataLedger::Submit)
+                .ok_or_eyre("Submit ledger required for the expiry inclusion block")?;
+            let headers = get_data_tx_in_parallel(ordered_ids.to_vec(), mempool_guard, db).await?;
+            let ordered: Vec<(IrysTransactionId, u64)> =
+                headers.iter().map(|h| (h.id, h.data_size)).collect();
+            let start_offset =
+                submit_tx_start_offset(txid, &ordered, inc.base, config.consensus.chunk_size);
+            Ok(start_offset.is_some_and(|offset| offset < range.range_end))
         }
-    };
-
-    // The verdict depends on the candidate's exact start offset only on the
-    // latest boundary of a multi-block range (the only place the walk trims).
-    // Everywhere else the inclusion-block height alone decides, so skip the
-    // inclusion-block fetch.
-    let needs_start_offset =
-        range.min_block_height != range.max_block_height && submit_height == range.max_block_height;
-    let start_offset = if needs_start_offset {
-        // Reconstruct the candidate's Submit start offset from its inclusion
-        // block (== the max boundary block here). `get_data_tx_in_parallel`
-        // preserves input order — the same helper the walk uses, so the
-        // reconstructed offsets match.
-        let base_chunks = get_previous_max_offset(block_index, submit_height, DataLedger::Submit)?;
-        let block = get_block_by_hash(range.max_block_hash, block_tree_guard, db).await?;
-        let ordered_ids = block
-            .get_data_ledger_tx_ids_ordered(DataLedger::Submit)
-            .ok_or_eyre("Submit ledger required for the expiry inclusion block")?;
-        let headers = get_data_tx_in_parallel(ordered_ids.to_vec(), mempool_guard, db).await?;
-        let ordered: Vec<(IrysTransactionId, u64)> =
-            headers.iter().map(|h| (h.id, h.data_size)).collect();
-        submit_tx_start_offset(txid, &ordered, *base_chunks, config.consensus.chunk_size)
-    } else {
-        None
-    };
-
-    Ok(submit_tx_in_expired_range(
-        submit_height,
-        range.min_block_height,
-        range.max_block_height,
-        range.range_end,
-        start_offset,
-    ))
+    }
 }
 
-/// Pure boundary decision for [`is_submit_storage_expired`]: given the expired
-/// chunk range's block span `[min_block_height, max_block_height]` and its
-/// `range_end` offset, decides whether a candidate whose Submit inclusion is
-/// block `submit_height` is in the set — mirroring `find_block_range` /
-/// `filter_transactions_by_chunk_range`.
+/// Pure block-span decision: given an inclusion block's `[base, total)` Submit
+/// chunk span and the expired range end, is the candidate expired?
+/// `Some(true)`  → the whole block lies before `range_end`.
+/// `Some(false)` → the block starts at/after `range_end`.
+/// `None`        → `range_end` falls strictly inside the block; the caller must
+///                  consult the candidate's exact start offset.
+fn submit_span_verdict(base: u64, total: u64, range_end: u64) -> Option<bool> {
+    if total <= range_end {
+        Some(true)
+    } else if base >= range_end {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// A candidate's branch-correct Submit inclusion: the block that introduced it
+/// into the Submit ledger, with the cumulative chunk offsets bracketing it.
+struct SubmitInclusion {
+    /// Hash of the inclusion block.
+    block_hash: H256,
+    /// Cumulative Submit chunks *before* the inclusion block (its start offset).
+    base: u64,
+    /// Cumulative Submit chunks *through* the inclusion block.
+    total: u64,
+}
+
+/// Resolves `txid`'s Submit inclusion along the **block's own parent ancestry**
+/// (`range.parent_block_hash`) — never the node's canonical tip.
 ///
-/// `start_offset` (the candidate's Submit start chunk offset) is consulted only
-/// on the latest boundary of a multi-block range — the one place the walk trims
-/// — so callers may pass `None` in every other case. The expired range always
-/// begins at slot 0, so the earliest-block skip never applies.
-fn submit_tx_in_expired_range(
-    submit_height: u64,
-    min_block_height: u64,
-    max_block_height: u64,
-    range_end: u64,
-    start_offset: Option<u64>,
-) -> bool {
-    // Inclusion block outside the expired block span.
-    if submit_height < min_block_height || submit_height > max_block_height {
-        return false;
+/// Fast path: `canonical_submit_height` resolves migrated inclusions in O(1).
+/// Migrated blocks are below the reorg floor, hence finalized and shared by every
+/// branch, so the height is authoritative and branch-invariant.
+///
+/// Slow path (only when the inclusion is un-migrated, i.e. the fast path returns
+/// `None`): walk the parent chain by hash up to `tx_anchor_expiry_depth` blocks
+/// (config-asserted `>= block_migration_depth`, so the walk covers the entire
+/// un-migrated window) looking for `txid` in each block's Submit `tx_ids`. The
+/// inclusion block's predecessor total comes from the tree, or — if the
+/// predecessor is below the tree window — from the canonical index, gated by
+/// `MigratedBlockHashes` so a side-fork ancestor can never be mistaken for the
+/// canonical block at that height (the C1 guard). No `get_canonical_chain` or
+/// height→hash tree lookup is ever used.
+fn resolve_submit_inclusion(
+    txid: IrysTransactionId,
+    range: &ExpiredSubmitRange,
+    config: &Config,
+    block_index: &BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<Option<SubmitInclusion>> {
+    // Fast path: migrated inclusion (finalized, branch-invariant). Capped at the
+    // parent — Submit inclusion is strictly before the block being evaluated.
+    let max_height = range.block_height.saturating_sub(1);
+    if let Some(h) = db.view_eyre(|tx| canonical_submit_height(tx, &txid, max_height))? {
+        let item = block_index
+            .get_item(h)
+            .ok_or_eyre("canonical_submit_height returned a height absent from the block index")?;
+        let total = submit_total_of_index_item(&item);
+        let base = if h == 0 {
+            0
+        } else {
+            block_index
+                .get_item(h - 1)
+                .map(|i| submit_total_of_index_item(&i))
+                .unwrap_or(0)
+        };
+        return Ok(Some(SubmitInclusion {
+            block_hash: item.block_hash,
+            base,
+            total,
+        }));
     }
-    // Whole range packed into one block (`same_block`, only reachable with tiny
-    // test partitions), or an earliest/middle block → the walk includes every tx
-    // of these blocks.
-    if min_block_height == max_block_height || submit_height < max_block_height {
-        return true;
+
+    // Slow path: un-migrated inclusion — walk the parent ancestry by hash. The
+    // walk logic lives in the pure `walk_submit_inclusion` so the branch-
+    // correctness rules (by-hash traversal, C1 side-fork guard) are unit-testable
+    // with in-memory maps; here we back it with the live tree, the block index,
+    // and `MigratedBlockHashes`.
+    let max_walk = config.consensus.mempool.tx_anchor_expiry_depth as u64;
+    let tree = block_tree_guard.read();
+    let resolved = walk_submit_inclusion(
+        range.parent_block_hash,
+        max_walk,
+        |hash| {
+            tree.get_block(hash).map(|header| WalkBlock {
+                height: header.height,
+                prev_hash: header.previous_block_hash,
+                submit_total: submit_total_of_header(header),
+                includes_txid: block_includes_submit_tx(header, &txid),
+            })
+        },
+        |height| {
+            block_index
+                .get_item(height)
+                .map(|item| submit_total_of_index_item(&item))
+        },
+        |hash, height| {
+            // C1 gate input: is `hash` the canonical block at `height` per
+            // `MigratedBlockHashes`? (`block_tree_depth > block_migration_depth`
+            // guarantees a predecessor below the tree window is indexed.)
+            let canonical = db.view_eyre(|tx| Ok(tx.get::<MigratedBlockHashes>(height)?))?;
+            Ok(canonical == Some(hash))
+        },
+    )?;
+    Ok(resolved.map(|(block_hash, base, total)| SubmitInclusion {
+        block_hash,
+        base,
+        total,
+    }))
+}
+
+/// Dependency-free view of a block needed by [`walk_submit_inclusion`].
+#[derive(Clone, Copy)]
+struct WalkBlock {
+    height: u64,
+    prev_hash: H256,
+    /// Cumulative Submit chunks through this block.
+    submit_total: u64,
+    /// Whether this block's Submit ledger includes the candidate txid.
+    includes_txid: bool,
+}
+
+/// Pure branch-correct ancestry walk — the testable core of
+/// [`resolve_submit_inclusion`]'s slow path. Walks the parent chain **by hash**
+/// from `parent_hash` (never the node's canonical tip) for at most `max_walk`
+/// steps, looking for the block that includes the candidate. When found, the
+/// predecessor's cumulative Submit total (the inclusion's `base` offset) comes
+/// from the tree if present, otherwise from the canonical index — but only after
+/// `is_canonical_at` confirms the predecessor hash is the canonical block at that
+/// height (the **C1 side-fork guard**, so a side-fork ancestor's chunks are never
+/// misattributed; `block_tree_depth > block_migration_depth` guarantees such a
+/// predecessor is indexed). Returns `(block_hash, base, total)`.
+fn walk_submit_inclusion(
+    parent_hash: H256,
+    max_walk: u64,
+    header_by_hash: impl Fn(&H256) -> Option<WalkBlock>,
+    index_submit_total_at: impl Fn(u64) -> Option<u64>,
+    is_canonical_at: impl Fn(H256, u64) -> eyre::Result<bool>,
+) -> eyre::Result<Option<(H256, u64, u64)>> {
+    let mut cursor = parent_hash;
+    let mut steps = 0_u64;
+    while steps <= max_walk {
+        let Some(block) = header_by_hash(&cursor) else {
+            break; // fell out of the retained tree window
+        };
+        if block.includes_txid {
+            let total = block.submit_total;
+            // Predecessor total, branch-correct.
+            let base = if block.height == 0 {
+                0
+            } else if let Some(prev) = header_by_hash(&block.prev_hash) {
+                prev.submit_total
+            } else {
+                // Predecessor below the tree window → canonical index, C1-gated.
+                let prev_height = block.height - 1;
+                if !is_canonical_at(block.prev_hash, prev_height)? {
+                    eyre::bail!(
+                        "Submit-expiry walk reached a non-canonical ancestor at height \
+                         {prev_height} (supplied {}) — off the validated block's branch \
+                         (C1 guard)",
+                        block.prev_hash
+                    );
+                }
+                index_submit_total_at(prev_height).ok_or_eyre(
+                    "Submit-expiry walk: predecessor below block_tree window must be \
+                     indexed (block_tree_depth > block_migration_depth)",
+                )?
+            };
+            return Ok(Some((cursor, base, total)));
+        }
+        cursor = block.prev_hash;
+        steps += 1;
     }
-    // Latest boundary of a multi-block range → the walk trims at `range_end`.
-    start_offset.is_some_and(|offset| offset < range_end)
+    Ok(None)
+}
+
+/// Cumulative Submit chunk total recorded in a block header (`0` if the Submit
+/// ledger is absent — pre-Submit / inactive).
+fn submit_total_of_header(header: &IrysBlockHeader) -> u64 {
+    parent_ledger_total_chunks(header, DataLedger::Submit)
+}
+
+/// Whether `header`'s Submit ledger includes `txid` (per-block `tx_ids`).
+fn block_includes_submit_tx(header: &IrysBlockHeader, txid: &IrysTransactionId) -> bool {
+    header
+        .data_ledgers
+        .iter()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .is_some_and(|l| l.tx_ids.0.contains(txid))
+}
+
+/// Cumulative Submit chunk total from a migrated block-index item.
+fn submit_total_of_index_item(item: &BlockIndexItem) -> u64 {
+    ledger_total_of_index_item(item, DataLedger::Submit)
+}
+
+/// Cumulative chunk total for `ledger` from a migrated block-index item
+/// (`0` if the ledger is absent — pre-Cascade / inactive).
+fn ledger_total_of_index_item(item: &BlockIndexItem, ledger: DataLedger) -> u64 {
+    item.ledgers
+        .iter()
+        .find(|l| l.ledger == ledger)
+        .map(|l| l.total_chunks)
+        .unwrap_or(0)
+}
+
+/// C1 side-fork guard: confirm `hash` is the canonical block at `height` per
+/// `MigratedBlockHashes` before trusting a height-keyed (canonical-only) index
+/// lookup for it. Without this, a walk that descended onto a side-fork ancestor
+/// below the block-tree window would attribute the canonical block's chunks to
+/// the wrong block.
+fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Result<()> {
+    let canonical = db.view_eyre(|tx| Ok(tx.get::<MigratedBlockHashes>(height)?))?;
+    if canonical != Some(hash) {
+        eyre::bail!(
+            "expiry walk reached a non-canonical ancestor at height {height} \
+             (supplied {hash}) — off the validated block's branch (C1 guard)"
+        );
+    }
+    Ok(())
+}
+
+/// Branch-correct resolution of the canonical block that introduced chunk
+/// `offset` in `ledger`, as a pure function of the block's **own parent
+/// ancestry** (`parent_hash`) — never the node's canonical tip or migration-
+/// lagged index frontier (NC-0042 R1). Returns `(height, block_hash, block_total)`
+/// where `block_total` is that block's cumulative `ledger` total.
+///
+/// Fast path: offsets below the migrated index tip resolve via the index binary
+/// search (finalized ⇒ branch-invariant, O(log n)). Slow path: offsets in the
+/// un-migrated tail are resolved by walking the parent chain BY HASH (`get_block`
+/// + `previous_block_hash`); a predecessor below the block-tree window is read
+/// from the index only after the `MigratedBlockHashes` C1 check confirms it is
+/// canonical at that height. No `get_canonical_chain` or height→hash tree lookup
+/// is ever used for the forky region. The fast/slow split is itself branch-safe:
+/// both paths return the same block (a migrated offset's block is finalized and
+/// shared by every branch; an un-migrated offset's block is on the parent's own
+/// chain).
+fn resolve_ledger_offset_to_block(
+    offset: u64,
+    parent_hash: H256,
+    ledger: DataLedger,
+    block_tree_guard: &BlockTreeReadGuard,
+    block_index: &BlockIndex,
+    db: &DatabaseProvider,
+) -> eyre::Result<(BlockHeight, H256, u64)> {
+    // Fast path: finalized/migrated region — binary search is branch-invariant.
+    let index_tip_total = block_index
+        .get_latest_item()
+        .map(|item| ledger_total_of_index_item(&item, ledger))
+        .unwrap_or(0);
+    if offset < index_tip_total {
+        let (height, item) = block_index.get_block_index_item(ledger, offset)?;
+        return Ok((
+            height,
+            item.block_hash,
+            ledger_total_of_index_item(&item, ledger),
+        ));
+    }
+
+    // Slow path: un-migrated tail — walk the parent ancestry by hash.
+    let tree = block_tree_guard.read();
+    let mut cursor = parent_hash;
+    while let Some(header) = tree.get_block(&cursor) {
+        let total = parent_ledger_total_chunks(header, ledger);
+        let prev_total = if header.height == 0 {
+            0
+        } else if let Some(prev) = tree.get_block(&header.previous_block_hash) {
+            parent_ledger_total_chunks(prev, ledger)
+        } else {
+            // Predecessor below the tree window → canonical index, C1-gated.
+            let prev_height = header.height - 1;
+            assert_canonical_via_mbh(db, header.previous_block_hash, prev_height)?;
+            block_index
+                .get_item(prev_height)
+                .map(|i| ledger_total_of_index_item(&i, ledger))
+                .ok_or_eyre(
+                    "expiry walk: predecessor below block_tree window must be indexed \
+                     (block_tree_depth > block_migration_depth)",
+                )?
+        };
+        if (prev_total..total).contains(&offset) {
+            return Ok((header.height, cursor, total));
+        }
+        cursor = header.previous_block_hash;
+    }
+
+    // Walked off the retained tree window without matching → the offset is below
+    // it, hence finalized/migrated; resolve from the index (branch-invariant).
+    let (height, item) = block_index.get_block_index_item(ledger, offset)?;
+    Ok((
+        height,
+        item.block_hash,
+        ledger_total_of_index_item(&item, ledger),
+    ))
 }
 
 /// Reconstructs `target`'s Submit-ledger **start chunk offset**: the cumulative
@@ -758,63 +988,73 @@ fn find_block_range(
     block_index: &BlockIndex,
     ledger_type: DataLedger,
     parent_total_chunks: u64,
+    parent_block_hash: H256,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
 ) -> eyre::Result<Option<BlockRange>> {
     let mut blocks_with_expired_ledgers = BTreeMap::new();
 
-    // Ensure that we don't start reading a partition that's only partially populated.
+    // Bound the expired chunk range by the *parent header's* recorded ledger size
+    // only — a pure function of the block being built/validated, identical on every
+    // node regardless of that node's migration-lagged index tip (NC-0042 R1). Each
+    // offset is then mapped to its block branch-correctly via
+    // `resolve_ledger_offset_to_block` (parent-ancestry walk by hash for the
+    // un-migrated tail, finalized index below it, C1-gated), so the whole
+    // enumeration is a pure function of the parent's canonical ancestry.
     //
-    // Bounded by min(parent_total_chunks, index total):
-    // - `parent_total_chunks` (the parent header's recorded ledger size) makes the
-    //   result a function of the block being built/validated, not of this node's
-    //   current tip — a validator replaying an old block (sync) must not see data
-    //   that landed *after* that block in a partially-filled expired slot.
-    // - the block-index total caps lookups to migrated blocks (the index lags the
-    //   tip by `block_migration_depth`, so offsets beyond it are unresolvable).
-    // At the live tip the index term binds (index ≤ parent — unchanged behavior);
-    // during historical validation the parent term binds (deterministic verdict).
-    // Residual: expired-range chunks inside the not-yet-migrated tail are invisible
-    // until migration catches up to the parent, so verdicts there can still differ
-    // across nodes for up to `block_migration_depth` blocks. Only reachable when a
-    // partially-filled expired slot is still receiving data (allocation runs ahead
-    // of fill — see `calculate_additional_slots`); resolving it would require
-    // walking unmigrated tree blocks by chunk offset, which the index can't do.
-    let last_item = block_index
-        .get_latest_item()
-        .expect("expected block index to contain at least one item");
-    let max_chunk_offset_across_all_partitions = LedgerChunkOffset::from(
-        last_item.ledgers[ledger_type]
-            .total_chunks
-            .min(parent_total_chunks),
-    );
+    // Previously this clamped to `min(index_tip, parent)` and resolved via the
+    // migrated-only index, leaving expired chunks in the un-migrated tail invisible
+    // — an epoch-block consensus-fork vector AND a stranded-refund accounting gap
+    // (the now-exact §4b filter drops a tail tx that this walk never refunded).
+    let max_chunk_offset_across_all_partitions = LedgerChunkOffset::from(parent_total_chunks);
 
-    // Track min and max blocks as we iterate
-    let mut min_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
-    let mut max_height: Option<(BlockHeight, BlockIndexItem, LedgerChunkRange)> = None;
+    // Track min and max blocks as we iterate. Keyed by hash (not block-index item)
+    // so un-migrated tail blocks — which have no index entry yet — are representable.
+    let mut min_height: Option<(BlockHeight, H256)> = None;
+    let mut max_height: Option<(BlockHeight, H256)> = None;
+    // The boundary trim must span the UNION of all expired slots, not one slot's
+    // range. When several expired slots share a block (small partitions), trimming
+    // to a single slot's range would drop the others — under-refunding / halving
+    // fee distribution (NC-0042). Expired slots are a contiguous prefix from slot
+    // 0, so the union is `[lowest start, highest end)`.
+    let mut global_start: Option<u64> = None;
+    let mut global_end: Option<u64> = None;
 
     for (slot_index, miners) in expired_slots {
         let chunk_range = slot_index.compute_chunk_range(
             config.consensus.num_chunks_in_partition,
             max_chunk_offset_across_all_partitions,
         );
+        global_start =
+            Some(global_start.map_or(*chunk_range.start(), |s| s.min(*chunk_range.start())));
+        global_end = Some(global_end.map_or(*chunk_range.end(), |e| e.max(*chunk_range.end())));
 
         let mut chunk_offset = *chunk_range.start();
         while chunk_offset < *chunk_range.end() {
-            let (height, block_index_item) =
-                block_index.get_block_index_item(ledger_type, chunk_offset)?;
+            // Branch-correct: resolve the offset against the parent's own ancestry
+            // (tree-then-index, C1-gated), not the migrated-only index.
+            let (height, block_hash, block_total) = resolve_ledger_offset_to_block(
+                chunk_offset,
+                parent_block_hash,
+                ledger_type,
+                block_tree_guard,
+                block_index,
+                db,
+            )?;
 
             // Update min_height if this is the first block or a lower height
-            if min_height.as_ref().is_none_or(|(h, _, _)| height < *h) {
-                min_height = Some((height, block_index_item.clone(), chunk_range));
+            if min_height.as_ref().is_none_or(|(h, _)| height < *h) {
+                min_height = Some((height, block_hash));
             }
 
             // Update max_height if this is the first block or a higher height
-            if max_height.as_ref().is_none_or(|(h, _, _)| height > *h) {
-                max_height = Some((height, block_index_item.clone(), chunk_range));
+            if max_height.as_ref().is_none_or(|(h, _)| height > *h) {
+                max_height = Some((height, block_hash));
             }
 
             // If the block already exists, merge the miners
             blocks_with_expired_ledgers
-                .entry(block_index_item.block_hash)
+                .entry(block_hash)
                 .and_modify(|existing_miners: &mut Arc<Vec<IrysAddress>>| {
                     // Merge the new miners with existing ones
                     let mut combined = (**existing_miners).clone();
@@ -823,10 +1063,14 @@ fn find_block_range(
                 })
                 .or_insert_with(|| Arc::new(miners.clone()));
 
-            // Skip to the next chunk after this block ends.
-            // We do this by going to the very end of the current blocks max chunk offset
-            chunk_offset =
-                (block_index_item.ledgers[ledger_type].total_chunks + 1).min(*chunk_range.end());
+            // Advance to the first chunk of the NEXT block. `block_total` is the
+            // exclusive end of this block's chunks (offsets `[base, block_total)`),
+            // so it is exactly the next block's first offset. The old `+ 1` here
+            // skipped that boundary chunk, so a block whose first chunk landed on a
+            // slot boundary was never resolved — silently dropping its expired txs
+            // from the refund/fee walk (NC-0042). `block_total > chunk_offset`
+            // always (the offset lies within this block), so progress is guaranteed.
+            chunk_offset = block_total.min(*chunk_range.end());
         }
     }
 
@@ -837,30 +1081,39 @@ fn find_block_range(
     }
 
     // Extract min and max block data - these must exist if we have expired slots
-    let (min_height, min_item, min_range) =
+    let (min_height, min_hash) =
         min_height.expect("min_height must be populated after iterating expired slots");
-    let (max_height, max_item, max_range) =
+    let (max_height, max_hash) =
         max_height.expect("max_height must be populated after iterating expired slots");
 
+    // Both boundary blocks trim against the full expired span [global_start,
+    // global_end): the earliest skips txs starting before it, the latest breaks at
+    // its end, and a sole block (min == max) does both. Using the union — not a
+    // single slot's range — is what keeps a block holding several expired slots
+    // from being trimmed down to one (the multi-slot under-count bug).
+    let global_range = LedgerChunkRange(ledger_chunk_offset_ii!(
+        global_start.expect("global_start populated when expired slots exist"),
+        global_end.expect("global_end populated when expired slots exist")
+    ));
     let min_block = BoundaryBlock {
         height: min_height,
-        item: min_item,
-        chunk_range: min_range,
+        block_hash: min_hash,
+        chunk_range: global_range,
     };
 
     let max_block = BoundaryBlock {
         height: max_height,
-        item: max_item,
-        chunk_range: max_range,
+        block_hash: max_hash,
+        chunk_range: global_range,
     };
 
     // Get miners for boundary blocks before removing them
     let min_block_miners = blocks_with_expired_ledgers
-        .remove(&min_block.item.block_hash)
+        .remove(&min_block.block_hash)
         .unwrap_or_else(|| Arc::new(vec![]));
 
     let max_block_miners = blocks_with_expired_ledgers
-        .remove(&max_block.item.block_hash)
+        .remove(&max_block.block_hash)
         .unwrap_or_else(|| Arc::new(vec![]));
 
     Ok(Some(BlockRange {
@@ -904,6 +1157,7 @@ async fn process_boundary_block(
     block_hash: H256,
     miners: Arc<Vec<IrysAddress>>,
     is_earliest: bool,
+    is_latest: bool,
     ledger_type: DataLedger,
     config: &Config,
     block_index: &BlockIndex,
@@ -934,6 +1188,7 @@ async fn process_boundary_block(
         prev_max_offset,
         boundary.chunk_range,
         is_earliest,
+        is_latest,
         config.consensus.chunk_size,
         miners,
     );
@@ -948,10 +1203,17 @@ async fn process_boundary_block(
 ///
 /// # Boundary Handling
 ///
-/// - **Earliest block**: Skips transactions that start before the partition boundary,
-///   only including transactions fully contained within the partition
-/// - **Latest block**: Includes all transactions that start within the partition,
-///   even if they extend beyond the partition end
+/// The two trims are independent so the **sole** boundary block (the whole
+/// expired range packed into one block, `min == max`) can apply both at once:
+/// - **Start trim** (`is_earliest`): skips transactions that start before the
+///   partition boundary.
+/// - **End trim** (`is_latest`): stops at the first transaction starting at or
+///   after the partition end.
+///
+/// A multi-block range sets exactly one (`min` block → start trim, `max` block →
+/// end trim). A sole block sets **both** — omitting the end trim there would
+/// over-include the next slot's txs (NC-0042 §4b: keeps Pipeline B's refund set
+/// exact, matching the per-candidate promotion filter `submit_tx_expired`).
 ///
 /// # Returns
 ///
@@ -961,13 +1223,15 @@ async fn process_boundary_block(
     chunk.partition_start = %partition_range.start(),
     chunk.partition_end = %partition_range.end(),
     tx.count = transactions.len(),
-    boundary.is_earliest = is_earliest
+    boundary.is_earliest = is_earliest,
+    boundary.is_latest = is_latest
 ))]
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
     prev_max_offset: LedgerChunkOffset,
     partition_range: LedgerChunkRange,
     is_earliest: bool,
+    is_latest: bool,
     chunk_size: u64,
     miners: Arc<Vec<IrysAddress>>,
 ) -> BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>> {
@@ -999,21 +1263,20 @@ fn filter_transactions_by_chunk_range(
                 *tx_end
             );
 
-            if is_earliest {
-                // For earliest block: skip transactions that start before the partition
-                // We only include transactions fully contained within the partition
-                if tx_start < partition_range.start() {
-                    tracing::debug!("  Skipping (starts before partition)");
-                    current_offset = tx_end;
-                    continue;
-                }
-            } else {
-                // For latest block: stop when we reach a transaction that starts at or after the partition end
-                // We use >= because a transaction starting exactly at the end belongs to the next partition
-                if tx_start >= partition_range.end() {
-                    tracing::debug!("  Breaking (starts at or after partition end)");
-                    break;
-                }
+            // Start trim (earliest boundary): skip transactions that start before
+            // the partition; we only include transactions starting within it.
+            if is_earliest && tx_start < partition_range.start() {
+                tracing::debug!("  Skipping (starts before partition)");
+                current_offset = tx_end;
+                continue;
+            }
+            // End trim (latest boundary): stop at the first transaction that starts
+            // at or after the partition end (one starting exactly at the end belongs
+            // to the next partition). Independent of the start trim so a sole block
+            // (min == max) applies both.
+            if is_latest && tx_start >= partition_range.end() {
+                tracing::debug!("  Breaking (starts at or after partition end)");
+                break;
             }
 
             // Include this transaction
@@ -1193,7 +1456,7 @@ impl SlotIndex {
 #[derive(Debug, Clone)]
 struct BoundaryBlock {
     height: BlockHeight,
-    item: BlockIndexItem,
+    block_hash: H256,
     chunk_range: LedgerChunkRange,
 }
 
@@ -1467,51 +1730,191 @@ mod tests {
         assert_eq!(submit_tx_start_offset(a, &[(a, 3)], 0, 0), None);
     }
 
-    // `submit_tx_in_expired_range`: expired chunk range ends at `range_end`,
-    // spanning blocks `[min, max]`.
+    // `submit_span_verdict`: the pure offset decision over an inclusion block's
+    // `[base, total)` Submit chunk span against the expired `range_end`. The
+    // verdict is an exact offset comparison — no block-span over-inclusion (this
+    // is the F4 fix vs. the old `submit_tx_in_expired_range` block-membership).
 
     #[test]
-    fn block_after_expired_range_is_not_expired() {
-        // Recent tx (block 9) past the expired span [2,5] → not expired.
-        assert!(!submit_tx_in_expired_range(9, 2, 5, 100, None));
+    fn span_verdict_block_wholly_before_range_end_is_expired() {
+        // Inclusion block occupies [4, 9); range_end 10 ⇒ whole block expired.
+        assert_eq!(submit_span_verdict(4, 9, 10), Some(true));
+        // Exactly touching: total == range_end ⇒ still wholly before.
+        assert_eq!(submit_span_verdict(4, 10, 10), Some(true));
     }
 
     #[test]
-    fn block_before_expired_range_is_not_expired() {
-        assert!(!submit_tx_in_expired_range(1, 2, 5, 100, None));
+    fn span_verdict_block_at_or_after_range_end_is_not_expired() {
+        // Inclusion block starts at the boundary ⇒ not expired.
+        assert_eq!(submit_span_verdict(10, 14, 10), Some(false));
+        // Entirely past the boundary.
+        assert_eq!(submit_span_verdict(20, 25, 10), Some(false));
     }
 
     #[test]
-    fn same_block_range_includes_every_tx_of_that_block() {
-        // Whole expired range packed into one block (min == max), as in tiny
-        // test partitions: every tx of that block is in the set, regardless of
-        // start offset — this is the walk's `same_block` over-inclusion.
-        assert!(submit_tx_in_expired_range(3, 3, 3, 10, None));
+    fn span_verdict_straddle_requires_exact_offset() {
+        // range_end 10 falls strictly inside [8, 12) ⇒ caller must consult the
+        // candidate's exact start offset (no over-inclusion of the whole block).
+        assert_eq!(submit_span_verdict(8, 12, 10), None);
+    }
+
+    // `walk_submit_inclusion`: the pure, branch-correct ancestry walk that backs
+    // `resolve_submit_inclusion`'s slow path (un-migrated Submit inclusions). The
+    // NC-0042 F2 (ii) fix and the C1 side-fork guard live here; these exercise
+    // them with in-memory maps (no BlockTree/BlockIndex/db fixtures).
+
+    /// Build a `header_by_hash` map from `(hash, height, prev, submit_total,
+    /// includes_txid)` rows.
+    fn walk_tree(
+        rows: &[(H256, u64, H256, u64, bool)],
+    ) -> std::collections::HashMap<H256, WalkBlock> {
+        rows.iter()
+            .map(|&(hash, height, prev_hash, submit_total, includes_txid)| {
+                (
+                    hash,
+                    WalkBlock {
+                        height,
+                        prev_hash,
+                        submit_total,
+                        includes_txid,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn unreachable_index(_height: u64) -> Option<u64> {
+        panic!("index lookup must not be called when the predecessor is in-tree / unneeded")
+    }
+    fn unreachable_canonical(_hash: H256, _height: u64) -> eyre::Result<bool> {
+        panic!("C1 canonical check must not be called when the predecessor is in-tree / unneeded")
     }
 
     #[test]
-    fn earliest_and_middle_blocks_are_fully_included() {
-        // Multi-block range [2,6]: earliest (2) and middle (4) blocks include
-        // every tx without consulting the start offset.
-        assert!(submit_tx_in_expired_range(2, 2, 6, 1000, None));
-        assert!(submit_tx_in_expired_range(4, 2, 6, 1000, None));
+    fn walk_finds_tx_with_in_tree_predecessor() {
+        // h2(parent, not incl) → h1(incl, prev h0) → h0(genesis). base from the
+        // in-tree predecessor h0's total; index/canonical never consulted.
+        let h0 = H256::random();
+        let h1 = H256::random();
+        let h2 = H256::random();
+        let tree = walk_tree(&[
+            (h2, 2, h1, 20, false),
+            (h1, 1, h0, 15, true),
+            (h0, 0, H256::zero(), 8, false),
+        ]);
+        let got = walk_submit_inclusion(
+            h2,
+            100,
+            |h| tree.get(h).copied(),
+            unreachable_index,
+            unreachable_canonical,
+        )
+        .unwrap();
+        assert_eq!(got, Some((h1, 8, 15)));
     }
 
     #[test]
-    fn latest_block_of_multiblock_range_trims_at_range_end() {
-        // The production path: a partition spans many blocks, so the highest
-        // expired slot's data ends mid-block. On that latest block the walk keeps
-        // only txs whose start offset is before range_end.
+    fn walk_tree_bottom_predecessor_uses_canonical_index() {
+        // Inclusion block is the bottom of the retained tree; its predecessor is
+        // below the window → base via the canonical index, gated by the C1 check.
+        let h_bottom = H256::random();
+        let h_below = H256::random();
+        let tree = walk_tree(&[(h_bottom, 5, h_below, 30, true)]);
+        let got = walk_submit_inclusion(
+            h_bottom,
+            100,
+            |h| tree.get(h).copied(),
+            |height| (height == 4).then_some(25),
+            |hash, height| Ok(hash == h_below && height == 4), // C1 passes
+        )
+        .unwrap();
+        assert_eq!(got, Some((h_bottom, 25, 30)));
+    }
+
+    #[test]
+    fn walk_c1_guard_rejects_non_canonical_predecessor() {
+        // KEY branch-correctness test: predecessor below the window is NOT the
+        // canonical block at its height (a side-fork ancestor) → C1 guard fires,
+        // the walk errors rather than misattributing the canonical block's chunks.
+        let h_bottom = H256::random();
+        let h_below = H256::random();
+        let tree = walk_tree(&[(h_bottom, 5, h_below, 30, true)]);
+        let err = walk_submit_inclusion(
+            h_bottom,
+            100,
+            |h| tree.get(h).copied(),
+            |_| Some(25),
+            |_, _| Ok(false), // C1: supplied hash is not canonical at that height
+        )
+        .unwrap_err();
         assert!(
-            submit_tx_in_expired_range(6, 2, 6, 1000, Some(999)),
-            "tx starting before range_end is expired"
+            err.to_string().contains("non-canonical ancestor"),
+            "expected the C1 guard message, got: {err}"
         );
-        assert!(
-            !submit_tx_in_expired_range(6, 2, 6, 1000, Some(1000)),
-            "tx starting at/after range_end is in the next (unexpired) slot"
-        );
-        // Defensive: a tx not found in its inclusion block (None) is not expired.
-        assert!(!submit_tx_in_expired_range(6, 2, 6, 1000, None));
+    }
+
+    #[test]
+    fn walk_returns_none_when_tx_absent() {
+        // No block in the window includes the tx; the walk runs off the bottom
+        // (predecessor of genesis absent from the map) → None.
+        let h0 = H256::random();
+        let h1 = H256::random();
+        let h2 = H256::random();
+        let tree = walk_tree(&[
+            (h2, 2, h1, 20, false),
+            (h1, 1, h0, 15, false),
+            (h0, 0, H256::zero(), 8, false),
+        ]);
+        let got = walk_submit_inclusion(
+            h2,
+            100,
+            |h| tree.get(h).copied(),
+            unreachable_index,
+            unreachable_canonical,
+        )
+        .unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn walk_genesis_inclusion_has_zero_base() {
+        // Inclusion at height 0 ⇒ base is 0 with no predecessor lookup at all.
+        let h0 = H256::random();
+        let tree = walk_tree(&[(h0, 0, H256::zero(), 5, true)]);
+        let got = walk_submit_inclusion(
+            h0,
+            100,
+            |h| tree.get(h).copied(),
+            unreachable_index,
+            unreachable_canonical,
+        )
+        .unwrap();
+        assert_eq!(got, Some((h0, 0, 5)));
+    }
+
+    #[test]
+    fn walk_stops_at_max_walk_depth() {
+        // The including block sits at depth 2, but max_walk=1 bounds the walk to
+        // depths {0,1}, so it is never reached → None (the anchor-expiry bound).
+        let h0 = H256::random();
+        let h1 = H256::random();
+        let h2 = H256::random();
+        let h3 = H256::random();
+        let tree = walk_tree(&[
+            (h3, 3, h2, 30, false),
+            (h2, 2, h1, 20, false),
+            (h1, 1, h0, 15, true), // depth 2 from h3 — beyond max_walk
+            (h0, 0, H256::zero(), 8, false),
+        ]);
+        let got = walk_submit_inclusion(
+            h3,
+            1,
+            |h| tree.get(h).copied(),
+            unreachable_index,
+            unreachable_canonical,
+        )
+        .unwrap();
+        assert_eq!(got, None);
     }
 
     /// NC-0042 determinism regression: `find_block_range` must bound the
@@ -1523,7 +1926,10 @@ mod tests {
     #[test]
     fn find_block_range_bounds_by_parent_not_index_tip() -> eyre::Result<()> {
         use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{BlockTree, BlockTreeReadGuard};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
 
         let mut node_config = irys_types::NodeConfig::testing();
         node_config.consensus.get_mut().num_chunks_in_partition = 10;
@@ -1539,7 +1945,7 @@ mod tests {
             DatabaseArguments::irys_testing()?,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
-        let block_index = BlockIndex::new_for_testing(db);
+        let block_index = BlockIndex::new_for_testing(db.clone());
         for (height, submit_total) in [0_u64, 4, 7, 12, 15].into_iter().enumerate() {
             block_index.push_item(
                 &BlockIndexItem {
@@ -1567,6 +1973,21 @@ mod tests {
             m
         };
 
+        // All three cases below resolve offsets that lie BELOW the migrated index
+        // tip (total 15), so they exercise `find_block_range`'s fast path: the block
+        // tree is never walked and `parent_hash` is unused. A genesis-only tree and
+        // an arbitrary parent hash satisfy the signature. The slow/un-migrated-tail
+        // path is covered by `find_block_range_resolves_unmigrated_tail`.
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+            &genesis,
+            irys_types::ConsensusConfig::testing(),
+        ))));
+        let parent_hash = genesis.block_hash;
+
         // Parent at height 2 (total 7): the range must stop at the block
         // holding chunk 6 (height 2), even though the index tip (total 15)
         // covers slot 0's full [0,10) range.
@@ -1576,6 +1997,9 @@ mod tests {
             &block_index,
             DataLedger::Submit,
             7,
+            parent_hash,
+            &guard,
+            &db,
         )?
         .expect("expired slot 0 holds data");
         assert_eq!(range.min_block.height, 1, "chunk 0 lands at height 1");
@@ -1592,21 +2016,290 @@ mod tests {
             &block_index,
             DataLedger::Submit,
             15,
+            parent_hash,
+            &guard,
+            &db,
         )?
         .expect("expired slot 0 holds data");
         assert_eq!(range.max_block.height, 3);
 
-        // Parent ahead of the migrated index (unmigrated tail): the index term
-        // caps lookups — no out-of-range error, same blocks as parent == tip.
+        // Parent total ahead of the migrated index, but slot 0's data ([0,10)) is
+        // fully migrated, so resolution stays on the fast path — same blocks as
+        // parent == tip, no out-of-range error.
         let range = find_block_range(
             expired_slot_0(),
             &config,
             &block_index,
             DataLedger::Submit,
             20,
+            parent_hash,
+            &guard,
+            &db,
         )?
         .expect("expired slot 0 holds data");
         assert_eq!(range.max_block.height, 3);
+
+        Ok(())
+    }
+
+    /// NC-0042 R1: `find_block_range` must resolve expired chunks in the
+    /// **un-migrated tail** from the parent's block tree, not truncate at the
+    /// migrated block-index tip. Slot 1 (`[10,20)`) extends past the index tip
+    /// (Submit total 14) into tree-only blocks (heights 3,4); the range's max
+    /// block must be the tree block at height 4. Pre-R1 the range was capped at
+    /// the index tip → max block height 2, silently dropping the tail's
+    /// refunds/miner payouts (an epoch-block accounting + determinism gap).
+    #[test]
+    fn find_block_range_resolves_unmigrated_tail() -> eyre::Result<()> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{
+            BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
+        };
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{BlockTransactions, SealedBlock};
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.consensus.get_mut().num_chunks_in_partition = 10;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // A Submit header with a cumulative chunk total at `height`.
+        fn with_submit(height: u64, total_chunks: u64) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: irys_types::H256List(vec![]),
+                total_chunks,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        }
+
+        // Tree holds heights 0..=4 with cumulative Submit totals 0,8,14,18,22, so
+        // block h introduced chunks [total(h-1), total(h)). The migrated index
+        // holds only 0..=2 (tip total 14); heights 3,4 are the un-migrated tail,
+        // present ONLY in the tree.
+        let mut headers: Vec<IrysBlockHeader> = [0_u64, 8, 14, 18, 22]
+            .into_iter()
+            .enumerate()
+            .map(|(h, t)| with_submit(h as u64, t))
+            .collect();
+        let guard = {
+            let mut iter = headers.iter_mut();
+            let genesis = iter.next().unwrap();
+            genesis.cumulative_diff = 0.into();
+            genesis.test_sign();
+            let mut prev = genesis.block_hash;
+            let mut tree = BlockTree::new(genesis, irys_types::ConsensusConfig::testing());
+            tree.mark_tip(&prev).unwrap();
+            for h in iter {
+                h.previous_block_hash = prev;
+                h.cumulative_diff = h.height.into();
+                h.test_sign();
+                prev = h.block_hash;
+                let sealed = Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(h.clone()),
+                    BlockTransactions::default(),
+                ));
+                tree.add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    dummy_ema_snapshot(),
+                )?;
+            }
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+        };
+        let parent_hash = headers[4].block_hash; // height 4 = tip = the parent
+        let tree_tail_hash = headers[4].block_hash;
+
+        // Migrated index: heights 0..=2 only (Submit totals 0,8,14).
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        for (height, submit_total) in [0_u64, 8, 14].into_iter().enumerate() {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: H256::random(),
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: submit_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+
+        // Expire slot 1 = chunks [10,20); parent's Submit total is 22.
+        let mut expired = BTreeMap::new();
+        expired.insert(SlotIndex::new(1), vec![IrysAddress::ZERO]);
+        let range = find_block_range(
+            expired,
+            &config,
+            &block_index,
+            DataLedger::Submit,
+            22, // parent_total — slot 1's tail (chunks 14-19) is past the index tip 14
+            parent_hash,
+            &guard,
+            &db,
+        )?
+        .expect("expired slot 1 holds data");
+
+        // chunk 10 (fast path, index) → height 2; chunk 19 (slow path, tree) →
+        // the un-migrated tree block at height 4 — proving the tail was resolved.
+        assert_eq!(
+            range.min_block.height, 2,
+            "slot 1 starts at chunk 10, which lives in height 2"
+        );
+        assert_eq!(
+            range.max_block.height, 4,
+            "slot 1's tail must resolve to the un-migrated tree block (pre-R1 this was capped at 2)"
+        );
+        assert_eq!(
+            range.max_block.block_hash, tree_tail_hash,
+            "the max boundary block must be the tree block, not an indexed one"
+        );
+
+        Ok(())
+    }
+
+    /// NC-0042 F2 (ii) — real-fixture coverage of `resolve_submit_inclusion`'s
+    /// SLOW path against an actual `BlockTree`: a candidate whose Submit inclusion
+    /// is in the un-migrated tree (absent from the migrated index /
+    /// `MigratedBlockHashes`, so `canonical_submit_height` returns `None`) must
+    /// still be resolved — by the branch-correct by-hash parent walk — with the
+    /// correct `(base, total)` offsets. This is the path the chain-test
+    /// (`block_migration_depth = 1`) never reaches; fast-path resolution of a
+    /// migrated inclusion is covered end-to-end by
+    /// `chain-tests/.../promote_after_submit_expiry.rs`. (The below-tree-window
+    /// predecessor + C1 side-fork rejection are covered by the `walk_*` unit
+    /// tests, which need no heavy tree fixture.)
+    #[test]
+    fn resolve_submit_inclusion_slow_path_walks_untracked_tree() -> eyre::Result<()> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{
+            BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
+        };
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{BlockTransactions, SealedBlock};
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        // A header with one Submit ledger entry: cumulative chunk total + tx_ids.
+        fn with_submit(height: u64, total_chunks: u64, tx_ids: Vec<H256>) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: irys_types::H256List(tx_ids),
+                total_chunks,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        }
+
+        let target = H256::random();
+        // Cumulative Submit totals h0=5, h1=12, h2=20. The target lands in h1, so
+        // its inclusion spans Submit chunks [5, 12): base 5, total 12.
+        let mut headers = [
+            with_submit(0, 5, vec![]),
+            with_submit(1, 12, vec![target]),
+            with_submit(2, 20, vec![]),
+        ];
+
+        // Build a real BlockTree from the headers. The shared `genesis_tree`
+        // helper can't be used here: it seals every block with the *checked*
+        // `SealedBlock::new`, which rejects h1 (it declares `target` in its Submit
+        // ledger but has an empty body). `SealedBlock::new_unchecked` (test-only)
+        // skips that body check; genesis (empty ledgers) still seals via
+        // `BlockTree::new`.
+        let guard = {
+            let mut iter = headers.iter_mut();
+            let genesis = iter.next().unwrap();
+            genesis.cumulative_diff = 0.into();
+            genesis.test_sign();
+            let mut prev = genesis.block_hash;
+            let mut tree = BlockTree::new(genesis, irys_types::ConsensusConfig::testing());
+            tree.mark_tip(&prev).unwrap();
+            for h in iter {
+                h.previous_block_hash = prev;
+                h.cumulative_diff = h.height.into();
+                h.test_sign();
+                prev = h.block_hash;
+                let sealed = Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(h.clone()),
+                    BlockTransactions::default(),
+                ));
+                tree.add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    dummy_ema_snapshot(),
+                )?;
+            }
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+        };
+        let inclusion_hash = headers[1].block_hash; // h1
+        let parent_hash = headers[2].block_hash; // h2 = tip = parent of block @ height 3
+
+        // Empty db ⇒ canonical_submit_height returns None ⇒ the SLOW path runs.
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
+
+        let range = ExpiredSubmitRange {
+            block_height: 3,
+            range_end: 12,
+            parent_block_hash: parent_hash,
+        };
+
+        let inc = resolve_submit_inclusion(target, &range, &config, &block_index, &guard, &db)?
+            .expect("slow path must resolve the un-migrated Submit inclusion");
+        assert_eq!(
+            inc.block_hash, inclusion_hash,
+            "resolved the wrong inclusion block"
+        );
+        assert_eq!(
+            inc.base, 5,
+            "base = predecessor (h0) cumulative Submit total"
+        );
+        assert_eq!(
+            inc.total, 12,
+            "total = inclusion block (h1) cumulative Submit total"
+        );
+
+        // End-to-end verdict via the pure span decision (no body load needed):
+        // range_end 12 ⇒ block [5,12) wholly before ⇒ expired; range_end 5 ⇒ not.
+        assert_eq!(submit_span_verdict(inc.base, inc.total, 12), Some(true));
+        assert_eq!(submit_span_verdict(inc.base, inc.total, 5), Some(false));
 
         Ok(())
     }

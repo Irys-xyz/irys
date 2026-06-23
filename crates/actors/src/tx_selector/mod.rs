@@ -906,7 +906,6 @@ async fn get_publish_txs_and_proofs(
             epoch_snapshot,
             parent_block_header,
             ctx.config,
-            ctx.block_index,
         )?;
 
         for tx_header in &tx_headers {
@@ -932,18 +931,16 @@ async fn get_publish_txs_and_proofs(
             // structural validation, so a `Some` from the canonical DB index
             // is sufficient evidence of prior Submit.
             //
-            // Capture the resolved height (DB-fallback path only) so the §4b
-            // expiry check below can reuse it instead of looking it up again.
-            // Live-tree candidates hit the HashSet — their height is resolved
-            // lazily inside `submit_tx_expired` (a recent tx can't have expired).
-            let submit_height: Option<u64> = if submit_txs_from_canonical.contains(&tx_header.id) {
-                None
-            } else {
+            // Prior-Submit gate: live-tree candidates are in the canonical fold;
+            // others must have a canonical (migrated) Submit inclusion. The §4b
+            // expiry check below resolves the inclusion itself (branch-correct),
+            // so we only need the gate's continue-on-missing side effect here.
+            if !submit_txs_from_canonical.contains(&tx_header.id) {
                 match ctx
                     .db
                     .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
                 {
-                    Ok(Some(h)) => Some(h),
+                    Ok(Some(_)) => {}
                     Ok(None) => {
                         warn!(
                             tx.id = ?tx_header.id,
@@ -970,7 +967,7 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                 }
-            };
+            }
 
             // NC-0042 §4b: drop publish candidates whose Submit-ledger storage has
             // expired as of the block we're producing. `submit_tx_expired` is the
@@ -982,7 +979,6 @@ async fn get_publish_txs_and_proofs(
             if let Some(range) = &expired_submit_range
                 && crate::block_producer::ledger_expiry::submit_tx_expired(
                     tx_header.id,
-                    submit_height,
                     range,
                     ctx.config,
                     ctx.block_index,
