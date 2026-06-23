@@ -1209,6 +1209,14 @@ pub fn block_index_latest_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
     Ok(cursor.last()?.map(|(height, _)| height))
 }
 
+/// Returns the canonical migrated block hash recorded at `height`.
+pub fn block_index_hash_by_height<T: DbTx>(
+    tx: &T,
+    height: BlockHeight,
+) -> eyre::Result<Option<H256>> {
+    Ok(tx.get::<MigratedBlockHashes>(height)?)
+}
+
 /// Returns the number of blocks stored in the block index.
 pub fn block_index_num_blocks<T: DbTx>(tx: &T) -> eyre::Result<u64> {
     let count = tx.entries::<MigratedBlockHashes>()?;

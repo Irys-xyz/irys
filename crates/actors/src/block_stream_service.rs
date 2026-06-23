@@ -17,9 +17,12 @@ use irys_types::block_stream::{BlockEvent, BlockRef, EventsPage, StreamEvent, St
 use irys_types::{DatabaseProvider, H256, TokioServiceHandle};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver};
+use std::task::{Context, Poll};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, error::TryRecvError};
 use tracing::{Instrument as _, error, info, warn};
 
 /// Count-based retention: keep at most this many events; older ones are pruned. Sized to comfortably
@@ -30,11 +33,16 @@ const RETENTION_EVENTS: u64 = 100_000;
 const PRUNE_INTERVAL: u64 = 1_000;
 /// De-dup window for emitted `observed` block hashes. Must comfortably exceed the reorg depth so a
 /// re-adopted block is still remembered.
-const DEDUP_CAPACITY: usize = 10_000;
+const DEDUP_CAPACITY: NonZeroUsize = match NonZeroUsize::new(10_000) {
+    Some(capacity) => capacity,
+    None => NonZeroUsize::MIN,
+};
 /// Per-subscriber live buffer. A consumer that lags beyond this many frames is dropped (its SSE
 /// stream ends) and reconnects with `from_seq` to replay from the durable log — bounding memory
 /// instead of letting a stuck follower accumulate frames without limit.
 const SUBSCRIBER_BUFFER: usize = 1_024;
+/// Maximum number of durable frames decoded at once for an SSE replay.
+const REPLAY_PAGE: usize = 1_024;
 
 /// Max frames a single `GET /internal/blocks/events` page may return; an over-size `limit` is clamped to
 /// this rather than rejected, bounding per-request work.
@@ -47,7 +55,7 @@ pub struct BlockStreamHandle {
     /// Live SSE subscribers. The lock is shared with [`Self::append_and_fanout`] so a subscribe's
     /// snapshot+register pair cannot interleave with an append. Bounded senders: a lagging
     /// subscriber is dropped rather than buffered without limit.
-    live: Mutex<Vec<Sender<StreamFrame>>>,
+    live: Mutex<Vec<Sender<Arc<StreamFrame>>>>,
     db: DatabaseProvider,
 }
 
@@ -59,18 +67,19 @@ impl BlockStreamHandle {
         }
     }
 
-    /// Atomic replay→live handover: under one lock, snapshot the durable replay suffix (from `from_seq`,
-    /// or the retained floor when the cursor is stale past the tip) and register a live sender, so no
-    /// append interleaves between the snapshot and the registration.
+    /// Atomic replay→live handover: under one lock, snapshot the durable replay bounds and register
+    /// a live sender, so no append interleaves between the snapshot and the registration. The returned
+    /// replay reads that immutable range in bounded pages after releasing the fan-out lock.
     pub fn subscribe(
         &self,
         from_seq: u64,
-    ) -> eyre::Result<(Vec<StreamFrame>, Receiver<StreamFrame>)> {
+    ) -> eyre::Result<(ReplayStream, Receiver<Arc<StreamFrame>>)> {
         let mut live = self
             .live
             .lock()
-            .expect("block-stream fan-out lock poisoned");
-        let stored = self.db.view_eyre(|tx| {
+            .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
+        let (start, end) = self.db.view_eyre(|tx| {
+            let lowest = irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0);
             let logical_len = match irys_database::block_stream_latest_seq(tx)? {
                 Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
                 None => 0,
@@ -79,21 +88,17 @@ impl BlockStreamHandle {
             // from the retained floor so the follower sees below-cursor frames and rewinds, matching the
             // `/events` beyond-tip clamp; otherwise the SSE follower would silently continue onto the new
             // chain at the same seq. In-window / caught-up cursors replay from `from_seq` (empty at the
-            // tip); a below-floor cursor already starts at the floor via the range walk.
-            let start = if from_seq > logical_len {
-                irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0)
+            // tip); a below-floor cursor also clamps to the retained floor.
+            let start = if from_seq < lowest || from_seq > logical_len {
+                lowest
             } else {
                 from_seq
             };
-            irys_database::read_block_stream_from(tx, start)
+            Ok((start, logical_len))
         })?;
-        let mut replay = Vec::with_capacity(stored.len());
-        for (seq, bytes) in stored {
-            replay.push(decode_frame(seq, &bytes)?);
-        }
         let (tx, rx) = mpsc::channel(SUBSCRIBER_BUFFER);
         live.push(tx);
-        Ok((replay, rx))
+        Ok((ReplayStream::new(&self.db, start, end), rx))
     }
 
     /// One-shot page over the durable log for `GET /internal/blocks/events`, read in a single
@@ -152,21 +157,97 @@ impl BlockStreamHandle {
         let mut live = self
             .live
             .lock()
-            .expect("block-stream fan-out lock poisoned");
+            .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
         let payload = serde_json::to_vec(&event)?;
         let seq = self
             .db
             .update_eyre(|tx| irys_database::append_block_stream_event(tx, payload))?;
-        let frame = StreamFrame { seq, event };
+        let frame = Arc::new(StreamFrame { seq, event });
         // Drop subscribers whose receiver is closed or lagging past `SUBSCRIBER_BUFFER`; a dropped
         // follower reconnects and replays from the durable log via `subscribe(from_seq)`.
-        live.retain(|sender| sender.try_send(frame.clone()).is_ok());
+        live.retain(|sender| {
+            sender
+                .try_send(Arc::clone(&frame)) // clone: live subscribers share one immutable frame allocation
+                .is_ok()
+        });
         Ok(seq)
     }
 
     fn prune(&self, keep_from_seq: u64) -> eyre::Result<()> {
         self.db
             .update_eyre(|tx| irys_database::prune_block_stream_below(tx, keep_from_seq))
+    }
+}
+
+/// Bounded, lazy replay of the durable range captured by [`BlockStreamHandle::subscribe`].
+#[derive(Debug)]
+pub struct ReplayStream {
+    db: DatabaseProvider,
+    next_seq: u64,
+    end_seq: u64,
+    buffered: VecDeque<Arc<StreamFrame>>,
+    failed: bool,
+}
+
+impl ReplayStream {
+    fn new(db: &DatabaseProvider, next_seq: u64, end_seq: u64) -> Self {
+        Self {
+            db: DatabaseProvider(Arc::clone(&db.0)), // clone: replay owns shared access to the DB environment
+            next_seq,
+            end_seq,
+            buffered: VecDeque::new(),
+            failed: false,
+        }
+    }
+
+    fn load_page(&mut self) -> eyre::Result<()> {
+        let remaining = self.end_seq.saturating_sub(self.next_seq);
+        let limit = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(REPLAY_PAGE);
+        let raw = self
+            .db
+            .view_eyre(|tx| irys_database::read_block_stream_range(tx, self.next_seq, limit))?;
+        let mut expected = self.next_seq;
+        for (seq, bytes) in raw {
+            if seq != expected {
+                return Err(eyre::eyre!(
+                    "block-stream replay lost seq {expected}; next retained seq is {seq}"
+                ));
+            }
+            self.buffered
+                .push_back(Arc::new(decode_frame(seq, &bytes)?));
+            expected = expected
+                .checked_add(1)
+                .ok_or_eyre("block-stream replay seq overflow")?;
+        }
+        if expected == self.next_seq && self.next_seq < self.end_seq {
+            return Err(eyre::eyre!(
+                "block-stream replay ended at seq {} before snapshot end {}",
+                self.next_seq,
+                self.end_seq
+            ));
+        }
+        self.next_seq = expected;
+        Ok(())
+    }
+}
+
+impl futures::Stream for ReplayStream {
+    type Item = eyre::Result<Arc<StreamFrame>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(frame) = self.buffered.pop_front() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+        if self.failed || self.next_seq >= self.end_seq {
+            return Poll::Ready(None);
+        }
+        if let Err(error) = self.load_page() {
+            self.failed = true;
+            return Poll::Ready(Some(Err(error)));
+        }
+        Poll::Ready(self.buffered.pop_front().map(Ok))
     }
 }
 
@@ -190,7 +271,7 @@ impl BlockStreamService {
         info!("Spawning block-stream service");
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let handle = Arc::new(BlockStreamHandle::new(db));
-        let producer_handle = Arc::clone(&handle);
+        let producer_handle = Arc::clone(&handle); // clone: producer and API share the service handle
 
         let join = runtime_handle.spawn(
             async move {
@@ -249,7 +330,11 @@ impl Producer {
         loop {
             tokio::select! {
                 _ = &mut self.shutdown => {
-                    info!("block-stream producer shutting down");
+                    if let Err(e) = self.drain_queued_signals() {
+                        error!(error = ?e, "block-stream producer halting while draining shutdown queue");
+                    } else {
+                        info!("block-stream producer drained queued signals and is shutting down");
+                    }
                     break;
                 }
                 maybe_signal = self.signal_rx.recv() => {
@@ -269,6 +354,16 @@ impl Producer {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn drain_queued_signals(&mut self) -> eyre::Result<()> {
+        self.signal_rx.close();
+        loop {
+            match self.signal_rx.try_recv() {
+                Ok(signal) => self.handle_signal(signal)?,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
             }
         }
     }
@@ -344,15 +439,15 @@ impl Producer {
 /// Rebuilds the producer's in-memory de-dup state (`observed` and `finalized` hashes) from the
 /// durable log tail on startup, so a restart does not re-emit for blocks already in the log.
 fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, ()>) {
-    let cap = NonZeroUsize::new(DEDUP_CAPACITY).expect("non-zero dedup capacity");
-    let mut emitted = LruCache::new(cap);
-    let mut finalized = LruCache::new(cap);
+    let mut emitted = LruCache::new(DEDUP_CAPACITY);
+    let mut finalized = LruCache::new(DEDUP_CAPACITY);
 
     let tail = (|| -> eyre::Result<Vec<(u64, Vec<u8>)>> {
         let Some(latest) = db.view_eyre(irys_database::block_stream_latest_seq)? else {
             return Ok(Vec::new());
         };
-        let start = latest.saturating_sub(DEDUP_CAPACITY as u64);
+        let capacity = u64::try_from(DEDUP_CAPACITY.get()).unwrap_or(u64::MAX);
+        let start = latest.saturating_sub(capacity);
         db.view_eyre(|tx| irys_database::read_block_stream_from(tx, start))
     })();
 
@@ -388,17 +483,19 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{StreamExt as _, TryStreamExt as _};
     use irys_database::{
         IrysDatabaseArgs as _, append_block_stream_event, open_or_create_db,
         prune_block_stream_below, tables::IrysTables,
     };
     use irys_types::block_stream::{BlockEvent, BlockHeaderView, OwnerId};
+    use irys_types::{BlockTransactions, IrysBlockHeader, SealedBlock};
     use reth_db::mdbx::DatabaseArguments;
 
     /// A minimal but well-formed `observed` event, so `decode_frame` round-trips it. The frame's `seq`
     /// comes from the DB key, not this body, so a constant body is fine for the regime assertions.
-    fn sample_event() -> Vec<u8> {
-        let event = StreamEvent::Observed(BlockEvent {
+    fn sample_stream_event() -> StreamEvent {
+        StreamEvent::Observed(BlockEvent {
             header: BlockHeaderView {
                 height: 0,
                 block_hash: H256::zero(),
@@ -411,8 +508,25 @@ mod tests {
                 data_ledgers: vec![],
             },
             txs: vec![],
-        });
-        serde_json::to_vec(&event).expect("serialize sample event")
+        })
+    }
+
+    fn sample_event() -> Vec<u8> {
+        serde_json::to_vec(&sample_stream_event()).expect("serialize sample event")
+    }
+
+    fn collect_replay(replay: ReplayStream) -> Vec<Arc<StreamFrame>> {
+        futures::executor::block_on(replay.try_collect()).expect("collect replay")
+    }
+
+    fn sample_block(height: u64) -> Arc<SealedBlock> {
+        let mut header = IrysBlockHeader::default();
+        header.height = height;
+        header.block_hash = H256::from_low_u64_be(height);
+        Arc::new(SealedBlock::new_unchecked(
+            Arc::new(header),
+            BlockTransactions::default(),
+        ))
     }
 
     fn handle_with_events(
@@ -512,6 +626,7 @@ mod tests {
         let (handle, _tmp) = handle_with_events(3);
         let page = handle.events_page(0, 10).unwrap();
         let (replay, _live) = handle.subscribe(0).unwrap();
+        let replay = collect_replay(replay);
         assert_eq!(
             serde_json::to_value(&page.frames).unwrap(),
             serde_json::to_value(&replay).unwrap(),
@@ -525,10 +640,79 @@ mod tests {
         // A cursor beyond the tip (only reachable after a reset shrank the log) replays from the floor,
         // so the follower sees below-cursor frames and rewinds — not an empty replay.
         let (replay, _live) = handle.subscribe(99).unwrap();
+        let replay = collect_replay(replay);
         assert_eq!(replay.first().map(|f| f.seq), Some(0));
         assert_eq!(replay.len(), 3);
         // Caught up at the tip replays nothing — no re-stream of the whole log.
         let (replay, _live) = handle.subscribe(3).unwrap();
+        let replay = collect_replay(replay);
         assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn subscribe_replay_decodes_at_most_one_page_at_a_time() {
+        let event_count = u64::try_from(REPLAY_PAGE).unwrap() + 1;
+        let (handle, _tmp) = handle_with_events(event_count);
+        let (mut replay, _live) = handle.subscribe(0).unwrap();
+
+        assert!(replay.buffered.is_empty());
+        let first = futures::executor::block_on(replay.next())
+            .expect("first replay item")
+            .expect("decode first replay item");
+
+        assert_eq!(first.seq, 0);
+        assert_eq!(replay.buffered.len(), REPLAY_PAGE - 1);
+    }
+
+    #[test]
+    fn live_subscribers_share_the_same_frame_allocation() {
+        let (handle, _tmp) = handle_with_events(0);
+        let (_replay_a, mut live_a) = handle.subscribe(0).unwrap();
+        let (_replay_b, mut live_b) = handle.subscribe(0).unwrap();
+
+        handle.append_and_fanout(sample_stream_event()).unwrap();
+        let frame_a = live_a.blocking_recv().expect("first live frame");
+        let frame_b = live_b.blocking_recv().expect("second live frame");
+
+        assert!(Arc::ptr_eq(&frame_a, &frame_b));
+    }
+
+    #[test]
+    fn subscribe_reports_a_poisoned_fanout_lock() {
+        let (handle, _tmp) = handle_with_events(0);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = handle.live.lock().expect("lock fan-out registry");
+            panic!("poison fan-out registry");
+        }));
+        assert!(poisoned.is_err());
+
+        let error = handle
+            .subscribe(0)
+            .expect_err("poisoned lock must be an error");
+        assert!(error.to_string().contains("fan-out lock poisoned"));
+    }
+
+    #[test]
+    fn shutdown_drain_persists_every_queued_signal() {
+        let (handle, _tmp) = handle_with_events(0);
+        let handle = Arc::new(handle);
+        let (_shutdown_tx, shutdown) = reth::tasks::shutdown::signal();
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        signal_tx
+            .send(BlockStreamSignal::Confirmed(sample_block(1)))
+            .expect("queue first signal");
+        signal_tx
+            .send(BlockStreamSignal::Confirmed(sample_block(2)))
+            .expect("queue second signal");
+        let mut producer = Producer::new(Arc::clone(&handle), 1, shutdown, signal_rx);
+
+        producer.drain_queued_signals().expect("drain signals");
+
+        let (replay, _live) = handle.subscribe(0).unwrap();
+        let frames = collect_replay(replay);
+        assert_eq!(
+            frames.iter().map(|frame| frame.seq).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 }
