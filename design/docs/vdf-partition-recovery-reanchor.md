@@ -326,11 +326,12 @@ canonical chain *during* the window, all flowing through one primitive,
   tree) and re-validate against that: `build_fork_local_recall_view`
   (`crates/actors/src/block_validation.rs`).
 - **Previous-step continuity — fork-local view.** The `ensure_vdf_is_valid` prev-step equality
-  check (`crates/actors/src/validation_service.rs`) previously handled only an *absent* previous
-  step (requeue via `VdfStepRewound`); a *present-but-stale* step — the poisoned boundary value
-  during the window — fell through to terminal `Invalid`. On mismatch it now resolves the previous
-  step from a fork-local view sized to include it (`build_fork_local_step_view`, which covers the
-  prev step even for a boundary-crossing block) and accepts iff that matches. A value that
+  check (`crates/actors/src/validation_service.rs`) reads the live buffer as a fast path and treats
+  an *absent* previous step and a *present-but-stale* one (the poisoned boundary value during the
+  window) identically: both fall through to resolve the previous step from a fork-local view sized
+  to include it (`build_fork_local_step_view`, which covers the prev step even for a boundary-crossing
+  block) and accept iff that matches. (An absent-or-mismatched step with an unbuildable view requeues
+  via `VdfPrevStepForkViewUnavailable`; there is no separate `VdfStepRewound` re-wait path.) A value that
   mismatches the block's own canonical ancestry is still rejected.
 
 ### 4. Post-recovery mining — reset the efficient-sampling rotation
@@ -406,10 +407,11 @@ next seed. `get_recall_range` also defends against a backward step jump.
     writer); `store_step` is forward-only, so a decrease is always a re-anchor and must
     not be mislabelled as a stall (which would `panic!` the node per the never-mislabel
     rule).
-  - The post-wait `get_step(prev_output_step_number)` re-waits once if the step is
-    transiently absent (rewound after the wait returned); if still absent it surfaces
-    the typed `VdfStepRewound` sentinel, which routes to `Cancelled` (peer-innocent
-    requeue) rather than `panic!` or `Invalid`.
+  - The post-wait `get_step(prev_output_step_number)` is a fast path that may read absent or
+    stale during a rewind; either way the prev-step check falls through to the authoritative
+    fork-local view (no re-wait). If that view is also unbuildable it surfaces
+    `VdfPrevStepForkViewUnavailable`, which routes to `Cancelled` (peer-innocent requeue)
+    rather than `panic!` or `Invalid`.
 - **Rebuild failure.** `create_state_for_canonical_tip` runs on the live VDF supervisor
   thread, so it returns `eyre::Result` instead of unwrapping DB/header reads. On failure
   (transient DB error, or an ancestor missing from both the block-tree cache and the DB)
