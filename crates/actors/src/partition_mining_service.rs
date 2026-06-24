@@ -118,8 +118,9 @@ impl PartitionMiningServiceInner {
     /// stale `last_step_num + 1`.
     fn handle_reanchor(&mut self) {
         debug!("VDF re-anchored: resetting partition recall-range rotation state");
-        self.ranges.reinitialize();
-        self.ranges.last_step_num = 0;
+        self.ranges = Ranges::new(self.ranges.num_recall_ranges_in_partition).expect(
+            "existing partition miner must already have a valid non-zero recall-range count",
+        );
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -499,5 +500,87 @@ impl PartitionMiningService {
             }
         }
         info!("Partition mining service stopped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::build_test_service_senders;
+    use irys_domain::{StorageModule, StorageModuleInfo};
+    use irys_testing_utils::tempfile::TempDir;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        Config, NodeConfig, PartitionChunkOffset, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
+    };
+    use irys_vdf::state::test_helpers::mocked_vdf_service;
+    use std::sync::atomic::AtomicU64;
+
+    fn test_inner() -> eyre::Result<(PartitionMiningServiceInner, TempDir)> {
+        let tmp = TempDirBuilder::new().build();
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = tmp.path().to_path_buf();
+        node_config.consensus.get_mut().num_chunks_in_partition = 4;
+        node_config.consensus.get_mut().num_chunks_in_recall_range = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module_info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, config.consensus.num_chunks_in_partition as u32),
+                "partition-miner-test".into(),
+            )],
+        };
+        let storage_module = Arc::new(StorageModule::new(&storage_module_info, &config)?);
+        let (service_senders, _receivers) = build_test_service_senders();
+
+        let inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            storage_module,
+            false,
+            VdfStateReadonly::new(mocked_vdf_service(&config)),
+            Arc::new(AtomicU64::new(0)),
+            U256::zero(),
+        );
+
+        // Return the tempdir so the caller keeps it alive for the storage module's lifetime.
+        Ok((inner, tmp))
+    }
+
+    #[test]
+    fn reanchor_clears_stale_recall_range_cache() -> eyre::Result<()> {
+        let partition_hash = irys_types::H256::repeat_byte(0xAA);
+        let old_seed = irys_types::H256::repeat_byte(0x11);
+        let new_seed = irys_types::H256::repeat_byte(0x44);
+        let stale_step = 21_u64;
+
+        let (mut stale_inner, _stale_tmp) = test_inner()?;
+        for step in 1..=25 {
+            stale_inner.test_get_recall_range(step, old_seed, partition_hash);
+        }
+        let stale_cached = stale_inner.test_get_recall_range(stale_step, old_seed, partition_hash);
+
+        let (mut fresh_new_lineage, _fresh_tmp) = test_inner()?;
+        for step in 1..=stale_step {
+            fresh_new_lineage.test_get_recall_range(step, new_seed, partition_hash);
+        }
+        let expected_after_reanchor =
+            fresh_new_lineage.test_get_recall_range(stale_step, new_seed, partition_hash);
+
+        assert_ne!(
+            stale_cached, expected_after_reanchor,
+            "test precondition failed: old and new lineages must diverge at the retained cached step"
+        );
+
+        stale_inner.handle_reanchor();
+        let rebuilt = stale_inner.test_get_recall_range(stale_step, new_seed, partition_hash);
+
+        assert_eq!(
+            rebuilt, expected_after_reanchor,
+            "re-anchor must discard retained cached recall ranges and rebuild from the new lineage"
+        );
+        Ok(())
     }
 }

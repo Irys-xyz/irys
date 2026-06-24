@@ -386,6 +386,25 @@ pub fn process_reset(
     }
 }
 
+/// Fold the reset-boundary entropy into a VDF ANCHOR hash before it seeds [`run_vdf`].
+///
+/// The step buffer stores RAW step outputs — `process_reset` applies the reset fold to the carried
+/// hash only AFTER a step is stored (the loop tail), and fast-forward stores values verbatim. So a
+/// hash read back from the buffer via `get_last_step_and_seed` at (re-)anchor time is unfolded. When
+/// the anchor `step` is itself a reset boundary, the first `vdf_sha` for `step + 1` must run on the
+/// hash WITH boundary `step`'s reset folded in, or that first step diverges from the canonical
+/// lineage. This is rare (only when the anchor lands exactly on a boundary) and non-safety
+/// (validation recomputes from each block's own seed), but it mis-steps local mining until it heals.
+///
+/// `seed` is boundary `step`'s reset seed: the anchoring block's OWN `vdf_limiter_info.seed`. When a
+/// block's step range contains a reset boundary, `IrysBlockHeader::set_seeds` pins that boundary's
+/// entropy in `seed` (while `next_seed` targets the NEXT boundary above the block — what the loop
+/// applies going forward). A no-op when `step` is not a boundary.
+#[must_use]
+pub fn reset_applied_anchor_hash(reset_frequency: u64, step: u64, hash: H256, seed: H256) -> H256 {
+    process_reset(step, hash, reset_frequency, seed)
+}
+
 /// Returns `true` when the VDF loop must NOT yet cross the upcoming reset boundary.
 ///
 /// The reset seed applied at boundary `B` is pinned by a rotation block at step
@@ -1711,6 +1730,68 @@ mod tests {
         assert!(
             accepted.is_ok(),
             "clean buffer (gate held until the seed was confirmed) must ACCEPT the canonical block: {accepted:?}"
+        );
+    }
+
+    /// Regression for finding #5: a VDF anchor hash read back from the (raw) step buffer must have
+    /// its OWN reset boundary folded in before it seeds the loop. The buffer stores raw step values
+    /// (the reset fold is applied to the carried hash only AFTER a step is stored), so an anchor
+    /// hash from `get_last_step_and_seed` is unfolded. When the anchor step is a reset boundary,
+    /// `reset_applied_anchor_hash` folds boundary K's seed (the anchoring block's own `seed`); the
+    /// first forward step (K+1) then matches the canonical lineage. Skipping the fold (the #5 bug)
+    /// mis-steps the first range.
+    #[test]
+    fn anchor_hash_folds_its_own_reset_boundary_before_seeding_the_loop() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 4;
+        let config = Config::new_with_random_peer_id(node_config);
+        let reset_frequency = config.vdf.reset_frequency as u64;
+
+        let raw_anchor = H256::repeat_byte(0xA1); // buffer's raw step-8 value
+        let boundary_seed = H256::repeat_byte(0xB2); // boundary 8's seed (the anchoring block's `seed`)
+
+        // Anchor exactly on boundary 8: the raw hash must be folded with the boundary seed.
+        let folded = reset_applied_anchor_hash(reset_frequency, 8, raw_anchor, boundary_seed);
+        assert_eq!(
+            folded,
+            apply_reset_seed(raw_anchor, boundary_seed),
+            "anchoring on a reset boundary must fold the boundary seed into the hash"
+        );
+        assert_ne!(
+            folded, raw_anchor,
+            "the fold must change the hash on a boundary"
+        );
+
+        // Anchor off a boundary (step 9): the hash is used as-is.
+        assert_eq!(
+            reset_applied_anchor_hash(reset_frequency, 9, raw_anchor, boundary_seed),
+            raw_anchor,
+            "anchoring off a boundary must leave the hash untouched"
+        );
+
+        // The fold is load-bearing: the next VDF step computed from the folded vs raw anchor differs,
+        // so skipping it diverges step K+1 from the canonical lineage.
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, 8));
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        let mut next_from_folded = folded;
+        vdf_sha(
+            salt,
+            &mut next_from_folded,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        let mut next_from_raw = raw_anchor;
+        vdf_sha(
+            salt,
+            &mut next_from_raw,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        assert_ne!(
+            next_from_folded, next_from_raw,
+            "folding boundary K's seed changes step K+1 — skipping it (finding #5) mis-steps the loop"
         );
     }
 

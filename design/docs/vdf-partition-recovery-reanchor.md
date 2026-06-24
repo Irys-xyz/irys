@@ -259,7 +259,7 @@ own boundary seed), so the rebuilt buffer reproduces the canonical lineage acros
 recovered range. `init_vdf_thread` takes the `block_tree_guard` (not the block index). It returns
 `eyre::Result` (see [Rebuild failure](#risks--edge-cases)) plus the canonical `next_seed`.
 
-### 2. The catch-up reset-seed hole — and `canonical_vdf_info_at_or_below_step`
+### 2. The catch-up reset-seed hole — and `canonical_vdf_snapshot`
 
 The tip re-anchor is correct **only if it anchors at, or above, every reset boundary the
 recovered range crosses.** But a partition recovery adopts the canonical fork **incrementally**
@@ -268,26 +268,33 @@ recovered range crosses.** But a partition recovery adopts the canonical fork **
 instant* — below the boundary — and the VDF then **local-steps the catch-up** forward across the
 boundary on its own, before the canonical blocks that pin that boundary's seed have been adopted.
 
-At the crossing, `run_vdf` applied `next_reset_seed = latest_canonical_vdf_info().next_seed` — the
-**tip's** next_seed. Once the tip advances *past* the boundary (the rest of the fork arrives), that
-field is the seed for the next, *higher* boundary, not the one being crossed. The wrong seed is
-XOR'd in and the post-boundary steps are re-poisoned — and, because `store_step` is forward-only,
-the canonical steps that arrive afterward can never overwrite them. The heal silently fails for
-that range (~1 in 15–20 boundary-crossing recoveries; the deterministic VDF would otherwise
-reproduce canonical exactly with the right seed).
+At the crossing, `run_vdf` applied `next_reset_seed = <tip>.next_seed` — the **tip's** next_seed.
+Once the tip advances *past* the boundary (the rest of the fork arrives), that field is the seed for
+the next, *higher* boundary, not the one being crossed. The wrong seed is XOR'd in and the
+post-boundary steps are re-poisoned — and, because `store_step` is forward-only, the canonical steps
+that arrive afterward can never overwrite them. The heal silently fails for that range (~1 in 15–20
+boundary-crossing recoveries; the deterministic VDF would otherwise reproduce canonical exactly with
+the right seed).
 
-**Fix:** source the reset seed from the canonical block **ending at or before the VDF's current
-step**, not the tip. That block's `next_seed` pins the seed for the next boundary *above the
-current step* — exactly the boundary the VDF is about to cross. Plumbing:
-`BlockProvider::canonical_vdf_info_at_or_below_step` (`crates/types/src/block_provider.rs`,
-default `None`) → `BlockTree::canonical_entry_at_or_below_step`
+**Fix:** source the reset seed from the canonical block **ending at or before the boundary being
+crossed**, not the tip — that block's `next_seed` pins the seed for that boundary. The rule is:
+**boundary `B`'s reset seed is the `next_seed` of the canonical block ending at or before `B - 1`.**
+Each path queries accordingly: local-stepping (which is at step `S` and resets the step it computes,
+`S + 1`) queries at `S = B - 1`; the fast-forward path (which stores step `P` and resets *at* `P`)
+queries at `P - 1`. Plumbing: `BlockProvider::canonical_vdf_snapshot(step)`
+(`crates/types/src/block_provider.rs`) → `BlockTree::canonical_entry_at_or_below_step`
 (`crates/domain/src/models/block_tree.rs`, an in-place binary search by `global_step_number` over
-the canonical-chain cache) → overridden in `BlockStatusProvider` (`crates/p2p/...`). `run_vdf`'s
-local-stepping read uses it: when the VDF runs *ahead* of the tip the query returns the tip itself
+the canonical-chain cache) → implemented in `BlockStatusProvider` (`crates/p2p/...`).
+
+`canonical_vdf_snapshot` returns the **whole** canonical snapshot the loop needs — tip info,
+`confirmed_global_step_number`, and the per-step reset seed (`reset_seed_for_step`) — from **one**
+block-tree read lock, so a reorg cannot land between a tip read and a separate seed read (it
+replaced the earlier split `latest_canonical_vdf_info()` + `canonical_vdf_info_at_or_below_step()`
+pair, which took two locks). When the VDF runs *ahead* of the tip the query returns the tip itself
 (the greatest `global_step_number <= S` is the tip), yielding the tip's `next_seed` — equal to the
-prior behavior, a no-op. The `unwrap_or` fallback to the tip's `next_seed` is a defensive default
-for the distinct edge case where *no* canonical block ends at/before the step (the step is below the
-earliest cached block in the bounded canonical-chain cache).
+prior behavior, a no-op. The fallback to the tip's `next_seed` is a defensive default for the
+distinct edge case where *no* canonical block ends at/before the step (the step is below the earliest
+cached block in the bounded canonical-chain cache).
 
 Two subtleties this resolves:
 
@@ -296,9 +303,14 @@ Two subtleties this resolves:
   (greatest `global_step_number <= S`), **not** the block whose range *covers* the step (which may
   be the spanning block, yielding the wrong seed). This off-by-one — covering vs ending-before —
   was a real bug in the first cut of this fix, caught by the boundary-crossing test.
-- **The fast-forward path is unchanged.** FF stores canonical step values **verbatim**
-  (`store_step` runs *before* `process_reset`), so an FF'd buffer is canonical regardless of
-  `next_reset_seed`. Only local-stepping can poison the buffer, so the fix is local-path-only.
+- **The fast-forward path needs the same seed for its carried hash.** FF stores canonical step
+  values **verbatim** (`store_step` runs *before* `process_reset`), so the FF'd *buffer* is canonical
+  regardless of `next_reset_seed`. But the `process_reset` after an FF step folds the seed into the
+  *carried* `hash` that seeds any subsequent **local** stepping — so if an FF step lands exactly on a
+  boundary and local stepping resumes, that hash must carry the right boundary fold. The FF path
+  therefore sources `reset_seed_for_step` too, querying at `P - 1` (the step before the FF step, since
+  `process_reset` is applied *at* `P`, not `P + 1`). Without the `- 1` it would fold the seed for the
+  boundary *above* `P` whenever a canonical block ends exactly on `P`.
 
 This preserves the #1447/#1449 protection: the confirmation gate still keys on
 `confirmed_global_step_number` (unchanged); only the seed *source* moves, and only when the VDF is
@@ -334,6 +346,14 @@ canonical chain *during* the window, all flowing through one primitive,
   via `VdfPrevStepForkViewUnavailable`; there is no separate `VdfStepRewound` re-wait path.) A value that
   mismatches the block's own canonical ancestry is still rejected.
 
+Both view builders resolve each ancestor **block-tree-first, then by hash from the DB**, mirroring
+`create_state_for_canonical_tip`. The tree-only lookup was insufficient: a deep recovery's
+recall/step window can reach below the cached chain (mainnet `reset_frequency` ≈ 50 blocks vs
+`block_tree_depth` 100, but lower steps-per-block widen the window), so a needed ancestor may be
+migrated out of the tree yet still present in the DB. Without the fallback the build fails and the
+honest canonical block is routed to `StepsUnavailable` / `VdfPrevStepForkViewUnavailable` and retries
+forever instead of validating.
+
 ### 4. Post-recovery mining — reset the efficient-sampling rotation
 
 Partition mining's recall-range selection uses a **stateful** efficient-sampling rotation
@@ -354,6 +374,30 @@ next seed. `get_recall_range` also defends against a backward step jump.
 > from the **peer** (the canonical-fork miner, whose rotation was never re-anchored and so is
 > intact) and asserts the recovered node *follows* — the production path — rather than forcing the
 > recovered node to mine into the turbulence.
+
+### 5. The anchor hash itself must carry its boundary fold
+
+The buffer stores **raw** step outputs: `process_reset` folds the reset entropy into the *carried*
+hash only **after** a step is stored (the loop tail), and fast-forward stores values verbatim. So a
+hash read back from the buffer via `get_last_step_and_seed` — exactly what the supervisor uses as
+the next `run_vdf` anchor — is **unfolded**. `run_vdf` does not fold its initial hash; it goes
+straight into `vdf_sha` for `anchor_step + 1`. If `anchor_step` is *itself* a reset boundary, that
+first step skips boundary `anchor_step`'s fold and diverges from the canonical lineage.
+
+Both anchor sites apply `irys_vdf::vdf::reset_applied_anchor_hash(reset_frequency, step, hash, seed)`
+(a no-op unless `step` is a boundary): the **startup** anchor (`init_vdf_thread`) with
+`latest_block`'s seed, and the **re-anchor** (the supervisor's `Reanchor` arm) with the rebuilt
+canonical tip's seed. `seed` here is the anchoring block's own `vdf_limiter_info.seed` — *not*
+`next_seed`: when a block's step range contains a reset boundary, `IrysBlockHeader::set_seeds` pins
+that in-range boundary's entropy in `seed` while `next_seed` targets the *next* boundary above the
+block. (This is the same value `canonical_vdf_snapshot(step - 1).reset_seed_for_step` would return,
+since the parent's `next_seed` equals this block's `seed`.)
+
+Rare (only when an anchor lands exactly on a boundary) and non-safety (validation recomputes from
+each block's own seed, so a mis-stepped buffer cannot reject a canonical block), but it mis-steps
+local mining for a range until it heals. The rebuild-*failure* fallback (resume from the live
+buffer's current step) is left unfolded — it is already a degraded best-effort path that leans on
+`store_step`'s behind-step rejection to realign.
 
 ## Alternatives considered
 

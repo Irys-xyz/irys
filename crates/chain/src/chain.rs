@@ -65,7 +65,7 @@ use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
     VdfStep,
     state::{AtomicVdfState, VdfStateReadonly, create_state_for_canonical_tip},
-    vdf::{VdfExit, run_vdf},
+    vdf::{VdfExit, reset_applied_anchor_hash, run_vdf},
     vdf_sha,
 };
 use reth::{
@@ -2171,6 +2171,10 @@ impl IrysNode {
         shutdown_token: CancellationToken,
     ) -> CancellationToken {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
+        // Boundary seed for the STARTUP anchor: when the anchor step is itself a reset boundary, the
+        // buffer's (raw) anchor hash needs `latest_block`'s own `seed` folded in before run_vdf's
+        // first step. See `reset_applied_anchor_hash` (finding #5).
+        let startup_anchor_seed = latest_block.vdf_limiter_info.seed;
         let span = tracing::Span::current();
         // Cancelled when the VDF thread exits for any reason (clean exit,
         // poisoned-lock graceful return, or panic via Drop unwind). The
@@ -2233,7 +2237,14 @@ impl IrysNode {
                 // only run_vdf's hash/global_step/seed and the shared step buffer are reset.
                 // See design/docs/vdf-partition-recovery-reanchor.md.
                 let mut anchor_step = global_step_number;
-                let mut anchor_hash = initial_hash;
+                // Fold the anchor step's own reset boundary into the (raw) buffer hash if it lands on
+                // one, so run_vdf's first step continues the canonical lineage (finding #5).
+                let mut anchor_hash = reset_applied_anchor_hash(
+                    config.vdf.reset_frequency as u64,
+                    global_step_number,
+                    initial_hash,
+                    startup_anchor_seed,
+                );
                 let mut anchor_reset_seed = next_canonical_vdf_seed;
                 loop {
                     let exit = run_vdf(
@@ -2361,7 +2372,20 @@ impl IrysNode {
                             }
 
                             anchor_step = rebuilt_step;
-                            anchor_hash = rebuilt_seed.0;
+                            // Fold the rebuilt tip's own reset boundary into the (raw) buffer hash if
+                            // the tip step lands on one, so run_vdf's first step continues the
+                            // canonical lineage rather than mis-stepping a range (finding #5). The
+                            // boundary seed is the tip block's own `seed` (set_seeds pins the
+                            // in-range boundary's entropy there; `next_seed` targets the next one).
+                            let tip_anchor_seed = canonical_headers
+                                .last()
+                                .map_or(next_seed, |tip| tip.vdf_limiter_info.seed);
+                            anchor_hash = reset_applied_anchor_hash(
+                                config.vdf.reset_frequency as u64,
+                                rebuilt_step,
+                                rebuilt_seed.0,
+                                tip_anchor_seed,
+                            );
                             anchor_reset_seed = next_seed;
                             // Tell the partition miners to discard their stateful recall-range
                             // rotation, which assumes forward-only steps and is now pointing at the
