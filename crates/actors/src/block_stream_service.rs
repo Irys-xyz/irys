@@ -209,14 +209,17 @@ impl ReplayStream {
             .db
             .view_eyre(|tx| irys_database::read_block_stream_range(tx, self.next_seq, limit))?;
         let mut expected = self.next_seq;
+        // Stage the whole page before publishing it: a mid-page decode/seq failure must leave
+        // `buffered` untouched so `poll_next` surfaces the error and then terminates, rather than
+        // draining already-decoded frames after the error (which would break replay ordering).
+        let mut page = VecDeque::new();
         for (seq, bytes) in raw {
             if seq != expected {
                 return Err(eyre::eyre!(
                     "block-stream replay lost seq {expected}; next retained seq is {seq}"
                 ));
             }
-            self.buffered
-                .push_back(Arc::new(decode_frame(seq, &bytes)?));
+            page.push_back(Arc::new(decode_frame(seq, &bytes)?));
             expected = expected
                 .checked_add(1)
                 .ok_or_eyre("block-stream replay seq overflow")?;
@@ -228,6 +231,7 @@ impl ReplayStream {
                 self.end_seq
             ));
         }
+        self.buffered = page;
         self.next_seq = expected;
         Ok(())
     }
