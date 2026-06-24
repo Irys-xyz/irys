@@ -182,7 +182,9 @@ pub fn run_vdf<B: BlockProvider>(
                     vdf_info,
                     confirmed_global_step_number: _,
                     reset_seed_for_step,
-                }) = block_provider.canonical_vdf_snapshot(proposed_ff_step.global_step_number)
+                }) = block_provider.canonical_vdf_snapshot(
+                    proposed_ff_step.global_step_number.saturating_sub(1),
+                )
                 {
                     next_reset_seed = reset_seed_for_step;
                     canonical_global_step_number = vdf_info.global_step_number;
@@ -1384,6 +1386,128 @@ mod tests {
         assert_ne!(
             stored_step3, wrong_step3,
             "the test must distinguish the per-step seed from the tip seed"
+        );
+    }
+
+    /// Regression for the FF-path exact-boundary edge: when a fast-forward step lands exactly on
+    /// boundary `B`, the carried hash for subsequent local stepping must use the seed pinned at
+    /// `B - 1`, not the seed for the block ending at `B` (which targets the next window).
+    #[tokio::test]
+    async fn fast_forward_exact_boundary_uses_pre_boundary_seed() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let initial_seed = H256::repeat_byte(0x22);
+        let correct_boundary_seed = H256::repeat_byte(0x44);
+        let wrong_boundary_seed = H256::repeat_byte(0x66);
+        let tip_seed = H256::repeat_byte(0x77);
+
+        let provider = ControllableBlockProvider::new(10_000);
+        provider.set_snapshot(tip_seed, 10_000, 10_000);
+        provider.set_seed_for_step(1, correct_boundary_seed);
+        provider.set_seed_for_step(2, wrong_boundary_seed);
+
+        let mut step1 = initial_seed;
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 0)),
+            &mut step1,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        let mut ff_step2 = step1;
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 1)),
+            &mut ff_step2,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let vdf_state = mocked_vdf_service(&config);
+        {
+            let mut guard = vdf_state.write().expect("test VDF state lock");
+            guard.store_step(Seed(step1), 1);
+            guard.set_canonical_step(1);
+        }
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
+
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                global_step_number: 2,
+                step: ff_step2,
+            }))
+            .expect("queue FF step before the loop starts");
+
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
+        let atomic_step = Arc::new(AtomicU64::new(1));
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown_token = CancellationToken::new();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let provider = provider.clone();
+            let shutdown_token = shutdown_token.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    1,
+                    step1,
+                    H256::zero(),
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    vdf_state.clone(),
+                    atomic_step,
+                    provider,
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_guard
+            .wait_for_step(3, Arc::clone(&cancel), Duration::from_secs(5))
+            .await
+            .expect("loop should consume the FF boundary step and then locally reach step 3");
+        shutdown_token.cancel();
+        assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
+
+        let stored_step3 = vdf_steps_guard.get_step(3).expect("step 3 should be present");
+
+        let mut expected_step3 = apply_reset_seed(ff_step2, correct_boundary_seed);
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 2)),
+            &mut expected_step3,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let mut wrong_step3 = apply_reset_seed(ff_step2, wrong_boundary_seed);
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 2)),
+            &mut wrong_step3,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        assert_eq!(
+            stored_step3, expected_step3,
+            "an FF step landing on the boundary must carry forward with the seed pinned at step B-1"
+        );
+        assert_ne!(
+            stored_step3, wrong_step3,
+            "the test must distinguish the correct pre-boundary seed from the block-ending-at-B seed"
         );
     }
 
