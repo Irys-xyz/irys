@@ -2326,6 +2326,15 @@ impl IrysNode {
                                     if let Ok(guard) = vdf_state.read() {
                                         let (live_step, live_seed) = guard.get_last_step_and_seed();
                                         anchor_step = live_step;
+                                        // Intentionally NOT reset_applied_anchor_hash'd here (unlike
+                                        // the startup and successful-re-anchor sites): the buffer was
+                                        // NOT rebuilt, so we resume from the live tip, which free-ran
+                                        // ABOVE the canonical chain — there is no confirmed canonical
+                                        // block pinning live_step's boundary seed to fold (the steps
+                                        // past the canonical tip are the unconfirmed region; guessing
+                                        // a seed here would re-poison, the #4 hazard). Resume raw and
+                                        // let store_step's forward-only rule + fork-local validation
+                                        // recompute realign. Degraded best-effort, non-safety.
                                         anchor_hash = live_seed.0;
                                     }
                                     continue;

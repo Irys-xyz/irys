@@ -1050,24 +1050,23 @@ impl ValidationServiceInner {
                     canonical_prev,
                 ),
                 Err(err) => {
-                    // The live buffer was absent or mismatched, but we have no authoritative
-                    // fork-local cross-check — EITHER the view could not be BUILT (an ancestor is
-                    // transiently absent from the block tree: depth-prune / reorg /
-                    // in-flight re-anchor race) OR it built but does not COVER
-                    // `prev_output_step_number` (a near-genesis block whose lineage bottoms
-                    // out at genesis before that step). Both are "no verdict", NOT proof of
-                    // invalidity, so the bare mismatch must NOT be peer-attributed as
-                    // `Invalid`: that would permanently reject an honest canonical block in
-                    // the re-anchor window — the exact failure this fork-local check exists
-                    // to prevent. (A resolvable-but-disagreeing step is the separate
-                    // `Ok(_) => bail` arm above, which IS a terminal reject.) Both share the
-                    // peer-innocent Cancelled lane; on retry the re-anchor has typically
-                    // landed (live buffer matches, so this branch is skipped) or the ancestry
-                    // is present (fork-local view then yields a definitive accept/reject).
+                    // The live buffer was absent or mismatched, and we could not build an
+                    // authoritative fork-local cross-check: an ancestor is absent from BOTH the
+                    // block tree and the DB (depth-prune / reorg / in-flight re-anchor race). A
+                    // SUCCESSFUL build always covers `prev_output_step_number` — the view is sized
+                    // to include it (see `build_fork_local_step_view`) — so the only `Err` here is
+                    // a build failure. This is "no verdict", NOT proof of invalidity, so the bare
+                    // mismatch must NOT be peer-attributed as `Invalid`: that would permanently
+                    // reject an honest canonical block in the re-anchor window — the exact failure
+                    // this fork-local check exists to prevent. (A resolvable-but-disagreeing step
+                    // is the separate `Ok(_) => bail` arm above, which IS a terminal reject.) It
+                    // uses the peer-innocent Cancelled lane; on retry the re-anchor has typically
+                    // landed (live buffer matches, so this branch is skipped) or the ancestry is
+                    // present (fork-local view then yields a definitive accept/reject).
                     warn!(
                         custom.error = ?err,
                         vdf.prev_output_step_number = prev_output_step_number,
-                        "ensure_vdf_is_valid: no authoritative fork-local prev-step cross-check (view unbuildable or does not cover the step); requeuing instead of failing terminally"
+                        "ensure_vdf_is_valid: no authoritative fork-local prev-step cross-check (view unbuildable: ancestor absent from tree and db); requeuing instead of failing terminally"
                     );
                     return Err(VdfPrevStepForkViewUnavailable.into());
                 }
