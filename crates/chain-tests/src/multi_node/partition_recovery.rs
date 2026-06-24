@@ -25,7 +25,7 @@ use tracing::info;
 ///   - Re-indexed offsets 3–5: peer's unique data_roots present after re-migration
 ///   - Supply state matches new canonical chain
 #[test_log::test(tokio::test)]
-async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
+async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     let seconds_to_wait = 30;
     // migration_depth=1 so that 2+ orphaned fork blocks trigger recovery
     let block_migration_depth: u32 = 1;
@@ -628,7 +628,7 @@ async fn mine_fork_past_step_natural(
 /// matching the canonical chain — not re-stepped with the wrong reset seed — so the node
 /// converges instead of re-wedging.
 ///
-/// `heavy4_network_partition_recovery` never reaches a reset boundary (default `reset_frequency`,
+/// `heavy4_slow_network_partition_recovery` never reaches a reset boundary (default `reset_frequency`,
 /// few blocks), so it passes regardless of the bug. This test lowers `reset_frequency` and mines
 /// the forks far enough that the recovered range spans a reset boundary, then asserts:
 ///   (A) the recovering node's VDF steps over the boundary-crossing range equal the canonical

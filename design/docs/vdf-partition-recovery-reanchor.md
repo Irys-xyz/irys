@@ -443,7 +443,7 @@ Implemented:
   recompute-on-mismatch while a forged block is still rejected (§3, layer 1); plus
   `build_vdf_seed_buffer_propagates_fetch_error` and `wait_for_step_tolerates_backward_reanchor_jump`
   cover the fallible tip-rebuild and the backward-jump liveness handling.
-- **Integration (chain):** `heavy4_network_partition_recovery`
+- **Integration (chain):** `heavy4_slow_network_partition_recovery`
   (`crates/chain-tests/src/multi_node/partition_recovery.rs`) now exercises the
   re-anchor wiring end-to-end — recovery fires the signal, the supervisor rebuilds
   from the index and restarts the loop, and the node both adopts the peer's canonical
@@ -490,4 +490,4 @@ The heal is therefore covered both end-to-end (above) and in composition by the 
 the buffer divergence + validation reject/accept (`issue_1447_*`), the re-anchor trigger
 (`reanchor_signal_returns_reanchor_exit`), the DB-free tip-rebuild
 (`build_vdf_seed_buffer_reproduces_canonical_steps_anchored_at_tip`), and the live reorg →
-re-anchor → rebuild → restart → continued-operation wiring (`heavy4_network_partition_recovery`).
+re-anchor → rebuild → restart → continued-operation wiring (`heavy4_slow_network_partition_recovery`).
