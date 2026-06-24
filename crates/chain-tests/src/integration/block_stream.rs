@@ -537,3 +537,140 @@ async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// A canonical range request spanning a fork point returns one consistent, parent-linked chain from the
+/// winning fork — never a splice of the orphaned and adopted chains. The endpoint snapshots the canonical
+/// chain, re-verifies it is unchanged across the per-height resolution (retrying), and rejects any result
+/// that is not a contiguous parent-linked chain (`snapshot_canonical_range`). This drives a real 2-node
+/// reorg and asserts that observable contract over HTTP after the switch settles.
+///
+/// Scope: the mid-request race the snapshot guard defends against — a reorg landing between the canonical
+/// reads — cannot be forced deterministically from integration without fault injection, and a timing-based
+/// probe would be flaky. This locks in the single-fork result the guard must always produce post-reorg.
+#[test_log::test(tokio::test)]
+async fn internal_range_after_reorg_is_single_parent_linked_fork() -> eyre::Result<()> {
+    let seconds_to_wait = 20_usize;
+    // Epoch size 10 (matching the other isolated-fork reorg tests) avoids epoch-boundary races while the
+    // two nodes mine competing forks in isolation.
+    let mut genesis_config = NodeConfig::testing_with_epochs(10);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config)
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
+    let peer_node = genesis_node
+        .testing_peer_with_assignments_and_name(peer_config, "PEER")
+        .await?;
+
+    // Isolate both nodes so each builds an independent fork from the same base.
+    genesis_node.gossip_disable();
+    peer_node.gossip_disable();
+    let base_height = genesis_node.get_canonical_chain_height().await;
+
+    // Genesis mines the soon-to-be-orphaned block; capture it before the reorg replaces it. The peer mines
+    // a strictly longer chain that wins the fork choice once gossiped.
+    genesis_node.mine_blocks_without_gossip(1).await?;
+    genesis_node
+        .wait_until_height(base_height + 1, seconds_to_wait)
+        .await?;
+    let orphan_block = genesis_node.get_block_by_height(base_height + 1).await?;
+
+    peer_node.mine_blocks_without_gossip(3).await?;
+    peer_node
+        .wait_until_height(base_height + 3, seconds_to_wait)
+        .await?;
+    let peer_block_1 = Arc::new(peer_node.get_block_by_height(base_height + 1).await?);
+    let peer_block_2 = Arc::new(peer_node.get_block_by_height(base_height + 2).await?);
+    let peer_block_3 = Arc::new(peer_node.get_block_by_height(base_height + 3).await?);
+    assert_ne!(
+        orphan_block.block_hash, peer_block_1.block_hash,
+        "the orphan and the winning fork must genuinely diverge at the fork height"
+    );
+
+    // Arm reorg detection, then re-enable gossip and feed genesis the winning chain in order.
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
+    genesis_node.gossip_enable();
+    peer_node.gossip_enable();
+    for block in [&peer_block_1, &peer_block_2, &peer_block_3] {
+        peer_node.gossip_block_to_peers(block)?;
+        genesis_node
+            .wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+    let _reorg_event = reorg_future.await?;
+    // The fork choice has switched: the canonical tip is now the winning fork's tip.
+    genesis_node
+        .wait_until_height(base_height + 3, seconds_to_wait)
+        .await?;
+
+    // Request the canonical range spanning the fork point: the common ancestor at `base_height` through the
+    // winning tip at `base_height + 3`, covering the divergence at `base_height + 1`.
+    let address = format!(
+        "http://127.0.0.1:{}",
+        genesis_node.node_ctx.config.node_config.http.bind_port
+    );
+    let client = reqwest::Client::new();
+    let to_height = base_height + 3;
+    let resp = client
+        .get(format!(
+            "{address}/internal/blocks?from_height={base_height}&to_height={to_height}"
+        ))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200, "a settled canonical range resolves");
+    let events: serde_json::Value = resp.json().await?;
+    let events = events.as_array().expect("events array");
+
+    // The range is the full contiguous height span, ascending.
+    let heights: Vec<u64> = events
+        .iter()
+        .map(|e| e["header"]["height"].as_u64().expect("height"))
+        .collect();
+    assert_eq!(
+        heights,
+        (base_height..=to_height).collect::<Vec<_>>(),
+        "range is the full contiguous height span: {heights:?}"
+    );
+
+    // Every block links to its predecessor: one parent-linked fork, not a splice of two.
+    for pair in events.windows(2) {
+        assert_eq!(
+            pair[1]["header"]["previous_block_hash"], pair[0]["header"]["block_hash"],
+            "block at height {} must link to its predecessor",
+            pair[1]["header"]["height"]
+        );
+    }
+
+    // Every forked height reflects the winning (adopted) fork — never the orphaned chain.
+    for (height, winner) in [
+        (base_height + 1, &peer_block_1),
+        (base_height + 2, &peer_block_2),
+        (base_height + 3, &peer_block_3),
+    ] {
+        let block = events
+            .iter()
+            .find(|e| e["header"]["height"].as_u64() == Some(height))
+            .expect("block at forked height present");
+        assert_eq!(
+            block["header"]["block_hash"],
+            serde_json::to_value(winner.block_hash)?,
+            "height {height} must reflect the winning fork",
+        );
+    }
+    let at_fork = events
+        .iter()
+        .find(|e| e["header"]["height"].as_u64() == Some(base_height + 1))
+        .expect("block at fork height present");
+    assert_ne!(
+        at_fork["header"]["block_hash"],
+        serde_json::to_value(orphan_block.block_hash)?,
+        "the forked height must never resolve to the orphaned block",
+    );
+
+    tokio::join!(genesis_node.stop(), peer_node.stop());
+    Ok(())
+}
