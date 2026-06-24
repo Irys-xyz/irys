@@ -7917,16 +7917,19 @@ mod tests {
     }
 
     #[test]
-    fn fork_local_step_view_falls_back_to_db_and_covers_prev_step_below_reset_boundary() -> eyre::Result<()> {
+    fn fork_local_step_view_falls_back_to_db_and_covers_prev_step_below_reset_boundary()
+    -> eyre::Result<()> {
         use irys_database::tables::IrysBlockHeaders;
         use reth_db::transaction::DbTxMut as _;
 
         let (db, _tmp) = fork_local_test_db()?;
         let block_tree_guard = dummy_block_tree_guard(&ConsensusConfig::testing());
-        let consensus = NodeConfig::testing().with_consensus(|c| {
-            c.num_chunks_in_partition = 4;
-            c.num_chunks_in_recall_range = 1;
-        }).consensus_config();
+        let consensus = NodeConfig::testing()
+            .with_consensus(|c| {
+                c.num_chunks_in_partition = 4;
+                c.num_chunks_in_recall_range = 1;
+            })
+            .consensus_config();
 
         // reset step for global step 5 with interval 4 is 5, while the previous step of this
         // block is 3. The step view must therefore include step 3 from the parent lineage.
@@ -7938,12 +7941,7 @@ mod tests {
             Ok(())
         })??;
 
-        let view = build_fork_local_step_view(
-            &block,
-            &consensus,
-            &block_tree_guard,
-            &db,
-        )?;
+        let view = build_fork_local_step_view(&block, &consensus, &block_tree_guard, &db)?;
 
         assert_eq!(view.get_step(3)?, H256::repeat_byte(0x31));
         assert_eq!(view.get_step(4)?, H256::repeat_byte(0x41));
@@ -7958,10 +7956,12 @@ mod tests {
 
         let (db, _tmp) = fork_local_test_db()?;
         let block_tree_guard = dummy_block_tree_guard(&ConsensusConfig::testing());
-        let consensus = NodeConfig::testing().with_consensus(|c| {
-            c.num_chunks_in_partition = 4;
-            c.num_chunks_in_recall_range = 1;
-        }).consensus_config();
+        let consensus = NodeConfig::testing()
+            .with_consensus(|c| {
+                c.num_chunks_in_partition = 4;
+                c.num_chunks_in_recall_range = 1;
+            })
+            .consensus_config();
 
         // reset step for global step 8 with interval 4 is 5, so recall validation needs steps
         // 5..=8. Only the tip block is supplied directly; the older half of the window must come
@@ -7974,12 +7974,7 @@ mod tests {
             Ok(())
         })??;
 
-        let view = build_fork_local_recall_view(
-            &block,
-            &consensus,
-            &block_tree_guard,
-            &db,
-        )?;
+        let view = build_fork_local_recall_view(&block, &consensus, &block_tree_guard, &db)?;
 
         assert_eq!(
             view.get_steps(ii(5, 8))?.0,

@@ -182,9 +182,8 @@ pub fn run_vdf<B: BlockProvider>(
                     vdf_info,
                     confirmed_global_step_number: _,
                     reset_seed_for_step,
-                }) = block_provider.canonical_vdf_snapshot(
-                    proposed_ff_step.global_step_number.saturating_sub(1),
-                )
+                }) = block_provider
+                    .canonical_vdf_snapshot(proposed_ff_step.global_step_number.saturating_sub(1))
                 {
                     next_reset_seed = reset_seed_for_step;
                     canonical_global_step_number = vdf_info.global_step_number;
@@ -1127,7 +1126,9 @@ mod tests {
 
     #[derive(Clone)]
     struct ControllableBlockProvider(
-        std::sync::Arc<std::sync::Mutex<(VDFLimiterInfo, u64, std::collections::HashMap<u64, H256>)>>,
+        std::sync::Arc<
+            std::sync::Mutex<(VDFLimiterInfo, u64, std::collections::HashMap<u64, H256>)>,
+        >,
     );
     impl ControllableBlockProvider {
         /// The canonical tip step is held at 0 so `store_step` treats every produced step
@@ -1350,10 +1351,13 @@ mod tests {
         shutdown_token.cancel();
         assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
 
-        let stored_step3 = vdf_steps_guard.get_step(3).expect("step 3 should be present");
+        let stored_step3 = vdf_steps_guard
+            .get_step(3)
+            .expect("step 3 should be present");
 
         let mut expected_step2 = step1;
-        let mut expected_checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        let mut expected_checkpoints =
+            vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
         vdf_sha(
             U256::from(step_number_to_salt_number(&config.vdf, 1)),
             &mut expected_step2,
@@ -1481,7 +1485,9 @@ mod tests {
         shutdown_token.cancel();
         assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
 
-        let stored_step3 = vdf_steps_guard.get_step(3).expect("step 3 should be present");
+        let stored_step3 = vdf_steps_guard
+            .get_step(3)
+            .expect("step 3 should be present");
 
         let mut expected_step3 = apply_reset_seed(ff_step2, correct_boundary_seed);
         vdf_sha(
