@@ -83,7 +83,7 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         block1
             .get_data_ledger_tx_ids()
             .get(&DataLedger::Submit)
-            .is_some_and(|s| s.contains(&tx1.header.id)),
+            .is_some_and(|s| s.len() == 1 && s[0] == tx1.header.id),
         "tx1 (unpromoted) should be alone in slot 0 at block 1"
     );
 
