@@ -172,8 +172,7 @@ pub async fn calculate_expired_ledger_fees(
     .await?;
 
     // Step 6: Fetch transactions
-    let mut all_tx_ids = Vec::new();
-    all_tx_ids.extend(tx_to_miners.keys());
+    let all_tx_ids: Vec<_> = tx_to_miners.keys().copied().collect();
     let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
     transactions.sort_by(irys_types::DataTransactionHeader::compare_tx);
 
@@ -247,7 +246,6 @@ async fn collect_tx_to_miners_from_range(
         // diverged from the exact per-candidate promotion filter; see NC-0042 §4b.)
         let miners = process_boundary_block(
             &block_range.min_block,
-            block_range.min_block.block_hash,
             true, // is_earliest
             true, // is_latest — sole boundary block (min == max), so trim BOTH ends
             ledger_type,
@@ -265,7 +263,6 @@ async fn collect_tx_to_miners_from_range(
         // Different blocks - process both boundaries
         let e_miners = process_boundary_block(
             &block_range.min_block,
-            block_range.min_block.block_hash,
             true,  // is_earliest — min block trims only the start
             false, // is_latest
             ledger_type,
@@ -279,7 +276,6 @@ async fn collect_tx_to_miners_from_range(
 
         let l_miners = process_boundary_block(
             &block_range.max_block,
-            block_range.max_block.block_hash,
             false, // is_earliest
             true,  // is_latest — max block trims only the end
             ledger_type,
@@ -406,23 +402,15 @@ pub async fn expired_submit_tx_ids(
     Ok(tx_to_miners.into_keys().collect())
 }
 
-/// NC-0042 §4b/§4c per-candidate non-promotability predicate: returns whether
-/// `txid`'s Submit-ledger storage has expired as of `block_height` (the block
-/// being produced/validated).
+/// Test-only convenience that combines [`expired_submit_range`] (computed once)
+/// with [`submit_tx_expired`] (per candidate) into a single per-`txid` verdict.
 ///
-/// The verdict is an exact offset comparison: `txid` is expired iff its Submit
-/// **start chunk offset** is `< range_end`, where `[0, range_end)` is the expired
-/// chunk prefix bounded by the parent header's recorded Submit total (see
-/// [`expired_submit_range`]).
-///
-/// Branch-deterministic by construction: both `range_end` and the candidate's
-/// Submit inclusion are resolved from the block's **own parent ancestry**, never
-/// this node's canonical tip or its migration-lagged block-index frontier, so
-/// every node reaches the same verdict (NC-0042 F2). See
-/// [`resolve_submit_inclusion`] for the migrated (fast, via
-/// `canonical_submit_height`) vs un-migrated (by-hash parent walk) resolution. A
-/// candidate with no resolvable Submit inclusion on this branch yields `false`
-/// (it cannot have expired Submit storage).
+/// Production does NOT call this: both the producer (`tx_selector`) and the
+/// validator (`block_validation`) hoist `expired_submit_range` out of their
+/// candidate loops and call `submit_tx_expired` directly. The branch-determinism
+/// rationale lives on those two functions. Kept here as the differential-test
+/// counterpart to the [`expired_submit_tx_ids`] walk oracle.
+#[cfg(any(test, feature = "test-utils"))]
 #[tracing::instrument(level = "debug", skip_all, fields(tx.id = %txid, block.height = block_height))]
 pub async fn is_submit_storage_expired(
     txid: IrysTransactionId,
@@ -651,7 +639,7 @@ fn resolve_submit_inclusion(
             tree.get_block(hash).map(|header| WalkBlock {
                 height: header.height,
                 prev_hash: header.previous_block_hash,
-                submit_total: submit_total_of_header(header),
+                submit_total: parent_ledger_total_chunks(header, DataLedger::Submit),
                 includes_txid: block_includes_submit_tx(header, &txid),
             })
         },
@@ -660,13 +648,9 @@ fn resolve_submit_inclusion(
                 .get_item(height)
                 .map(|item| submit_total_of_index_item(&item))
         },
-        |hash, height| {
-            // C1 gate input: is `hash` the canonical block at `height` per
-            // `MigratedBlockHashes`? (`block_tree_depth > block_migration_depth`
-            // guarantees a predecessor below the tree window is indexed.)
-            let canonical = db.view_eyre(|tx| Ok(tx.get::<MigratedBlockHashes>(height)?))?;
-            Ok(canonical == Some(hash))
-        },
+        // C1 gate input: is `hash` the canonical block at `height` per
+        // `MigratedBlockHashes`? (shared with `assert_canonical_via_mbh`.)
+        |hash, height| is_canonical_at(db, hash, height),
     )?;
     Ok(resolved.map(|(block_hash, base, total)| SubmitInclusion {
         block_hash,
@@ -740,12 +724,6 @@ fn walk_submit_inclusion(
     Ok(None)
 }
 
-/// Cumulative Submit chunk total recorded in a block header (`0` if the Submit
-/// ledger is absent — pre-Submit / inactive).
-fn submit_total_of_header(header: &IrysBlockHeader) -> u64 {
-    parent_ledger_total_chunks(header, DataLedger::Submit)
-}
-
 /// Whether `header`'s Submit ledger includes `txid` (per-block `tx_ids`).
 fn block_includes_submit_tx(header: &IrysBlockHeader, txid: &IrysTransactionId) -> bool {
     header
@@ -770,14 +748,23 @@ fn ledger_total_of_index_item(item: &BlockIndexItem, ledger: DataLedger) -> u64 
         .unwrap_or(0)
 }
 
+/// Is `hash` the canonical block at `height` per `MigratedBlockHashes`? The
+/// single C1 read, shared by the pure walk (`walk_submit_inclusion`, via a
+/// closure) and `assert_canonical_via_mbh`. (`block_tree_depth >
+/// block_migration_depth` guarantees a predecessor below the tree window is
+/// indexed, so `false` here means a genuinely non-canonical ancestor.)
+fn is_canonical_at(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Result<bool> {
+    let canonical = db.view_eyre(|tx| Ok(tx.get::<MigratedBlockHashes>(height)?))?;
+    Ok(canonical == Some(hash))
+}
+
 /// C1 side-fork guard: confirm `hash` is the canonical block at `height` per
 /// `MigratedBlockHashes` before trusting a height-keyed (canonical-only) index
 /// lookup for it. Without this, a walk that descended onto a side-fork ancestor
 /// below the block-tree window would attribute the canonical block's chunks to
 /// the wrong block.
 fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Result<()> {
-    let canonical = db.view_eyre(|tx| Ok(tx.get::<MigratedBlockHashes>(height)?))?;
-    if canonical != Some(hash) {
+    if !is_canonical_at(db, hash, height)? {
         eyre::bail!(
             "expiry walk reached a non-canonical ancestor at height {height} \
              (supplied {hash}) — off the validated block's branch (C1 guard)"
@@ -1175,7 +1162,6 @@ fn find_block_range(
 /// 3. Applies filtering based on whether it's the earliest or latest block
 async fn process_boundary_block(
     boundary: &BoundaryBlock,
-    block_hash: H256,
     is_earliest: bool,
     is_latest: bool,
     ledger_type: DataLedger,
@@ -1186,7 +1172,7 @@ async fn process_boundary_block(
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
     // Get the block and its transactions
-    let block = get_block_by_hash(block_hash, block_tree_guard, db).await?;
+    let block = get_block_by_hash(boundary.block_hash, block_tree_guard, db).await?;
     let ledger_tx_ids = block
         .get_data_ledger_tx_ids_ordered(ledger_type)
         .ok_or_eyre(format!(

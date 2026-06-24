@@ -1674,8 +1674,8 @@ pub trait BlockProdStrategy {
     ) -> Result<MempoolTxs, crate::tx_selector::TxSelectorError> {
         // NC-0042 §4b: the tx selector drops any publish candidate whose Submit
         // -ledger storage has expired as of the block we're about to produce
-        // (per candidate, via `ledger_expiry::is_submit_storage_expired`), so the
-        // producer never both promotes and refunds the same tx (panic) or
+        // (`expired_submit_range` once, then `submit_tx_expired` per candidate), so
+        // the producer never both promotes and refunds the same tx (panic) or
         // promotes a tx that was refunded in an earlier block (silent cross-block
         // double-pay). It resolves that from `block_index` + the parent epoch
         // snapshot — the same inputs the refund walk uses.
