@@ -181,9 +181,10 @@ pub fn run_vdf<B: BlockProvider>(
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,
-                }) = block_provider.latest_canonical_vdf_info()
+                    reset_seed_for_step,
+                }) = block_provider.canonical_vdf_snapshot(proposed_ff_step.global_step_number)
                 {
-                    next_reset_seed = vdf_info.next_seed;
+                    next_reset_seed = reset_seed_for_step;
                     canonical_global_step_number = vdf_info.global_step_number;
                 }
 
@@ -233,25 +234,12 @@ pub fn run_vdf<B: BlockProvider>(
         if let Some(CanonicalVdfSnapshot {
             vdf_info,
             confirmed_global_step_number: confirmed_step,
-        }) = block_provider.latest_canonical_vdf_info()
+            reset_seed_for_step,
+        }) = block_provider.canonical_vdf_snapshot(global_step_number)
         {
             canonical_global_step_number = vdf_info.global_step_number;
             confirmed_global_step_number = confirmed_step;
-            // Source the reset seed from the canonical block ENDING at or before the current step,
-            // not the chain tip. During partition-recovery CATCH-UP the re-anchored VDF local-steps
-            // across reset boundaries the canonical tip has ALREADY passed; the tip's `next_seed`
-            // targets the boundary above the tip, so applying it at an earlier boundary XORs in the
-            // wrong seed and re-poisons the post-boundary steps (the Finding #1 wedge, which then
-            // never heals because `store_step` is forward-only). The block with the greatest
-            // `global_step_number <= global_step_number` pins (via its `next_seed`) the seed for the
-            // boundary the VDF is about to cross — and is correct even when a later canonical block
-            // SPANS that boundary (whose own `next_seed` targets a higher boundary). When the VDF
-            // runs AHEAD of the canonical chain (normal forward operation) that block IS the tip, so
-            // this equals the prior behavior — a no-op. The confirmed-step gate (below) is
-            // unaffected: it still uses `confirmed_global_step_number`.
-            next_reset_seed = block_provider
-                .canonical_vdf_info_at_or_below_step(global_step_number)
-                .unwrap_or(vdf_info.next_seed);
+            next_reset_seed = reset_seed_for_step;
             debug!(
                 "Canonical global step number: {}, next reset seed: {:?}, prev output: {:?}, confirmed step: {}, global_step: {:?}",
                 canonical_global_step_number,
@@ -480,11 +468,13 @@ mod tests {
     }
 
     impl BlockProvider for MockBlockProvider {
-        fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
+        fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+            let _ = step_number;
             Some(CanonicalVdfSnapshot {
                 vdf_info: self.0.vdf_limiter_info.clone(),
                 // The mock holds a single block, so the tip is also the confirmed tip.
                 confirmed_global_step_number: self.0.vdf_limiter_info.global_step_number,
+                reset_seed_for_step: self.0.vdf_limiter_info.next_seed,
             })
         }
     }
@@ -1134,7 +1124,9 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct ControllableBlockProvider(std::sync::Arc<std::sync::Mutex<(VDFLimiterInfo, u64)>>);
+    struct ControllableBlockProvider(
+        std::sync::Arc<std::sync::Mutex<(VDFLimiterInfo, u64, std::collections::HashMap<u64, H256>)>>,
+    );
     impl ControllableBlockProvider {
         /// The canonical tip step is held at 0 so `store_step` treats every produced step
         /// as a normal advance; the `u64` is the confirmed-chain step the gate reads.
@@ -1145,6 +1137,7 @@ mod tests {
             Self(std::sync::Arc::new(std::sync::Mutex::new((
                 info,
                 confirmed_global_step_number,
+                std::collections::HashMap::new(),
             ))))
         }
         fn set_confirmed(&self, confirmed_global_step_number: u64) {
@@ -1165,13 +1158,18 @@ mod tests {
             g.0.global_step_number = canonical_tip_step;
             g.1 = confirmed_global_step_number;
         }
+        fn set_seed_for_step(&self, step_number: u64, seed: H256) {
+            self.0.lock().unwrap().2.insert(step_number, seed);
+        }
     }
     impl BlockProvider for ControllableBlockProvider {
-        fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
+        fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
             let g = self.0.lock().unwrap();
+            let reset_seed_for_step = g.2.get(&step_number).copied().unwrap_or(g.0.next_seed);
             Some(CanonicalVdfSnapshot {
                 vdf_info: g.0.clone(),
                 confirmed_global_step_number: g.1,
+                reset_seed_for_step,
             })
         }
     }
@@ -1271,6 +1269,122 @@ mod tests {
 
         shutdown_token.cancel();
         handle.join().unwrap();
+    }
+
+    /// Regression for the partition-recovery catch-up seed path: when the canonical tip has already
+    /// passed a reset boundary, the loop must use the seed pinned for the CURRENT step rather than
+    /// the tip's `next_seed`. Start the loop at step 1 with a provider whose tip seed is different
+    /// from the per-step seed for step 1; crossing boundary 2 must produce step 3 from the
+    /// step-1-pinned seed, not the tip seed.
+    #[tokio::test]
+    async fn uses_per_step_seed_from_single_snapshot_when_crossing_boundary() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let initial_seed = H256::repeat_byte(0x33);
+        let correct_boundary_seed = H256::repeat_byte(0x44);
+        let tip_seed = H256::repeat_byte(0x55);
+
+        let provider = ControllableBlockProvider::new(10_000);
+        provider.set_snapshot(tip_seed, 10_000, 10_000);
+        provider.set_seed_for_step(1, correct_boundary_seed);
+
+        let mut step1 = initial_seed;
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 0)),
+            &mut step1,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+
+        let vdf_state = mocked_vdf_service(&config);
+        {
+            let mut guard = vdf_state.write().expect("test VDF state lock");
+            guard.store_step(Seed(step1), 1);
+            guard.set_canonical_step(1);
+        }
+        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
+
+        let (_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+        let is_mining_enabled = Arc::new(AtomicBool::new(true));
+        let atomic_step = Arc::new(AtomicU64::new(1));
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown_token = CancellationToken::new();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let provider = provider.clone();
+            let shutdown_token = shutdown_token.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    1,
+                    step1,
+                    H256::zero(),
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    vdf_state.clone(),
+                    atomic_step,
+                    provider,
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_guard
+            .wait_for_step(3, Arc::clone(&cancel), Duration::from_secs(5))
+            .await
+            .expect("loop should reach step 3");
+        shutdown_token.cancel();
+        assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
+
+        let stored_step3 = vdf_steps_guard.get_step(3).expect("step 3 should be present");
+
+        let mut expected_step2 = step1;
+        let mut expected_checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 1)),
+            &mut expected_step2,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut expected_checkpoints,
+        );
+        let mut expected_step3 = apply_reset_seed(expected_step2, correct_boundary_seed);
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 2)),
+            &mut expected_step3,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut expected_checkpoints,
+        );
+
+        let mut wrong_step3 = apply_reset_seed(expected_step2, tip_seed);
+        vdf_sha(
+            U256::from(step_number_to_salt_number(&config.vdf, 2)),
+            &mut wrong_step3,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut expected_checkpoints,
+        );
+
+        assert_eq!(
+            stored_step3, expected_step3,
+            "step 3 must be derived from the seed pinned for step 1, not the tip seed"
+        );
+        assert_ne!(
+            stored_step3, wrong_step3,
+            "the test must distinguish the per-step seed from the tip seed"
+        );
     }
 
     /// Spin up a real `run_vdf` loop and drive it (deterministically, via `wait_for_step`)
