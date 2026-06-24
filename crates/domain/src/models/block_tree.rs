@@ -2940,6 +2940,74 @@ mod tests {
         assert_eq!(cache.confirmed_canonical_step(2), 10);
     }
 
+    /// Regression for the per-boundary VDF seed lookup: the provider must resolve the canonical
+    /// block whose VDF range ENDS at or before the requested step, not the block whose range merely
+    /// covers it. A later canonical block can span the step while its `next_seed` targets a higher
+    /// boundary, so returning it would pin the wrong reset seed.
+    #[test]
+    fn canonical_entry_at_or_below_step_returns_last_entry_ending_at_or_before_step() {
+        let comm_cache = Arc::new(CommitmentSnapshot::default());
+
+        let mut b1 = random_block(U256::from(1));
+        b1.vdf_limiter_info.global_step_number = 15;
+        b1.test_sign();
+        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
+
+        let mut b2 = random_block(U256::from(2));
+        b2.vdf_limiter_info.global_step_number = 35;
+        let mut b2 = extend_chain(b2, &b1);
+        cache
+            .add_block(
+                &seal_block(&mut b2),
+                comm_cache.clone(),
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+            )
+            .unwrap();
+        cache
+            .add_common(
+                b2.block_hash,
+                &seal_block(&mut b2),
+                comm_cache,
+                dummy_epoch_snapshot(),
+                dummy_ema_snapshot(),
+                ChainState::Validated(BlockState::ValidBlock),
+            )
+            .unwrap();
+        cache.mark_tip(&b2.block_hash).unwrap();
+
+        assert!(
+            cache.canonical_entry_at_or_below_step(14).is_none(),
+            "a step below the earliest cached block must return None"
+        );
+        assert_eq!(
+            cache
+                .canonical_entry_at_or_below_step(15)
+                .expect("exact step should resolve")
+                .header()
+                .block_hash,
+            b1.block_hash
+        );
+        assert_eq!(
+            cache
+                .canonical_entry_at_or_below_step(20)
+                .expect("between blocks should resolve")
+                .header()
+                .block_hash,
+            b1.block_hash,
+            "step 20 lies below b2's end step, so the lookup must not return the covering block"
+        );
+        assert_eq!(
+            cache
+                .canonical_entry_at_or_below_step(35)
+                .expect("tip step should resolve")
+                .header()
+                .block_hash,
+            b2.block_hash
+        );
+        assert!(cache.canonical_entry_at_or_below_step(0).is_none());
+    }
+
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
         let mut block = IrysBlockHeader::new_mock_header();
         block.solution_hash = H256::random(); // Ensure unique solution hash
