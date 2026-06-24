@@ -96,7 +96,13 @@ async fn block_by_height(
     path: web::Path<u64>,
 ) -> Result<web::Json<BlockEvent>, ApiError> {
     let height = path.into_inner();
-    resolve_block_event(&state, height)?
+    // Resolve through the same stabilised snapshot the range path uses (a single-height span), so a
+    // reorg landing mid-read cannot return a block that has just been orphaned.
+    snapshot_canonical_range(&state, height, height)?
+        .into_iter()
+        .next()
+        .map(|source| resolve_snapshot_block(&state, source))
+        .transpose()?
         .map(web::Json)
         .ok_or(ApiError::ErrNoId {
             id: height.to_string(),
@@ -225,30 +231,6 @@ fn resolve_snapshot_block(
             })
         }
     }
-}
-
-/// Resolves the canonical block at `height` to a `BlockEvent`, or `None` if there is none.
-///
-/// In-tree blocks are built from the sealed block in hand (recent blocks are not yet persisted to
-/// `IrysDataTxHeaders`); migrated blocks are rebuilt from the header plus per-tx headers resolved
-/// from the DB via `tx_header_by_txid`.
-fn resolve_block_event(state: &ApiState, height: u64) -> Result<Option<BlockEvent>, ApiError> {
-    let in_tree = state
-        .block_tree
-        .read()
-        .get_canonical_chain()
-        .0
-        .iter()
-        .find_map(|entry| (entry.height() == height).then(|| entry.block_hash()));
-    let block_hash = match in_tree {
-        Some(hash) => hash,
-        None => match state.block_index.read().get_item(height) {
-            Some(item) => item.block_hash,
-            None => return Ok(None),
-        },
-    };
-
-    resolve_block_hash(state, block_hash)
 }
 
 fn resolve_block_hash(state: &ApiState, block_hash: H256) -> Result<Option<BlockEvent>, ApiError> {
