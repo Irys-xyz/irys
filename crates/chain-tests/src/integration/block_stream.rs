@@ -38,6 +38,49 @@ async fn collect_replay(replay: ReplayStream) -> eyre::Result<Vec<Arc<StreamFram
     replay.try_collect().await
 }
 
+/// Reads `count` frames from the real `/internal/blocks/stream?from_seq=` SSE endpoint over HTTP,
+/// decoding each `data: {json}\n\n` event to JSON. The durable replay prefix is gapless and ordered,
+/// so the first `count` frames are stable against any frame appended afterwards.
+async fn read_sse_frames(
+    address: &str,
+    from_seq: u64,
+    count: usize,
+) -> eyre::Result<Vec<serde_json::Value>> {
+    use futures::StreamExt as _;
+
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stream = reqwest::Client::new()
+        .get(format!(
+            "{address}/internal/blocks/stream?from_seq={from_seq}"
+        ))
+        .send()
+        .await?
+        .bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut frames = Vec::new();
+    while frames.len() < count {
+        let chunk = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await?
+            .ok_or_eyre("SSE stream ended before all frames arrived")??;
+        buf.extend_from_slice(&chunk);
+        // Compact JSON carries no newlines, so each `data: {json}\n\n` event ends at the first `\n\n`.
+        while let Some(end) = buf.windows(2).position(|w| w == b"\n\n") {
+            let raw: Vec<u8> = buf.drain(..end + 2).collect();
+            let event = std::str::from_utf8(&raw)?
+                .strip_prefix("data: ")
+                .and_then(|s| s.strip_suffix("\n\n"))
+                .ok_or_eyre("malformed SSE frame")?;
+            frames.push(serde_json::from_str::<serde_json::Value>(event)?);
+            if frames.len() == count {
+                break;
+            }
+        }
+    }
+    Ok(frames)
+}
+
 #[test_log::test(tokio::test)]
 async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Result<()> {
     let mut node = IrysNodeTest::default_async();
@@ -477,7 +520,6 @@ async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
         node.node_ctx.config.node_config.http.bind_port
     );
     let client = reqwest::Client::new();
-    let handle = node.node_ctx.block_stream_handle.clone();
 
     // Produce observed + finalized frames: mine, advance past the migration depth, await the index.
     let blk1 = node.mine_block().await?;
@@ -506,18 +548,14 @@ async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
         }
     }
 
-    // SSE side: the durable replay from seq 0 is the whole log. The log is append-only, so comparing the
-    // poll set against the equal-length SSE prefix is stable against any frame appended afterwards.
-    let (sse_frames, _live) = handle.subscribe(0)?;
-    let sse_frames = collect_replay(sse_frames).await?;
-    assert!(
-        sse_frames.len() >= poll_frames.len(),
-        "SSE replay covers at least the polled range"
-    );
+    // SSE side: read the same range from the real `/internal/blocks/stream` endpoint over HTTP, so this
+    // covers route dispatch, `from_seq` handling, and the `data: {json}\n\n` framing — not just the
+    // in-process replay. The durable replay prefix is gapless and ordered, so its first
+    // `poll_frames.len()` frames are exactly the range the poll endpoint returned.
+    let sse_frames = read_sse_frames(&address, 0, poll_frames.len()).await?;
     for (i, poll) in poll_frames.iter().enumerate() {
         assert_eq!(
-            *poll,
-            serde_json::to_value(&sse_frames[i]).expect("serialize sse frame"),
+            *poll, sse_frames[i],
             "poll frame {i} must be byte-identical to the SSE frame"
         );
     }

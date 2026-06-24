@@ -177,6 +177,15 @@ impl BlockStreamHandle {
         self.db
             .update_eyre(|tx| irys_database::prune_block_stream_below(tx, keep_from_seq))
     }
+
+    /// Drops every live subscriber sender so their SSE streams end and followers reconnect to
+    /// replay from the last durable `seq`. Called when the producer stops appending for good.
+    fn close_live_subscribers(&self) {
+        match self.live.lock() {
+            Ok(mut live) => live.clear(),
+            Err(_) => warn!("block-stream fan-out lock poisoned while closing subscribers"),
+        }
+    }
 }
 
 /// Bounded, lazy replay of the durable range captured by [`BlockStreamHandle::subscribe`].
@@ -360,6 +369,10 @@ impl Producer {
                 }
             }
         }
+        // The producer has stopped and will append no further frames; disconnect live subscribers
+        // rather than leave their SSE streams hanging, so followers reconnect and replay from the
+        // last durable `seq`.
+        self.handle.close_live_subscribers();
     }
 
     fn drain_queued_signals(&mut self) -> eyre::Result<()> {
