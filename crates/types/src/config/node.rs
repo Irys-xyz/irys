@@ -642,6 +642,12 @@ pub struct HttpConfig {
     /// Actix worker count. Defaults to half the available system threads.
     #[serde(default = "default_actix_workers")]
     pub actix_workers: usize,
+    /// Whether to mount the node-internal `/internal/*` endpoints (block-stream SSE + canonical
+    /// block reads) on this HTTP listener. Off by default: these routes carry no application-layer
+    /// authentication, so enable them only on a node whose HTTP bind is restricted to a trusted
+    /// gateway at the network layer (firewall / reverse proxy / bind address).
+    #[serde(default)]
+    pub expose_internal_api: bool,
 }
 
 impl_network_config_with_defaults!(HttpConfig);
@@ -1164,6 +1170,8 @@ impl NodeConfig {
                 bind_ip: None,
                 bind_port: 0,
                 actix_workers: default_actix_workers(),
+                // Test nodes bind locally and are trusted, so expose the internal block-follower API.
+                expose_internal_api: true,
             },
             mempool: MempoolNodeConfig {
                 max_pending_pledge_items: 100,
@@ -1348,6 +1356,9 @@ impl NodeConfig {
                 bind_ip: None,
                 bind_port: 8080,
                 actix_workers: default_actix_workers(),
+                // Unauthenticated internal endpoints stay off by default; a gateway deployment opts
+                // in via `expose_internal_api` once its HTTP bind is network-restricted.
+                expose_internal_api: false,
             },
 
             mempool: MempoolNodeConfig {

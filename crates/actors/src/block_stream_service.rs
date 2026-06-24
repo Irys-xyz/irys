@@ -55,14 +55,27 @@ pub struct BlockStreamHandle {
     /// Live SSE subscribers. The lock is shared with [`Self::append_and_fanout`] so a subscribe's
     /// snapshot+register pair cannot interleave with an append. Bounded senders: a lagging
     /// subscriber is dropped rather than buffered without limit.
-    live: Mutex<Vec<Sender<Arc<StreamFrame>>>>,
+    live: Mutex<LiveSubscribers>,
     db: DatabaseProvider,
+}
+
+/// The live fan-out registry: subscriber senders plus a `closed` flag the producer sets when it
+/// stops appending for good. Once closed, [`BlockStreamHandle::subscribe`] registers no new sender,
+/// so a reconnecting follower's SSE ends cleanly after its replay instead of hanging on a live tail
+/// nothing will ever feed.
+#[derive(Debug)]
+struct LiveSubscribers {
+    senders: Vec<Sender<Arc<StreamFrame>>>,
+    closed: bool,
 }
 
 impl BlockStreamHandle {
     fn new(db: DatabaseProvider) -> Self {
         Self {
-            live: Mutex::new(Vec::new()),
+            live: Mutex::new(LiveSubscribers {
+                senders: Vec::new(),
+                closed: false,
+            }),
             db,
         }
     }
@@ -97,7 +110,12 @@ impl BlockStreamHandle {
             Ok((start, logical_len))
         })?;
         let (tx, rx) = mpsc::channel(SUBSCRIBER_BUFFER);
-        live.push(tx);
+        // After the producer has halted for good, register no new live sender: dropping `tx` here
+        // closes `rx`, so the reconnecting follower's SSE ends cleanly after its replay rather than
+        // hanging on a live tail nothing will ever feed.
+        if !live.closed {
+            live.senders.push(tx);
+        }
         Ok((ReplayStream::new(&self.db, start, end), rx))
     }
 
@@ -165,7 +183,7 @@ impl BlockStreamHandle {
         let frame = Arc::new(StreamFrame { seq, event });
         // Drop subscribers whose receiver is closed or lagging past `SUBSCRIBER_BUFFER`; a dropped
         // follower reconnects and replays from the durable log via `subscribe(from_seq)`.
-        live.retain(|sender| {
+        live.senders.retain(|sender| {
             sender
                 .try_send(Arc::clone(&frame)) // clone: live subscribers share one immutable frame allocation
                 .is_ok()
@@ -182,7 +200,10 @@ impl BlockStreamHandle {
     /// replay from the last durable `seq`. Called when the producer stops appending for good.
     fn close_live_subscribers(&self) {
         match self.live.lock() {
-            Ok(mut live) => live.clear(),
+            Ok(mut live) => {
+                live.closed = true;
+                live.senders.clear();
+            }
             Err(_) => warn!("block-stream fan-out lock poisoned while closing subscribers"),
         }
     }
@@ -707,6 +728,19 @@ mod tests {
             .subscribe(0)
             .expect_err("poisoned lock must be an error");
         assert!(error.to_string().contains("fan-out lock poisoned"));
+    }
+
+    #[test]
+    fn subscribe_after_close_returns_a_closed_live_receiver() {
+        let (handle, _tmp) = handle_with_events(2);
+        handle.close_live_subscribers();
+
+        // Replay still delivers the durable suffix up to the last good seq...
+        let (replay, mut live) = handle.subscribe(0).unwrap();
+        assert_eq!(collect_replay(replay).len(), 2);
+        // ...but no live sender is registered, so the receiver is already closed and the follower's
+        // SSE ends after replay instead of hanging on a tail the halted producer will never feed.
+        assert!(live.blocking_recv().is_none());
     }
 
     #[test]
