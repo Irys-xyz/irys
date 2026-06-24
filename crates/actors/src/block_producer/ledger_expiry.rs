@@ -1217,7 +1217,7 @@ async fn process_boundary_block(
         config.consensus.chunk_size,
         config.consensus.num_chunks_in_partition,
         slot_miners,
-    );
+    )?;
 
     Ok(filtered_txs)
 }
@@ -1243,7 +1243,9 @@ async fn process_boundary_block(
 ///
 /// # Returns
 ///
-/// mapping of tx ID to miners who stored it
+/// Mapping of tx ID to the miners who stored it. Fails loud (`Err`) if an
+/// in-range tx maps to a non-expired slot — an unreachable state that would mean
+/// the refund walk diverged from the per-candidate promotion filter (NC-0042).
 #[tracing::instrument(level = "trace", skip_all, fields(
     chunk.prev_max_offset = %prev_max_offset,
     chunk.partition_start = %partition_range.start(),
@@ -1261,7 +1263,7 @@ fn filter_transactions_by_chunk_range(
     chunk_size: u64,
     num_chunks_in_partition: u64,
     slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
-) -> BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>> {
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
     let mut current_offset = prev_max_offset;
     let mut tx_to_miners = BTreeMap::new();
 
@@ -1310,7 +1312,10 @@ fn filter_transactions_by_chunk_range(
         // cross-paid adjacent expired slots owned by different miners when they
         // shared a block (NC-0042 R4). Expired slots tile [global_start,
         // global_end) contiguously, so an in-range tx always maps to a present
-        // slot; the `None` arm is a defensive guard, not an expected path.
+        // slot. The `None` arm is therefore unreachable; if it ever fires the
+        // refund walk has diverged from the per-candidate promotion filter
+        // (`submit_tx_expired`) — fail loud rather than silently under-refund,
+        // which in consensus code would strand a refund and break Pipeline A ≡ B.
         if num_chunks_in_partition != 0 {
             let slot = SlotIndex::new(*tx_start / num_chunks_in_partition);
             match slot_miners.get(&slot) {
@@ -1318,10 +1323,13 @@ fn filter_transactions_by_chunk_range(
                     tracing::debug!("  Including transaction (slot {})", slot.0);
                     tx_to_miners.insert(tx.id, Arc::clone(miners));
                 }
-                None => tracing::warn!(
-                    tx.id = ?tx.id,
-                    slot = slot.0,
-                    "tx start offset maps to a non-expired slot; skipping (unexpected)"
+                None => eyre::bail!(
+                    "tx {} start offset {} maps to non-expired slot {} \
+                     (expired slots must tile the range contiguously) — refund \
+                     walk diverged from the promotion filter (NC-0042)",
+                    tx.id,
+                    *tx_start,
+                    slot.0,
                 ),
             }
         }
@@ -1329,7 +1337,7 @@ fn filter_transactions_by_chunk_range(
     }
 
     tracing::info!("Filtered to {} transactions", tx_to_miners.len());
-    tx_to_miners
+    Ok(tx_to_miners)
 }
 
 /// Processes all middle (fully-interior) blocks. Unlike the boundaries these need
@@ -1370,7 +1378,7 @@ async fn process_middle_blocks(
             config.consensus.chunk_size,
             config.consensus.num_chunks_in_partition,
             slot_miners,
-        );
+        )?;
         tx_to_miners.extend(filtered);
     }
 
