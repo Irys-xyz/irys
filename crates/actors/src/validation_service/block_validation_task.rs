@@ -482,7 +482,12 @@ impl BlockValidationTask {
             // fork that crossed a VDF reset boundary (the partition-recovery wedge), and confines
             // the fork-aware step resolution to one seam (`build_fork_local_recall_view`).
             if matches!(outcome, Err(RecallRangeError::Mismatch(_))) {
-                match build_fork_local_recall_view(block, consensus, &self.block_tree_guard) {
+                match build_fork_local_recall_view(
+                    block,
+                    consensus,
+                    &self.block_tree_guard,
+                    &self.service_inner.db,
+                ) {
                     Ok(view) => outcome = recall_recall_range_is_valid(block, consensus, &view).await,
                     Err(e) => {
                         // The live buffer mismatched, but we could not build the block's

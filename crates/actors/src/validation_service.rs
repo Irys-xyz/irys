@@ -1029,8 +1029,13 @@ impl ValidationServiceInner {
         // fork-local fallback and confines fork-aware step resolution to `build_fork_local_view`.
         if stored_previous_step != Some(vdf_info.prev_output) {
             let fork_local =
-                build_fork_local_step_view(block, &self.config.consensus, &self.block_tree_guard)
-                    .and_then(|view| view.get_step(prev_output_step_number));
+                build_fork_local_step_view(
+                    block,
+                    &self.config.consensus,
+                    &self.block_tree_guard,
+                    &self.db,
+                )
+                .and_then(|view| view.get_step(prev_output_step_number));
             match fork_local {
                 Ok(canonical_prev) if canonical_prev == vdf_info.prev_output => {
                     debug!(
