@@ -5,9 +5,10 @@ block-event log two ways — a push stream and an equivalent paged poll — plus
 transports carry the **same** `StreamFrame`s from the **same** seq-keyed log, so a follower may use either
 and reach identical state.
 
-> **Security.** These routes carry no application-layer authentication and ride the same HTTP listener as
-> the public API. The deployment **must** restrict `/internal/*` at the network layer (firewall / reverse
-> proxy / bind address) to the trusted gateway.
+> **Security.** These routes carry no application-layer authentication. They are mounted only when the
+> node sets `http.expose_internal_api` (off by default); when enabled they ride the same HTTP listener as
+> the public API. A deployment that enables them **must** restrict `/internal/*` at the network layer
+> (firewall / reverse proxy / bind address) to the trusted gateway.
 
 ## The event log and its cursor
 
@@ -85,11 +86,11 @@ a `truncated` poll.
 - `200` for any valid `from_seq` / `limit`, including every cursor regime above.
 - `400` only for an unparsable `from_seq` / `limit`, or a range read exceeding `MAX_BLOCK_RANGE`.
 - `5xx` only on a genuine log-read fault.
-- **`404` means the endpoint is not deployed.** Both `/internal` routes are mounted unconditionally — there
-  is no runtime "disabled" mode — so a `404` is the normal not-found served by an older node build that
-  lacks the route. The gateway's transport selector treats `404` / connection-refused as "this transport is
-  unsupported" and falls back accordingly. The endpoints therefore never return `404` for an empty, short,
-  or out-of-range log.
+- **`404` means the endpoint is not available.** The `/internal` routes are mounted only when the node
+  sets `http.expose_internal_api` (off by default); a node with it disabled, or an older build that lacks
+  the route entirely, serves a normal not-found. The gateway's transport selector treats `404` /
+  connection-refused as "this transport is unsupported" and falls back accordingly. When the routes are
+  mounted they never return `404` for an empty, short, or out-of-range log.
 
 ## Limitation: log recreation (reset)
 

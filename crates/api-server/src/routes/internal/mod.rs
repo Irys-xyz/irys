@@ -4,10 +4,11 @@
 //! [`irys_types::block_stream`]. `stream` is registered before `{height}` so it is matched as a
 //! literal segment rather than captured as a height.
 //!
-//! SECURITY: these endpoints carry no application-layer authentication and ride the same HTTP
-//! listener as the public API. They expose internal block data and a long-lived SSE stream, so the
-//! deployment MUST restrict `/internal/*` at the network layer (firewall / reverse proxy / bind
-//! address) to the trusted gateway.
+//! SECURITY: these endpoints carry no application-layer authentication. They are mounted only when
+//! `http.expose_internal_api` is set (off by default); when enabled they ride the same HTTP listener
+//! as the public API. They expose internal block data and a long-lived SSE stream, so a deployment
+//! that enables them MUST restrict `/internal/*` at the network layer (firewall / reverse proxy /
+//! bind address) to the trusted gateway.
 
 use crate::ApiState;
 use crate::error::ApiError;
