@@ -305,13 +305,16 @@ impl EpochSnapshot {
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
-        // Activate Cascade hardfork ledgers at the activation epoch boundary
-        if self
+        // Cascade activation and the retention `last_height` touch both gate on
+        // the same activation timestamp; evaluate the gate once.
+        let cascade_active = self
             .config
             .consensus
             .hardforks
-            .is_cascade_active_at(new_epoch_block.timestamp_secs())
-        {
+            .is_cascade_active_at(new_epoch_block.timestamp_secs());
+
+        // Activate Cascade hardfork ledgers at the activation epoch boundary
+        if cascade_active {
             self.ledgers.activate_cascade(&self.config.consensus);
         }
 
@@ -320,6 +323,24 @@ impl EpochSnapshot {
         self.try_genesis_init(new_epoch_block);
 
         self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
+
+        // Cascade retention fix: a slot's expiry clock should count from the
+        // last epoch data was written into it, not from when it was allocated.
+        // Gated on the Cascade hardfork so pre-activation replay is unchanged.
+        // Must run AFTER allocation (so this epoch's new slots exist) and BEFORE
+        // expiry (so freshly-written slots aren't expired this same epoch).
+        //
+        // LOCKSTEP: the recycle set produced here (touch then `expire_ledger_slots`
+        // on this post-touch snapshot) MUST equal the set the fee model settles,
+        // which `block_producer::ledger_expiry` derives by calling
+        // `get_expiring_partition_info` on the PARENT snapshot with the same
+        // window exclusion. Both the touch above and that exclusion are gated on
+        // this same `cascade_active` (the new epoch block's Cascade status); if
+        // one is gated and the other isn't they diverge — a slot would recycle
+        // here yet still be settled, or vice versa. Keep the two gates aligned.
+        if cascade_active {
+            self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block);
+        }
 
         self.expire_ledger_slots(new_epoch_block);
 
@@ -532,6 +553,35 @@ impl EpochSnapshot {
                 self.calculate_additional_slots(previous_epoch_block, new_epoch_block, ledger);
             debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
             self.ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
+        }
+    }
+
+    /// Refreshes `last_height` for every slot that received canonical data this
+    /// epoch, so each slot's expiry counts from the last write into it rather
+    /// than from its allocation. The newly-written chunk window is the delta of
+    /// the per-ledger cumulative `total_chunks` between the previous and current
+    /// epoch blocks (the same values `calculate_additional_slots` reads).
+    ///
+    /// Caller gates this on the Cascade hardfork.
+    fn touch_active_ledger_slots(
+        &mut self,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+    ) {
+        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        for ledger in self.ledgers.active_ledgers() {
+            let new_total = new_epoch_block.ledger_total_chunks(ledger);
+            let prev_total = previous_epoch_block
+                .as_ref()
+                .map_or(0, |b| b.ledger_total_chunks(ledger));
+
+            self.ledgers.touch_filled_slots(
+                ledger,
+                prev_total,
+                new_total,
+                chunks_per_slot,
+                new_epoch_block.height,
+            );
         }
     }
 
@@ -1262,9 +1312,63 @@ impl EpochSnapshot {
     /// Returns partitions expiring at height + 1 to this [EpochSnapshot]. Empty unless next block is an epoch block with expiring partitions.
     ///
     /// Used during block production to produce epoch blocks with the correct term fee distributions.
-    pub fn get_expiring_partition_info(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
-        // expiring at next next block
-        self.ledgers.get_expiring_partitions(epoch_height)
+    /// Partitions in `ledger` that will ACTUALLY recycle at `epoch_height`.
+    ///
+    /// This is the set the fee model must settle, and it must equal what
+    /// `expire_partitions` recycles on the post-touch snapshot. It is the slots
+    /// old enough to expire MINUS the slots that received data this epoch
+    /// (`[prev_total, new_total)`), which the `last_height` touch rescues from
+    /// recycling. Excluding the same window the touch bumps keeps the fee
+    /// distribution (block_producer::ledger_expiry) in lockstep with the actual
+    /// recycle — otherwise a slot written in its expiry epoch would be settled
+    /// here yet survive, and be settled again when it later recycles.
+    ///
+    /// `new_total_chunks` is `ledger`'s cumulative `total_chunks` at the new
+    /// epoch block; `prev` is read from this (parent) snapshot's epoch block,
+    /// matching `touch_active_ledger_slots`.
+    ///
+    /// `cascade_active` MUST be the Cascade status of the epoch block being
+    /// produced/validated (`is_cascade_active_at(new_epoch_block.timestamp)`),
+    /// NOT of this parent snapshot — it has to mirror the
+    /// `touch_active_ledger_slots` gate in `perform_epoch_tasks`, which keys off
+    /// the new epoch block. When false, the window exclusion is skipped and the
+    /// result reproduces the original (pre-Cascade) master set, so pre-activation
+    /// history replays bit-identically.
+    pub fn get_expiring_partition_info(
+        &self,
+        epoch_height: u64,
+        ledger: DataLedger,
+        new_total_chunks: u64,
+        cascade_active: bool,
+    ) -> Vec<ExpiringPartitionInfo> {
+        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
+
+        // A slot that received data this epoch is rescued by the touch, not
+        // recycled — same window as `Ledgers::touch_filled_slots`. The touch is
+        // Cascade-gated, so pre-activation no slot is rescued: skip the exclusion
+        // when Cascade is inactive so the expiring set matches the original
+        // master behavior (no window exclusion) for bit-identical replay.
+        let written_this_epoch = |slot_index: usize| -> bool {
+            if !cascade_active || new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
+                return false;
+            }
+            let first = prev_total_chunks / chunks_per_slot;
+            let last = (new_total_chunks - 1) / chunks_per_slot;
+            // usize -> u64 is lossless on supported targets; convert via the
+            // checked path but PANIC on the impossible failure rather than
+            // silently treating the slot as outside the window — a wrong answer
+            // here would diverge the settled set from the recycled set.
+            let idx = u64::try_from(slot_index)
+                .expect("slot_index fits in u64 (usize is <= 64 bits on supported targets)");
+            first <= idx && idx <= last
+        };
+
+        self.ledgers
+            .get_expiring_partitions(epoch_height)
+            .into_iter()
+            .filter(|info| info.ledger_id == ledger && !written_this_epoch(info.slot_index))
+            .collect()
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {
