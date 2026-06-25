@@ -642,3 +642,165 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     node.stop().await;
     Ok(())
 }
+
+/// Reproduction: the term-fee model in `block_producer::ledger_expiry.rs` must
+/// distribute fees for EXACTLY the slots that actually recycle.
+///
+/// The fee calc predicts the expiring set from the PARENT epoch snapshot
+/// (`get_expiring_partition_info`, pre-this-epoch-touch), while the real
+/// recycle set is `expired_partition_infos` on the NEW epoch snapshot
+/// (post-touch). They can diverge for a slot that is written in the very epoch
+/// it would otherwise expire: the touch rescues it from recycling, but the
+/// parent-based fee calc still settles it -> its fees would be distributed now
+/// AND again when it actually recycles later (double distribution).
+///
+/// Scenario (nbe=2, thirty_day_epoch_length=2 -> window=4 blocks, C=10 chunks):
+/// 1. Epoch L: write 12 chunks -> slot 0 full, slot 1 partial (the frontier),
+///    extra empty slots allocated so slot 1 is non-last. Both get last_height=L.
+/// 2. Idle for the full window (no ThirtyDay data) so slot 1 stays at L and
+///    becomes due to expire at E = L + window.
+/// 3. Epoch E = L + 4: write again -> lands in slot 1 (still the frontier),
+///    touching it to E so it is RESCUED from recycling.
+///
+/// At E the fee-predicted set (parent) must equal the actual recycle set (new).
+/// Pre-fix this FAILS: slot 1 is in the fee set but not the recycle set.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+    let window = thirty_day_epoch_length * num_blocks_in_epoch; // 4
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length,
+            thirty_day_epoch_length,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let ctx = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    async fn post_thirty_day(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &irys_types::irys::IrysSigner,
+        tag: u8,
+        bytes: usize,
+    ) -> eyre::Result<()> {
+        let mut data = vec![9_u8; bytes];
+        data[0] = tag;
+        let price = ctx
+            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
+            .await?;
+        let tx = signer.create_transaction_with_fees(
+            data,
+            ctx.get_anchor().await?,
+            DataLedger::ThirtyDay,
+            BoundedFee::new(price.term_fee),
+            None,
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        ctx.ingest_data_tx(tx.header.clone()).await?;
+        ctx.wait_for_mempool(tx.header.id, 30).await?;
+        Ok(())
+    }
+
+    while ctx.get_canonical_chain_height().await <= activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch L: 4 txs × 3 chunks = 12 chunks -> slot 0 full, slot 1 partial frontier.
+    for i in 0_u8..4 {
+        post_thirty_day(&ctx, &signer, i, 96).await?;
+    }
+    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < l {
+        ctx.mine_block().await?;
+    }
+
+    // Idle through the window so slot 1 ages to its expiry epoch E = L + window.
+    let e = l + window;
+    while ctx.get_canonical_chain_height().await < e - 1 {
+        ctx.mine_block().await?;
+    }
+
+    // Resume exactly in epoch E: write into the (still-frontier) slot 1.
+    post_thirty_day(&ctx, &signer, 200, 96).await?;
+    while ctx.get_canonical_chain_height().await < e {
+        ctx.mine_block().await?;
+    }
+
+    // ThirtyDay's cumulative total_chunks at the epoch block E (the value the
+    // producer/validator feed to the fee calc).
+    let epoch_block = ctx.get_block_by_height(e).await?;
+    let e_total = epoch_block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::ThirtyDay as u32)
+        .map(|dl| dl.total_chunks)
+        .unwrap_or(0);
+
+    // Fee-predicted expiring set: the PARENT epoch snapshot (as the producer
+    // sees it) asked which ThirtyDay slots will actually recycle at height E.
+    let parent_block = ctx.get_block_by_height(e - 1).await?;
+    let mut fee_set = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot");
+        snap.get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total)
+            .into_iter()
+            .map(|p| p.slot_index)
+            .collect::<Vec<_>>()
+    };
+    fee_set.sort_unstable();
+    fee_set.dedup();
+
+    // Actual recycle set recorded by the NEW epoch snapshot at E.
+    let mut actual_set = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&epoch_block.block_hash)
+            .expect("epoch snapshot at E");
+        snap.expired_partition_infos
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.ledger_id == DataLedger::ThirtyDay)
+            .map(|p| p.slot_index)
+            .collect::<Vec<_>>()
+    };
+    actual_set.sort_unstable();
+    actual_set.dedup();
+
+    assert_eq!(
+        fee_set, actual_set,
+        "fee-distribution expiring set (parent, get_expiring_partition_info) must \
+         equal the actual recycle set (expired_partition_infos) at epoch E={e}; \
+         a mismatch means fees are distributed for a slot that did not recycle"
+    );
+
+    ctx.stop().await;
+    Ok(())
+}

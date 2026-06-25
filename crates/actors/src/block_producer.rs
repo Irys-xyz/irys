@@ -1623,7 +1623,12 @@ pub trait BlockProdStrategy {
         // =====
 
         let aggregated_miner_fees = self
-            .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
+            .calculate_expired_ledger_fees(
+                &parent_epoch_snapshot,
+                block_height,
+                prev_block_header,
+                &mempool_txs,
+            )
             .await?;
 
         let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
@@ -1821,7 +1826,26 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
+        prev_block_header: &IrysBlockHeader,
+        mempool_txs: &MempoolTxs,
     ) -> eyre::Result<LedgerExpiryBalanceDelta> {
+        let chunk_size = self.inner().config.consensus.chunk_size;
+        // `ledger`'s cumulative total_chunks at the block being produced =
+        // parent total + chunks added by this block's selected txs. This is the
+        // exact value that lands in the block header (see produce_block_*), and
+        // the validator reads it straight from the header — so both sides agree.
+        // It lets the fee calc exclude slots written this epoch (rescued by the
+        // last_height touch) from the expiring set.
+        let new_total = |ledger: DataLedger, txs: &[DataTransactionHeader]| -> u64 {
+            let prev = prev_block_header
+                .data_ledgers
+                .iter()
+                .find(|dl| dl.ledger_id == ledger as u32)
+                .map(|dl| dl.total_chunks)
+                .unwrap_or(0);
+            prev + calculate_chunks_added(txs, chunk_size)
+        };
+
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,
@@ -1832,6 +1856,7 @@ pub trait BlockProdStrategy {
             &self.inner().mempool_guard,
             &self.inner().db,
             true, // expect txs to be promoted — return perm fee refund if not
+            new_total(DataLedger::Submit, &mempool_txs.submit_tx),
         )
         .in_current_span()
         .await?;
@@ -1845,7 +1870,10 @@ pub trait BlockProdStrategy {
             .hardforks
             .is_cascade_active_for_epoch(parent_epoch_snapshot);
         if cascade_active {
-            for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+            for (ledger, txs) in [
+                (DataLedger::OneYear, &mempool_txs.one_year_tx),
+                (DataLedger::ThirtyDay, &mempool_txs.thirty_day_tx),
+            ] {
                 let delta = ledger_expiry::calculate_expired_ledger_fees(
                     parent_epoch_snapshot,
                     block_height,
@@ -1856,6 +1884,7 @@ pub trait BlockProdStrategy {
                     &self.inner().mempool_guard,
                     &self.inner().db,
                     false, // no promotion for these ledgers
+                    new_total(ledger, txs),
                 )
                 .in_current_span()
                 .await?;

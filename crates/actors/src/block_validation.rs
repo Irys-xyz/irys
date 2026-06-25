@@ -4434,6 +4434,18 @@ async fn generate_expected_shadow_transactions(
     // to "split into DB-vs-logic" later. (A prior TODO here suggested
     // that split; on audit it was speculative and the TODO was removed.)
     let expired_ledger_fees = if is_epoch_block {
+        // `ledger`'s cumulative total_chunks at this block, read straight from the
+        // header (the producer computed the identical value). Lets the fee calc
+        // exclude slots written this epoch — rescued by the last_height touch — so
+        // the settled set matches what actually recycles.
+        let ledger_total = |ledger: DataLedger| -> u64 {
+            block
+                .data_ledgers
+                .iter()
+                .find(|dl| dl.ledger_id == ledger as u32)
+                .map(|dl| dl.total_chunks)
+                .unwrap_or(0)
+        };
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
             block.height,
@@ -4444,6 +4456,7 @@ async fn generate_expected_shadow_transactions(
             mempool_guard,
             db,
             true, // expect txs to be promoted — return perm fee refund if not
+            ledger_total(DataLedger::Submit),
         )
         .in_current_span()
         .await
@@ -4466,6 +4479,7 @@ async fn generate_expected_shadow_transactions(
                     mempool_guard,
                     db,
                     false, // no promotion for these ledgers
+                    ledger_total(ledger),
                 )
                 .in_current_span()
                 .await

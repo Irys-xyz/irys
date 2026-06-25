@@ -1310,9 +1310,52 @@ impl EpochSnapshot {
     /// Returns partitions expiring at height + 1 to this [EpochSnapshot]. Empty unless next block is an epoch block with expiring partitions.
     ///
     /// Used during block production to produce epoch blocks with the correct term fee distributions.
-    pub fn get_expiring_partition_info(&self, epoch_height: u64) -> Vec<ExpiringPartitionInfo> {
-        // expiring at next next block
-        self.ledgers.get_expiring_partitions(epoch_height)
+    /// Partitions in `ledger` that will ACTUALLY recycle at `epoch_height`.
+    ///
+    /// This is the set the fee model must settle, and it must equal what
+    /// `expire_partitions` recycles on the post-touch snapshot. It is the slots
+    /// old enough to expire MINUS the slots that received data this epoch
+    /// (`[prev_total, new_total)`), which the `last_height` touch rescues from
+    /// recycling. Excluding the same window the touch bumps keeps the fee
+    /// distribution (block_producer::ledger_expiry) in lockstep with the actual
+    /// recycle — otherwise a slot written in its expiry epoch would be settled
+    /// here yet survive, and be settled again when it later recycles.
+    ///
+    /// `new_total_chunks` is `ledger`'s cumulative `total_chunks` at the new
+    /// epoch block; `prev` is read from this (parent) snapshot's epoch block,
+    /// matching `touch_active_ledger_slots`.
+    pub fn get_expiring_partition_info(
+        &self,
+        epoch_height: u64,
+        ledger: DataLedger,
+        new_total_chunks: u64,
+    ) -> Vec<ExpiringPartitionInfo> {
+        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        let prev_total_chunks = self
+            .epoch_block
+            .data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == ledger as u32)
+            .map(|dl| dl.total_chunks)
+            .unwrap_or(0);
+
+        // A slot that received data this epoch is rescued by the touch, not
+        // recycled — same window as `Ledgers::touch_filled_slots`.
+        let written_this_epoch = |slot_index: usize| -> bool {
+            if new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
+                return false;
+            }
+            let first = prev_total_chunks / chunks_per_slot;
+            let last = (new_total_chunks - 1) / chunks_per_slot;
+            let idx = slot_index as u64;
+            first <= idx && idx <= last
+        };
+
+        self.ledgers
+            .get_expiring_partitions(epoch_height)
+            .into_iter()
+            .filter(|info| info.ledger_id == ledger && !written_this_epoch(info.slot_index))
+            .collect()
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {
