@@ -1851,13 +1851,7 @@ pub trait BlockProdStrategy {
         // It lets the fee calc exclude slots written this epoch (rescued by the
         // last_height touch) from the expiring set.
         let new_total = |ledger: DataLedger, txs: &[DataTransactionHeader]| -> u64 {
-            let prev = prev_block_header
-                .data_ledgers
-                .iter()
-                .find(|dl| dl.ledger_id == ledger as u32)
-                .map(|dl| dl.total_chunks)
-                .unwrap_or(0);
-            prev + calculate_chunks_added(txs, chunk_size)
+            prev_block_header.ledger_total_chunks(ledger) + calculate_chunks_added(txs, chunk_size)
         };
 
         let mut result = ledger_expiry::calculate_expired_ledger_fees(

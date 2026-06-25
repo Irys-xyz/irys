@@ -4411,13 +4411,16 @@ async fn generate_expected_shadow_transactions(
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
 
-    // Calculate expired ledger fees for epoch blocks. Every input to
-    // `calculate_expired_ledger_fees` is locally derived (parent epoch
-    // snapshot, validator-computed block height, local block index, local
-    // mempool, local DB) — the peer supplies nothing that flows into this
-    // computation. The function produces what the validator EXPECTS the
-    // peer's shadow txs to look like; the peer-vs-expected comparison
-    // happens downstream in `generate_expected_shadow_transactions`.
+    // Calculate expired ledger fees for epoch blocks. Most inputs are locally
+    // derived (parent epoch snapshot, validator-computed block height, local
+    // block index, local mempool, local DB); the only candidate-header values
+    // that flow in are the block's own timestamp (the Cascade gate) and each
+    // ledger's `total_chunks` (the write-window bound). Both are validated
+    // independently elsewhere, so here they merely SELECT which slots the fee
+    // calc settles — they cannot make the calc itself fail. The function
+    // produces what the validator EXPECTS the peer's shadow txs to look like;
+    // the peer-vs-expected comparison (where a divergence is attributed to the
+    // peer) happens downstream in `generate_expected_shadow_transactions`.
     //
     // Consequence: every failure path here is a node-side fault.
     //   - MDBX I/O failure (block-header / data-tx reads) → NodeFault.
@@ -4434,18 +4437,12 @@ async fn generate_expected_shadow_transactions(
     // to "split into DB-vs-logic" later. (A prior TODO here suggested
     // that split; on audit it was speculative and the TODO was removed.)
     let expired_ledger_fees = if is_epoch_block {
-        // `ledger`'s cumulative total_chunks at this block, read straight from the
-        // header (the producer computed the identical value). Lets the fee calc
-        // exclude slots written this epoch — rescued by the last_height touch — so
-        // the settled set matches what actually recycles.
-        let ledger_total = |ledger: DataLedger| -> u64 {
-            block
-                .data_ledgers
-                .iter()
-                .find(|dl| dl.ledger_id == ledger as u32)
-                .map(|dl| dl.total_chunks)
-                .unwrap_or(0)
-        };
+        // `block.ledger_total_chunks(..)` is each ledger's cumulative total_chunks
+        // at this block, read straight from the header (the producer computed the
+        // identical value). Lets the fee calc exclude slots written this epoch —
+        // rescued by the last_height touch — so the settled set matches what
+        // actually recycles.
+        //
         // Gate for the write-window exclusion: THIS block's own Cascade status —
         // the same value `perform_epoch_tasks` reads to gate the
         // `touch_active_ledger_slots` that rescues these slots. Must match the
@@ -4466,7 +4463,7 @@ async fn generate_expected_shadow_transactions(
             mempool_guard,
             db,
             true, // expect txs to be promoted — return perm fee refund if not
-            ledger_total(DataLedger::Submit),
+            block.ledger_total_chunks(DataLedger::Submit),
             cascade_active_for_block,
         )
         .in_current_span()
@@ -4490,7 +4487,7 @@ async fn generate_expected_shadow_transactions(
                     mempool_guard,
                     db,
                     false, // no promotion for these ledgers
-                    ledger_total(ledger),
+                    block.ledger_total_chunks(ledger),
                     cascade_active_for_block,
                 )
                 .in_current_span()

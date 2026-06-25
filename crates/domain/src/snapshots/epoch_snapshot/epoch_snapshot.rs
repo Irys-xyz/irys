@@ -570,17 +570,10 @@ impl EpochSnapshot {
     ) {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         for ledger in self.ledgers.active_ledgers() {
-            let ledger_total = |block: &IrysBlockHeader| -> u64 {
-                block
-                    .data_ledgers
-                    .iter()
-                    .find(|dl| dl.ledger_id == ledger as u32)
-                    .map(|dl| dl.total_chunks)
-                    .unwrap_or(0)
-            };
-
-            let new_total = ledger_total(new_epoch_block);
-            let prev_total = previous_epoch_block.as_ref().map_or(0, ledger_total);
+            let new_total = new_epoch_block.ledger_total_chunks(ledger);
+            let prev_total = previous_epoch_block
+                .as_ref()
+                .map_or(0, |b| b.ledger_total_chunks(ledger));
 
             self.ledgers.touch_filled_slots(
                 ledger,
@@ -1349,13 +1342,7 @@ impl EpochSnapshot {
         cascade_active: bool,
     ) -> Vec<ExpiringPartitionInfo> {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
-        let prev_total_chunks = self
-            .epoch_block
-            .data_ledgers
-            .iter()
-            .find(|dl| dl.ledger_id == ledger as u32)
-            .map(|dl| dl.total_chunks)
-            .unwrap_or(0);
+        let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
 
         // A slot that received data this epoch is rescued by the touch, not
         // recycled — same window as `Ledgers::touch_filled_slots`. The touch is
@@ -1368,7 +1355,12 @@ impl EpochSnapshot {
             }
             let first = prev_total_chunks / chunks_per_slot;
             let last = (new_total_chunks - 1) / chunks_per_slot;
-            let idx = slot_index as u64;
+            // usize -> u64 is lossless on supported targets; convert via the
+            // checked path but PANIC on the impossible failure rather than
+            // silently treating the slot as outside the window — a wrong answer
+            // here would diverge the settled set from the recycled set.
+            let idx = u64::try_from(slot_index)
+                .expect("slot_index fits in u64 (usize is <= 64 bits on supported targets)");
             first <= idx && idx <= last
         };
 

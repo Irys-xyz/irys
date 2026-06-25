@@ -312,6 +312,18 @@ impl IrysBlockHeader {
         self.timestamp.to_secs()
     }
 
+    /// Cumulative `total_chunks` recorded for `ledger` in this block's data
+    /// ledgers, or `0` when the ledger is absent (e.g. the Cascade term ledgers
+    /// before activation). This is the canonical chunk count both the producer
+    /// and validator feed into the ledger-expiry fee calculation.
+    pub fn ledger_total_chunks(&self, ledger: DataLedger) -> u64 {
+        self.data_ledgers
+            .iter()
+            .find(|dl| dl.ledger_id == ledger)
+            .map(|dl| dl.total_chunks)
+            .unwrap_or(0)
+    }
+
     /// Append commitment transactions to this block's commitment system ledger.
     ///
     /// Creates the `Commitment` ledger if it doesn't already exist, appends each
