@@ -1276,6 +1276,14 @@ fn filter_transactions_by_chunk_range(
     num_chunks_in_partition: u64,
     slot_miners: &BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>>,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
+    // `data_size.div_ceil(chunk_size)` below panics on a zero divisor. `chunk_size`
+    // is a genesis-fixed consensus constant (never 0 in a real config), but guard
+    // it loudly and deterministically rather than risk a producer/validator panic —
+    // matching the `chunk_size == 0` guard in `submit_tx_start_offset`.
+    if chunk_size == 0 {
+        eyre::bail!("chunk_size must be non-zero for ledger-expiry chunk math");
+    }
+
     let mut current_offset = prev_max_offset;
     let mut tx_to_miners = BTreeMap::new();
 
