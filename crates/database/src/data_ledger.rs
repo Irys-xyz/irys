@@ -1050,4 +1050,31 @@ mod tests {
             "get_expired_slot_indexes returns only newly-expiring slots"
         );
     }
+
+    /// NC-0042 P0-1: `get_all_expired_slot_indexes` CAN return a non-contiguous
+    /// (holey) set when an empty pre-allocated middle slot ages out by its
+    /// allocation height while a lower slot stays live. This is the exact input
+    /// the `expired_submit_range` contiguity guard fails loud on — keep them in
+    /// lockstep. Built with the `last_height = [1, 100, 1, 1]` shape the touch
+    /// produces (touch only slot 1).
+    #[test]
+    fn get_all_expired_slot_indexes_can_be_non_prefix() {
+        let config = ConsensusConfig::testing();
+        let min_blocks = config.epoch.submit_ledger_epoch_length * config.epoch.num_blocks_in_epoch;
+
+        // 4 slots allocated at height 1; touch only slot 1 (chunks [12,18) with a
+        // 10-chunk partition) → last_height [1, 100, 1, 1].
+        let mut ledgers = ledgers_with_submit_slots(4, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 12, 18, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 100, 1, 1]);
+
+        // expiry_height = (min_blocks + 50) - min_blocks = 50 ∈ (1, 100): slots 0
+        // and 2 expire (last_height 1), slot 1 stays live (last_height 100), slot
+        // 3 is the never-expiring last slot → the non-prefix set {0, 2}.
+        assert_eq!(
+            ledgers.get_all_expired_term_slot_indexes(DataLedger::Submit, min_blocks + 50),
+            vec![0, 2],
+            "an empty middle slot aged by allocation height yields a non-prefix expired set"
+        );
+    }
 }

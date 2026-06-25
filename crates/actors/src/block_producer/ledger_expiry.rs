@@ -483,6 +483,32 @@ pub fn expired_submit_range(
         return Ok(None);
     };
 
+    // NC-0042 contiguity guard. The `[0, range_end)` collapse below is correct only
+    // if the expired slots are a prefix `{0..=max}`. In normal operation they are:
+    // chunk offsets are cumulative and slots fill sequentially, so `last_height` is
+    // non-decreasing in slot index, and empty pre-allocated slots sit at the top
+    // where the never-expire-the-last-slot rule trims them. A hole (an empty,
+    // non-last slot aged out by its allocation height beneath a still-live lower
+    // slot) would make the prefix over-approximate — deterministically rejecting
+    // valid promotions AND diverging from the slot-exact refund walk
+    // (`collect_expired_partitions`, which only settles slots that actually hold
+    // partitions). The set is a pure function of canonical state, so failing loud
+    // here fails identically on every node (no fork) instead of silently diverging
+    // — same philosophy as the `filter_transactions_by_chunk_range` guard below.
+    // `slot_indexes` is ascending and distinct (`get_all_expired_slot_indexes`
+    // iterates slots in order), so "value at position i equals i" ⇔ prefix-from-0.
+    if let Some((i, &slot)) = slot_indexes
+        .iter()
+        .enumerate()
+        .find(|&(i, &slot)| slot != i)
+    {
+        eyre::bail!(
+            "expired Submit slot set {slot_indexes:?} is not a contiguous prefix from 0 \
+             (slot {slot} at position {i}) — the [0, range_end) promotion-filter \
+             assumption is violated; refusing to over-approximate (NC-0042)"
+        );
+    }
+
     // End of the expired chunk range = end of the highest expired slot, clamped
     // to data actually written *as of the parent*. Expired slots form a prefix
     // from slot 0, so the range is `[0, range_end)`. Bounding by the parent
@@ -2600,5 +2626,94 @@ mod tests {
         assert_eq!(submit_span_verdict(inc.base, inc.total, 5), Some(false));
 
         Ok(())
+    }
+
+    /// NC-0042 contiguity guard: `expired_submit_range` collapses the expired
+    /// Submit slots to a single `[0, range_end)` prefix, which is only correct if
+    /// the slots are `{0..=max}`. A hole (an empty, non-last slot aged out by its
+    /// allocation height beneath a still-live lower slot) would over-approximate
+    /// — deterministically rejecting valid promotions AND diverging from the
+    /// slot-exact refund walk. The verdict is a pure function of canonical state,
+    /// so it must fail loud (identically on every node) rather than silently.
+    #[test]
+    fn expired_submit_range_bails_on_non_prefix_expired_set() {
+        fn submit_header_total(total_chunks: u64) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: irys_types::H256List(vec![]),
+                total_chunks,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        }
+
+        // Build the hole topology in real ledger state: 4 Submit slots allocated
+        // at height 1, then only slot 1 touched (chunks [12,18) with a 10-chunk
+        // partition) → last_height [1, 100, 1, 1]. At an expiry height in (1, 100)
+        // slots 0 and 2 expire while slot 1 stays live; slot 3 is the never-
+        // expiring last slot. So `get_all_expired_term_slot_indexes` returns the
+        // non-prefix set {0, 2}.
+        let mut epoch = EpochSnapshot::default();
+        epoch.ledgers[DataLedger::Submit].allocate_slots(4, 1);
+        epoch
+            .ledgers
+            .touch_filled_slots(DataLedger::Submit, 12, 18, 10, 100);
+
+        let ep = &epoch.config.consensus.epoch;
+        let min_blocks = ep.submit_ledger_epoch_length * ep.num_blocks_in_epoch;
+        let block_height = min_blocks + 50; // expiry_height = 50 ∈ (1, 100)
+
+        // Sanity: the fixture really is a hole before we assert the guard fires.
+        assert_eq!(
+            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height),
+            vec![0, 2],
+            "fixture must produce the non-prefix expired set {{0, 2}}"
+        );
+
+        let parent = submit_header_total(25); // data through slot 2 (3 × 10 chunks)
+        let err = expired_submit_range(block_height, &epoch, &parent, &epoch.config)
+            .expect_err("a non-prefix expired set must fail loud, not over-approximate");
+        assert!(
+            err.to_string().contains("not a contiguous prefix"),
+            "expected the NC-0042 contiguity guard message, got: {err}"
+        );
+    }
+
+    /// NC-0042 fail-loud (commit c300d7ec2): a tx whose start offset maps to a
+    /// slot absent from `slot_miners` (a non-expired slot) must `Err`, not be
+    /// silently dropped — a silent under-refund would strand a refund and break
+    /// Pipeline A ≡ B if the contiguity invariant ever broke.
+    #[test]
+    fn filter_transactions_by_chunk_range_bails_on_non_expired_slot() {
+        let tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_size: 5,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        // tx starts at offset 0 → slot 0, but `slot_miners` is empty: no expired
+        // slot covers it. Middle-block flags (no trim) so it is not skipped first.
+        let slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>> = BTreeMap::new();
+        let err = filter_transactions_by_chunk_range(
+            vec![tx],
+            LedgerChunkOffset::from(0_u64),
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 100)),
+            false, // is_earliest — no start trim
+            false, // is_latest — no end trim
+            1,     // chunk_size
+            10,    // num_chunks_in_partition
+            &slot_miners,
+        )
+        .expect_err("a tx mapping to a non-expired slot must fail loud");
+        assert!(
+            err.to_string().contains("non-expired slot"),
+            "expected the NC-0042 fail-loud message, got: {err}"
+        );
     }
 }
