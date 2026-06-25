@@ -4,8 +4,8 @@ use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
-    Config, DatabaseProvider, H256, H256List, IrysBlockHeader, U256, VDFLimiterInfo, VdfConfig,
-    block_production::Seed,
+    AtomicVdfStepNumber, Config, DatabaseProvider, H256, H256List, IrysBlockHeader, U256,
+    VDFLimiterInfo, VdfConfig, block_production::Seed,
 };
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
@@ -174,6 +174,33 @@ impl VdfState {
             .store(false, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// Marker error returned by [`publish_reanchored_state`] when the VDF state `RwLock` is poisoned.
+/// A zero-size type so the re-anchor orchestration can distinguish a terminal poisoned lock (the
+/// supervisor must shut the node down) from a recoverable buffer-rebuild failure.
+#[derive(Debug)]
+pub struct ReanchorLockPoisoned;
+
+/// Publish a re-anchored buffer. The (rewound) tip step is stored into `atomic_step` BEFORE the
+/// buffer is swapped, both under the buffer's single write lock, so `atomic_step <=
+/// buffer.global_step` holds at every instant — a reader can never observe the atomic pointing past
+/// the buffer's newest step. Mirrors [`VdfState::store_step`]'s lock discipline. The fold of the
+/// anchor hash is intentionally left to the caller: it is lock-free, pure-functional post-processing
+/// and must not extend the hold time. Returns the published tip `(step, seed)`; `Err` only on a
+/// poisoned lock.
+pub fn publish_reanchored_state(
+    vdf_state: &AtomicVdfState,
+    atomic_step: &AtomicVdfStepNumber,
+    new_state: VdfState,
+) -> Result<(u64, Seed), ReanchorLockPoisoned> {
+    // Read the tip BEFORE the move so the lock is held for the two stores alone, and return it so
+    // the caller can derive the restart anchor.
+    let tip = new_state.get_last_step_and_seed();
+    let mut guard = vdf_state.write().map_err(|_| ReanchorLockPoisoned)?;
+    atomic_step.store(tip.0, std::sync::atomic::Ordering::Relaxed);
+    *guard = new_state;
+    Ok(tip)
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
@@ -760,7 +787,7 @@ mod tests {
     use super::*;
     use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::time::Duration;
 
     /// Regression for the partition-recovery re-anchor fix (review Finding #1):
@@ -1253,6 +1280,72 @@ mod tests {
         let mut state = vdf_state_at(current);
         let returned = state.store_step(Seed(H256::zero()), proposed);
         assert_eq!(returned, expected);
+    }
+
+    /// The publish invariant: `publish_reanchored_state` stores the rewound tip into the atomic and
+    /// swaps the buffer under one write lock, leaving `atomic == buffer.global_step == tip.step`. A
+    /// re-anchor is always a rewind, so the published step is below the live buffer's free-run tip.
+    #[test]
+    fn publish_reanchored_state_rewinds_atomic_and_buffer() {
+        // Live buffer far ahead (the loop free-ran above the canonical chain).
+        let live = Arc::new(RwLock::new(vdf_state_at(9_999)));
+        let atomic = Arc::new(AtomicU64::new(9_999));
+
+        // Rebuilt (canonical-tip) buffer at a lower step, carrying its own tip seed.
+        let tip_seed = Seed(H256::repeat_byte(0x42));
+        let mut rebuilt = vdf_state_at(100);
+        rebuilt.seeds.push_back(tip_seed.clone());
+
+        let (step, seed) =
+            publish_reanchored_state(&live, &atomic, rebuilt).expect("healthy lock must publish");
+
+        assert_eq!(step, 100, "returned tip step is the rebuilt step");
+        assert_eq!(
+            seed, tip_seed,
+            "returned tip seed is the rebuilt buffer's back"
+        );
+        assert_eq!(
+            atomic.load(Ordering::Relaxed),
+            100,
+            "atomic must be rewound to the published step"
+        );
+        let guard = live.read().expect("lock not poisoned");
+        assert_eq!(guard.global_step, 100, "buffer must hold the rebuilt step");
+        assert_eq!(
+            guard.seeds.back().cloned(),
+            Some(tip_seed),
+            "buffer must hold the rebuilt contents"
+        );
+    }
+
+    /// A poisoned VDF write lock surfaces as `Err(ReanchorLockPoisoned)` rather than a panic, and
+    /// leaves the atomic untouched (the store happens only after the lock is acquired).
+    #[test]
+    fn publish_reanchored_state_reports_poisoned_lock() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let live = Arc::new(RwLock::new(vdf_state_at(9_999)));
+        let atomic = Arc::new(AtomicU64::new(9_999));
+
+        let poison = Arc::clone(&live);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = poison.write().unwrap();
+            panic!("writer panic to poison the VDF state lock");
+        }));
+        assert!(live.is_poisoned(), "test setup: lock must be poisoned");
+
+        let mut rebuilt = vdf_state_at(100);
+        rebuilt.seeds.push_back(Seed(H256::repeat_byte(0x42)));
+        let result = publish_reanchored_state(&live, &atomic, rebuilt);
+
+        assert!(
+            matches!(result, Err(ReanchorLockPoisoned)),
+            "poisoned lock must surface as ReanchorLockPoisoned, not a panic"
+        );
+        assert_eq!(
+            atomic.load(Ordering::Relaxed),
+            9_999,
+            "atomic must be untouched when the lock is poisoned"
+        );
     }
 
     /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,

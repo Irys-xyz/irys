@@ -64,8 +64,8 @@ use irys_types::{
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
     VdfStep,
-    state::{AtomicVdfState, VdfStateReadonly, create_state_for_canonical_tip},
-    vdf::{VdfExit, reset_applied_anchor_hash, run_vdf},
+    state::{AtomicVdfState, VdfStateReadonly},
+    vdf::{ReanchorOutcome, VdfAnchor, VdfExit, reanchor_to_canonical_tip, run_vdf},
     vdf_sha,
 };
 use reth::{
@@ -2236,22 +2236,19 @@ impl IrysNode {
                 // pinning and the fast-forward / re-anchor channels persist across restarts —
                 // only run_vdf's hash/global_step/seed and the shared step buffer are reset.
                 // See design/docs/vdf-partition-recovery-reanchor.md.
-                let mut anchor_step = global_step_number;
-                // Fold the anchor step's own reset boundary into the (raw) buffer hash if it lands on
-                // one, so run_vdf's first step continues the canonical lineage (finding #5).
-                let mut anchor_hash = reset_applied_anchor_hash(
+                let mut anchor = VdfAnchor::at_startup(
                     config.vdf.reset_frequency as u64,
                     global_step_number,
                     initial_hash,
                     startup_anchor_seed,
+                    next_canonical_vdf_seed,
                 );
-                let mut anchor_reset_seed = next_canonical_vdf_seed;
                 loop {
                     let exit = run_vdf(
                         &config.vdf,
-                        anchor_step,
-                        anchor_hash,
-                        anchor_reset_seed,
+                        anchor.step,
+                        anchor.hash,
+                        anchor.reset_seed,
                         &mut vdf_fast_forward_receiver,
                         &mut vdf_reanchor_receiver,
                         is_vdf_mining_enabled.clone(),
@@ -2266,19 +2263,15 @@ impl IrysNode {
                     match exit {
                         VdfExit::Shutdown => break,
                         VdfExit::Reanchor => {
-                            // Rebuild the step buffer anchored at the NEW CANONICAL TIP (not the
-                            // truncated index's LCA), reading the recovered range's blocks from the
-                            // block tree's canonical chain. Each canonical block carries its own
-                            // reset-boundary seed, so the rebuilt buffer matches the canonical
-                            // lineage across the whole recovered range. Anchoring at the LCA would
-                            // instead leave the restarted loop to re-cross those boundaries by
-                            // local stepping with the canonical tip's single reset seed — wrong for
-                            // every intermediate boundary — diverging the buffer and re-wedging
-                            // validation. See design/docs/vdf-partition-recovery-reanchor.md.
-                            //
-                            // The index truncation by recover_from_network_partition still rolls
-                            // back the orphaned fork's storage/supply side effects; the VDF rebuild
-                            // no longer depends on it, sourcing the canonical chain from the tree.
+                            // The supervisor owns the block-tree guard, so it collects the canonical
+                            // chain here and hands the headers to the re-anchor; the VDF crate stays
+                            // decoupled from the block tree. Rebuilding from the canonical TIP (not
+                            // the truncated index's LCA) is what makes the buffer match the canonical
+                            // lineage across the whole recovered range — each block carries its own
+                            // reset-boundary seed. The index truncation by
+                            // recover_from_network_partition still rolls back the orphaned fork's
+                            // storage/supply side effects; the VDF rebuild sources the canonical
+                            // chain from the tree. See design/docs/vdf-partition-recovery-reanchor.md.
                             let canonical_headers: Vec<Arc<IrysBlockHeader>> = block_tree_guard
                                 .read()
                                 .get_canonical_chain()
@@ -2286,127 +2279,35 @@ impl IrysNode {
                                 .iter()
                                 .map(|entry| Arc::clone(entry.header()))
                                 .collect();
-                            let (new_state, next_seed) = match create_state_for_canonical_tip(
+                            match reanchor_to_canonical_tip(
+                                &vdf_state,
+                                &atomic_global_step_number,
+                                &mut vdf_fast_forward_receiver,
                                 &canonical_headers,
                                 &db,
                                 is_vdf_mining_enabled.clone(),
                                 &config,
+                                anchor.reset_seed,
                             ) {
-                                Ok(rebuilt) => rebuilt,
-                                Err(e) => {
-                                    // Rebuild failed — a transient DB error, or a canonical
-                                    // ancestor missing from both the block-tree cache and the
-                                    // DB. Do NOT crash or break the live VDF thread: a panic OR
-                                    // a break here drops the CancelOnDrop guard, which fires
-                                    // vdf_exit_token -> ShutdownReason::VdfExited and shuts the
-                                    // whole node down mid-recovery — fail-stopping on a transient
-                                    // DB error during a routine deep reorg. Keep the current
-                                    // buffer, but re-anchor run_vdf to the buffer's OWN current
-                                    // tip rather than the stale startup/previous anchor — the
-                                    // live loop free-ran above it, so resuming from the stale low
-                                    // anchor would feed a stale-lineage hash into the first
-                                    // vdf_sha and lean on store_step's behind-step rejection to
-                                    // realign.
-                                    //
-                                    // Resuming on a not-yet-rebuilt buffer is safe because block
-                                    // validation does NOT trust the live buffer: the VDF-sensitive
-                                    // checks resolve steps from a fork-local view of the block's
-                                    // OWN lineage (build_fork_local_recall_view /
-                                    // build_fork_local_step_view), so a stale buffer cannot reject
-                                    // canonical blocks. It degrades only THIS node's local mining
-                                    // until the buffer is rebuilt. Note there is no retry timer
-                                    // here: the rebuild is re-attempted only when the next deep
-                                    // reorg (> block_migration_depth) re-emits vdf_reanchor, so a
-                                    // transient failure recovers on the next recovery event but a
-                                    // genuinely persistent one is not self-healed by this arm.
-                                    error!(
-                                        error = ?e,
-                                        "VDF re-anchor rebuild failed; resuming from the live buffer's current step (rebuild re-attempted on the next deep-reorg re-anchor)"
+                                ReanchorOutcome::Reanchored(new_anchor) => {
+                                    anchor = new_anchor;
+                                    // Tell the partition miners to discard their stateful
+                                    // recall-range rotation, which assumes forward-only steps and now
+                                    // points at the pre-re-anchor lineage. They rebuild from the
+                                    // re-anchored steps on the next seed. See
+                                    // PartitionMiningServiceInner::handle_reanchor.
+                                    mining_bus.send_reanchor();
+                                    warn!(
+                                        vdf.global_step_number = anchor.step,
+                                        "VDF re-anchored to canonical chain tip after partition recovery"
                                     );
-                                    if let Ok(guard) = vdf_state.read() {
-                                        let (live_step, live_seed) = guard.get_last_step_and_seed();
-                                        anchor_step = live_step;
-                                        // Intentionally NOT reset_applied_anchor_hash'd here (unlike
-                                        // the startup and successful-re-anchor sites): the buffer was
-                                        // NOT rebuilt, so we resume from the live tip, which free-ran
-                                        // ABOVE the canonical chain — there is no confirmed canonical
-                                        // block pinning live_step's boundary seed to fold (the steps
-                                        // past the canonical tip are the unconfirmed region; guessing
-                                        // a seed here would re-poison, the #4 hazard). Resume raw and
-                                        // let store_step's forward-only rule + fork-local validation
-                                        // recompute realign. Degraded best-effort, non-safety.
-                                        anchor_hash = live_seed.0;
-                                    }
-                                    continue;
                                 }
-                            };
-                            let (rebuilt_step, rebuilt_seed) = new_state.get_last_step_and_seed();
-                            match vdf_state.write() {
-                                Ok(mut guard) => {
-                                    // Store the rewound (lower) step BEFORE publishing the
-                                    // rebuilt buffer, under the same write lock, so the atomic
-                                    // never points past the buffer's newest step
-                                    // (atomic <= buffer.global_step holds at every instant).
-                                    // Mirrors store_step's lock discipline; the re-anchor is
-                                    // always a rewind — the live loop free-runs above any
-                                    // canonical block's step.
-                                    atomic_global_step_number
-                                        .store(rebuilt_step, std::sync::atomic::Ordering::Relaxed);
-                                    *guard = new_state;
-                                }
-                                Err(_) => {
-                                    error!(
-                                        "VDF state write lock poisoned during re-anchor; exiting VDF thread"
-                                    );
-                                    break;
-                                }
+                                // Rebuild failed; the live buffer is untouched, so resume from the
+                                // live tip and do NOT broadcast a mining reset (the rotation still
+                                // matches the unchanged buffer).
+                                ReanchorOutcome::Fallback(live_anchor) => anchor = live_anchor,
+                                ReanchorOutcome::Shutdown => break,
                             }
-
-                            // Discard any fast-forward steps queued before the re-anchor. They
-                            // may carry steps pinned by the orphaned fork's (minority) reset
-                            // seed; applying them after the buffer was rebuilt to the canonical
-                            // TIP would re-poison it via store_step's exact-sequential accept.
-                            // The canonical steps are already in the rebuilt buffer; the loop
-                            // only local-steps forward to the live timeline, so dropping the
-                            // queue loses no correct work.
-                            let mut drained = 0_u64;
-                            while vdf_fast_forward_receiver.try_recv().is_ok() {
-                                drained += 1;
-                            }
-                            if drained > 0 {
-                                debug!(
-                                    vdf.drained_fast_forward_steps = drained,
-                                    "Discarded stale fast-forward steps during VDF re-anchor"
-                                );
-                            }
-
-                            anchor_step = rebuilt_step;
-                            // Fold the rebuilt tip's own reset boundary into the (raw) buffer hash if
-                            // the tip step lands on one, so run_vdf's first step continues the
-                            // canonical lineage rather than mis-stepping a range (finding #5). The
-                            // boundary seed is the tip block's own `seed` (set_seeds pins the
-                            // in-range boundary's entropy there; `next_seed` targets the next one).
-                            let tip_anchor_seed = canonical_headers
-                                .last()
-                                .map_or(next_seed, |tip| tip.vdf_limiter_info.seed);
-                            anchor_hash = reset_applied_anchor_hash(
-                                config.vdf.reset_frequency as u64,
-                                rebuilt_step,
-                                rebuilt_seed.0,
-                                tip_anchor_seed,
-                            );
-                            anchor_reset_seed = next_seed;
-                            // Tell the partition miners to discard their stateful recall-range
-                            // rotation, which assumes forward-only steps and is now pointing at the
-                            // pre-re-anchor lineage. Without this, after the rewound VDF climbs back
-                            // they would mine recall ranges computed from the discarded lineage
-                            // (rejected by validation). They rebuild from the re-anchored steps on
-                            // the next seed. See PartitionMiningServiceInner::handle_reanchor.
-                            mining_bus.send_reanchor();
-                            warn!(
-                                vdf.global_step_number = rebuilt_step,
-                                "VDF re-anchored to canonical chain tip after partition recovery"
-                            );
                         }
                     }
                 }

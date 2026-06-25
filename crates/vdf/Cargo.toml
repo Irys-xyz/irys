@@ -27,6 +27,7 @@ thiserror.workspace = true
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
+irys-testing-utils.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 criterion.workspace = true
