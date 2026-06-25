@@ -1209,6 +1209,190 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn delete_ingress_proof_by_signer_deletes_only_that_signer() -> eyre::Result<()> {
+        use super::{
+            delete_ingress_proof_by_signer, ingress_proof_by_data_root_address,
+            ingress_proofs_by_data_root,
+        };
+        use crate::{
+            db::IrysDatabaseExt as _,
+            db_cache::CachedDataRoot,
+            tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
+        };
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let data_root = H256::random();
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random();
+
+        // Build minimal distinct proofs for addr_a and addr_b.
+        let make_proof = |address: IrysAddress, proof_hash: H256| {
+            let mut p = irys_types::IngressProof::default();
+            p.data_root = data_root;
+            p.proof = proof_hash;
+            CompactCachedIngressProof(CachedIngressProof { address, proof: p })
+        };
+
+        let proof_a = make_proof(addr_a, H256::from([1_u8; 32]));
+        let proof_b = make_proof(addr_b, H256::from([2_u8; 32]));
+
+        // Seed: minimal CDR + two proof rows.
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::default(),
+                },
+            )?;
+            tx.put::<IngressProofs>(data_root, proof_a.clone())?;
+            tx.put::<IngressProofs>(data_root, proof_b.clone())?;
+            Ok(())
+        })?;
+
+        // Both rows present initially.
+        assert_eq!(
+            db.view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))?
+                .len(),
+            2,
+            "expected 2 proofs after seeding"
+        );
+
+        // Delete addr_a — must return true and remove only that row.
+        let deleted = db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_a))?;
+        assert!(deleted, "deleting addr_a row must return true");
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_none(),
+            "addr_a proof must be gone"
+        );
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_b))?
+                .is_some(),
+            "addr_b proof must survive"
+        );
+
+        // Deleting addr_a again returns false (already absent).
+        let deleted_again =
+            db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_a))?;
+        assert!(!deleted_again, "second delete of addr_a must return false");
+
+        // Deleting a never-stored addr_c returns false.
+        let deleted_c =
+            db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_c))?;
+        assert!(!deleted_c, "delete of absent addr_c must return false");
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_ingress_proof_if_unchanged_preserves_refreshed_proof() -> eyre::Result<()> {
+        use super::{delete_ingress_proof_if_unchanged, ingress_proof_by_data_root_address};
+        use crate::{
+            db::IrysDatabaseExt as _,
+            db_cache::CachedDataRoot,
+            tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
+        };
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let data_root = H256::random();
+        let addr_a = IrysAddress::random();
+
+        let make_proof = |proof_hash: H256| {
+            let mut p = irys_types::IngressProof::default();
+            p.data_root = data_root;
+            p.proof = proof_hash;
+            CompactCachedIngressProof(CachedIngressProof {
+                address: addr_a,
+                proof: p,
+            })
+        };
+
+        let proof_p1 = make_proof(H256::from([0xAA_u8; 32]));
+        let proof_p2 = make_proof(H256::from([0xBB_u8; 32]));
+
+        // absent-key case: returns false without error.
+        let absent = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p1.clone()))?;
+        assert!(!absent, "absent key must return false");
+
+        // Insert CDR and P1.
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::default(),
+                },
+            )?;
+            tx.put::<IngressProofs>(data_root, proof_p1.clone())?;
+            Ok(())
+        })?;
+
+        // Simulate refresh: replace P1 with P2 in the store (overwrite between scan and delete).
+        db.update_eyre(|tx| {
+            tx.delete::<IngressProofs>(data_root, Some(proof_p1.clone()))?;
+            tx.put::<IngressProofs>(data_root, proof_p2.clone())?;
+            Ok(())
+        })?;
+
+        // CAS with stale P1 must return false and leave P2 intact.
+        let stale = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p1.clone()))?;
+        assert!(
+            !stale,
+            "stale expected value must return false (TOCTOU guard)"
+        );
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_some(),
+            "P2 must still be present after stale CAS"
+        );
+
+        // CAS with current P2 must return true and remove the row.
+        let deleted = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p2.clone()))?;
+        assert!(deleted, "matching expected value must return true");
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_none(),
+            "row must be gone after successful CAS delete"
+        );
+
+        Ok(())
+    }
+
     mod canonical_height_tests {
         use crate::{
             canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
