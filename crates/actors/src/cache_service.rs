@@ -884,6 +884,15 @@ impl InnerCacheTask {
             }
         }
 
+        // Release the scan's read transaction (and its walker/cursor) before the
+        // per-proof write-tx loop below. Holding a long-lived reader open across
+        // up to MAX_PROOF_CHECKS_PER_RUN short write txns would pin the MVCC
+        // snapshot and hold back MDBX free-page reclamation; nothing past the scan
+        // reads from `tx` (the delete/reanchor/regen loops open their own txns).
+        drop(walker);
+        drop(cursor);
+        drop(tx);
+
         // Delete expired proofs — per-signer to avoid wiping other signers' rows on the same
         // data_root. Content-aware delete closes the TOCTOU window: a fresh proof stored
         // between the scan and this delete will not match the scanned value and is preserved.
