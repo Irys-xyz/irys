@@ -1,8 +1,15 @@
 //! Integration test verifying that a peer whose local VDF state cannot
 //! reach a block's required `prev_output_step_number` surfaces a
-//! `WaitForStepError::Stalled` (turned into `Invalid(VdfValidationFailed)`
-//! at the validation-service boundary) within `progress_timeout_secs`,
-//! rather than hanging the validation pipeline indefinitely.
+//! `WaitForStepError::Stalled` and eventually crashes the validation
+//! service, rather than hanging the validation pipeline indefinitely.
+//!
+//! Note on timing: a `Stalled` wait no longer panics immediately. The
+//! head here is a `CanonicalExtension`, so the dispatch requeues it up to
+//! `MAX_CONSECUTIVE_NOPROGRESS_STALLS` times (the buffer never advances —
+//! mining is stopped and the parent's steps are never fast-forwarded), and
+//! only then panics (`StallPanicReason::FrozenWriter`). That bounded delay
+//! (~3 × `progress_timeout_secs`) still lands well within
+//! `FAILURE_DEADLINE_SECS`. See `design/docs/vdf-validation-stall-detection.md`.
 //!
 //! Why a normal "gossip the head only" setup doesn't exercise this:
 //! when peer receives a head whose parent isn't in its tree,
@@ -227,13 +234,16 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     let delivery_instant = Instant::now();
     tracing::info!(block.hash = %head_hash, "head delivered to peer via send_full_block");
 
-    // -- Wait for peer's validation_service to die from the Stalled panic.
+    // -- Wait for peer's validation_service to die from the Stalled crash.
     //
     // `ensure_vdf_is_valid` Stage A polls `vdf_state.global_step` and
     // returns `WaitForStepError::Stalled` once `progress_timeout_secs`
-    // elapses without local progress. `PreemptibleVdfTask::execute` then
-    // panics with "VDF wait stalled" (see
-    // `active_validations.rs` ~line 150 and
+    // elapses without local progress. `PreemptibleVdfTask::execute` now
+    // surfaces that as `VdfValidationResult::Stalled`, and the dispatch's
+    // `ValidationCoordinator::handle_stalled_vdf_task` requeues this
+    // (CanonicalExtension) head up to `MAX_CONSECUTIVE_NOPROGRESS_STALLS`
+    // times — the buffer never advances, so the no-progress bound trips and
+    // it panics (`StallPanicReason::FrozenWriter`; see
     // `design/docs/vdf-validation-stall-detection.md` — never-mislabel
     // rule: a local liveness failure must not be reported as block-Invalid
     // to the block tree). The validation_service task ends, which drops

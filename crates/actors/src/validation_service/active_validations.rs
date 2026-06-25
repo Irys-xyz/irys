@@ -80,6 +80,68 @@ impl PartialOrd for BlockPriorityMeta {
     }
 }
 
+/// Maximum consecutive VDF wait stalls *with no buffer advancement* before the node crashes.
+/// The bound resets on any buffer advance (a heal cascade is liveness, not a dead writer), so this
+/// fires only on a genuinely frozen writer. 2 → at most 3 frozen ~`progress_timeout` waits
+/// (~45s at the 15s default) before the never-mislabel crash. See
+/// design/docs/vdf-validation-stall-detection.md.
+pub(super) const MAX_CONSECUTIVE_NOPROGRESS_STALLS: u32 = 2;
+
+/// Why a stalled VDF validation task cannot be safely healed by a retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StallPanicReason {
+    /// Block is not canonical; re-sending its steps would re-poison the re-anchored buffer.
+    NonCanonical,
+    /// The buffer has not advanced across the retry budget; the VDF writer is frozen.
+    FrozenWriter,
+}
+
+/// What to do with a VDF validation task whose wait stalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StallAction {
+    Requeue { retries: u32, last_stall_step: u64 },
+    Panic(StallPanicReason),
+}
+
+/// Decide how to handle a VDF validation task whose wait stalled at `current_step`.
+///
+/// Guard 1 (re-poison safety): only `Canonical`/`CanonicalExtension` blocks may heal via retry —
+/// re-sending a fork block's fast-forward steps is exactly what the re-anchor drain prevents
+/// (a partition-recovery re-anchor rebuilds the buffer to the canonical tip and drains the
+/// fast-forward queue; a fork block's steps share the same global step numbers and would be
+/// accepted verbatim by `store_step`, re-poisoning the buffer).
+///
+/// Guard 2 (liveness): the count is over CONSECUTIVE stalls with no buffer advancement; any advance
+/// resets it, because the heal cascades bottom-up (single VDF lane, height priority) and each healed
+/// predecessor advances the shared buffer. So only a genuinely frozen writer trips the bound.
+pub(super) fn stall_retry_action(
+    priority: BlockPriority,
+    last_stall_step: Option<u64>,
+    retries: u32,
+    current_step: u64,
+    max_consecutive_noprogress_stalls: u32,
+) -> StallAction {
+    if !matches!(
+        priority,
+        BlockPriority::Canonical | BlockPriority::CanonicalExtension
+    ) {
+        return StallAction::Panic(StallPanicReason::NonCanonical);
+    }
+    let retries = if last_stall_step == Some(current_step) {
+        retries + 1
+    } else {
+        1
+    };
+    if retries > max_consecutive_noprogress_stalls {
+        StallAction::Panic(StallPanicReason::FrozenWriter)
+    } else {
+        StallAction::Requeue {
+            retries,
+            last_stall_step: current_step,
+        }
+    }
+}
+
 /// Result from a concurrent validation task
 #[derive(Debug)]
 pub(super) struct ConcurrentValidationResult {
@@ -204,18 +266,17 @@ impl PreemptibleVdfTask {
                             metrics::record_validation_cancellation("vdf_preempted");
                             VdfValidationResult::Cancelled
                         }
-                        Some(WaitForStepError::Stalled { .. }) => {
+                        Some(WaitForStepError::Stalled { current, .. }) => {
                             metrics::record_validation_cancellation("vdf_stalled");
-                            // See above. Panic propagates through the spawned task
-                            // as JoinError::is_panic(), then `resume_unwind` in the
-                            // validation service select loop re-raises it onto the
-                            // service task. The global panic hook then raises SIGINT
-                            // and the 45s shutdown watchdog forces process abort.
-                            panic!(
-                                "VDF wait stalled (block={}, error={}); local VDF state cannot advance — crashing per never-mislabel rule",
-                                self.task.sealed_block.header().block_hash,
-                                e
-                            );
+                            // Do NOT panic here: the dispatch decides requeue (a canonical block
+                            // heals when its re-validation re-sends the dropped fast-forward step)
+                            // vs panic (a non-canonical block, or a buffer frozen past the bound).
+                            // `current` is carried so the dispatch's advancement-keyed bound can
+                            // tell a heal cascade from a frozen writer. See
+                            // design/docs/vdf-validation-stall-detection.md.
+                            VdfValidationResult::Stalled {
+                                current_step: *current,
+                            }
                         }
                         None => {
                             if self.cancel_u8.load(Ordering::Relaxed) == CancelEnum::Cancelled as u8
@@ -751,6 +812,44 @@ impl<S: VdfSpawnStrategy> ValidationCoordinator<S> {
         self.vdf_scheduler.submit(task, priority);
     }
 
+    /// Handle a VDF validation task whose wait stalled at `current_step`.
+    ///
+    /// Computes the block's current canonicality and applies [`stall_retry_action`]: a canonical
+    /// block is requeued — its re-validation re-sends the dropped, verified-canonical fast-forward
+    /// step, which `run_vdf` consumes even while mining is paused, healing the buffer stranded by a
+    /// partition-recovery re-anchor drain. A non-canonical block (re-sending its steps would
+    /// re-poison the rebuilt buffer) or a buffer frozen past the no-progress bound panics per the
+    /// never-mislabel rule. See design/docs/vdf-validation-stall-detection.md.
+    pub(super) fn handle_stalled_vdf_task(
+        &mut self,
+        mut task: BlockValidationTask,
+        current_step: u64,
+    ) {
+        let hash = task.sealed_block.header().block_hash;
+        let priority = self.calculate_priority(task.sealed_block.header()).state;
+        match stall_retry_action(
+            priority,
+            task.last_stall_step,
+            task.vdf_stall_retries,
+            current_step,
+            MAX_CONSECUTIVE_NOPROGRESS_STALLS,
+        ) {
+            StallAction::Requeue {
+                retries,
+                last_stall_step,
+            } => {
+                task.vdf_stall_retries = retries;
+                task.last_stall_step = Some(last_stall_step);
+                metrics::record_validation_cancellation("vdf_stalled_requeue");
+                self.submit_task(task);
+            }
+            StallAction::Panic(reason) => panic!(
+                "VDF wait stalled and cannot be safely healed (block={hash}, \
+                 current_step={current_step}, reason={reason:?}); crashing per never-mislabel rule"
+            ),
+        }
+    }
+
     /// Spawn a VDF-validated block into the concurrent validation JoinSet.
     pub(super) fn spawn_concurrent(&mut self, task: BlockValidationTask) {
         let block_hash = task.sealed_block.header().block_hash;
@@ -1008,6 +1107,131 @@ mod tests {
     /// 1s) spuriously fires under parallel-CI CPU starvation on a current-thread runtime
     /// (the spawned task can't be polled in time), so keep it generously loose.
     const HANDLE_RESOLVE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // --- stall_retry_action: the pure gate + bound decision (Codex impl review finding 1) ---
+
+    #[test]
+    fn stall_retry_canonical_first_stall_requeues() {
+        assert_eq!(
+            stall_retry_action(BlockPriority::CanonicalExtension, None, 0, 7, 2),
+            StallAction::Requeue {
+                retries: 1,
+                last_stall_step: 7
+            }
+        );
+    }
+
+    #[test]
+    fn stall_retry_canonical_noprogress_counts_then_panics() {
+        // Same stalled-at step each time → consecutive no-progress stalls count down.
+        assert_eq!(
+            stall_retry_action(BlockPriority::Canonical, Some(7), 1, 7, 2),
+            StallAction::Requeue {
+                retries: 2,
+                last_stall_step: 7
+            }
+        );
+        assert_eq!(
+            stall_retry_action(BlockPriority::Canonical, Some(7), 2, 7, 2),
+            StallAction::Panic(StallPanicReason::FrozenWriter)
+        );
+    }
+
+    #[test]
+    fn stall_retry_resets_when_buffer_advanced() {
+        // A higher stalled-at step means the buffer moved since the last stall (a cascade healing
+        // predecessors) → budget resets, never trips the bound.
+        assert_eq!(
+            stall_retry_action(BlockPriority::CanonicalExtension, Some(7), 2, 9, 2),
+            StallAction::Requeue {
+                retries: 1,
+                last_stall_step: 9
+            }
+        );
+    }
+
+    #[test]
+    fn stall_retry_fork_or_unknown_panics() {
+        assert_eq!(
+            stall_retry_action(BlockPriority::Fork, None, 0, 7, 2),
+            StallAction::Panic(StallPanicReason::NonCanonical)
+        );
+        assert_eq!(
+            stall_retry_action(BlockPriority::Unknown, Some(7), 5, 9, 2),
+            StallAction::Panic(StallPanicReason::NonCanonical)
+        );
+    }
+
+    // --- handle_stalled_vdf_task: the dispatch wiring (calculate_priority + requeue/panic) ---
+
+    fn stub_task_for(block: &IrysBlockHeader, guard: &BlockTreeReadGuard) -> BlockValidationTask {
+        let sealed = Arc::new(
+            SealedBlock::new(
+                block.clone(),
+                BlockBody {
+                    block_hash: block.block_hash,
+                    ..Default::default()
+                },
+            )
+            .expect("sealing block"),
+        );
+        BlockValidationTask::test_stub(sealed, guard.clone())
+    }
+
+    #[tokio::test]
+    async fn handle_stalled_canonical_requeues_with_updated_fields() {
+        let (guard, blocks) = setup_canonical_chain_scenario(3);
+        // Test-mode spawn: `submit` auto-starts the only pending task (spawning a no-op future,
+        // never the real `execute()` that would read the stub's uninitialised inner), so the
+        // requeued task lands in `current` with its updated retry clone, not in `pending`.
+        let mut coordinator = ValidationCoordinator::new_with_strategy(
+            guard.clone(),
+            VdfScheduler::new_test_mode(tokio::runtime::Handle::current()),
+        );
+        // blocks[2] is height-2 and Onchain → Canonical priority.
+        let task = stub_task_for(&blocks[2], &guard);
+        let hash = task.sealed_block.header().block_hash;
+        coordinator.handle_stalled_vdf_task(task, 7);
+        let current = coordinator
+            .vdf_scheduler
+            .current
+            .as_ref()
+            .expect("canonical block must be requeued and started");
+        assert_eq!(current.hash, hash);
+        let requeued = current
+            .requeue_task
+            .as_ref()
+            .expect("requeue clone retained");
+        assert_eq!(requeued.vdf_stall_retries, 1);
+        assert_eq!(requeued.last_stall_step, Some(7));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "never-mislabel")]
+    async fn handle_stalled_noncanonical_panics() {
+        let (guard, _blocks) = setup_canonical_chain_scenario(3);
+        let mut coordinator =
+            ValidationCoordinator::new(guard.clone(), tokio::runtime::Handle::current());
+        // A block absent from the tree → Unknown priority → not safe to retry.
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = 99;
+        header.test_sign();
+        let task = stub_task_for(&header, &guard);
+        coordinator.handle_stalled_vdf_task(task, 7);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "FrozenWriter")]
+    async fn handle_stalled_frozen_canonical_panics() {
+        let (guard, blocks) = setup_canonical_chain_scenario(3);
+        let mut coordinator =
+            ValidationCoordinator::new(guard.clone(), tokio::runtime::Handle::current());
+        let mut task = stub_task_for(&blocks[2], &guard);
+        // Already at the bound, and the buffer has not advanced (same stalled-at step).
+        task.vdf_stall_retries = MAX_CONSECUTIVE_NOPROGRESS_STALLS;
+        task.last_stall_step = Some(7);
+        coordinator.handle_stalled_vdf_task(task, 7);
+    }
 
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]

@@ -470,6 +470,19 @@ buffer's current step) is left unfolded — it is already a degraded best-effort
 - **Lock poisoning.** `run_vdf` already exits gracefully on a poisoned VDF lock
   (`crates/vdf/src/vdf.rs:83`); the supervisor must treat that as full shutdown, not
   a re-anchor.
+- **Fast-forward drain strands a paused follower (drain stall).** The re-anchor drains the
+  *entire* fast-forward queue after rebuilding to the canonical tip `T` (to discard stale
+  orphaned-fork steps that would re-poison — `be55d7796`). It therefore also drops any *legitimate
+  canonical* fast-forward step for a block above `T` that was in flight at the drain instant (the
+  recovery adopts the canonical fork incrementally, so such steps exist). A mining-paused follower
+  never local-steps, so `store_step` gap-rejects the next step and the buffer is stranded at `T`;
+  validation's `wait_for_step` then stalls. This is **not** unrecoverable (correcting the earlier
+  "fast-forward is not re-supplied … never re-sent" reasoning, which described the rejected
+  LCA-anchor): the stall is handled in the validation layer by a bounded, canonicality-gated
+  requeue — the canonical block is re-validated, which re-sends the verified-canonical step (`run_vdf`
+  consumes fast-forward even while paused), healing the buffer. A fork block, or a buffer frozen
+  past the bound, still crashes per the never-mislabel rule. See
+  `design/docs/vdf-validation-stall-detection.md` and `ValidationCoordinator::handle_stalled_vdf_task`.
 
 ## Testing
 

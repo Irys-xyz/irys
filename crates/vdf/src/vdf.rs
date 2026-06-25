@@ -1180,6 +1180,247 @@ mod tests {
         );
     }
 
+    /// Reproduction for the fast-forward drain stall (Codex P1). On a mining-paused follower the
+    /// VDF loop advances ONLY via fast-forward — it never local-steps (the pause gate in `run_vdf`).
+    /// `reanchor_to_canonical_tip` drains the WHOLE fast-forward queue after rebuilding to the
+    /// canonical tip T, so a legitimate canonical step for T+1 that was in flight at the drain
+    /// instant is lost. `store_step` then gap-rejects the next (higher) canonical step, so the
+    /// buffer is stranded at T and validation's `wait_for_step(>T)` stalls — which
+    /// `active_validations.rs` turns into a node-killing panic.
+    ///
+    /// This characterises the current (buggy) behaviour; a fix must let the paused follower reach
+    /// the stranded step so the final wait succeeds.
+    #[tokio::test]
+    async fn reanchor_drain_strands_paused_follower_at_tip() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Rebuild to canonical tip step 7 (self-contained chain, no DB reads).
+        let genesis = mock_canonical_block(0, 0x00, 0xFF, &[0x10], 1, 0x90, 0x91);
+        let b1 = mock_canonical_block(1, 0x01, 0x00, &[0x11, 0x12], 3, 0x92, 0x93);
+        let tip = mock_canonical_block(2, 0x02, 0x01, &[0x13, 0xBB], 7, 0x94, 0x95);
+        let canonical = vec![genesis, b1, tip];
+
+        let (_tmp, db) = temp_db();
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 7, None)));
+        let atomic = Arc::new(AtomicU64::new(7));
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // A LEGITIMATE canonical fast-forward step for tip+1 (=8), in flight at the drain instant
+        // (the block at step 8 is being adopted while the re-anchor runs).
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .expect("queue the in-flight canonical FF step");
+
+        // Mining paused: this is a syncing follower, the only configuration where the loop cannot
+        // recompute a dropped step.
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &canonical,
+            &db,
+            Arc::clone(&is_mining_enabled),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+        let ReanchorOutcome::Reanchored(anchor) = outcome else {
+            panic!("expected Reanchored on a successful rebuild");
+        };
+        assert_eq!(anchor.step, 7, "re-anchored to the canonical tip");
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "the drain discarded the in-flight canonical step 8 (root of the bug)"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            7,
+            "rebuilt buffer holds canonical steps only up to the tip (step 8 is gone)"
+        );
+
+        // Paused follower resumes run_vdf at the re-anchored tip.
+        let chain_sync_state = ChainSyncState::new(true, false);
+        let shutdown_token = CancellationToken::new();
+        let vdf_steps_guard = VdfStateReadonly::new(live.clone());
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            let live = live.clone();
+            let atomic = Arc::clone(&atomic);
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    anchor.step,
+                    anchor.hash,
+                    anchor.reset_seed,
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    live,
+                    atomic,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        // Let the loop enter its paused path.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The next canonical block's fast-forward starts at step 9 (step 8 was dropped and is never
+        // re-sent). store_step gap-rejects it against the buffer at 7, so it cannot fill the hole a
+        // paused follower has no other way to close.
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x15),
+                global_step_number: 9,
+            }))
+            .await
+            .unwrap();
+
+        // BUG: the buffer never reaches step 8, so validation's wait stalls (-> panic in
+        // active_validations.rs). A fix must make this wait succeed instead.
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let result = vdf_steps_guard
+            .wait_for_step(8, cancel, Duration::from_millis(200))
+            .await;
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .map(std::string::ToString::to_string)
+                .is_some_and(|m| m.contains("did not advance")),
+            "Codex P1: paused follower stalls at the re-anchor tip (got {result:?})"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            7,
+            "buffer stranded at the re-anchor tip — the dropped canonical step is unrecoverable while paused"
+        );
+
+        shutdown_token.cancel();
+        handle.join().unwrap();
+    }
+
+    /// Companion to `reanchor_drain_strands_paused_follower_at_tip`: once the requeued block's
+    /// re-validation re-sends the dropped contiguous step (tip+1 = 8), `run_vdf` consumes it even
+    /// while mining is paused, the buffer advances, and the wait that previously stalled succeeds.
+    /// This is the heal the bounded canonicality-gated requeue (Approach B) relies on.
+    #[tokio::test]
+    async fn reanchor_drain_heals_when_dropped_step_is_resent() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let genesis = mock_canonical_block(0, 0x00, 0xFF, &[0x10], 1, 0x90, 0x91);
+        let b1 = mock_canonical_block(1, 0x01, 0x00, &[0x11, 0x12], 3, 0x92, 0x93);
+        let tip = mock_canonical_block(2, 0x02, 0x01, &[0x13, 0xBB], 7, 0x94, 0x95);
+        let canonical = vec![genesis, b1, tip];
+
+        let (_tmp, db) = temp_db();
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 7, None)));
+        let atomic = Arc::new(AtomicU64::new(7));
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // Canonical step tip+1 (=8) in flight at the drain instant → dropped by the drain.
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .expect("queue the in-flight canonical FF step");
+
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &canonical,
+            &db,
+            Arc::clone(&is_mining_enabled),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+        let ReanchorOutcome::Reanchored(anchor) = outcome else {
+            panic!("expected Reanchored on a successful rebuild");
+        };
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "the drain discarded the in-flight canonical step 8"
+        );
+
+        let chain_sync_state = ChainSyncState::new(true, false);
+        let shutdown_token = CancellationToken::new();
+        let vdf_steps_guard = VdfStateReadonly::new(live.clone());
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            let live = live.clone();
+            let atomic = Arc::clone(&atomic);
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    anchor.step,
+                    anchor.hash,
+                    anchor.reset_seed,
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    live,
+                    atomic,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The requeued block's re-validation re-sends the dropped step 8 (contiguous with tip 7).
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .await
+            .unwrap();
+
+        // HEAL: the paused follower consumes the re-sent fast-forward, so the wait that stalled in
+        // the companion test now succeeds and the buffer advances.
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_guard
+            .wait_for_step(8, cancel, Duration::from_secs(5))
+            .await
+            .expect("re-sent fast-forward must heal the stranded buffer");
+        assert_eq!(
+            live.read().unwrap().global_step,
+            8,
+            "buffer advanced to the re-sent step"
+        );
+
+        shutdown_token.cancel();
+        handle.join().unwrap();
+    }
+
     /// Rebuild failure (empty canonical chain) -> keep the live buffer untouched and fall back to
     /// its own tip, carrying the previous reset seed. The atomic is not touched.
     #[test]

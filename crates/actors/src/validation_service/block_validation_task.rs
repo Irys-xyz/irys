@@ -75,6 +75,12 @@ pub(super) struct BlockValidationTask {
     /// When the task first entered the validation queue. Preserved across
     /// preemption/requeue so queue-age metrics reflect total waiting time.
     pub enqueued_at: Instant,
+    /// Consecutive VDF wait stalls with no buffer advancement, for the bounded
+    /// stall-retry (see `stall_retry_action`). Preserved across requeue.
+    pub vdf_stall_retries: u32,
+    /// The `global_step` at which this task last stalled. Lets the bound tell a
+    /// frozen buffer (same step) from a heal cascade advancing it (higher step).
+    pub last_stall_step: Option<u64>,
 }
 
 impl PartialEq for BlockValidationTask {
@@ -160,6 +166,8 @@ impl BlockValidationTask {
             skip_vdf_validation,
             parent_span,
             enqueued_at,
+            vdf_stall_retries: 0,
+            last_stall_step: None,
         }
     }
 
@@ -198,6 +206,8 @@ impl BlockValidationTask {
             skip_vdf_validation: false,
             parent_span: tracing::Span::none(),
             enqueued_at: Instant::now(),
+            vdf_stall_retries: 0,
+            last_stall_step: None,
         }
     }
 

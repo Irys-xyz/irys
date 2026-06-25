@@ -61,6 +61,15 @@ pub enum VdfValidationResult {
     ParentMissing {
         parent_hash: BlockHash,
     },
+    /// A cooperative VDF wait stalled (no `global_step` advance for `progress_timeout`). Carries
+    /// the stalled-at step so the dispatch's advancement-keyed bound can distinguish a heal cascade
+    /// (buffer advancing) from a frozen writer. The dispatch — not the spawned task — decides
+    /// requeue (canonical heal) vs panic (non-canonical, or frozen past the bound). See
+    /// `active_validations::handle_stalled_vdf_task` and
+    /// design/docs/vdf-validation-stall-detection.md.
+    Stalled {
+        current_step: u64,
+    },
 }
 
 /// Sentinel error returned from `ensure_vdf_is_valid` when Stage B observes
@@ -450,6 +459,13 @@ impl ValidationService {
                                 // recalculates priority (which may have changed
                                 // due to reorgs) before re-entering the queue.
                                 coordinator.submit_task(task);
+                            }
+                            VdfValidationResult::Stalled { current_step } => {
+                                metrics::record_validation_result("vdf", "stalled");
+                                // A canonical block heals via requeue (re-validation re-sends the
+                                // dropped fast-forward step); a non-canonical block or a frozen
+                                // buffer panics. See `handle_stalled_vdf_task`.
+                                coordinator.handle_stalled_vdf_task(task, current_step);
                             }
                             VdfValidationResult::ParentMissing { parent_hash } => {
                                 // Stage B observed the parent missing from
