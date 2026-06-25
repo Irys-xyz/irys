@@ -1732,6 +1732,75 @@ mod tests {
         );
     }
 
+    /// NC-0042 R4 amount-attribution: when distinct miners own different expired
+    /// slots (hence different txs), each miner's reward must be exactly the
+    /// treasury slice of ITS slot's txs — never cross-credited to the other
+    /// miner. The straddle MAPPING (tx start offset → slot → miner) is proven by
+    /// `collect_attributes_each_tx_to_its_start_offset_slot_miners`; this composes
+    /// that mapping with `aggregate_balance_deltas` to confirm the resulting
+    /// per-miner reward AMOUNTS. (A full multi-node produced-block variant that
+    /// decodes the on-chain reward shadow-txs is a reasonable follow-up — the
+    /// refund harness is single-miner and cannot place two miners' slots in one
+    /// boundary block without partition-assignment control it does not expose.)
+    #[test]
+    fn aggregate_attributes_each_slots_fee_to_its_own_miner() {
+        let node_config = irys_types::NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let miner_a = IrysAddress::repeat_byte(0xAA);
+        let miner_b = IrysAddress::repeat_byte(0xBB);
+
+        // tx0,tx1 stored by miner A (slot 0); tx2,tx3 by miner B (slot 1) — the
+        // outcome of the per-slot start-offset attribution on a straddle block.
+        let mk = |id_byte: u8, term_fee: u64| -> DataTransactionHeader {
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256::from([id_byte; 32]),
+                    term_fee: U256::from(term_fee).into(),
+                    data_size: 100,
+                    ..Default::default()
+                },
+                metadata: irys_types::DataTransactionMetadata::new(),
+            })
+        };
+        let txs = [mk(1, 1000), mk(2, 2000), mk(3, 4000), mk(4, 8000)];
+
+        let mut tx_to_miners = BTreeMap::new();
+        tx_to_miners.insert(txs[0].id, Arc::new(vec![miner_a]));
+        tx_to_miners.insert(txs[1].id, Arc::new(vec![miner_a]));
+        tx_to_miners.insert(txs[2].id, Arc::new(vec![miner_b]));
+        tx_to_miners.insert(txs[3].id, Arc::new(vec![miner_b]));
+
+        let epoch_snapshot = EpochSnapshot::default();
+        let result =
+            aggregate_balance_deltas(txs.to_vec(), &tx_to_miners, &epoch_snapshot, &config, false)
+                .unwrap();
+
+        // Single miner per tx ⇒ that miner gets the whole treasury slice. Compute
+        // it via TermFeeCharges so the assertion tracks the real fee model.
+        let treasury = |term_fee: u64| -> U256 {
+            TermFeeCharges::new(U256::from(term_fee).into(), &config.consensus)
+                .unwrap()
+                .distribution_on_expiry(&[IrysAddress::ZERO])
+                .unwrap()[0]
+        };
+        assert_eq!(
+            result.reward_balance_increment.get(&miner_a).unwrap().0,
+            treasury(1000).saturating_add(treasury(2000)),
+            "miner A receives exactly slot-0 txs' treasury slices"
+        );
+        assert_eq!(
+            result.reward_balance_increment.get(&miner_b).unwrap().0,
+            treasury(4000).saturating_add(treasury(8000)),
+            "miner B receives exactly slot-1 txs' treasury slices"
+        );
+        assert_eq!(
+            result.reward_balance_increment.len(),
+            2,
+            "exactly the two slot owners are credited — no cross-crediting"
+        );
+    }
+
     #[test]
     fn test_ledger_expiry_balance_delta_merge_combines_rewards() {
         use crate::shadow_tx_generator::RollingHash;
