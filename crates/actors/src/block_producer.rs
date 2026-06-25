@@ -1626,6 +1626,7 @@ pub trait BlockProdStrategy {
             .calculate_expired_ledger_fees(
                 &parent_epoch_snapshot,
                 block_height,
+                block_timestamp,
                 prev_block_header,
                 &mempool_txs,
             )
@@ -1826,10 +1827,23 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
+        block_timestamp: UnixTimestampMs,
         prev_block_header: &IrysBlockHeader,
         mempool_txs: &MempoolTxs,
     ) -> eyre::Result<LedgerExpiryBalanceDelta> {
         let chunk_size = self.inner().config.consensus.chunk_size;
+        // Gate for the write-window exclusion: the Cascade status of THIS block
+        // (its own timestamp — the value `perform_epoch_tasks` reads to gate the
+        // `touch_active_ledger_slots` that rescues these slots). Must not use the
+        // parent-snapshot helper below: at the activation epoch the parent still
+        // predates activation, which would disable the exclusion while the touch
+        // already runs — settling a slot that did not recycle.
+        let cascade_active_for_block = self
+            .inner()
+            .config
+            .consensus
+            .hardforks
+            .is_cascade_active_at(block_timestamp.to_secs());
         // `ledger`'s cumulative total_chunks at the block being produced =
         // parent total + chunks added by this block's selected txs. This is the
         // exact value that lands in the block header (see produce_block_*), and
@@ -1857,6 +1871,7 @@ pub trait BlockProdStrategy {
             &self.inner().db,
             true, // expect txs to be promoted — return perm fee refund if not
             new_total(DataLedger::Submit, &mempool_txs.submit_tx),
+            cascade_active_for_block,
         )
         .in_current_span()
         .await?;
@@ -1885,6 +1900,7 @@ pub trait BlockProdStrategy {
                     &self.inner().db,
                     false, // no promotion for these ledgers
                     new_total(ledger, txs),
+                    cascade_active_for_block,
                 )
                 .in_current_span()
                 .await?;

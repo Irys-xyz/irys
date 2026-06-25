@@ -329,6 +329,15 @@ impl EpochSnapshot {
         // Gated on the Cascade hardfork so pre-activation replay is unchanged.
         // Must run AFTER allocation (so this epoch's new slots exist) and BEFORE
         // expiry (so freshly-written slots aren't expired this same epoch).
+        //
+        // LOCKSTEP: the recycle set produced here (touch then `expire_ledger_slots`
+        // on this post-touch snapshot) MUST equal the set the fee model settles,
+        // which `block_producer::ledger_expiry` derives by calling
+        // `get_expiring_partition_info` on the PARENT snapshot with the same
+        // window exclusion. Both the touch above and that exclusion are gated on
+        // this same `cascade_active` (the new epoch block's Cascade status); if
+        // one is gated and the other isn't they diverge — a slot would recycle
+        // here yet still be settled, or vice versa. Keep the two gates aligned.
         if cascade_active {
             self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block);
         }
@@ -1324,11 +1333,20 @@ impl EpochSnapshot {
     /// `new_total_chunks` is `ledger`'s cumulative `total_chunks` at the new
     /// epoch block; `prev` is read from this (parent) snapshot's epoch block,
     /// matching `touch_active_ledger_slots`.
+    ///
+    /// `cascade_active` MUST be the Cascade status of the epoch block being
+    /// produced/validated (`is_cascade_active_at(new_epoch_block.timestamp)`),
+    /// NOT of this parent snapshot — it has to mirror the
+    /// `touch_active_ledger_slots` gate in `perform_epoch_tasks`, which keys off
+    /// the new epoch block. When false, the window exclusion is skipped and the
+    /// result reproduces the original (pre-Cascade) master set, so pre-activation
+    /// history replays bit-identically.
     pub fn get_expiring_partition_info(
         &self,
         epoch_height: u64,
         ledger: DataLedger,
         new_total_chunks: u64,
+        cascade_active: bool,
     ) -> Vec<ExpiringPartitionInfo> {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         let prev_total_chunks = self
@@ -1340,9 +1358,12 @@ impl EpochSnapshot {
             .unwrap_or(0);
 
         // A slot that received data this epoch is rescued by the touch, not
-        // recycled — same window as `Ledgers::touch_filled_slots`.
+        // recycled — same window as `Ledgers::touch_filled_slots`. The touch is
+        // Cascade-gated, so pre-activation no slot is rescued: skip the exclusion
+        // when Cascade is inactive so the expiring set matches the original
+        // master behavior (no window exclusion) for bit-identical replay.
         let written_this_epoch = |slot_index: usize| -> bool {
-            if new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
+            if !cascade_active || new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
                 return false;
             }
             let first = prev_total_chunks / chunks_per_slot;

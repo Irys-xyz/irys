@@ -776,7 +776,9 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
         let snap = tree
             .get_epoch_snapshot(&parent_block.block_hash)
             .expect("parent epoch snapshot");
-        snap.get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total)
+        // cascade_active=true: this scenario runs post-activation (cascade
+        // activated at timestamp 0), matching the producer/validator gate.
+        snap.get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
@@ -944,6 +946,197 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         refunds_at_recycle >= 1,
         "deferred PermFeeRefund for the unpromoted txs must land when slot 0 \
          actually recycles at E+{window}={recycle} (got {refunds_at_recycle})"
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Pre-Cascade replay-identity guard for the Submit-ledger expiry-fee path.
+///
+/// The write-window exclusion in `get_expiring_partition_info` mirrors the
+/// `last_height` touch, which is Cascade-gated. But the Submit fee path runs
+/// unconditionally (Submit is always live), so the exclusion MUST be gated on
+/// the block's Cascade status too. Otherwise, pre-activation, a slot that
+/// actually recycles (no touch to rescue it) would be silently dropped from the
+/// settled set — diverging from the original master binary and breaking
+/// bit-identical replay of pre-Cascade history.
+///
+/// This is the pre-activation twin of
+/// `heavy_cascade_expiry_fee_model_matches_actual_recycle`: there the touch
+/// RESCUES the late-filled slot, so it is excluded from BOTH sets and they match
+/// at "without slot 1". Here Cascade is inactive, the slot is NOT rescued, so it
+/// must appear in BOTH the fee set and the actual recycle set.
+///
+/// Scenario (nbe=2, submit_ledger_epoch_length=2 -> window=4, C=10 chunks), with
+/// NO Cascade configured:
+/// 1. Epoch L: write 12 Submit chunks -> slot 0 full, slot 1 partial (frontier);
+///    extra empty slots so slot 1 is non-last. Slot 1 allocated at L.
+/// 2. Idle the full window so slot 1 ages to its expiry epoch E = L + 4.
+/// 3. Epoch E: write again -> lands in slot 1. Pre-Cascade there is NO touch, so
+///    slot 1 still expires at E (its `last_height` stays L).
+///
+/// At E the fee-predicted set (parent, `cascade_active=false`) must equal the
+/// actual recycle set AND contain the recycled slot. The buggy unconditional
+/// exclusion (`cascade_active=true`) would instead DROP that slot — demonstrated
+/// explicitly so a regression in the gate fails here.
+#[test_log::test(tokio::test)]
+async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let submit_ledger_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+    let window = submit_ledger_epoch_length * num_blocks_in_epoch; // 4
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        // Cascade intentionally NOT configured: this exercises pre-activation
+        // behavior, where the last_height touch is gated off.
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let ctx = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    // Post one unpromoted publish-data tx (chunks never uploaded) -> grows the
+    // Submit ledger's `total_chunks`. `chunks` controls how many chunks it spans.
+    async fn post_submit(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &irys_types::irys::IrysSigner,
+        chunk_size: u64,
+        tag: u8,
+        chunks: usize,
+    ) -> eyre::Result<()> {
+        let mut data = vec![7_u8; chunks * chunk_size as usize];
+        data[0] = tag;
+        let anchor = ctx.get_anchor().await?;
+        let tx = ctx.post_data_tx(anchor, data, signer).await;
+        ctx.wait_for_mempool(tx.header.id, 30).await?;
+        Ok(())
+    }
+
+    // Get past genesis epoch processing into a steady state.
+    while ctx.get_canonical_chain_height().await <= num_blocks_in_epoch {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch L: 4 txs × 3 chunks = 12 chunks -> slot 0 full, slot 1 partial frontier.
+    for i in 0_u8..4 {
+        post_submit(&ctx, &signer, chunk_size, i, 3).await?;
+    }
+    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < l {
+        ctx.mine_block().await?;
+    }
+
+    // Idle through the window so slot 1 ages to its expiry epoch E = L + window.
+    let e = l + window;
+    while ctx.get_canonical_chain_height().await < e - 1 {
+        ctx.mine_block().await?;
+    }
+
+    // Resume exactly in epoch E: write into the (still-frontier) slot 1. No touch
+    // pre-Cascade, so slot 1 still expires here.
+    post_submit(&ctx, &signer, chunk_size, 200, 3).await?;
+    while ctx.get_canonical_chain_height().await < e {
+        ctx.mine_block().await?;
+    }
+
+    // Submit's cumulative total_chunks at the epoch block E (the value the
+    // producer/validator feed to the fee calc).
+    let epoch_block = ctx.get_block_by_height(e).await?;
+    let e_total = epoch_block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::Submit as u32)
+        .map(|dl| dl.total_chunks)
+        .unwrap_or(0);
+    let parent_block = ctx.get_block_by_height(e - 1).await?;
+
+    // Actual recycle set recorded by the NEW epoch snapshot at E.
+    let mut actual_set = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&epoch_block.block_hash)
+            .expect("epoch snapshot at E");
+        snap.expired_partition_infos
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.ledger_id == DataLedger::Submit)
+            .map(|p| p.slot_index)
+            .collect::<Vec<_>>()
+    };
+    actual_set.sort_unstable();
+    actual_set.dedup();
+
+    // The late-filled headroom slot MUST recycle pre-Cascade (no touch rescue).
+    // If this is empty the setup failed to age a non-last slot — fail loudly
+    // rather than let the equality assert pass vacuously.
+    assert!(
+        !actual_set.is_empty(),
+        "expected a Submit slot to actually recycle at E={e} pre-Cascade \
+         (got empty recycle set; setup failed to age a non-last slot)"
+    );
+
+    // Fee-predicted set with the CORRECT pre-activation gate (cascade_active=false):
+    // no window exclusion, so it must equal what actually recycles.
+    let mut fee_set = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot");
+        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, false)
+            .into_iter()
+            .map(|p| p.slot_index)
+            .collect::<Vec<_>>()
+    };
+    fee_set.sort_unstable();
+    fee_set.dedup();
+
+    assert_eq!(
+        fee_set, actual_set,
+        "pre-Cascade: fee-distribution set (cascade_active=false) must equal the \
+         actual recycle set at E={e}; dropping a recycled slot diverges from the \
+         original master binary and breaks pre-Cascade replay"
+    );
+
+    // Demonstrate the divergence the gate prevents: with the exclusion
+    // erroneously applied pre-activation (cascade_active=true), the late-filled
+    // slot is dropped from the settled set even though it recycles.
+    let mut fee_set_buggy = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot");
+        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, true)
+            .into_iter()
+            .map(|p| p.slot_index)
+            .collect::<Vec<_>>()
+    };
+    fee_set_buggy.sort_unstable();
+    fee_set_buggy.dedup();
+
+    assert_ne!(
+        fee_set_buggy, actual_set,
+        "sanity: the unconditional exclusion (cascade_active=true) must DROP the \
+         recycled slot here — this is exactly the divergence the Cascade gate \
+         prevents pre-activation"
     );
 
     ctx.stop().await;

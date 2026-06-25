@@ -4446,6 +4446,16 @@ async fn generate_expected_shadow_transactions(
                 .map(|dl| dl.total_chunks)
                 .unwrap_or(0)
         };
+        // Gate for the write-window exclusion: THIS block's own Cascade status —
+        // the same value `perform_epoch_tasks` reads to gate the
+        // `touch_active_ledger_slots` that rescues these slots. Must match the
+        // producer (which uses the produced block's timestamp), and must NOT be
+        // the parent-snapshot helper (`is_cascade_active_for_epoch`), which lags
+        // by an epoch at the activation boundary.
+        let cascade_active_for_block = config
+            .consensus
+            .hardforks
+            .is_cascade_active_at(block.timestamp_secs());
         let mut result = ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
             block.height,
@@ -4457,6 +4467,7 @@ async fn generate_expected_shadow_transactions(
             db,
             true, // expect txs to be promoted — return perm fee refund if not
             ledger_total(DataLedger::Submit),
+            cascade_active_for_block,
         )
         .in_current_span()
         .await
@@ -4480,6 +4491,7 @@ async fn generate_expected_shadow_transactions(
                     db,
                     false, // no promotion for these ledgers
                     ledger_total(ledger),
+                    cascade_active_for_block,
                 )
                 .in_current_span()
                 .await
