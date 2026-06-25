@@ -16,9 +16,12 @@ pub struct LedgerSlot {
     pub partitions: Vec<H256>,
     /// Flag marking weather this ledger slot is expired or not
     pub is_expired: bool,
-    /// Block height at which this slot was allocated. Set once at allocation and
-    /// never mutated, so slot expiry (`last_height <= expiry_height`) is a pure
-    /// function of canonical slot state — see `get_all_expired_slot_indexes`.
+    /// Block height the slot's expiry clock counts from. Set at allocation, then
+    /// refreshed to the last write height by the Cascade-gated `touch_filled_slots`
+    /// (so expiry counts from the last data write, not from allocation). Either way
+    /// it is a deterministic function of canonical state, so slot expiry
+    /// (`last_height <= expiry_height`) stays a pure function of canonical slot
+    /// state — see `get_all_expired_slot_indexes` and `touch_filled_slots`.
     pub last_height: u64,
 }
 
