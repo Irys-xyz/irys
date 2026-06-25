@@ -945,12 +945,17 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
                 );
-                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof_by_signer(
-                    &self.db,
-                    proof.data_root,
-                    local_addr,
-                ) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+                // Content-checked delete, same TOCTOU guard as the `to_delete`
+                // loop: only remove the local proof if it is still the one we
+                // scanned, so a proof refreshed since the scan is preserved.
+                let scanned = CompactCachedIngressProof(CachedIngressProof {
+                    address: local_addr,
+                    proof: proof.clone(),
+                });
+                if let Err(e) = self.db.update_eyre(|rw_tx| {
+                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
+                }) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }
         }
@@ -977,11 +982,16 @@ impl InnerCacheTask {
                     ingress_proof.data_root = ?proof.data_root,
                     "Regeneration disabled, removing ingress proof for data root"
                 );
-                if let Err(e) = ChunkIngressServiceInner::remove_ingress_proof_by_signer(
-                    &self.db,
-                    proof.data_root,
-                    local_addr,
-                ) {
+                // Content-checked delete, same TOCTOU guard as the `to_delete`
+                // loop: only remove the local proof if it is still the one we
+                // scanned, so a proof refreshed since the scan is preserved.
+                let scanned = CompactCachedIngressProof(CachedIngressProof {
+                    address: local_addr,
+                    proof: proof.clone(),
+                });
+                if let Err(e) = self.db.update_eyre(|rw_tx| {
+                    delete_ingress_proof_if_unchanged(rw_tx, proof.data_root, scanned)
+                }) {
                     warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }
