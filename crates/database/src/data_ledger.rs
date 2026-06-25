@@ -555,12 +555,24 @@ impl Ledgers {
 
         let slots = self.slots_mut(ledger);
 
-        for idx in first..=last {
-            if let Some(slot) = slots.get_mut(idx as usize) {
-                // Don't resurrect an already-expired slot.
-                if !slot.is_expired {
-                    slot.last_height = height;
-                }
+        // Clamp the touched range to the slots that actually exist: `first`/`last`
+        // come from cumulative chunk counts, so `last` can point past the
+        // allocated slots (e.g. when allocation lags ingress). Iterate the
+        // existing slice directly rather than probing non-existent indices.
+        let Ok(first) = usize::try_from(first) else {
+            return;
+        };
+        if first >= slots.len() {
+            return;
+        }
+        let last = usize::try_from(last)
+            .unwrap_or(usize::MAX)
+            .min(slots.len() - 1);
+
+        for slot in &mut slots[first..=last] {
+            // Don't resurrect an already-expired slot.
+            if !slot.is_expired {
+                slot.last_height = height;
             }
         }
     }
