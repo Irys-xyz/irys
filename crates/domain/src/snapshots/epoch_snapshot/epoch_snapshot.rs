@@ -305,13 +305,16 @@ impl EpochSnapshot {
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
-        // Activate Cascade hardfork ledgers at the activation epoch boundary
-        if self
+        // Cascade activation and the retention `last_height` touch both gate on
+        // the same activation timestamp; evaluate the gate once.
+        let cascade_active = self
             .config
             .consensus
             .hardforks
-            .is_cascade_active_at(new_epoch_block.timestamp_secs())
-        {
+            .is_cascade_active_at(new_epoch_block.timestamp_secs());
+
+        // Activate Cascade hardfork ledgers at the activation epoch boundary
+        if cascade_active {
             self.ledgers.activate_cascade(&self.config.consensus);
         }
 
@@ -320,6 +323,15 @@ impl EpochSnapshot {
         self.try_genesis_init(new_epoch_block);
 
         self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
+
+        // Cascade retention fix: a slot's expiry clock should count from the
+        // last epoch data was written into it, not from when it was allocated.
+        // Gated on the Cascade hardfork so pre-activation replay is unchanged.
+        // Must run AFTER allocation (so this epoch's new slots exist) and BEFORE
+        // expiry (so freshly-written slots aren't expired this same epoch).
+        if cascade_active {
+            self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block);
+        }
 
         self.expire_ledger_slots(new_epoch_block);
 
@@ -532,6 +544,42 @@ impl EpochSnapshot {
                 self.calculate_additional_slots(previous_epoch_block, new_epoch_block, ledger);
             debug!("Allocating {} slots for ledger {:?}", &part_slots, &ledger);
             self.ledgers[ledger].allocate_slots(part_slots, new_epoch_block.height);
+        }
+    }
+
+    /// Refreshes `last_height` for every slot that received canonical data this
+    /// epoch, so each slot's expiry counts from the last write into it rather
+    /// than from its allocation. The newly-written chunk window is the delta of
+    /// the per-ledger cumulative `total_chunks` between the previous and current
+    /// epoch blocks (the same values `calculate_additional_slots` reads).
+    ///
+    /// Caller gates this on the Cascade hardfork.
+    fn touch_active_ledger_slots(
+        &mut self,
+        previous_epoch_block: &Option<IrysBlockHeader>,
+        new_epoch_block: &IrysBlockHeader,
+    ) {
+        let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
+        for ledger in self.ledgers.active_ledgers() {
+            let ledger_total = |block: &IrysBlockHeader| -> u64 {
+                block
+                    .data_ledgers
+                    .iter()
+                    .find(|dl| dl.ledger_id == ledger as u32)
+                    .map(|dl| dl.total_chunks)
+                    .unwrap_or(0)
+            };
+
+            let new_total = ledger_total(new_epoch_block);
+            let prev_total = previous_epoch_block.as_ref().map_or(0, ledger_total);
+
+            self.ledgers.touch_filled_slots(
+                ledger,
+                prev_total,
+                new_total,
+                chunks_per_slot,
+                new_epoch_block.height,
+            );
         }
     }
 

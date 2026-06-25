@@ -483,6 +483,14 @@ impl Ledgers {
         }
     }
 
+    /// Mutable counterpart of [`get_slots`]: the slot `Vec` backing `ledger`.
+    fn slots_mut(&mut self, ledger: DataLedger) -> &mut Vec<LedgerSlot> {
+        match ledger {
+            DataLedger::Publish => &mut self.perm.slots,
+            ledger => &mut self.get_term_ledger_mut(ledger).slots,
+        }
+    }
+
     /// Get the slot needs for the ledger, returning a vector of (slot index, number of partitions needed)
     pub fn get_slot_needs(&self, ledger: DataLedger) -> Vec<(usize, usize)> {
         match ledger {
@@ -497,16 +505,9 @@ impl Ledgers {
         slot_index: usize,
         partition_hash: H256,
     ) {
-        match ledger {
-            DataLedger::Publish => {
-                self.perm.slots[slot_index].partitions.push(partition_hash);
-            }
-            ledger => {
-                self.get_term_ledger_mut(ledger).slots[slot_index]
-                    .partitions
-                    .push(partition_hash);
-            }
-        }
+        self.slots_mut(ledger)[slot_index]
+            .partitions
+            .push(partition_hash);
     }
 
     pub fn remove_partition_from_slot(
@@ -515,16 +516,51 @@ impl Ledgers {
         slot_index: usize,
         partition_hash: &H256,
     ) {
-        match ledger {
-            DataLedger::Publish => {
-                self.perm.slots[slot_index]
-                    .partitions
-                    .retain(|p| p != partition_hash);
-            }
-            ledger => {
-                self.get_term_ledger_mut(ledger).slots[slot_index]
-                    .partitions
-                    .retain(|p| p != partition_hash);
+        self.slots_mut(ledger)[slot_index]
+            .partitions
+            .retain(|p| p != partition_hash);
+    }
+
+    /// Refresh `last_height` on every slot that received new canonical data
+    /// during this epoch, so a slot's expiry clock counts from the last time
+    /// data was written into it rather than from when the slot was allocated.
+    ///
+    /// `prev_total_chunks` / `new_total_chunks` are the ledger's cumulative
+    /// chunk counts at the previous and current epoch blocks (read from the
+    /// block header's `DataTransactionLedger.total_chunks`). `chunks_per_slot`
+    /// is `num_chunks_in_partition` — the canonical chunks held by one slot,
+    /// matching the capacity model in `calculate_additional_slots` and the slot
+    /// range math in `block_producer::ledger_expiry::compute_chunk_range`.
+    ///
+    /// Caller is responsible for gating this on the Cascade hardfork so that
+    /// pre-activation chains replay bit-identically (slots keep their
+    /// allocation-time `last_height`).
+    pub fn touch_filled_slots(
+        &mut self,
+        ledger: DataLedger,
+        prev_total_chunks: u64,
+        new_total_chunks: u64,
+        chunks_per_slot: u64,
+        height: u64,
+    ) {
+        // No data added this epoch (or misconfigured slot size) -> nothing to do.
+        if new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
+            return;
+        }
+
+        // The new chunks [prev_total_chunks, new_total_chunks) land in slots
+        // first..=last (each slot i owns chunk range [i*C, (i+1)*C)).
+        let first = prev_total_chunks / chunks_per_slot;
+        let last = (new_total_chunks - 1) / chunks_per_slot;
+
+        let slots = self.slots_mut(ledger);
+
+        for idx in first..=last {
+            if let Some(slot) = slots.get_mut(idx as usize) {
+                // Don't resurrect an already-expired slot.
+                if !slot.is_expired {
+                    slot.last_height = height;
+                }
             }
         }
     }
@@ -774,5 +810,89 @@ mod tests {
 
         let expiring = ledgers.get_expiring_partitions(1000);
         assert!(expiring.iter().all(|e| e.ledger_id != DataLedger::Publish));
+    }
+
+    /// Allocate `count` Submit slots, all stamped with `last_height = alloc_height`.
+    fn ledgers_with_submit_slots(count: u64, alloc_height: u64) -> Ledgers {
+        let config = ConsensusConfig::testing();
+        let mut ledgers = Ledgers::new(&config, false);
+        ledgers[DataLedger::Submit].allocate_slots(count, alloc_height);
+        ledgers
+    }
+
+    fn submit_last_heights(ledgers: &Ledgers) -> Vec<u64> {
+        ledgers
+            .get_slots(DataLedger::Submit)
+            .iter()
+            .map(|s| s.last_height)
+            .collect()
+    }
+
+    #[test]
+    fn test_touch_filled_slots_marks_all_written_slots() {
+        // 3 slots of 10 chunks each; new chunks [0, 25) span slots 0,1,2.
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 0, 25, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![100, 100, 100]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_partial_window_touches_only_overlap() {
+        // New chunks [12, 18) fall entirely within slot 1 (covers [10, 20)).
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 12, 18, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 100, 1]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_boundary_aligned_prev() {
+        // prev exactly on a slot boundary: [10, 11) is the first chunk of slot 1,
+        // so slot 0 must NOT be touched.
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 10, 11, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 100, 1]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_noop_when_no_data() {
+        // new <= prev means no chunks were added this epoch.
+        let mut ledgers = ledgers_with_submit_slots(2, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 15, 15, 10, 100);
+        ledgers.touch_filled_slots(DataLedger::Submit, 20, 10, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 1]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_noop_when_zero_slot_size() {
+        // chunks_per_slot == 0 must be a guarded no-op (no divide-by-zero panic).
+        let mut ledgers = ledgers_with_submit_slots(2, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 0, 100, 0, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 1]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_skips_expired_slots() {
+        // An already-expired slot must not be resurrected, even if data lands in it.
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.slots_mut(DataLedger::Submit)[1].is_expired = true;
+        ledgers.touch_filled_slots(DataLedger::Submit, 0, 25, 10, 100);
+
+        let slots = ledgers.get_slots(DataLedger::Submit);
+        assert_eq!(slots[0].last_height, 100);
+        assert_eq!(
+            slots[1].last_height, 1,
+            "expired slot keeps its last_height"
+        );
+        assert!(slots[1].is_expired, "expired slot stays expired");
+        assert_eq!(slots[2].last_height, 100);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_ignores_out_of_range_indices() {
+        // Window implies slots up to index 4 but only 2 slots exist: no panic,
+        // existing slots still updated.
+        let mut ledgers = ledgers_with_submit_slots(2, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 0, 50, 10, 100);
+        assert_eq!(submit_last_heights(&ledgers), vec![100, 100]);
     }
 }
