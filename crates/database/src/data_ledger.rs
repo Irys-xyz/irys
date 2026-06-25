@@ -907,4 +907,24 @@ mod tests {
         ledgers.touch_filled_slots(DataLedger::Submit, 0, 50, 10, 100);
         assert_eq!(submit_last_heights(&ledgers), vec![100, 100]);
     }
+
+    #[test]
+    fn test_touch_filled_slots_refreshes_publish_perm_ledger() {
+        // `touch_active_ledger_slots` iterates `active_ledgers()`, which INCLUDES
+        // Publish. When `publish_ledger_epoch_length` makes perm slots expirable,
+        // the touch must refresh them through the `slots_mut(Publish)` (perm) path
+        // exactly as for term ledgers — otherwise perm expiry would still count
+        // from allocation instead of the last write.
+        let config = ConsensusConfig::testing();
+        let mut ledgers = Ledgers::new(&config, false);
+        ledgers[DataLedger::Publish].allocate_slots(3, 1);
+        // New chunks [0, 25) span perm slots 0,1,2 (10 chunks each).
+        ledgers.touch_filled_slots(DataLedger::Publish, 0, 25, 10, 100);
+        let heights: Vec<u64> = ledgers
+            .get_slots(DataLedger::Publish)
+            .iter()
+            .map(|s| s.last_height)
+            .collect();
+        assert_eq!(heights, vec![100, 100, 100]);
+    }
 }

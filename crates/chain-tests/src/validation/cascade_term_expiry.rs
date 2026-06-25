@@ -1142,3 +1142,156 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
     ctx.stop().await;
     Ok(())
 }
+
+/// Cascade-active last-write expiry for the PERMANENT (Publish) ledger.
+///
+/// `touch_active_ledger_slots` iterates `Ledgers::active_ledgers()`, which
+/// includes Publish — so when `publish_ledger_epoch_length` makes perm slots
+/// expirable, the last-write touch applies to them too. The term-ledger tests
+/// above never exercise this (Publish data only grows via promotion), so this
+/// test pins the perm path end-to-end.
+///
+/// Scenario (nbe=2, publish_ledger_epoch_length=4 -> window=8, perm slot C=4):
+/// 1. Promote a full slot's worth of data (4 chunks) -> fills perm slot 0; the
+///    epoch allocates a headroom slot 1 (empty), stamped `last_height = a1`.
+/// 2. Idle an epoch (no Publish data) so the headroom slot 1 ages unchanged.
+/// 3. Promote another 4 chunks -> fills slot 1 at a LATER epoch a2; the touch
+///    advances slot 1's `last_height` from its allocation epoch a1 to a2 (and
+///    allocates slot 2, so slot 1 is now non-last and expiry-eligible).
+/// 4. At a1 + window the slot WOULD expire if anchored to its allocation epoch;
+///    with last-write anchoring it survives because its last write was a2 > a1.
+///
+/// On `master` (touch gated off / absent) slot 1 keeps `last_height = a1` and
+/// both the step-3 advance and the step-4 retention assertions fail.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_publish_last_write_expiry() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let publish_ledger_epoch_length = 4_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 4_u64; // perm slot capacity = 4 chunks
+    let window = publish_ledger_epoch_length * num_blocks_in_epoch; // 8
+    let full_slot_bytes = (num_chunks_in_partition * chunk_size) as usize; // fills one slot
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.epoch.publish_ledger_epoch_length = Some(publish_ledger_epoch_length);
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.num_chunks_in_recall_range = 1;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length,
+            thirty_day_epoch_length,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let node = test_node.start_and_wait_for_packing("test", 30).await;
+
+    // Post and fully promote one publish-data tx (Submit -> Publish), growing the
+    // Publish ledger's `total_chunks` by `bytes`-worth of chunks.
+    async fn promote_publish(
+        node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &irys_types::irys::IrysSigner,
+        bytes: usize,
+        tag: u8,
+    ) -> eyre::Result<()> {
+        let mut data = vec![7_u8; bytes];
+        data[0] = tag;
+        let anchor = node.get_anchor().await?;
+        let tx = node.post_data_tx(anchor, data, signer).await;
+        node.wait_for_mempool(tx.header.id, 30).await?;
+        node.upload_chunks(&tx).await?;
+        node.mine_block().await?; // confirm in Submit, trigger ingress-proof generation
+        node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 30)
+            .await?;
+        node.mine_block().await?; // promote Submit -> Publish
+        Ok(())
+    }
+
+    // Mine past Cascade activation so the perm/term expiry machinery is live.
+    while node.get_canonical_chain_height().await <= activation_height {
+        node.mine_block().await?;
+    }
+
+    // --- Batch 1: fill perm slot 0; epoch allocates headroom slot 1. ---
+    promote_publish(&node, &signer, full_slot_bytes, 1).await?;
+    node.mine_until_next_epoch().await?;
+    let a1 = node.get_canonical_chain_height().await;
+    let a1_slot1_last_height = {
+        let snapshot = node.get_canonical_epoch_snapshot();
+        let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+        assert!(
+            slots.len() >= 2,
+            "expected >=2 perm slots after batch 1 (got {})",
+            slots.len()
+        );
+        slots[1].last_height
+    };
+
+    // --- Idle one epoch with no Publish data: headroom slot 1 must not move. ---
+    node.mine_until_next_epoch().await?;
+
+    // --- Batch 2: fill perm slot 1 at a later epoch; touch advances its clock. ---
+    promote_publish(&node, &signer, full_slot_bytes, 2).await?;
+    node.mine_until_next_epoch().await?;
+    let a2 = node.get_canonical_chain_height().await;
+    assert!(
+        a2 > a1,
+        "batch 2 epoch (a2={a2}) must be after batch 1 epoch (a1={a1})"
+    );
+    let a2_slot1_last_height = {
+        let snapshot = node.get_canonical_epoch_snapshot();
+        let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+        assert!(
+            slots.len() >= 3,
+            "expected >=3 perm slots after batch 2 (got {})",
+            slots.len()
+        );
+        slots[1].last_height
+    };
+
+    // CORE: the Cascade touch advanced the previously-allocated headroom slot to
+    // its actual write epoch. On master it would keep its allocation last_height.
+    assert!(
+        a2_slot1_last_height > a1_slot1_last_height,
+        "Cascade touch must advance perm slot 1's last_height from its allocation \
+         epoch ({a1_slot1_last_height}) to its write epoch (got {a2_slot1_last_height})"
+    );
+
+    // --- Retention: at a1 + window the slot would expire if anchored to its
+    //     allocation epoch; last-write anchoring keeps it alive (last write a2). ---
+    let alloc_anchored_expiry = a1 + window;
+    assert!(
+        a2 < alloc_anchored_expiry,
+        "test setup drift: batch 2 epoch (a2={a2}) must precede a1+window ({alloc_anchored_expiry})"
+    );
+    while node.get_canonical_chain_height().await < alloc_anchored_expiry {
+        node.mine_block().await?;
+    }
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        slots.len() >= 3,
+        "slot 1 must remain non-last (expiry-eligible) at a1+window"
+    );
+    assert!(
+        !slots[1].is_expired,
+        "perm slot 1 must still be ALIVE at a1+window ({alloc_anchored_expiry}): its \
+         last write was a2={a2}, so last-write anchoring retains it (allocation-anchored \
+         expiry would have recycled it here)"
+    );
+    drop(snapshot);
+
+    node.stop().await;
+    Ok(())
+}
