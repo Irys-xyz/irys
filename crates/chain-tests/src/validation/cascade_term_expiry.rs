@@ -454,3 +454,173 @@ async fn heavy_cascade_slot_expiry_anchored_to_last_write() -> eyre::Result<()> 
     ctx.stop().await;
     Ok(())
 }
+
+/// Mid-chain Cascade activation: verify the Submit ledger's `last_height`
+/// maintenance transitions correctly *across* the activation epoch.
+///
+/// The Submit ledger is live before Cascade, with `last_height` frozen at
+/// allocation (the touch is gated off). This test pins the transition:
+/// 1. **Pre-activation:** writing Submit data does NOT advance slot 0's
+///    `last_height` — it stays at its genesis allocation height (0).
+/// 2. **Post-activation:** the touch runs, and a write advances `last_height`
+///    to the epoch that processes it, so expiry now counts from the last write.
+///
+/// Activation is performed via stop -> set `cascade.activation_timestamp = now`
+/// -> restart (the established mid-chain hardfork pattern, as in the Aurora
+/// tests). On replay the historical epoch blocks predate the activation
+/// timestamp so they stay pre-activation, while every newly mined epoch block
+/// is post-activation — deterministic, no wall-clock race.
+///
+/// Note: the first post-activation epoch re-anchors any Submit data whose
+/// cumulative-chunk delta lands in that epoch's window (the activation-straddle
+/// cohort). The touch never *retroactively* rescans slots already fully counted
+/// and dormant before activation — those keep their allocation-time
+/// `last_height` — but data still being counted around the boundary is picked
+/// up. This test therefore asserts the robust endpoints (frozen before, tracks
+/// the write after) rather than the exact straddle value.
+///
+/// A single, large partition keeps all the small Submit writes inside slot 0,
+/// which therefore stays the only (last) slot: protected from expiry, so its
+/// `last_height` can be observed cleanly across the boundary.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() -> eyre::Result<()>
+{
+    let num_blocks_in_epoch = 2_u64;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    // Large partition so the handful of 1-chunk Submit writes all land in slot 0.
+    let num_chunks_in_partition = 100_u64;
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        // Cascade intentionally NOT configured yet — activated mid-chain below.
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let node = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    // Post one 1-chunk data tx. The Submit ledger is not user-targetable
+    // directly; published data lands in Submit (pre-promotion), so a Publish
+    // data tx is what grows Submit's `total_chunks`.
+    async fn post_submit_chunk(
+        node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &irys_types::irys::IrysSigner,
+        chunk_size: u64,
+        tag: u8,
+    ) -> eyre::Result<()> {
+        let mut data = vec![7_u8; chunk_size as usize];
+        data[0] = tag;
+        let anchor = node.get_anchor().await?;
+        let tx = node.post_data_tx(anchor, data, signer).await;
+        node.wait_for_mempool(tx.header.id, 30).await?;
+        Ok(())
+    }
+
+    // Reads (submit_slot0_last_height, submit_slot_count, active_ledger_count)
+    // from the epoch snapshot at the canonical tip.
+    async fn submit_state(
+        node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    ) -> eyre::Result<(u64, usize, usize)> {
+        let h = node.get_canonical_chain_height().await;
+        let block = node.get_block_by_height(h).await?;
+        let tree = node.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("epoch snapshot should exist at tip");
+        let slots = snapshot.ledgers.get_slots(DataLedger::Submit);
+        Ok((
+            slots[0].last_height,
+            slots.len(),
+            snapshot.ledgers.active_ledgers().len(),
+        ))
+    }
+
+    // === Pre-activation: write Submit data across two epochs ===
+    // Cascade is inactive, so the touch never runs; slot 0 must keep its genesis
+    // allocation last_height (0) despite receiving data.
+    for tag in 0_u8..2 {
+        post_submit_chunk(&node, &signer, chunk_size, tag).await?;
+        let boundary = next_epoch_boundary(node.get_canonical_chain_height().await + 1);
+        while node.get_canonical_chain_height().await < boundary {
+            node.mine_block().await?;
+        }
+    }
+
+    let (pre_last_height, pre_slot_count, pre_ledger_count) = submit_state(&node).await?;
+    assert_eq!(
+        pre_ledger_count, 2,
+        "cascade ledgers must be absent pre-activation (Publish + Submit only)"
+    );
+    assert_eq!(pre_slot_count, 1, "Submit should still be a single slot");
+    assert_eq!(
+        pre_last_height, 0,
+        "pre-activation: touch gated off, slot 0 keeps its genesis last_height"
+    );
+
+    // === Activate Cascade mid-chain via stop -> set activation = now -> restart ===
+    let mut stopped = node.stop().await;
+    let activation_timestamp = UnixTimestamp::now()
+        .expect("system time after unix epoch")
+        .as_secs();
+    stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
+        one_year_epoch_length,
+        thirty_day_epoch_length,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+    let node = stopped.start().await;
+
+    // Mine a couple of cascade-active epochs so activate_cascade runs.
+    for _ in 0..(2 * num_blocks_in_epoch) {
+        node.mine_block().await?;
+    }
+
+    let (_, _, mid_ledger_count) = submit_state(&node).await?;
+    assert_eq!(
+        mid_ledger_count, 4,
+        "cascade ledgers (OneYear + ThirtyDay) must be present after activation"
+    );
+
+    // === Post-activation write: the touch now advances last_height ===
+    post_submit_chunk(&node, &signer, chunk_size, 200).await?;
+    let write_height = node.mine_block().await?.height;
+    let boundary = next_epoch_boundary(write_height);
+    while node.get_canonical_chain_height().await < boundary {
+        node.mine_block().await?;
+    }
+
+    let (post_last_height, post_slot_count, _) = submit_state(&node).await?;
+    assert_eq!(post_slot_count, 1, "Submit should still be a single slot");
+    assert!(
+        post_last_height > pre_last_height,
+        "post-activation: last_height must advance past the frozen pre-activation \
+         value (pre={}, post={})",
+        pre_last_height,
+        post_last_height
+    );
+    assert_eq!(
+        post_last_height, boundary,
+        "post-activation write must anchor last_height to the epoch that processes \
+         it (write at height {}, processed at epoch {})",
+        write_height, boundary
+    );
+
+    node.stop().await;
+    Ok(())
+}
