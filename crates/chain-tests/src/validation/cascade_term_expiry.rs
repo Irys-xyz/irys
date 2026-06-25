@@ -595,9 +595,14 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
 
     // === Activate Cascade mid-chain via stop -> set activation = now -> restart ===
     let mut stopped = node.stop().await;
+    // +1s so activation is STRICTLY after every pre-restart block: their
+    // timestamps are all <= now() (second-granular), and `cascade_at` activates
+    // on inclusive equality (>=), so `now()` alone could collide with the tip's
+    // second and wrongly mark a historical epoch cascade-active during replay.
     let activation_timestamp = UnixTimestamp::now()
         .expect("system time after unix epoch")
-        .as_secs();
+        .as_secs()
+        + 1;
     stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
         activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
         one_year_epoch_length,
