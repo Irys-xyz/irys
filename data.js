@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782164532534,
+  "lastUpdate": 1782388876737,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7279,6 +7279,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "317d58caba3182fabd5bb66c498bf9059e4a0dd1",
+          "message": "feat(ledgers): anchor slot expiry to last write (Cascade-gated) (#1458)\n\n* feat(ledgers): anchor slot expiry to last write (Cascade-gated)\n\nA data-ledger slot's `last_height` was stamped only at allocation and never\nupdated, so data written late into a slot's life was evicted on the slot's\noriginal clock rather than getting its full retention window. Refresh\n`last_height` each epoch a slot receives new canonical data so a slot's\nexpiry counts from its last write.\n\nGated behind the Cascade hardfork: pre-activation chains keep allocation-time\nexpiry and replay bit-identically. Derived only from epoch-block header\n`total_chunks` deltas, so it is deterministic and replay-safe.\n\nAlso de-duplicates the perm/term slot-access match (now via a private\n`slots_mut` helper, shared by push/remove/touch) and hoists the duplicated\n`is_cascade_active_at` gate into one `cascade_active` bool.\n\n* test(cascade): mid-chain activation transition for Submit last_height\n\nAdds slow_heavy_cascade_midchain_activation_submit_last_height_transition:\nactivates Cascade mid-chain (stop -> set activation_timestamp = now ->\nrestart) with the Submit ledger already live, and asserts last_height is\nfrozen at allocation pre-activation (touch gated off) and tracks the write\nepoch post-activation. Covers the activation-epoch transition that the\ngenesis-activation tests (activation_timestamp = 0) don't exercise.\n\n* refactor(ledgers): clamp touch_filled_slots range to existing slots\n\nReplace the first..=last + get_mut(idx as usize) loop with an early\nreturn when first is past the slice, a checked clamp of last to the last\nvalid index, and direct iteration over the slot slice. last is derived\nfrom cumulative chunk counts and can point past allocated slots; this\navoids probing non-existent indices and the per-iteration cast. Behavior\nis unchanged (covered by the existing touch_filled_slots unit tests).\n\n* test(cascade): cover boundary-spanning tx in last-write expiry test\n\nRework heavy_cascade_slot_expiry_anchored_to_last_write into\nheavy_cascade_spanning_tx_last_write_expiry: a single tx now spans the\nslot 0/1 boundary. Asserts the spanning tx bumps both halves to the write\nepoch, the head slot freezes (not coupled to later tail writes), the head\nexpires exactly epoch_length after its write (full retention, no premature\nhalf-tx loss), and the tail survives until epoch_length after its own last\nwrite. Matches the start-slot ownership model in block_producer/ledger_expiry.rs.\n\n* fix(ledgers): align term-fee settlement with actual slot recycle\n\nThe term-fee model predicted the expiring set from the PARENT epoch snapshot\n(pre-touch), while the real recycle set is computed on the new snapshot\n(post-touch). A slot written in the very epoch it would expire is rescued by\nthe last_height touch (not recycled) but was still settled by the parent-based\nfee calc — so its fees would be distributed then, and again when it actually\nrecycles later (double distribution).\n\nget_expiring_partition_info now excludes slots written in the current epoch's\n[prev_total, new_total) chunk window — the same window touch_filled_slots\nbumps — so the fee-settled set equals what expire_partitions actually recycles.\nThe new total is computed by the producer (parent total + calculate_chunks_added,\nmatching the block header) and read from the header by the validator, so both\nagree.\n\nAdds heavy_cascade_expiry_fee_model_matches_actual_recycle reproducing the\ndivergence (fee set [0,1] vs actual [0]) and asserting alignment.\n\n* test(cascade): rescued slot defers both reward and refund\n\nAdds heavy_cascade_rescued_slot_defers_reward_and_refund: a Submit slot\nholding an unpromoted tx, rescued at its expiry epoch, emits neither a\nTermFeeReward nor a PermFeeRefund that epoch, and the deferred PermFeeRefund\nlands only when the slot actually recycles later. Closes the refund side of\nthe fee/recycle alignment with the same rigor as the distribution side.\n\n* test(cascade): make mid-chain activation timestamp strictly after tip\n\ncascade_at activates on inclusive equality (>=), and every pre-restart block\ntimestamp is <= now() (second-granular), so using now() directly as the\nactivation timestamp could collide with the tip's second and wrongly mark a\nhistorical epoch cascade-active during replay. Offset by +1s so activation is\nstrictly after every pre-restart block.\n\n* fix(ledgers): gate expiry-fee window exclusion on Cascade (replay-identity)\n\nThe write-window exclusion in `get_expiring_partition_info` mirrors the\nCascade-gated `last_height` touch, but was applied unconditionally — while the\nSubmit-ledger expiry-fee path runs regardless of Cascade. Pre-activation (touch\ngated off) a late-filled Submit slot still recycles on its allocation clock,\nyet the unconditional exclusion dropped it from settlement. The original\n(master) binary settled it, so a new binary could not re-validate pre-Cascade\nhistory bit-identically.\n\nThread the producing/validating block's own Cascade status\n(`is_cascade_active_at(block.timestamp)`) through `calculate_expired_ledger_fees`\n-> `collect_expired_partitions` -> `get_expiring_partition_info`; skip the\nexclusion when inactive so settlement reproduces the original master set. Gate\non the block's own timestamp rather than the parent-snapshot helper\n(`is_cascade_active_for_epoch`), which lags by an epoch and would mis-gate at\nthe activation boundary (touch on, exclusion off -> settling a slot that did\nnot recycle).\n\nAlso add a lockstep comment tying the two recycle paths (the post-touch\n`expire_ledger_slots` set and the parent-snapshot window filter) and their\nshared gate, plus a pre-activation Submit regression test — the twin of the\npost-activation fee/recycle assertion — proving the recycled slot is settled\n(not dropped) when Cascade is inactive.\n\n* test(cascade): cover Publish-ledger last-write expiry\n\nThe last_height touch runs on every active ledger — active_ledgers()\nincludes Publish — but the existing perm_ledger_expiry tests never enable\nCascade, so the gated Publish path was uncovered. Add:\n\n- a deterministic unit test proving touch_filled_slots refreshes the perm\n  (Publish) slot path via slots_mut(Publish).\n- a heavy integration test where a previously-allocated headroom perm slot,\n  filled by promotion at a later epoch, has its expiry clock advanced to its\n  write epoch and survives past the allocation-anchored expiry point (this\n  fails on master).\n\n* refactor(ledgers): dedupe block total_chunks lookups; harden slot_index conversion\n\nExtract IrysBlockHeader::ledger_total_chunks(DataLedger) and replace the four\nhand-rolled data_ledgers.iter().find(...).map(...).unwrap_or(0) copies across\nthe producer, validator, and epoch snapshot. Non-behavioral — the consensus\nconfig hash regression test is unchanged.\n\nIn the write-window exclusion, convert slot_index with u64::try_from(..).expect(..)\nrather than an `as` cast: the conversion is lossless on supported targets, but a\npanic is the right failure mode for the impossible case — a silent fallback would\ndiverge the settled set from the recycled set.\n\nRefresh the now-stale block_validation threat-model comment: the expiry-fee calc\nnow reads the candidate header's timestamp and total_chunks (both validated\nindependently; they only select which slots settle).\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-06-25T12:45:03+01:00",
+          "tree_id": "43652b8e28ebd1edc54e0f0481d93ead6ddd0cc1",
+          "url": "https://github.com/Irys-xyz/irys/commit/317d58caba3182fabd5bb66c498bf9059e4a0dd1"
+        },
+        "date": 1782388875563,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015347,
+            "range": "± 0.000233",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.130498,
+            "range": "± 0.012057",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.279406,
+            "range": "± 0.063885",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.403995,
+            "range": "± 0.220156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.080277,
+            "range": "± 0.000835",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 761.248805,
+            "range": "± 31.474374",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.898716,
+            "range": "± 9.293891",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119366,
+            "range": "± 0.003745",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1213.050606,
+            "range": "± 109.000491",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1544.678132,
+            "range": "± 6.667367",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034212,
+            "range": "± 0.00108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.818685,
+            "range": "± 0.630831",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.194287,
+            "range": "± 0.947499",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
