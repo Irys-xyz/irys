@@ -248,36 +248,43 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
     Ok(())
 }
 
-/// Verify that a slot's expiry is anchored to the LAST epoch data was written
-/// into it, not to when the slot was allocated.
+/// Verify last-write expiry for a transaction that SPANS a slot boundary, and
+/// that the two slots it occupies expire independently and correctly — i.e. the
+/// spanning tx is never *under*-retained ("half a tx expiring early").
 ///
-/// This exercises the Cascade retention fix: `last_height` is refreshed each
-/// epoch a slot receives new canonical data, so a slot that keeps receiving
-/// writes across multiple epochs stays alive for `epoch_length` epochs measured
-/// from its *last* write.
+/// A tx's data is a contiguous chunk range; when it crosses the slot boundary
+/// `C` it occupies the head slot N (where it starts) and the tail slot N+1. The
+/// touch refreshes `last_height` on every slot the epoch's chunk window covers,
+/// so at write time BOTH halves get the same `last_height`. Because `total_chunks`
+/// is monotonic, the head slot then *freezes* at the write epoch (it can never
+/// receive more data), while the tail keeps filling in later epochs.
 ///
 /// Scenario (num_blocks_in_epoch=2, thirty_day_epoch_length=2 -> expiry after
-/// 4 blocks):
-/// 1. Write 6 chunks of ThirtyDay data -> lands in slot 0; the next epoch
-///    boundary E_a allocates extra slots (so slot 0 is no longer the protected
-///    last slot) and stamps slot 0's `last_height = E_a`.
-/// 2. One epoch later, write 2 more chunks -> also lands in slot 0 (offsets 6,7
-///    are still within slot 0's [0, 10) range); the next boundary E_b = E_a + 2
-///    re-stamps slot 0's `last_height = E_b`.
-/// 3. At boundary E_a + 4 (when allocation-time semantics would have expired
-///    slot 0) the slot must still be ACTIVE, because its last write was at E_b.
-/// 4. At boundary E_b + 4 the slot finally expires.
+/// 4 blocks; slot size C = 10 chunks):
+/// 1. Epoch E_a: write 4 txs × 3 chunks = 12 chunks. They fill slot 0 (chunks
+///    0-9) and spill into slot 1 (chunks 10-11). The 4th tx (chunks 9,10,11)
+///    SPANS the slot 0/1 boundary: it starts in slot 0 (head) and ends in slot 1
+///    (tail). Allocation also adds extra slots so neither slot 0 nor slot 1 is
+///    the protected last slot. Both slot 0 and slot 1 get `last_height = E_a`.
+/// 2. Epoch E_b (> E_a): write 1 more tx × 3 chunks into slot 1 (chunks 12-14).
+///    Only slot 1 is touched -> `last_height = E_b`. Slot 0 (head) stays at E_a,
+///    proving the head's retention is NOT coupled to later tail writes.
+/// 3. At E_a + 4: the head slot 0 expires — exactly `epoch_length` after the
+///    spanning tx was written (full retention honored, not premature) — while the
+///    tail slot 1 is still ALIVE (its last write was E_b). The spanning tx's two
+///    slots expire at different times; the head governs the tx's readable life.
+/// 4. At E_b + 4: the tail slot 1 also expires.
 ///
-/// Without the last-write fix slot 0 would retain its genesis/allocation
-/// `last_height` and be expired by step 3 — so this test fails on `master`.
+/// Without the last-write fix slot 0 would keep its genesis `last_height` and be
+/// expired well before E_a + 4 — so this test fails on `master`.
 #[test_log::test(tokio::test)]
-async fn heavy_cascade_slot_expiry_anchored_to_last_write() -> eyre::Result<()> {
+async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2_u64;
     let activation_height = num_blocks_in_epoch;
     let one_year_epoch_length = 8_u64;
     let thirty_day_epoch_length = 2_u64; // expires 2×2 = 4 blocks after last write
     let chunk_size = 32_u64;
-    let num_chunks_in_partition = 10_u64;
+    let num_chunks_in_partition = 10_u64; // slot size C = 10 chunks
     let expiry_blocks = thirty_day_epoch_length * num_blocks_in_epoch; // 4
 
     let mut config = NodeConfig::testing().with_consensus(|c| {
@@ -308,14 +315,37 @@ async fn heavy_cascade_slot_expiry_anchored_to_last_write() -> eyre::Result<()> 
         }
     };
 
+    // Reads (slot0_last_height, slot0_expired, slot1_last_height, slot1_expired,
+    // slot_count, first_unexpired) for the ThirtyDay ledger at `height`.
+    async fn thirty_day_slots(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        height: u64,
+    ) -> eyre::Result<(u64, bool, u64, bool, usize, usize)> {
+        let block = ctx.get_block_by_height(height).await?;
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("epoch snapshot should exist");
+        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
+        Ok((
+            slots[0].last_height,
+            slots[0].is_expired,
+            slots[1].last_height,
+            slots[1].is_expired,
+            slots.len(),
+            snapshot.get_first_unexpired_slot_index(DataLedger::ThirtyDay),
+        ))
+    }
+
     // Mine past the Cascade activation height.
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
 
-    // --- Batch 1: 6 chunks (2 txs × 96 bytes) into slot 0 ---
-    for i in 0_u8..2 {
-        let mut tx_data = vec![9_u8; 96];
+    // --- Batch 1 @ E_a: 4 txs × 3 chunks = 12 chunks -> slot 0 (0-9) + slot 1
+    //     (10-11). The 4th tx (chunks 9,10,11) spans the slot 0/1 boundary. ---
+    for i in 0_u8..4 {
+        let mut tx_data = vec![9_u8; 96]; // 96 bytes / 32 = 3 chunks
         tx_data[0] = i;
         let price = ctx.get_data_price(DataLedger::ThirtyDay, 96).await?;
         let tx = signer.create_transaction_with_fees(
@@ -331,43 +361,39 @@ async fn heavy_cascade_slot_expiry_anchored_to_last_write() -> eyre::Result<()> 
     }
     let h1 = ctx.mine_block().await?.height;
     let epoch_a = next_epoch_boundary(h1);
-
-    // Mine to E_a so the epoch snapshot allocates extra slots (so slot 0 is no
-    // longer the protected last slot) and stamps slot 0's last_height = E_a.
     while ctx.get_canonical_chain_height().await < epoch_a {
         ctx.mine_block().await?;
     }
 
-    let block_a = ctx.get_block_by_height(epoch_a).await?;
-    let (la_after_a, expired_after_a, slot_count) = {
-        let tree = ctx.node_ctx.block_tree_guard.read();
-        let snapshot = tree
-            .get_epoch_snapshot(&block_a.block_hash)
-            .expect("epoch snapshot should exist at E_a");
-        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
-        (slots[0].last_height, slots[0].is_expired, slots.len())
-    };
+    let (s0_la_a, s0_exp_a, s1_la_a, _s1_exp_a, slot_count, _) =
+        thirty_day_slots(&ctx, epoch_a).await?;
     assert!(
-        slot_count >= 2,
-        "expected slot 0 to no longer be the (protected) last slot, slot_count={}",
+        slot_count >= 3,
+        "expected slots 0 and 1 to both be non-last (slot_count={})",
         slot_count
     );
+    // The spanning tx bumps BOTH halves to the write epoch.
     assert_eq!(
-        la_after_a, epoch_a,
-        "slot 0 last_height should be stamped to first-write epoch E_a={}",
+        s0_la_a, epoch_a,
+        "head slot 0 last_height should be the write epoch E_a={}",
         epoch_a
     );
-    assert!(!expired_after_a, "slot 0 must not be expired at E_a");
+    assert_eq!(
+        s1_la_a, epoch_a,
+        "tail slot 1 last_height should be the write epoch E_a={} (spanning tx \
+         touched both halves)",
+        epoch_a
+    );
+    assert!(!s0_exp_a, "head slot 0 must not be expired at E_a");
 
-    // --- Batch 2: 2 more chunks (1 tx × 64 bytes), one epoch later ---
-    // Ensure we're strictly past E_a so the second write lands in a later epoch.
+    // --- Batch 2 @ E_b (> E_a): 1 tx × 3 chunks into slot 1 (chunks 12-14) ---
     while ctx.get_canonical_chain_height().await <= epoch_a {
         ctx.mine_block().await?;
     }
     {
-        let mut tx_data = vec![9_u8; 64];
+        let mut tx_data = vec![9_u8; 96];
         tx_data[0] = 100;
-        let price = ctx.get_data_price(DataLedger::ThirtyDay, 64).await?;
+        let price = ctx.get_data_price(DataLedger::ThirtyDay, 96).await?;
         let tx = signer.create_transaction_with_fees(
             tx_data,
             ctx.get_anchor().await?,
@@ -383,72 +409,64 @@ async fn heavy_cascade_slot_expiry_anchored_to_last_write() -> eyre::Result<()> 
     let epoch_b = next_epoch_boundary(h2);
     assert!(
         epoch_b > epoch_a,
-        "second write must occur in a later epoch (E_a={}, E_b={})",
-        epoch_a,
+        "E_b ({epoch_b}) must be after E_a ({epoch_a})"
+    );
+    while ctx.get_canonical_chain_height().await < epoch_b {
+        ctx.mine_block().await?;
+    }
+
+    let (s0_la_b, _, s1_la_b, _, _, _) = thirty_day_slots(&ctx, epoch_b).await?;
+    // Head slot froze at E_a; the later tail write must NOT extend the head.
+    assert_eq!(
+        s0_la_b, epoch_a,
+        "head slot 0 must stay frozen at E_a={} after a later tail write (got {})",
+        epoch_a, s0_la_b
+    );
+    assert_eq!(
+        s1_la_b, epoch_b,
+        "tail slot 1 should advance to its last-write epoch E_b={}",
         epoch_b
     );
 
-    // --- Check 1: at E_a + expiry_blocks, slot 0 must still be ALIVE ---
-    // (Allocation-time semantics would have expired it here.)
-    let first_write_expiry = epoch_a + expiry_blocks;
-    while ctx.get_canonical_chain_height().await < first_write_expiry {
+    // --- Check 1 @ E_a + 4: head expires (full retention from its write), tail
+    //     survives. The spanning tx's two slots expire at DIFFERENT times. ---
+    let head_expiry = epoch_a + expiry_blocks;
+    while ctx.get_canonical_chain_height().await < head_expiry {
         ctx.mine_block().await?;
     }
-    let block_mid = ctx.get_block_by_height(first_write_expiry).await?;
-    let (la_mid, expired_mid, first_unexpired_mid) = {
-        let tree = ctx.node_ctx.block_tree_guard.read();
-        let snapshot = tree
-            .get_epoch_snapshot(&block_mid.block_hash)
-            .expect("epoch snapshot should exist at E_a+expiry");
-        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
-        (
-            slots[0].last_height,
-            slots[0].is_expired,
-            snapshot.get_first_unexpired_slot_index(DataLedger::ThirtyDay),
-        )
-    };
-    assert_eq!(
-        la_mid, epoch_b,
-        "slot 0 last_height should have advanced to last-write epoch E_b={}",
-        epoch_b
+    let (_, s0_exp_mid, _, s1_exp_mid, _, first_unexpired_mid) =
+        thirty_day_slots(&ctx, head_expiry).await?;
+    assert!(
+        s0_exp_mid,
+        "head slot 0 must expire exactly epoch_length after the spanning tx's \
+         write (E_a+{expiry_blocks}={head_expiry})"
     );
     assert!(
-        !expired_mid,
-        "slot 0 must NOT be expired at E_a+{} ({}) — its last write was at E_b={}",
-        expiry_blocks, first_write_expiry, epoch_b
+        !s1_exp_mid,
+        "tail slot 1 must still be ALIVE at E_a+{expiry_blocks} — its last write \
+         was E_b={epoch_b} (no half-tx premature loss; tail lingers)"
     );
     assert_eq!(
-        first_unexpired_mid, 0,
-        "ThirtyDay first-unexpired slot should still be 0 at E_a+{}",
-        expiry_blocks
+        first_unexpired_mid, 1,
+        "first-unexpired ThirtyDay slot should be 1 (head expired, tail alive)"
     );
 
-    // --- Check 2: at E_b + expiry_blocks, slot 0 finally expires ---
-    let last_write_expiry = epoch_b + expiry_blocks;
-    while ctx.get_canonical_chain_height().await < last_write_expiry {
+    // --- Check 2 @ E_b + 4: the tail slot 1 also expires. ---
+    let tail_expiry = epoch_b + expiry_blocks;
+    while ctx.get_canonical_chain_height().await < tail_expiry {
         ctx.mine_block().await?;
     }
-    let block_late = ctx.get_block_by_height(last_write_expiry).await?;
-    let (expired_late, first_unexpired_late) = {
-        let tree = ctx.node_ctx.block_tree_guard.read();
-        let snapshot = tree
-            .get_epoch_snapshot(&block_late.block_hash)
-            .expect("epoch snapshot should exist at E_b+expiry");
-        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
-        (
-            slots[0].is_expired,
-            snapshot.get_first_unexpired_slot_index(DataLedger::ThirtyDay),
-        )
-    };
+    let (_, _, _, s1_exp_late, _, first_unexpired_late) =
+        thirty_day_slots(&ctx, tail_expiry).await?;
     assert!(
-        expired_late,
-        "slot 0 must be expired at E_b+{} ({})",
-        expiry_blocks, last_write_expiry
+        s1_exp_late,
+        "tail slot 1 must expire epoch_length after its last write \
+         (E_b+{expiry_blocks}={tail_expiry})"
     );
     assert!(
-        first_unexpired_late > 0,
-        "ThirtyDay first-unexpired slot should advance past 0 once slot 0 expires (got {})",
-        first_unexpired_late
+        first_unexpired_late > 1,
+        "first-unexpired ThirtyDay slot should advance past 1 once the tail \
+         expires (got {first_unexpired_late})"
     );
 
     ctx.stop().await;
