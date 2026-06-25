@@ -1,8 +1,10 @@
 use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
+use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
     BoundedFee, DataLedger, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
+use reth::rpc::types::TransactionTrait as _;
 
 /// Verify that OneYear and ThirtyDay term ledgers expire at different rates
 /// based on their distinct epoch_length values from the Cascade hardfork config.
@@ -799,6 +801,144 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
         "fee-distribution expiring set (parent, get_expiring_partition_info) must \
          equal the actual recycle set (expired_partition_infos) at epoch E={e}; \
          a mismatch means fees are distributed for a slot that did not recycle"
+    );
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Closes the refund side of the fee/recycle alignment with the same rigor as
+/// the distribution side: a Submit slot RESCUED at its expiry epoch must emit
+/// neither a `TermFeeReward` nor a `PermFeeRefund` that round, and the refund
+/// must instead land when the slot ACTUALLY recycles later (deferred, not lost,
+/// and never doubled).
+///
+/// Scenario (nbe=2, submit_ledger_epoch_length=2 -> window=4, C=10):
+/// 1. Epoch L: post one UNPROMOTED publish-data tx (6 chunks; chunks never
+///    uploaded) -> lands in Submit slot 0, allocates empty slots so slot 0 is
+///    non-last. slot 0 last_height=L; it holds an unpromoted tx (refund-eligible).
+/// 2. Idle the full window so slot 0 ages to its expiry epoch E = L + 4.
+/// 3. Epoch E: post another (unpromoted) tx into slot 0 -> touch rescues it.
+///    Assert the epoch block at E has ZERO TermFeeReward and ZERO PermFeeRefund:
+///    the rescued slot is neither settled nor refunded.
+/// 4. Epoch E + 4: slot 0 (last write E) finally recycles -> the deferred
+///    PermFeeRefund for its unpromoted txs lands here.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let submit_ledger_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+    let window = submit_ledger_epoch_length * num_blocks_in_epoch; // 4
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length,
+            thirty_day_epoch_length,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let ctx = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    // Counts (TermFeeReward, PermFeeRefund) shadow txs in the block at `height`.
+    async fn expiry_shadow_counts(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        height: u64,
+    ) -> eyre::Result<(usize, usize)> {
+        let block = ctx.get_block_by_height(height).await?;
+        let evm = ctx.wait_for_evm_block(block.evm_block_hash, 30).await?;
+        let (mut rewards, mut refunds) = (0_usize, 0_usize);
+        for tx in evm.body.transactions {
+            let mut input = tx.input().as_ref();
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+                && let Some(packet) = shadow.as_v1()
+            {
+                match packet {
+                    TransactionPacket::TermFeeReward(_) => rewards += 1,
+                    TransactionPacket::PermFeeRefund(_) => refunds += 1,
+                    _ => {}
+                }
+            }
+        }
+        Ok((rewards, refunds))
+    }
+
+    while ctx.get_canonical_chain_height().await <= activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch L: one unpromoted 6-chunk publish tx -> Submit slot 0 (non-last).
+    let anchor = ctx.get_anchor().await?;
+    let tx1 = ctx
+        .post_data_tx(anchor, vec![1_u8; 6 * chunk_size as usize], &signer)
+        .await;
+    ctx.wait_for_mempool(tx1.header.id, 30).await?;
+    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < l {
+        ctx.mine_block().await?;
+    }
+
+    // Idle through the window so slot 0 ages to its expiry epoch E = L + window.
+    let e = l + window;
+    while ctx.get_canonical_chain_height().await < e - 1 {
+        ctx.mine_block().await?;
+    }
+
+    // Resume in epoch E: a second (unpromoted) tx into slot 0 -> rescued.
+    let anchor = ctx.get_anchor().await?;
+    let tx2 = ctx
+        .post_data_tx(anchor, vec![2_u8; chunk_size as usize], &signer)
+        .await;
+    ctx.wait_for_mempool(tx2.header.id, 30).await?;
+    while ctx.get_canonical_chain_height().await < e {
+        ctx.mine_block().await?;
+    }
+
+    // Phase A: the rescued slot must NOT be settled or refunded this epoch.
+    let (rewards_at_e, refunds_at_e) = expiry_shadow_counts(&ctx, e).await?;
+    assert_eq!(
+        rewards_at_e, 0,
+        "rescued Submit slot must not emit a TermFeeReward at its (skipped) expiry epoch E={e}"
+    );
+    assert_eq!(
+        refunds_at_e, 0,
+        "rescued Submit slot must not emit a PermFeeRefund at its (skipped) expiry epoch E={e}"
+    );
+
+    // Phase B: when the slot ACTUALLY recycles (E + window), the deferred refund
+    // for its unpromoted txs lands — proving the refund was deferred, not lost.
+    let recycle = e + window;
+    while ctx.get_canonical_chain_height().await < recycle {
+        ctx.mine_block().await?;
+    }
+    let (_, refunds_at_recycle) = expiry_shadow_counts(&ctx, recycle).await?;
+    assert!(
+        refunds_at_recycle >= 1,
+        "deferred PermFeeRefund for the unpromoted txs must land when slot 0 \
+         actually recycles at E+{window}={recycle} (got {refunds_at_recycle})"
     );
 
     ctx.stop().await;
