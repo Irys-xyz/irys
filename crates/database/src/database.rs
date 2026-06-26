@@ -231,24 +231,42 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// orphaned tip can leave a stranded `included_height` / `promoted_height`
 /// behind, and Phase-1 scrub only fires on reorg.
 ///
-/// `MigratedBlockHashes` (MBH) IS fork-aware past `block_migration_depth`
-/// — `validate_reorg_within_migration_depth` aborts any reorg that would
-/// rewrite a migrated row, so MBH attests the canonical hash from every
-/// chain's perspective.
+/// `MigratedBlockHashes` (MBH) records the local node's canonical block hash
+/// at each migrated height.  It is *branch-invariant* — attests the same hash
+/// from every chain's perspective — ONLY for heights below the reorg floor.
+///
+/// **Reorg ceiling moved (#1405).**  Network-partition / deep-reorg recovery
+/// removed the old `validate_reorg_within_migration_depth` gate (now dead): a
+/// reorg can rewind and rewrite already-migrated MBH rows up to
+/// `block_tree_depth` deep (`recover_from_network_partition` →
+/// `truncate_to_height` → `delete_block_index_range`).  So within
+/// `(tip - block_tree_depth, tip - block_migration_depth]`, MBH is a
+/// LOCAL-canonical view that can change across a reorg and disagree between
+/// nodes evaluating competing forks.  Only heights at/below
+/// `tip - block_tree_depth` are finalized and safe to key on by existence
+/// alone.
 ///
 /// The two helpers in this section return a height from `IrysDataTxMetadata`
-/// only if MBH confirms it ≤ `max_height`.  They return primitive
-/// `Option<u64>` (no header mutation) so call sites can't accidentally
-/// treat a stranded hint as canonical.
-///
-/// **Fork-awareness caveat (reorg-readiness).**  The "MBH-verified ⇒
-/// canonical-on-every-chain" inference rests on `block_migration_depth`
-/// being the absolute reorg ceiling.  If deeper reorgs are ever permitted,
-/// MBH rows past `block_migration_depth` become a LOCAL-canonical view
-/// that can disagree with the chain a validator is evaluating.  These
-/// helpers (and every site that reads from them) must be audited together
-/// with the `Searching { Publish }` arm in `data_txs_are_valid` when that
-/// invariant changes.
+/// only if MBH has a row for it ≤ `max_height`.  They return primitive
+/// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
+/// stranded hint as canonical.  Because the existence check is NOT
+/// branch-invariant in the window above, every caller must either (a) only
+/// consult these helpers for heights guaranteed below the reorg floor, or
+/// (b) treat the result as a hint and confirm membership against the evaluated
+/// branch's own ancestry.  Current callers:
+///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
+///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
+///     only falls back to these helpers for inclusions older than
+///     `tx_anchor_expiry_depth`.
+///   - the NC-0042 expiry fast path
+///     (`ledger_expiry::resolve_submit_inclusion`) relies on the config
+///     invariant that a ledger slot's lifetime exceeds `block_tree_depth`
+///     (enforced in `Config::validate`), so any *expired* tx's inclusion is
+///     necessarily below the reorg floor.
+///   - `lookup_via_migrated_metadata` (`tx_inclusion.rs`) re-reads the block
+///     and re-checks Submit membership before trusting the height.
+/// Re-audit all of these together (and the `Searching { Publish }` arm in
+/// `data_txs_are_valid`) whenever the reorg ceiling or those windows change.
 fn canonical_metadata_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,

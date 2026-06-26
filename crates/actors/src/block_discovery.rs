@@ -534,6 +534,22 @@ impl BlockDiscoveryServiceInner {
         // get any remaining valid_ingress_anchor_block hashes from the block index
         // we do not need the full block headers, so we use the block index
         {
+            // NC-0042 / #1405: the deepest by-hash ancestor we reached above
+            // (`parent_block`, at `bt_finished_height`) is on THIS block's chain.
+            // Push its hash BY-HASH — it sits ABOVE the index handoff below, so it
+            // must NOT be taken from the (reorg-mutable) block index, which is only
+            // branch-invariant below the reorg floor. Everything strictly deeper is
+            // read from the index, anchored to this by-hash boundary by the handoff
+            // check at `last_bt_safe_parent_height`: a matching hash there makes the
+            // whole linear index suffix branch-correct (or the assertion fires). This
+            // preserves the inclusive `[min_ingress_proof_anchor_height,
+            // bt_finished_height]` anchor window (matching the mempool) while
+            // resolving the boundary branch-correctly instead of from the local
+            // canonical index.
+            if bt_finished_height >= min_ingress_proof_anchor_height {
+                valid_ingress_anchor_blocks.push(parent_block.block_hash);
+            }
+
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
             debug!(
@@ -548,8 +564,11 @@ impl BlockDiscoveryServiceInner {
             // this is the last block header we got from the above loop
             // we use this to ensure that
             let last_bt_safe_parent_height = parent_block.height.checked_sub(1);
-            // IMPORTANT: this MUST be inclusive! matching mempool `validate_ingress_proof_anchor_for_inclusion` behaviour
-            for height in min_ingress_proof_anchor_height..=bt_finished_height {
+            // EXCLUSIVE of `bt_finished_height`: that boundary is supplied by-hash
+            // above (the index entry there is above the handoff and unverified). The
+            // top of this range is `last_bt_safe_parent_height`, where the handoff
+            // check ties the index to the by-hash chain.
+            for height in min_ingress_proof_anchor_height..bt_finished_height {
                 // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
                 let block_index_item =
                     block_index

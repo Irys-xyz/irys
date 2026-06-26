@@ -5391,19 +5391,13 @@ pub async fn data_txs_are_valid(
         );
     }
 
-    // Step 3: Check past inclusions only for non-promoted txs.
-    //
-    // Walk depth is `tx_anchor_expiry_depth`: anchor-expiry semantics
-    // bound any legitimate prior inclusion of `block`'s txs to within
-    // this window of `block`, regardless of how deep reorgs go (see the
-    // docblock on `get_previous_tx_inclusions` for the derivation).
-    // Deeper reorg support changes which chain the block tree buffers,
-    // not where on `block`'s chain a tx with a given anchor can have
-    // been included.
+    // Step 3: Check past inclusions only for non-promoted txs. The walk must cover
+    // both the duplicate-anchor window and the reorg window — see
+    // `prior_inclusion_walk_depth` and the `get_previous_tx_inclusions` docblock.
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
-        config.consensus.mempool.tx_anchor_expiry_depth as u64,
+        prior_inclusion_walk_depth(config),
         service_senders,
         db,
     )
@@ -5423,53 +5417,34 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // Past Submit inclusion was not in the historical scan
-                        // window — fall back to the fork-aware canonical-
-                        // height getters in `irys_database`.
+                        // Prior Submit/promotion was deeper than the by-hash
+                        // inclusion walk above — which now covers the full reorg
+                        // window (max(tx_anchor_expiry_depth, block_tree_depth)).
+                        // So any inclusion reaching this fallback is BELOW the
+                        // reorg floor: finalized, hence branch-invariant, so the
+                        // by-height canonical-height getters in `irys_database`
+                        // (metadata hint + `MigratedBlockHashes`) resolve it
+                        // identically on every node/branch. (Before the walk was
+                        // widened, this arm could run inside the reorg-mutable
+                        // `(tip - block_tree_depth, tip - block_migration_depth]`
+                        // band and fork — widening the walk to the reorg window is
+                        // exactly what makes this fallback safe post-#1405; see the
+                        // `get_previous_tx_inclusions` docblock.)
                         //
                         // `canonical_submit_height` is sufficient evidence of
                         // prior Submit: the structural pre-pass guarantees
                         // `tx.ledger_id == Publish`, and term ledgers reject
-                        // `ledger_id == Publish`, so the only term ledger
-                        // that could have produced an `included_height` is
-                        // Submit.  An MDBX I/O failure is a local fault that
-                        // we surface as `BlockBoundsLookupError` (classified
-                        // as `NodeFault`, so the caller aborts rather than
-                        // peer-attributing the local DB error).
+                        // `ledger_id == Publish`, so the only term ledger that
+                        // could have produced an `included_height` is Submit. An
+                        // MDBX I/O failure is a local fault surfaced as
+                        // `BlockBoundsLookupError` (classified `NodeFault`, so the
+                        // caller aborts rather than peer-attributing the DB error).
                         //
-                        // Defense-in-depth `canonical_promoted_height`
-                        // rejection.  Under the current invariants this is
-                        // effectively unreachable for legitimate prior
-                        // promotions: anchor expiry forces any legitimate
-                        // prior Publish of a tx in `block` to lie within
-                        // `tx_anchor_expiry_depth` of `block` (see
-                        // `get_previous_tx_inclusions`'s derivation), so the
-                        // parent walk above would have surfaced it as
-                        // `Found { historical: Publish, current: Publish }`
-                        // before we reach `Searching`.  The check is kept
-                        // as a safety net against a future bug that lets a
-                        // prior promotion escape the walk.
-                        //
-                        // FORK-AWARENESS CAVEAT (reorg-readiness): the
-                        // rejection's `block_hash` is taken from
-                        // `MigratedBlockHashes[promoted_height]`, which today
-                        // is fork-invariant past `block_migration_depth`
-                        // (deeper reorgs are aborted, so migrated rows are
-                        // irreversibly canonical from every chain's
-                        // perspective).  When deeper reorgs land, MBH past
-                        // migration_depth becomes a LOCAL-canonical view
-                        // that can disagree with `block`'s chain — this
-                        // check would then report `PublishTxAlreadyIncluded`
-                        // for a tx that isn't actually promoted on
-                        // `block`'s chain.
-                        // The same invariant change breaks
-                        // `canonical_promoted_height` / `canonical_submit_height`:
-                        // their "MBH-verified ⇒ canonical" contracts rely on
-                        // `block_migration_depth` being the absolute reorg
-                        // ceiling.  Audit this arm and those helpers (and
-                        // every site that consumes them, e.g. tx_selector's
-                        // prior-Submit fallback) together when changing
-                        // that invariant.
+                        // The `canonical_promoted_height` rejection below is
+                        // defense-in-depth: a prior promotion within the reorg
+                        // window is already surfaced as `Found` by the walk, so
+                        // only a finalized prior promotion reaches here — where MBH
+                        // is branch-invariant.
                         let parent_height = block.height.saturating_sub(1);
 
                         let submit_lookup =
@@ -6110,45 +6085,60 @@ enum TxInclusionState {
     },
 }
 
+/// Walk depth for the prevalidation prior-inclusion scan
+/// ([`get_previous_tx_inclusions`]). It must cover BOTH:
+///   - the **duplicate-anchor window** (`tx_anchor_expiry_depth`): a re-inclusion
+///     of the same tx_id reuses the same anchor, which expires within this window;
+///   - the **reorg window** (`block_tree_depth`): a promotion's prior Submit is
+///     bounded by `ingress_proof_anchor_expiry_depth` (NOT the tx anchor), so an
+///     inclusion inside the reorg window must be resolved branch-correctly by-hash
+///     here rather than via the by-height index/MBH fallback, which is only
+///     branch-invariant below the reorg floor (#1405).
+///
+/// `Config::validate` enforces `tx_anchor_expiry_depth <= block_tree_depth` in
+/// production (so the reorg window is the binding term there); `max` keeps this
+/// correct for test configs that set a tiny `block_tree_depth` without lowering
+/// `tx_anchor_expiry_depth`. See the [`get_previous_tx_inclusions`] docblock.
+fn prior_inclusion_walk_depth(config: &Config) -> u64 {
+    (config.consensus.mempool.tx_anchor_expiry_depth as u64).max(config.consensus.block_tree_depth)
+}
+
 /// Walks `block_under_validation`'s ancestors via the block tree (DB fallback
 /// for tree-evicted headers), updating each entry in `tx_ids` with the
 /// inclusion state found on this chain.
 ///
 /// **Fork-awareness contract.**  This walk is the validator's fork-aware
-/// source for prior inclusions of `block_under_validation`'s txs.  It is
-/// both *sufficient* and *tight*: every legitimate prior inclusion of any
-/// tx in `block_under_validation` necessarily lies within
-/// `tx_anchor_expiry_depth` blocks of `block_under_validation`, and no
-/// legitimate prior inclusion can lie outside it.
+/// (by-hash) source for prior inclusions of `block_under_validation`'s txs.
+/// `walk_depth` must be `max(tx_anchor_expiry_depth, block_tree_depth)`,
+/// covering two distinct requirements:
 ///
-/// **Derivation of the bound.**  For any tx in `block_under_validation`
-/// with signed anchor `A`:
-///   * `block_under_validation.height ≤ A + tx_anchor_expiry_depth` —
-///     `block_under_validation` itself must include the tx with an
-///     unexpired anchor.
-///   * Any prior canonical inclusion `I` of that tx has the *same* `A`
-///     (the tx_id is derived from the signed payload, which includes the
-///     anchor — re-anchoring produces a different tx_id), and must also
-///     satisfy `I ≤ A + tx_anchor_expiry_depth`.
-///   * Combined: `I ∈ [block_under_validation.height − tx_anchor_expiry_depth,
-///     block_under_validation.height − 1]`.
+/// 1. **Duplicate detection — needs `tx_anchor_expiry_depth`.**  For any tx in
+///    `block_under_validation` with signed anchor `A`: a re-inclusion `I` has the
+///    *same* `A` (the tx_id is derived from the signed payload incl. the anchor —
+///    re-anchoring yields a different tx_id) so `I ≤ A + tx_anchor_expiry_depth`,
+///    while `block_under_validation.height ≤ A + tx_anchor_expiry_depth`. Hence any
+///    duplicate lies within `tx_anchor_expiry_depth` of `block_under_validation`.
+///    (`I ≥ 1` is implicit: `build_unsigned_irys_genesis_block` gives height 0
+///    empty `tx_ids` for every data ledger, so the loop short-circuits at
+///    `block.1 == 0` without inspecting genesis.)
 ///
-/// Note that `I ≥ 1` is implicit: `build_unsigned_irys_genesis_block`
-/// constructs height 0 with `tx_ids = H256List::new()` for every data ledger,
-/// so no tx can have a prior inclusion at genesis.  The loop below relies on
-/// that fact to short-circuit at `block.1 == 0` without inspecting genesis.
+/// 2. **Branch-correctness — needs `block_tree_depth` (the reorg window).**  A
+///    *promotion*'s prior Submit is NOT bounded by `tx_anchor_expiry_depth`: a
+///    promoted (Publish) tx re-validates only its ingress-proof anchors
+///    (`ingress_proof_anchor_expiry_depth`, typically far larger), NOT its data-tx
+///    anchor (see `block_discovery`'s anchor checks). So the prior Submit can lie
+///    up to `ingress_proof_anchor_expiry_depth` back. Any such inclusion that falls
+///    inside the reorg window MUST be resolved here by-hash on
+///    `block_under_validation`'s own ancestry; resolving it via the by-height
+///    index/MBH shortcut (the `Searching { ledger_current: Publish }` arm in
+///    `data_txs_are_valid`) is only branch-invariant BELOW the reorg floor, which
+///    deep reorgs (#1405) moved from `block_migration_depth` to `block_tree_depth`.
+///    Walking the full reorg window guarantees that fallback is reached only for
+///    *finalized* inclusions, where node-canonical == every branch.
 ///
-/// So `walk_depth = tx_anchor_expiry_depth` covers exactly the reachable
-/// range of any prior inclusion `block_under_validation` could have.
-/// Walking deeper does no harm but is wasted work; walking shallower
-/// (e.g. `block_migration_depth`) would leave a legitimate-inclusion
-/// window uncovered and would force the DB fallback to bear correctness
-/// responsibility it isn't structurally equipped for (see the
-/// `Searching { ledger_current: Publish }` arm in `data_txs_are_valid`).
-///
-/// The bound is independent of reorg depth: deeper reorgs change which
-/// chain `block_tree` buffers but not where on `block_under_validation`'s
-/// chain a tx with a given anchor can have been included.
+/// (Config invariant `tx_anchor_expiry_depth ≤ block_tree_depth` makes #2 the
+/// binding term in production; `max(...)` keeps the walk correct for test configs
+/// that set a tiny `block_tree_depth` without lowering `tx_anchor_expiry_depth`.)
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
@@ -6581,6 +6571,128 @@ mod tests {
         Ok(())
     }
 
+    /// REGRESSION (RISK-2 / #1405 deep-reorg walk depth): `get_previous_tx_inclusions`
+    /// must resolve a promotion's prior Submit branch-correctly by-hash for the whole
+    /// reorg window — not just `tx_anchor_expiry_depth`. A Publish candidate C at
+    /// height 5 promotes tx T whose prior Submit sits at height 1 (depth 4) — inside
+    /// the band (tx_anchor_expiry_depth=2, block_tree_depth=8]. With the new walk depth
+    /// (`max` = 8) the by-hash walk reaches the Submit and marks it `Found`; with the
+    /// old depth (2) the walk misses it and T stays `Searching`, which in
+    /// `data_txs_are_valid` would fall to the by-height MBH fallback — branch-incorrect
+    /// during a deep reorg (a node off C's branch would wrongly reject C). The
+    /// ancestors live only in the DB (resolved via the by-hash DB fallback, since the
+    /// tree guard is empty); T's `included_height` is intentionally NOT recorded, so
+    /// the by-height fallback could not save the old shallow walk.
+    #[tokio::test]
+    async fn get_previous_tx_inclusions_finds_prior_submit_in_reorg_window_band() -> eyre::Result<()>
+    {
+        use irys_database::{
+            IrysDatabaseArgs as _, open_or_create_db,
+            tables::{IrysBlockHeaders, IrysTables},
+        };
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use reth_db::transaction::DbTxMut as _;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(env));
+
+        let tx_id = H256::random();
+
+        // genesis(0) -> b1(1, Submit=[T]) -> b2(2) -> b3(3) -> b4(4) -> C(5, Publish=[T])
+        let mk = |height: u64, prev: H256, cdiff: u64| -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.previous_block_hash = prev;
+            h.cumulative_diff = U256::from(cdiff);
+            h
+        };
+
+        let mut genesis = mk(0, H256::zero(), 0);
+        genesis.test_sign();
+        let mut b1 = mk(1, genesis.block_hash, 1);
+        b1.data_ledgers[DataLedger::Submit as usize].tx_ids = H256List(vec![tx_id]);
+        b1.test_sign();
+        let mut b2 = mk(2, b1.block_hash, 2);
+        b2.test_sign();
+        let mut b3 = mk(3, b2.block_hash, 3);
+        b3.test_sign();
+        let mut b4 = mk(4, b3.block_hash, 4);
+        b4.test_sign();
+        let mut c = mk(5, b4.block_hash, 5);
+        c.data_ledgers[DataLedger::Publish as usize].tx_ids = H256List(vec![tx_id]);
+        c.test_sign();
+
+        db.update(|tx| -> eyre::Result<()> {
+            for h in [&genesis, &b1, &b2, &b3, &b4, &c] {
+                tx.put::<IrysBlockHeaders>(h.block_hash, h.clone().into())?;
+            }
+            Ok(())
+        })??;
+
+        // Empty tree guard: the walk falls through to the by-hash DB lookup.
+        let consensus = ConsensusConfig::testing();
+        let block_tree_guard = dummy_block_tree_guard(&consensus);
+        let (service_senders, mut receivers) = crate::test_helpers::build_test_service_senders();
+        let guard_for_responder = block_tree_guard.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = receivers.block_tree.recv().await {
+                if let BlockTreeServiceMessage::GetBlockTreeReadGuard { response } = msg.inner {
+                    let _ = response.send(guard_for_responder.clone());
+                }
+            }
+        });
+
+        let tx_header = DataTransactionHeader::default();
+        let searching = || {
+            HashMap::from([(
+                tx_id,
+                (
+                    &tx_header,
+                    TxInclusionState::Searching {
+                        ledger_current: DataLedger::Publish,
+                    },
+                ),
+            )])
+        };
+
+        // New walk depth (max(tx_anchor=2, block_tree=8) = 8): finds the prior Submit.
+        let mut states = searching();
+        get_previous_tx_inclusions(&mut states, &c, 8, &service_senders, &db).await?;
+        assert!(
+            matches!(
+                states.get(&tx_id).map(|(_, s)| s),
+                Some(TxInclusionState::Found {
+                    ledger_current: (DataLedger::Publish, cur),
+                    ledger_historical: (DataLedger::Submit, hist),
+                }) if *cur == c.block_hash && *hist == b1.block_hash
+            ),
+            "new walk depth must find the prior Submit by-hash, got {:?}",
+            states.get(&tx_id).map(|(_, s)| s),
+        );
+
+        // Old walk depth (tx_anchor_expiry_depth = 2 < depth 4): misses it.
+        let mut states_old = searching();
+        get_previous_tx_inclusions(&mut states_old, &c, 2, &service_senders, &db).await?;
+        assert!(
+            matches!(
+                states_old.get(&tx_id).map(|(_, s)| s),
+                Some(TxInclusionState::Searching {
+                    ledger_current: DataLedger::Publish,
+                })
+            ),
+            "old shallow walk must miss the prior Submit (regression marker), got {:?}",
+            states_old.get(&tx_id).map(|(_, s)| s),
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn same_ledger_in_two_historical_blocks_is_marked_duplicate() -> eyre::Result<()> {
         let tx_id = H256::from_slice(&[8; 32]);
@@ -6619,6 +6731,35 @@ mod tests {
         ));
 
         Ok(())
+    }
+
+    /// Pins the RISK-2 walk-depth derivation: the prevalidation prior-inclusion
+    /// walk must cover `max(tx_anchor_expiry_depth, block_tree_depth)` so a
+    /// promotion's prior Submit inside the reorg window is resolved by-hash (not
+    /// via the branch-incorrect by-height fallback). A revert to just
+    /// `tx_anchor_expiry_depth` (or to `min`) fails this test.
+    #[test]
+    fn prior_inclusion_walk_depth_covers_both_windows() {
+        // Test-mode config, so the production `tx_anchor_expiry_depth <=
+        // block_tree_depth` validator guard does not constrain the
+        // tx_anchor > block_tree case below.
+        fn config_with_depths(tx_anchor: u8, block_tree: u64) -> Config {
+            let mut node_config = NodeConfig::testing();
+            {
+                let c = node_config.consensus.get_mut();
+                c.mempool.tx_anchor_expiry_depth = tx_anchor;
+                c.block_tree_depth = block_tree;
+            }
+            Config::new_with_random_peer_id(node_config)
+        }
+
+        // Production-shaped: the reorg window (block_tree_depth) is the binding term.
+        assert_eq!(prior_inclusion_walk_depth(&config_with_depths(20, 50)), 50);
+        // Degenerate (tx_anchor > tree): the duplicate-anchor window binds — `max`
+        // (not `min`/just-tree) is required so every reachable duplicate is walked.
+        assert_eq!(prior_inclusion_walk_depth(&config_with_depths(60, 50)), 60);
+        // Equal: either reading is correct.
+        assert_eq!(prior_inclusion_walk_depth(&config_with_depths(50, 50)), 50);
     }
 
     pub(super) struct TestContext {
