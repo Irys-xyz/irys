@@ -333,10 +333,17 @@ canonical chain *during* the window, all flowing through one primitive,
   competing fork legitimately differs from this node's buffer past a boundary; recompute is the
   source of truth. (Verified not to weaken #1447, whose protection is the mining-loop gate, not
   this fast path.)
-- **Recall-range validation — fork-local view.** On a recall `Mismatch` against the live buffer,
-  rebuild a fork-local step view from the block's **own** lineage (its ancestors via the block
-  tree) and re-validate against that: `build_fork_local_recall_view`
-  (`crates/actors/src/block_validation.rs`).
+- **Recall-range validation — fork-local view, always.** The recall range is validated against a
+  fork-local step view built from the block's **own** lineage (its ancestors via the block tree,
+  DB fallback) — `build_fork_local_recall_view` (`crates/actors/src/block_validation.rs`) — **never**
+  this node's live buffer. The recall range is a many-to-one reduction of the step window to an
+  index, so a competing fork's range that is invalid for its own steps could otherwise coincide with
+  the (per-node) live buffer's reduction and be wrongly accepted — and two honest nodes would then
+  disagree on the same block (non-deterministic consensus). The block's steps are already validated
+  by layer 1, so the fork-local view is the authoritative, node-independent source; a build failure
+  is the soft `StepsUnavailable` (retry) lane, never a peer-attributed mismatch. (This *always*-path
+  superseded an earlier "live buffer first, fork-local only on `Mismatch`" version that had the
+  coincidence hole.)
 - **Previous-step continuity — fork-local view.** The `ensure_vdf_is_valid` prev-step equality
   check (`crates/actors/src/validation_service.rs`) reads the live buffer as a fast path and treats
   an *absent* previous step and a *present-but-stale* one (the poisoned boundary value during the
@@ -344,15 +351,20 @@ canonical chain *during* the window, all flowing through one primitive,
   to include it (`build_fork_local_step_view`, which covers the prev step even for a boundary-crossing
   block) and accept iff that matches. (An absent-or-mismatched step with an unbuildable view requeues
   via `VdfPrevStepForkViewUnavailable`; there is no separate `VdfStepRewound` re-wait path.) A value that
-  mismatches the block's own canonical ancestry is still rejected.
+  mismatches the block's own canonical ancestry is still rejected. The `VdfPrevStepForkViewUnavailable`
+  requeue is **bounded** (`MAX_PREV_STEP_VIEW_RETRIES`): a few requeues cover the transient window (on
+  retry the buffer has typically healed so the fast path works, or the evicted ancestor reappears),
+  after which the block is parked as a peer-innocent SoftInternal (`VdfPrevStepViewUnavailable`) so the
+  single VDF lane is freed — rather than spinning forever on a permanently-pruned ancestor.
 
 Both view builders resolve each ancestor **block-tree-first, then by hash from the DB**, mirroring
 `create_state_for_canonical_tip`. The tree-only lookup was insufficient: a deep recovery's
 recall/step window can reach below the cached chain (mainnet `reset_frequency` ≈ 50 blocks vs
 `block_tree_depth` 100, but lower steps-per-block widen the window), so a needed ancestor may be
 migrated out of the tree yet still present in the DB. Without the fallback the build fails and the
-honest canonical block is routed to `StepsUnavailable` / `VdfPrevStepForkViewUnavailable` and retries
-forever instead of validating.
+honest canonical block is routed to `StepsUnavailable` / `VdfPrevStepViewUnavailable` and retried
+(now *boundedly* — see above — then parked) instead of validating; the DB fallback is what lets the
+build succeed in the first place so the honest block validates rather than parks.
 
 ### 4. Post-recovery mining — reset the efficient-sampling rotation
 
@@ -422,6 +434,85 @@ buffer's current step) is left unfolded — it is already a degraded best-effort
   restarted — at which point startup `create_state` performs exactly this
   re-anchor. The decision is, in effect, to perform that same recovery
   automatically at the moment it is needed.
+
+## Addendum: cold restart is a mechanism change, not a trust-boundary change (2026-06)
+
+Whenever this design is revisited, a natural question recurs: would it not be simpler to
+abandon the in-place re-anchor and instead *reinitialise* — restart the process, or tear down
+and respawn the VDF thread — and let the ordinary startup path rebuild correct state? The
+intuition is sound, yet the conclusion does not follow, and the reason is worth recording.
+A restart changes the recovery *mechanism*, but it leaves the *trust boundary* exactly where
+it was: that boundary is fork-local VDF verification before discard or adoption, and
+everything genuinely expensive about this work lives there. A restart therefore relocates the
+cost rather than removing it.
+
+To see why the boundary is irreducible, we must recall what a partition recovery actually asks
+of us. The recovering node has to follow a competing chain whose VDF lineage diverges from its
+own past a reset boundary, and to do so safely it must verify that chain against *its own*
+lineage before it either discards local state or adopts the fork. This is precisely what the
+recompute and fork-local paths provide: `vdf_step_batch_is_valid` treats a live-buffer
+mismatch as non-terminal and recomputes from the block's own seed while still rejecting forged
+steps (`crates/vdf/src/state.rs`), and recall-range and previous-step validation resolve from
+the block's own ancestry rather than the live buffer (`crates/actors/src/block_validation.rs`,
+`crates/actors/src/validation_service.rs`,
+`crates/actors/src/validation_service/block_validation_task.rs`). The two ways to dodge this
+verification are both worse than the ailment: trusting an unverified header's cumulative
+difficulty opens an eclipse vector, and discarding local state before verification risks
+throwing a valid chain away at a griefer's request.
+
+One might hope that building the restart approach afresh against `master` would sidestep the
+layered complexity, but it would not, for master is precisely the state in which the
+verification primitive is absent. On master, `vdf_step_batch_is_valid` rejects a buffer
+mismatch outright — `warn_mismatches(...)` followed by `Err("VDF steps are invalid!")`, with
+no recompute path (`crates/vdf/src/state.rs:416-419` on master). The deep-recovery call is
+validation-gated: `on_block_validation_finished` returns early on an invalid or internal
+result and reaches reorg handling only for a fully validated block, marking the tip solely on
+that path (`crates/actors/src/block_tree_service.rs:642-718`, `:925-960` on master). And
+cumulative difficulty is taken directly from the header field as a block is added
+(`crates/domain/src/models/block_tree.rs:553-560` on master), so it cannot by itself serve as
+a safe discard or restart trigger. In the boundary-crossing case master therefore wedges
+*before* adoption ever occurs; it is the broken baseline, not a cheaper starting point, and it
+is why even the *Do nothing* alternative above heals only once the verification primitive is
+present to let the fork be adopted in the first place.
+
+The clean design boundary, then, separates the one thing we must keep from the one thing we
+may choose. We keep the recompute and fork-local verification primitive unconditionally. We
+decide only the *post-adoption healing mechanism*, and here two options are genuinely on the
+table: the VDF-loop re-anchor that ships today, which incurs no downtime at the price of more
+local mechanism; or a controlled process restart after a validated deep recovery, which
+carries less VDF mechanism but more operational downtime and resync risk. The decisive
+observation is that the cold-restart variant is simpler only when it *begins* after fork-local
+validation has already proven the competing chain. Were it to trigger any earlier, it would
+have to either trust unverified headers or discard local state before the peer chain is known
+to be valid — and we have just seen that both are strictly worse.
+
+The accounting of what a restart sheds is not uniform across the layers, and the distinctions
+are what make the trade legible.
+
+| Restart's effect | Components |
+| --- | --- |
+| **Deletes** | the VDF re-anchor supervisor mechanism, `create_state_for_canonical_tip`, the `MiningBroadcastEvent::Reanchored` broadcast, and the asynchronous-window handling (the bounded-requeue drain heal and the absent-versus-stale previous-step path) |
+| **Reduces, but does not delete** | the catch-up reset-seed selection (§2). A restart that holds mining paused while fast-forward fills the buffer avoids the *local-stepping* crossing, but the *fast-forward* path still needs the per-step canonical reset seed for its carried hash when a fast-forward step lands on a boundary (`crates/vdf/src/vdf.rs:184`, `:224`). Deleting the seed-selection logic wholesale would require a separate proof. |
+| **Keeps** | the recompute and fork-local validation primitive, the startup anchor fold (`VdfAnchor::at_startup`, `crates/vdf/src/vdf.rs`), and the validation-gated trigger itself |
+| **Adds** | the cost of restarting the embedded Reth, peer, and mempool subsystems, the re-fetch of the un-migrated canonical tail (lost on a process restart), and the attendant downtime and resync risk |
+
+The reduction in the second row is the subtle one, and it is why the catch-up seed logic cannot
+simply be struck out. On a cold catch-up the buffer is filled verbatim by fast-forward, so an
+intermediate boundary's carried hash is overwritten by the next stored step and never read; the
+single place the seed still matters is the hand-off where fast-forward yields to local stepping,
+when the catch-up tip happens to land exactly on a boundary. Rare though that is, it is real,
+and master's behaviour there — folding the tip's `next_seed` rather than the boundary's own seed
+— is wrong.
+
+We therefore do not pivot. The thread-level supervisor is already the lighter form of
+reinitialisation: it restarts `run_vdf` while preserving the fast-forward channel and core
+pinning (`crates/chain/src/chain.rs:2233`), whereas a full OS-thread teardown would additionally
+have to replace the fast-forward channel (see *Strategy A1* under
+[Alternatives considered](#alternatives-considered)). A controlled process restart remains a
+legitimate fallback were the operational requirement ever to relax in favour of tolerating
+downtime, but the choice between it and the in-place re-anchor is a downtime-versus-mechanism
+trade. It is not, and cannot be, a way to avoid the consensus-critical verification that defines
+the trust boundary.
 
 ## Consequences
 

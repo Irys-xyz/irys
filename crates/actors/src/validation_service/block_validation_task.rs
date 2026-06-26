@@ -81,6 +81,10 @@ pub(super) struct BlockValidationTask {
     /// The `global_step` at which this task last stalled. Lets the bound tell a
     /// frozen buffer (same step) from a heal cascade advancing it (higher step).
     pub last_stall_step: Option<u64>,
+    /// Bounded retries for an unavailable fork-local previous-step view. A few
+    /// requeues cover the transient re-anchor window; past the bound the block is
+    /// parked (SoftInternal) instead of spinning the single VDF lane forever.
+    pub vdf_prev_step_view_retries: u32,
 }
 
 impl PartialEq for BlockValidationTask {
@@ -168,6 +172,7 @@ impl BlockValidationTask {
             enqueued_at,
             vdf_stall_retries: 0,
             last_stall_step: None,
+            vdf_prev_step_view_retries: 0,
         }
     }
 
@@ -208,6 +213,7 @@ impl BlockValidationTask {
             enqueued_at: Instant::now(),
             vdf_stall_retries: 0,
             last_stall_step: None,
+            vdf_prev_step_view_retries: 0,
         }
     }
 
@@ -482,42 +488,35 @@ impl BlockValidationTask {
         let recall_task = async move {
             let started = Instant::now();
             let consensus = &self.service_inner.config.consensus;
-            let mut outcome =
-                recall_recall_range_is_valid(block, consensus, &self.service_inner.vdf_state).await;
-            // A `Mismatch` against the live buffer may be a competing fork whose post-boundary VDF
-            // steps differ from this node's (possibly poisoned) buffer — not a genuine invalid
-            // recall range. Rebuild a fork-local step view from the block's OWN lineage (its
-            // ancestors in the block tree) and re-validate against THAT; only a still-`Mismatch` is
-            // a real consensus rejection. This is what lets a recovering node adopt a canonical
-            // fork that crossed a VDF reset boundary (the partition-recovery wedge), and confines
-            // the fork-aware step resolution to one seam (`build_fork_local_recall_view`).
-            if matches!(outcome, Err(RecallRangeError::Mismatch(_))) {
-                match build_fork_local_recall_view(
-                    block,
-                    consensus,
-                    &self.block_tree_guard,
-                    &self.service_inner.db,
-                ) {
-                    Ok(view) => outcome = recall_recall_range_is_valid(block, consensus, &view).await,
-                    Err(e) => {
-                        // The live buffer mismatched, but we could not build the block's
-                        // fork-local lineage view to re-validate against — an ancestor is
-                        // transiently absent from the block tree (depth-prune / reorg /
-                        // in-flight re-anchor race). With no authoritative verdict, the bare
-                        // live-buffer mismatch must NOT be peer-attributed as
-                        // `RecallRangeInvalid`: that would permanently reject an honest
-                        // canonical block in the re-anchor window. Reclassify as the soft
-                        // `StepsUnavailable` (SoftInternal) lane so validation requeues; on
-                        // retry the re-anchor has typically landed (live buffer matches) or
-                        // the ancestry is present (fork-local view yields a real verdict).
-                        tracing::warn!(
-                            custom.error = ?e,
-                            "recall range: could not build fork-local VDF view (ancestor eviction race); reclassifying as soft-internal (retry) instead of peer-attributed mismatch"
-                        );
-                        outcome = Err(RecallRangeError::StepsUnavailable(e));
-                    }
+            // Validate the recall range against the block's OWN lineage (deterministic), NOT this
+            // node's live VDF buffer. The recall range is a many-to-one reduction of the step
+            // window to an index; a competing fork's range that is invalid for its own steps can
+            // coincide with the local (possibly poisoned) buffer's reduction and be wrongly
+            // accepted — and because the buffer is per-node, two honest nodes can then disagree on
+            // the same block. The block's steps are already validated by the VDF phase
+            // (`vdf_step_batch_is_valid` recomputes on mismatch), so its fork-local lineage view is
+            // the authoritative, node-independent source. This confines the fork-aware step
+            // resolution to one seam (`build_fork_local_recall_view`) and lets a recovering node
+            // adopt a canonical fork that crossed a VDF reset boundary (the partition-recovery
+            // wedge). A view-build failure (an ancestor transiently absent from tree+db during a
+            // depth-prune / reorg / in-flight re-anchor) is the soft `StepsUnavailable` (retry)
+            // lane — never a peer-attributed mismatch, which would permanently reject an honest
+            // block in the re-anchor window.
+            let outcome = match build_fork_local_recall_view(
+                block,
+                consensus,
+                &self.block_tree_guard,
+                &self.service_inner.db,
+            ) {
+                Ok(view) => recall_recall_range_is_valid(block, consensus, &view).await,
+                Err(e) => {
+                    tracing::warn!(
+                        custom.error = ?e,
+                        "recall range: could not build fork-local VDF view (ancestor eviction race); soft-internal (retry)"
+                    );
+                    Err(RecallRangeError::StepsUnavailable(e))
                 }
-            }
+            };
             metrics::record_validation_stage_duration_ms(
                 "recall_range",
                 started.elapsed().as_secs_f64() * 1000.0,

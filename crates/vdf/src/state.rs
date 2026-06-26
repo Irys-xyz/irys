@@ -50,19 +50,36 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn new(
-        capacity: usize,
+    /// Construct from a pre-built seed buffer (oldest step at the front, newest at the back),
+    /// anchored at `global_step`. The canonical step and `minimum_step_to_keep` are derived from
+    /// `global_step` and `capacity`; [`Self::new`] is this with an empty buffer.
+    pub fn from_seeds(
         global_step: u64,
+        capacity: usize,
+        seeds: VecDeque<Seed>,
         is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             global_step,
             global_step_from_the_latest_canonical_block: global_step,
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
-            seeds: VecDeque::with_capacity(capacity),
+            seeds,
             capacity,
             is_vdf_mining_enabled,
         }
+    }
+
+    pub fn new(
+        capacity: usize,
+        global_step: u64,
+        is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self::from_seeds(
+            global_step,
+            capacity,
+            VecDeque::with_capacity(capacity),
+            is_vdf_mining_enabled,
+        )
     }
 
     pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
@@ -339,54 +356,32 @@ pub fn create_state(
         .map(|item| item.block_hash)
         .expect("To have at least genesis block");
 
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
     let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
+    let tip = block_header_by_hash(&tx, &block_hash, false)
         .unwrap()
         .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
+    let global_step_number = tip.vdf_limiter_info.global_step_number;
 
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    // Shared walk-back with the re-anchor / fork-local paths. Startup reads ancestors from the
+    // DB; a missing header or DB error is fatal here (matching the historical `.unwrap()`s) via
+    // the `expect` below.
+    let seeds = build_vdf_seed_buffer(&tip, capacity, |hash| {
+        block_header_by_hash(&tx, hash, false)?
+            .ok_or_else(|| eyre!("missing header {hash} during VDF state init"))
+    })
+    .expect("startup VDF buffer build from DB");
 
     info!(
         "Initializing vdf service from block's info in step number {}",
         global_step_number
     );
 
-    VdfState {
-        global_step: global_step_number,
-        global_step_from_the_latest_canonical_block: global_step_number,
-        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-        seeds,
+    VdfState::from_seeds(
+        global_step_number,
         capacity,
-        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-    }
+        seeds,
+        Some(is_vdf_mining_enabled),
+    )
 }
 
 /// Walk back from `tip` accumulating up to `capacity` VDF steps into a seed buffer (oldest step
@@ -492,14 +487,12 @@ pub fn create_state_for_canonical_tip(
     );
 
     Ok((
-        VdfState {
-            global_step: global_step_number,
-            global_step_from_the_latest_canonical_block: global_step_number,
-            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-            seeds,
+        VdfState::from_seeds(
+            global_step_number,
             capacity,
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-        },
+            seeds,
+            Some(is_vdf_mining_enabled),
+        ),
         next_seed,
     ))
 }
@@ -524,14 +517,9 @@ pub fn build_fork_local_view(
 ) -> eyre::Result<VdfStateReadonly> {
     let seeds = build_vdf_seed_buffer(tip, capacity, fetch_parent)?;
     let global_step = tip.vdf_limiter_info.global_step_number;
-    Ok(VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        global_step,
-        global_step_from_the_latest_canonical_block: global_step,
-        minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
-        seeds,
-        capacity,
-        is_vdf_mining_enabled: None,
-    }))))
+    Ok(VdfStateReadonly::new(Arc::new(RwLock::new(
+        VdfState::from_seeds(global_step, capacity, seeds, None),
+    ))))
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()

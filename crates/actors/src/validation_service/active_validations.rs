@@ -142,6 +142,31 @@ pub(super) fn stall_retry_action(
     }
 }
 
+/// Maximum bounded requeues for an unavailable fork-local previous-step view before the block is
+/// parked (SoftInternal). A few requeues cover the transient re-anchor / eviction window (on retry
+/// the healed buffer's fast path works or the evicted ancestor reappears); past the bound the
+/// ancestor is treated as permanently unavailable and the block is parked rather than spinning the
+/// single VDF lane forever. See design/docs/vdf-partition-recovery-reanchor.md §3.
+pub(super) const MAX_PREV_STEP_VIEW_RETRIES: u32 = 3;
+
+/// What to do with a VDF task whose fork-local previous-step view was unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrevStepViewAction {
+    /// Under the bound — requeue (re-validate; the view may build on retry).
+    Requeue,
+    /// Bound exhausted — park the block as a peer-innocent SoftInternal.
+    Park,
+}
+
+/// Decide whether to requeue or park a task whose fork-local previous-step view was unavailable.
+pub(super) fn prev_step_view_action(retries: u32, max_retries: u32) -> PrevStepViewAction {
+    if retries < max_retries {
+        PrevStepViewAction::Requeue
+    } else {
+        PrevStepViewAction::Park
+    }
+}
+
 /// Result from a concurrent validation task
 #[derive(Debug)]
 pub(super) struct ConcurrentValidationResult {
@@ -255,11 +280,13 @@ impl PreemptibleVdfTask {
                     }
                 // Transient race: the block's fork-local lineage view could not be built
                 // (an ancestor was evicted mid reorg / re-anchor) to cross-check a
-                // live-buffer prev-step mismatch. Peer-innocent — requeue rather than
-                // mislabel as Invalid.
+                // live-buffer prev-step mismatch. Peer-innocent. The dispatch requeues this a
+                // bounded number of times (covering the transient window) and then parks it as
+                // SoftInternal, rather than the previous unbounded resubmit that could spin the
+                // single VDF lane forever on a permanently-unavailable ancestor.
                 } else if e.downcast_ref::<VdfPrevStepForkViewUnavailable>().is_some() {
                     metrics::record_validation_cancellation("vdf_prev_step_fork_view_unavailable");
-                    VdfValidationResult::Cancelled
+                    VdfValidationResult::PrevStepViewUnavailable
                 } else {
                     match e.downcast_ref::<WaitForStepError>() {
                         Some(WaitForStepError::Cancelled) => {
@@ -1160,6 +1187,14 @@ mod tests {
             stall_retry_action(BlockPriority::Unknown, Some(7), 5, 9, 2),
             StallAction::Panic(StallPanicReason::NonCanonical)
         );
+    }
+
+    #[test]
+    fn prev_step_view_action_requeues_under_bound_then_parks() {
+        assert_eq!(prev_step_view_action(0, 3), PrevStepViewAction::Requeue);
+        assert_eq!(prev_step_view_action(2, 3), PrevStepViewAction::Requeue);
+        assert_eq!(prev_step_view_action(3, 3), PrevStepViewAction::Park);
+        assert_eq!(prev_step_view_action(9, 3), PrevStepViewAction::Park);
     }
 
     // --- handle_stalled_vdf_task: the dispatch wiring (calculate_priority + requeue/panic) ---
