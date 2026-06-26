@@ -787,7 +787,13 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
 /// Deletes only the ingress proof row for a specific (data_root, address) pair,
 /// leaving proofs from other signers intact.
 /// Returns `true` if a row was deleted, `false` if no matching row was found.
-pub fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
+///
+/// **Test-only** (`#[cfg(test)]`). This performs **no content check** (no TOCTOU
+/// guard), so it must never become a production deletion path: gating it on
+/// `cfg(test)` makes that misuse impossible at compile time. Production callers
+/// that need TOCTOU safety must use [`delete_ingress_proof_if_unchanged`].
+#[cfg(test)]
+pub(crate) fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
     tx: &T,
     data_root: DataRoot,
     address: IrysAddress,

@@ -2617,4 +2617,134 @@ mod tests {
 
         Ok(())
     }
+
+    /// Regression: when the cache is at capacity, a locally-produced expired
+    /// proof with unpromoted txs must be deleted (not regenerated), and the
+    /// content-checked delete path (`delete_ingress_proof_if_unchanged`) must
+    /// be used so a concurrently-refreshed proof is preserved.
+    ///
+    /// Setup:
+    /// - `max_cache_size_bytes = 0` → `at_capacity = true` (0 >= 0)
+    /// - Local proof (config's signer address) for a data_root that has one
+    ///   unpromoted tx; anchor = random hash → expired
+    /// - Sibling proof (distinct address) for the same data_root; anchor =
+    ///   genesis block hash → NOT expired → must survive
+    ///
+    /// After one pass of `prune_ingress_proofs`:
+    /// - local (expired + at-capacity) proof is deleted
+    /// - sibling (valid anchor) proof is preserved
+    #[tokio::test]
+    async fn prune_ingress_proofs_at_capacity_deletes_local_proof() -> eyre::Result<()> {
+        let mut node_config = NodeConfig::testing();
+        // Force at_capacity = true: chunk_cache_size (0) >= 0.
+        node_config.cache.max_cache_size_bytes = 0;
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let data_root = H256::random();
+        let txid = H256::random();
+
+        // Address of the local signer (derived from NodeConfig::testing()'s fixed key).
+        let local_addr = config.irys_signer().address();
+        // A different address for the sibling proof.
+        let sibling_addr = IrysAddress::random();
+
+        // Build the genesis block; its hash is a valid anchor (not expired).
+        let genesis_block = new_mock_signed_header();
+        let valid_anchor = genesis_block.block_hash;
+        // Unknown anchor → expired.
+        let expired_anchor = H256::random();
+
+        db.update(|wtx| -> eyre::Result<()> {
+            // CachedDataRoot with one pending (unpromoted) txid.
+            let cdr = irys_database::db_cache::CachedDataRoot {
+                data_size: 64,
+                data_size_confirmed: false,
+                txid_set: vec![txid],
+                block_set: vec![],
+                expiry_height: None,
+                cached_at: irys_types::UnixTimestamp::now()?,
+            };
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+
+            // Unpromoted tx header (promoted_height = None by default).
+            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: txid,
+                    data_root,
+                    data_size: 64,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            });
+            database::insert_tx_header(wtx, &tx_header)?;
+
+            // Local proof with expired anchor → at-capacity branch deletes it.
+            let mut local_proof = IngressProof::default();
+            local_proof.data_root = data_root;
+            local_proof.anchor = expired_anchor;
+            irys_database::store_external_ingress_proof_checked(wtx, &local_proof, local_addr)?;
+
+            // Sibling proof with valid anchor → not expired → survives.
+            let mut sibling_proof = IngressProof::default();
+            sibling_proof.data_root = data_root;
+            sibling_proof.anchor = valid_anchor;
+            irys_database::store_external_ingress_proof_checked(wtx, &sibling_proof, sibling_addr)?;
+
+            Ok(())
+        })??;
+
+        let initial_count = db.view_eyre(|rtx| {
+            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
+        })?;
+        assert_eq!(initial_count, 2, "expected 2 proofs before pruning");
+
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        service_task.prune_ingress_proofs()?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
+            assert_eq!(
+                remaining.len(),
+                1,
+                "only the sibling proof should survive; got {}",
+                remaining.len()
+            );
+            let addr = remaining[0].1.address;
+            assert_eq!(
+                addr, sibling_addr,
+                "surviving proof must be the sibling (valid anchor)"
+            );
+            assert_ne!(
+                addr, local_addr,
+                "local expired proof must have been deleted at capacity"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
 }
