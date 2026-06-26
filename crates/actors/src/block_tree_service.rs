@@ -1107,7 +1107,15 @@ impl BlockTreeServiceInner {
                         let live_vdf_step = self
                             .vdf_global_step
                             .load(std::sync::atomic::Ordering::Relaxed);
-                        if live_vdf_step >= first_divergent_boundary {
+                        // `+ 1` is a one-step TOCTOU margin. The VDF loop runs on another thread and
+                        // publishes its step via a `Relaxed` store only AFTER it has already read the
+                        // (possibly minority) reset seed for the iteration that crosses the boundary.
+                        // Sampling the live counter here can therefore lag the loop's committed seed by
+                        // up to one step: a node observed at `first_divergent_boundary - 1` may still
+                        // be about to fold the minority seed at the boundary, so treat it as poisoned.
+                        // Over-triggering costs only a (rare) extra restart; under-triggering would
+                        // silently strand the buffer poisoned with no other heal.
+                        if live_vdf_step + 1 >= first_divergent_boundary {
                             warn!(
                                 live_vdf_step,
                                 lca_step,

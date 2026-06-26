@@ -158,12 +158,13 @@ impl PartitionMiningServiceInner {
     ) -> eyre::Result<u64> {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
         // Fast path ONLY for the exact next consecutive step. Anything else — `step` AHEAD of the
-        // iterator (a gap) OR BEHIND it (a VDF re-anchor rewound the steps below the iterator's
-        // stateful rotation position, e.g. partition-recovery) — must rebuild the rotation rather
-        // than advance it. The previous `>=` fast-pathed every `step <= last_step_num + 1`, which
-        // silently computed a WRONG recall range after a re-anchor rewind (the rotation state was
-        // for a higher, now-discarded step), making the node mine blocks whose recall range no
-        // longer matches its (re-anchored) VDF steps.
+        // iterator (a gap) OR BEHIND it (a backward step relative to the iterator's stateful
+        // rotation position) — must rebuild the rotation rather than advance it. The previous `>=`
+        // fast-pathed every `step <= last_step_num + 1`, which would silently compute a WRONG recall
+        // range for a backward step (the rotation state was for a higher step). Backward steps no
+        // longer occur in-process (`store_step` is forward-only, and the deleted in-place VDF
+        // re-anchor was the only writer that ever rewound `global_step`); this stays as defensive
+        // handling.
         if next_ranges_step == step {
             debug!("Step {} is the next consecutive step", step);
         } else {
@@ -179,8 +180,8 @@ impl PartitionMiningServiceInner {
             );
             // Reinitialize when the iterator cannot incrementally reach `step` from
             // `next_ranges_step`: either the reset boundary is past where the iterator is (a
-            // forward gap across a boundary), or the iterator is AHEAD of `step` (a backward
-            // re-anchor rewind — its rotation must be rebuilt from the boundary, not advanced).
+            // forward gap across a boundary), or the iterator is AHEAD of `step` (a backward step —
+            // defensive; its rotation must be rebuilt from the boundary, not advanced).
             let start = if reset_step > next_ranges_step || step < next_ranges_step {
                 debug!(
                     "Step {} not incrementally reachable from last processed step {}, reinitializing ranges ...",

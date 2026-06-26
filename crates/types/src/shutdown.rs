@@ -87,11 +87,16 @@ mod tests {
             ShutdownReason::PartitionRecoveryRestart.exit_code(),
             PARTITION_RECOVERY_RESTART_EXIT_CODE
         );
+        // Every non-restart reason must exit 0 (exhaustive over the other variants).
         for reason in [
+            ShutdownReason::FatalError("x".into()),
+            ShutdownReason::ServiceCompleted("x".into()),
             ShutdownReason::SigInt,
+            ShutdownReason::SigTerm,
             ShutdownReason::CtrlC,
             ShutdownReason::CancellationToken,
             ShutdownReason::ServiceExited,
+            ShutdownReason::RethTaskManager,
             ShutdownReason::RethExit,
             ShutdownReason::VdfExited,
             ShutdownReason::ShutdownChannelClosed,

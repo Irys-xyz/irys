@@ -266,14 +266,11 @@ impl VdfStateReadonly {
                 return Ok(());
             }
 
-            if current_step != last_observed_step {
-                // Any movement resets the stall baseline/timer — including a
-                // BACKWARD jump from a partition-recovery VDF re-anchor, which
-                // rebuilds the buffer at a lower `global_step`. The stall detector
-                // exists to catch a DEAD writer, which leaves `global_step`
-                // constant; only the re-anchor swap ever decreases it (`store_step`
-                // is strictly forward-only), so resetting on a decrease responds to
-                // a genuine liveness event and cannot mask the frozen-writer case.
+            if current_step > last_observed_step {
+                // Forward progress resets the stall baseline/timer. The stall detector
+                // exists to catch a DEAD writer, which leaves `global_step` constant;
+                // `store_step` is strictly forward-only, so the live step never
+                // decreases.
                 last_observed_step = current_step;
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
@@ -312,40 +309,20 @@ pub fn create_state(
         .map(|item| item.block_hash)
         .expect("To have at least genesis block");
 
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
     let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
+    let tip = block_header_by_hash(&tx, &block_hash, false)
         .unwrap()
         .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
+    let global_step_number = tip.vdf_limiter_info.global_step_number;
 
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    // Same walk-back as the fork-local views (see `build_vdf_seed_buffer`), resolving ancestors
+    // from the DB. Cold-start always has genesis present, so the build cannot fail here.
+    let seeds = build_vdf_seed_buffer(&tip, capacity, |hash| {
+        block_header_by_hash(&tx, hash, false)
+            .map_err(|e| eyre!("cold-start VDF buffer: header lookup failed for {hash}: {e}"))?
+            .ok_or_else(|| eyre!("cold-start VDF buffer: missing header for {hash}"))
+    })
+    .expect("cold-start VDF buffer build must succeed (genesis is always present)");
 
     info!(
         "Initializing vdf service from block's info in step number {}",
@@ -364,8 +341,9 @@ pub fn create_state(
 
 /// Walk back from `tip` accumulating up to `capacity` VDF steps into a seed buffer (oldest step
 /// at the front, the tip's last step at the back), resolving each ancestor header via
-/// `fetch_parent`. Genesis (height 0) contributes only its first step. This is the shared
-/// walk-back used by the canonical-tip re-anchor; it mirrors [`create_state`]'s inline loop.
+/// `fetch_parent`. Genesis (height 0) contributes only its first step. Shared by [`create_state`]
+/// (cold-start, resolving ancestors from the DB) and [`build_fork_local_view`] (transient
+/// fork-local validation views).
 fn build_vdf_seed_buffer(
     tip: &IrysBlockHeader,
     capacity: usize,
@@ -395,9 +373,9 @@ fn build_vdf_seed_buffer(
         block = fetch_parent(&block.previous_block_hash)?;
     }
     if block.height == 0 {
-        // Genesis contributes only its first step. Guard the index: this runs on
-        // the live VDF supervisor thread during re-anchor, so a malformed genesis
-        // header must surface as a no-op rather than panicking the node.
+        // Genesis contributes only its first step. Guard the index so a malformed genesis header
+        // surfaces as a no-op rather than panicking (this runs on cold-start and on the live thread
+        // that builds transient fork-local validation views).
         if let Some(first) = block.vdf_limiter_info.steps.0.first() {
             seeds.push_front(Seed(*first));
         }
@@ -1271,45 +1249,5 @@ mod tests {
 
         advancer.await.unwrap();
         assert!(result.is_ok(), "wait should succeed when state advances");
-    }
-
-    /// Regression for the partition-recovery re-anchor (review Finding #2, Mode A):
-    /// a BACKWARD jump in `global_step` (the shared buffer rebuilt at a lower step)
-    /// must reset the stall baseline/timer, not be mistaken for a dead writer.
-    ///
-    /// Timeline (progress_timeout = 10s): advance 100→150 at t=4s, REWIND 150→120 at
-    /// t=8s, then climb to the desired 200 at t=16s. Pre-fix, the climb after the
-    /// rewind never exceeds the pre-rewind `last_observed_step` (150), so
-    /// `last_progress_at` (frozen at t=4s) elapses its 10s window at t=14s and the
-    /// wait spuriously returns `Stalled` (which panics the validation service).
-    /// Post-fix, the rewind at t=8s resets the timer, so the wait reaches 200 first.
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_step_tolerates_backward_reanchor_jump() {
-        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
-        let readonly = VdfStateReadonly::new(Arc::clone(&inner));
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        let progress_timeout = std::time::Duration::from_secs(10);
-
-        let advancer = {
-            let inner = Arc::clone(&inner);
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 150; // forward
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 120; // re-anchor rewind (the trigger)
-                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                inner.write().unwrap().global_step = 200; // climb to desired before timeout
-            })
-        };
-
-        let result = readonly
-            .wait_for_step(200, Arc::clone(&cancel), progress_timeout)
-            .await;
-
-        advancer.await.unwrap();
-        assert!(
-            result.is_ok(),
-            "a backward re-anchor jump must reset the stall timer, not surface as Stalled: {result:?}"
-        );
     }
 }
