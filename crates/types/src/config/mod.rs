@@ -280,7 +280,19 @@ impl Config {
                 ));
             }
             for (field, epoch_length) in slot_lifetimes {
-                let slot_lifetime_blocks = epoch_length.saturating_mul(num_blocks_in_epoch);
+                // checked_mul, not saturating: an overflowing product would clamp to
+                // u64::MAX and silently satisfy the `> block_tree_depth` guard below,
+                // yet the runtime expiry math (`TermLedger::get_expired_slot_indexes`'s
+                // `checked_mul(...).expect(...)`) would then panic on the same overflow.
+                // Reject it here, matching the publish_ledger_epoch_length check above.
+                let slot_lifetime_blocks = epoch_length
+                    .checked_mul(num_blocks_in_epoch)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "{field} ({epoch_length}) * num_blocks_in_epoch \
+                             ({num_blocks_in_epoch}) overflows u64"
+                        )
+                    })?;
                 ensure!(
                     slot_lifetime_blocks > self.consensus.block_tree_depth,
                     "{field} ({epoch_length}) * num_blocks_in_epoch ({num_blocks_in_epoch}) = slot \
@@ -1255,6 +1267,47 @@ mod tests {
         assert!(
             config.validate().is_ok(),
             "test-mode configs must skip the slot-lifetime guard"
+        );
+
+        // Cascade arm: a Cascade term-ledger whose lifetime <= block_tree_depth is
+        // rejected even when Submit passes. submit 5 * 11 = 55 > 50 (ok), but
+        // thirty_day 4 * 11 = 44 <= 50 — so the guard must fire on the Cascade arm.
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 11;
+            c.hardforks.cascade = Some(crate::hardfork_config::Cascade {
+                activation_timestamp: crate::UnixTimestamp::from_secs(0),
+                one_year_epoch_length: 365, // 365 * 11 = 4015 > 50 (ok)
+                thirty_day_epoch_length: 4, // 4 * 11 = 44 <= 50 (fails)
+                annual_cost_per_gb: crate::hardfork_config::Cascade::default_annual_cost_per_gb(),
+            });
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a Cascade term-ledger lifetime <= block_tree_depth must fail")
+            .to_string();
+        assert!(
+            err.contains("cascade.thirty_day_epoch_length") && err.contains("NC-0042"),
+            "expected the Cascade thirty-day slot-lifetime guard, got: {err}"
+        );
+
+        // Overflow: epoch_length * num_blocks_in_epoch must be rejected (not saturated
+        // to u64::MAX), so a config that validates can't later panic in the runtime
+        // expiry math (`TermLedger::get_expired_slot_indexes`'s checked_mul.expect).
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 2;
+            c.epoch.submit_ledger_epoch_length = u64::MAX; // u64::MAX * 2 overflows
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("an overflowing slot lifetime must be rejected, not saturated")
+            .to_string();
+        assert!(
+            err.contains("overflows u64"),
+            "expected the slot-lifetime overflow guard, got: {err}"
         );
     }
 
