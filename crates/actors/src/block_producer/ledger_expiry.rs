@@ -147,7 +147,7 @@ pub async fn calculate_expired_ledger_fees(
         config,
         &block_index,
         ledger_type,
-        parent_ledger_total_chunks(parent_block_header, ledger_type),
+        parent_block_header.ledger_total_chunks(ledger_type),
         parent_block_header.block_hash,
         block_tree_guard,
         db,
@@ -236,60 +236,23 @@ async fn collect_tx_to_miners_from_range(
     // (NC-0042 R4), so every block — boundary or middle — is processed against the
     // same un-merged `slot_miners` map rather than a per-block miner union.
     let slot_miners = &block_range.slot_miners;
-    let earliest_miners;
-    let latest_miners;
 
-    if same_block {
-        // When min and max are the same block, process it once as BOTH the earliest
-        // and latest boundary so both ends of the expired range are trimmed. (Trimming
-        // only the start — the old behavior — over-included the next slot's txs, which
-        // diverged from the exact per-candidate promotion filter; see NC-0042 §4b.)
-        let miners = process_boundary_block(
-            &block_range.min_block,
-            true, // is_earliest
-            true, // is_latest — sole boundary block (min == max), so trim BOTH ends
-            ledger_type,
-            config,
-            slot_miners,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        earliest_miners = miners;
-        latest_miners = BTreeMap::new();
-    } else {
-        // Different blocks - process both boundaries
-        let e_miners = process_boundary_block(
-            &block_range.min_block,
-            true,  // is_earliest — min block trims only the start
-            false, // is_latest
-            ledger_type,
-            config,
-            slot_miners,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        let l_miners = process_boundary_block(
-            &block_range.max_block,
-            false, // is_earliest
-            true,  // is_latest — max block trims only the end
-            ledger_type,
-            config,
-            slot_miners,
-            block_tree_guard,
-            mempool_guard,
-            db,
-        )
-        .await?;
-
-        earliest_miners = e_miners;
-        latest_miners = l_miners;
-    }
+    // Process the earliest boundary. For the sole-block case (min == max), process
+    // it as BOTH earliest and latest so both ends of the expired range are trimmed.
+    // (Trimming only the start — the old behavior — over-included the next slot's
+    // txs, which diverged from the exact per-candidate promotion filter; NC-0042 §4b.)
+    let earliest_miners = process_boundary_block(
+        &block_range.min_block,
+        true,       // is_earliest
+        same_block, // is_latest only when this is also the sole (max) block
+        ledger_type,
+        config,
+        slot_miners,
+        block_tree_guard,
+        mempool_guard,
+        db,
+    )
+    .await?;
 
     // Middle (fully-interior) blocks: no trim (they lie entirely within the
     // expired range), but still attributed per-slot by tx start offset — a middle
@@ -307,24 +270,51 @@ async fn collect_tx_to_miners_from_range(
     )
     .await?;
 
-    tracing::info!(
-        "Collected transactions: earliest={}, latest={}, middle={}",
-        earliest_miners.len(),
-        latest_miners.len(),
-        middle_miners.len(),
-    );
-
     let mut tx_to_miners = BTreeMap::new();
     tx_to_miners.extend(earliest_miners);
-    tx_to_miners.extend(latest_miners);
+
+    // Different blocks: process the latest boundary separately and extend.
+    if !same_block {
+        let latest_miners = process_boundary_block(
+            &block_range.max_block,
+            false, // is_earliest
+            true,  // is_latest — max block trims only the end
+            ledger_type,
+            config,
+            slot_miners,
+            block_tree_guard,
+            mempool_guard,
+            db,
+        )
+        .await?;
+        tracing::info!(
+            "Collected transactions: earliest={}, latest={}, middle={}",
+            tx_to_miners.len(),
+            latest_miners.len(),
+            middle_miners.len(),
+        );
+        tx_to_miners.extend(latest_miners);
+    } else {
+        tracing::info!(
+            "Collected transactions: earliest={}, middle={}",
+            tx_to_miners.len(),
+            middle_miners.len(),
+        );
+    }
+
     tx_to_miners.extend(middle_miners);
 
     Ok(tx_to_miners)
 }
 
 /// NC-0042 §4b/§4c: the set of Submit-ledger transaction ids whose storage has
-/// **expired as of `block_height`** — i.e. the txs that are (or will be at the
-/// next epoch) perm-fee-refunded and therefore must never be promoted.
+/// **expired as of `block_height`** — i.e. txs whose Submit storage is already
+/// expired at this block height, so they are perm-fee-refunded (now or at the
+/// next epoch settlement) and therefore must never be promoted.
+///
+/// Near-expiry is not disqualifying by itself: a tx may still be promoted even
+/// if its lowest slot is close to expiry, because its storage can span later
+/// slots and remains promotable until it has actually expired.
 ///
 /// It is derived from the *same* expired-partition → block → tx walk that
 /// `calculate_expired_ledger_fees` uses for refunds, so the "is this tx
@@ -386,7 +376,7 @@ pub async fn expired_submit_tx_ids(
         config,
         &block_index,
         DataLedger::Submit,
-        parent_ledger_total_chunks(parent_block_header, DataLedger::Submit),
+        parent_block_header.ledger_total_chunks(DataLedger::Submit),
         parent_block_header.block_hash,
         block_tree_guard,
         db,
@@ -524,7 +514,7 @@ pub fn expired_submit_range(
     // header (not this node's block-index tip) is what makes the verdict
     // branch-deterministic.
     let p = config.consensus.num_chunks_in_partition;
-    let parent_total = parent_ledger_total_chunks(parent_block_header, DataLedger::Submit);
+    let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
     let range_end = (max_expired_slot as u64 + 1)
         .saturating_mul(p)
         .min(parent_total);
@@ -543,9 +533,10 @@ pub fn expired_submit_range(
 /// `txid`'s Submit storage expired as of `range.block_height`?
 ///
 /// Branch-correct: `txid`'s Submit inclusion is resolved from the block's **own
-/// parent ancestry** (migrated inclusions via `canonical_submit_height`, which is
-/// finalized and branch-invariant; un-migrated inclusions via a by-hash parent
-/// walk — never the node's canonical tip or migration-lagged index). The verdict
+/// parent ancestry** (migrated inclusions via `canonical_submit_height`, branch-
+/// invariant for the already-expired inclusions this acts on — below the reorg
+/// floor; see `resolve_submit_inclusion`; un-migrated inclusions via a by-hash
+/// parent walk — never the node's canonical tip or migration-lagged index). The verdict
 /// is then a pure offset comparison: expired iff the candidate's Submit start
 /// offset is `< range_end`. A candidate with no resolvable Submit inclusion on
 /// this branch yields `false`.
@@ -616,9 +607,15 @@ struct SubmitInclusion {
 /// Resolves `txid`'s Submit inclusion along the **block's own parent ancestry**
 /// (`range.parent_block_hash`) — never the node's canonical tip.
 ///
-/// Fast path: `canonical_submit_height` resolves migrated inclusions in O(1).
-/// Migrated blocks are below the reorg floor, hence finalized and shared by every
-/// branch, so the height is authoritative and branch-invariant.
+/// Fast path: `canonical_submit_height` resolves migrated inclusions in O(1)
+/// from the canonical index / `MigratedBlockHashes`. Migrated rows are only
+/// branch-invariant BELOW the reorg floor — since #1405 a deep reorg can rewrite
+/// them up to `block_tree_depth` deep. This is safe HERE because
+/// `submit_tx_expired` only acts on *expired* Submit slots, and `Config::validate`
+/// requires a slot's lifetime (`submit_ledger_epoch_length * num_blocks_in_epoch`)
+/// to exceed `block_tree_depth`, so any expired tx's inclusion sits below the
+/// reorg floor and the height is authoritative on every branch. (See the
+/// fork-awareness note above `canonical_metadata_height` in `database.rs`.)
 ///
 /// Slow path (only when the inclusion is un-migrated, i.e. the fast path returns
 /// `None`): walk the parent chain by hash up to `tx_anchor_expiry_depth` blocks
@@ -637,8 +634,9 @@ fn resolve_submit_inclusion(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Option<SubmitInclusion>> {
-    // Fast path: migrated inclusion (finalized, branch-invariant). Capped at the
-    // parent — Submit inclusion is strictly before the block being evaluated.
+    // Fast path: migrated inclusion (branch-invariant below the reorg floor, where
+    // the slot-lifetime invariant keeps expired txs — see the doc above). Capped at
+    // the parent — Submit inclusion is strictly before the block being evaluated.
     let max_height = range.block_height.saturating_sub(1);
     if let Some(h) = db.view_eyre(|tx| canonical_submit_height(tx, &txid, max_height))? {
         let item = block_index
@@ -651,7 +649,10 @@ fn resolve_submit_inclusion(
             block_index
                 .get_item(h - 1)
                 .map(|i| submit_total_of_index_item(&i))
-                .unwrap_or(0)
+                .ok_or_eyre(
+                    "migrated predecessor must be indexed \
+                     (below the reorg floor → finalized)",
+                )?
         };
         return Ok(Some(SubmitInclusion {
             block_hash: item.block_hash,
@@ -674,7 +675,7 @@ fn resolve_submit_inclusion(
             tree.get_block(hash).map(|header| WalkBlock {
                 height: header.height,
                 prev_hash: header.previous_block_hash,
-                submit_total: parent_ledger_total_chunks(header, DataLedger::Submit),
+                submit_total: header.ledger_total_chunks(DataLedger::Submit),
                 includes_txid: block_includes_submit_tx(header, &txid),
             })
         },
@@ -739,12 +740,7 @@ fn walk_submit_inclusion(
                 // Predecessor below the tree window → canonical index, C1-gated.
                 let prev_height = block.height - 1;
                 if !is_canonical_at(block.prev_hash, prev_height)? {
-                    eyre::bail!(
-                        "Submit-expiry walk reached a non-canonical ancestor at height \
-                         {prev_height} (supplied {}) — off the validated block's branch \
-                         (C1 guard)",
-                        block.prev_hash
-                    );
+                    return Err(c1_non_canonical_ancestor_err(prev_height, block.prev_hash));
                 }
                 index_submit_total_at(prev_height).ok_or_eyre(
                     "Submit-expiry walk: predecessor below block_tree window must be \
@@ -793,6 +789,17 @@ fn is_canonical_at(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Resu
     Ok(canonical == Some(hash))
 }
 
+/// Unified C1 side-fork error: the expiry walk reached a block that is not the
+/// canonical block at `height` — i.e. it descended onto a side-fork ancestor off
+/// the validated block's own branch. Shared by the pure walk
+/// (`walk_submit_inclusion`) and [`assert_canonical_via_mbh`].
+fn c1_non_canonical_ancestor_err(height: u64, hash: H256) -> eyre::Report {
+    eyre::eyre!(
+        "expiry walk reached a non-canonical ancestor at height {height} \
+         (supplied {hash}) — off the validated block's branch (C1 guard)"
+    )
+}
+
 /// C1 side-fork guard: confirm `hash` is the canonical block at `height` per
 /// `MigratedBlockHashes` before trusting a height-keyed (canonical-only) index
 /// lookup for it. Without this, a walk that descended onto a side-fork ancestor
@@ -800,10 +807,7 @@ fn is_canonical_at(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Resu
 /// the wrong block.
 fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> eyre::Result<()> {
     if !is_canonical_at(db, hash, height)? {
-        eyre::bail!(
-            "expiry walk reached a non-canonical ancestor at height {height} \
-             (supplied {hash}) — off the validated block's branch (C1 guard)"
-        );
+        return Err(c1_non_canonical_ancestor_err(height, hash));
     }
     Ok(())
 }
@@ -824,10 +828,13 @@ fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> e
 /// + `previous_block_hash`); a predecessor below the block-tree window is read
 /// from the index only after the `MigratedBlockHashes` C1 check confirms it is
 /// canonical at that height. No `get_canonical_chain` or height→hash tree lookup
-/// is ever used for the forky region. The fast/slow split is itself branch-safe:
-/// both paths return the same block (a migrated offset's block is finalized and
-/// shared by every branch; an un-migrated offset's block is on the parent's own
-/// chain).
+/// is ever used for the forky region. The fast/slow split is branch-safe for the
+/// offsets this is called with: callers only resolve *expired* partitions, which
+/// the slot-lifetime > `block_tree_depth` config invariant keeps below the reorg
+/// floor, so a migrated offset's block is finalized and shared by every branch
+/// (migrated rows above the floor are reorg-mutable since #1405, but expired
+/// offsets never reach there); an un-migrated offset's block is on the parent's
+/// own chain.
 fn resolve_ledger_offset_to_block(
     offset: u64,
     parent_hash: H256,
@@ -836,7 +843,9 @@ fn resolve_ledger_offset_to_block(
     block_index: &BlockIndex,
     db: &DatabaseProvider,
 ) -> eyre::Result<(BlockHeight, H256, u64, u64)> {
-    // Fast path: finalized/migrated region — binary search is branch-invariant.
+    // Fast path: migrated region (index binary search). Branch-invariant for the
+    // expired offsets this is called with — kept below the reorg floor by the
+    // slot-lifetime > block_tree_depth config invariant; see the doc above.
     let index_tip_total = block_index
         .get_latest_item()
         .map(|item| ledger_total_of_index_item(&item, ledger))
@@ -846,7 +855,7 @@ fn resolve_ledger_offset_to_block(
         return Ok((
             height,
             item.block_hash,
-            migrated_predecessor_total(block_index, ledger, height),
+            migrated_predecessor_total(block_index, ledger, height)?,
             ledger_total_of_index_item(&item, ledger),
         ));
     }
@@ -855,11 +864,11 @@ fn resolve_ledger_offset_to_block(
     let tree = block_tree_guard.read();
     let mut cursor = parent_hash;
     while let Some(header) = tree.get_block(&cursor) {
-        let total = parent_ledger_total_chunks(header, ledger);
+        let total = header.ledger_total_chunks(ledger);
         let prev_total = if header.height == 0 {
             0
         } else if let Some(prev) = tree.get_block(&header.previous_block_hash) {
-            parent_ledger_total_chunks(prev, ledger)
+            prev.ledger_total_chunks(ledger)
         } else {
             // Predecessor below the tree window → canonical index, C1-gated.
             let prev_height = header.height - 1;
@@ -884,7 +893,7 @@ fn resolve_ledger_offset_to_block(
     Ok((
         height,
         item.block_hash,
-        migrated_predecessor_total(block_index, ledger, height),
+        migrated_predecessor_total(block_index, ledger, height)?,
         ledger_total_of_index_item(&item, ledger),
     ))
 }
@@ -899,14 +908,20 @@ fn migrated_predecessor_total(
     block_index: &BlockIndex,
     ledger: DataLedger,
     height: BlockHeight,
-) -> u64 {
+) -> eyre::Result<u64> {
     if height == 0 {
-        0
+        Ok(0)
     } else {
         block_index
             .get_item(height - 1)
             .map(|i| ledger_total_of_index_item(&i, ledger))
-            .unwrap_or(0)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "migrated predecessor at height {} must be indexed \
+                     (below the reorg floor → finalized)",
+                    height - 1
+                )
+            })
     }
 }
 
@@ -1024,20 +1039,6 @@ fn collect_expired_partitions(
     }
 
     Ok(expired_ledger_slot_indexes)
-}
-
-/// The parent block header's recorded total chunk count for `ledger`. Headers
-/// carry per-ledger totals, so this is a pure function of the parent block —
-/// unlike the node's block-index tip, which moves as the chain grows. `0` when
-/// the ledger is absent from the header (e.g. pre-Cascade blocks without
-/// OneYear/ThirtyDay entries).
-fn parent_ledger_total_chunks(parent_block_header: &IrysBlockHeader, ledger: DataLedger) -> u64 {
-    parent_block_header
-        .data_ledgers
-        .iter()
-        .find(|dl| dl.ledger_id == ledger as u32)
-        .map(|dl| dl.total_chunks)
-        .unwrap_or(0)
 }
 
 /// Finds all blocks containing data in the expired chunk ranges
@@ -1292,6 +1293,12 @@ fn filter_transactions_by_chunk_range(
     if chunk_size == 0 {
         eyre::bail!("chunk_size must be non-zero for ledger-expiry chunk math");
     }
+    // `*tx_start / num_chunks_in_partition` below would panic or yield all-slot-0
+    // on a zero divisor. Guard loudly so a misconfigured partition size fails
+    // deterministically rather than silently misattributing every tx to slot 0.
+    if num_chunks_in_partition == 0 {
+        eyre::bail!("num_chunks_in_partition must be non-zero for ledger-expiry chunk math");
+    }
 
     let mut current_offset = prev_max_offset;
     let mut tx_to_miners = BTreeMap::new();
@@ -1345,22 +1352,20 @@ fn filter_transactions_by_chunk_range(
         // refund walk has diverged from the per-candidate promotion filter
         // (`submit_tx_expired`) — fail loud rather than silently under-refund,
         // which in consensus code would strand a refund and break Pipeline A ≡ B.
-        if num_chunks_in_partition != 0 {
-            let slot = SlotIndex::new(*tx_start / num_chunks_in_partition);
-            match slot_miners.get(&slot) {
-                Some(miners) => {
-                    tracing::debug!("  Including transaction (slot {})", slot.0);
-                    tx_to_miners.insert(tx.id, Arc::clone(miners));
-                }
-                None => eyre::bail!(
-                    "tx {} start offset {} maps to non-expired slot {} \
-                     (expired slots must tile the range contiguously) — refund \
-                     walk diverged from the promotion filter (NC-0042)",
-                    tx.id,
-                    *tx_start,
-                    slot.0,
-                ),
+        let slot = SlotIndex::new(*tx_start / num_chunks_in_partition);
+        match slot_miners.get(&slot) {
+            Some(miners) => {
+                tracing::debug!("  Including transaction (slot {})", slot.0);
+                tx_to_miners.insert(tx.id, Arc::clone(miners));
             }
+            None => eyre::bail!(
+                "tx {} start offset {} maps to non-expired slot {} \
+                 (expired slots must tile the range contiguously) — refund \
+                 walk diverged from the promotion filter (NC-0042)",
+                tx.id,
+                *tx_start,
+                slot.0,
+            ),
         }
         current_offset = tx_end;
     }
@@ -2967,6 +2972,118 @@ mod tests {
         assert!(
             err.to_string().contains("non-expired slot"),
             "expected the NC-0042 fail-loud message, got: {err}"
+        );
+    }
+
+    /// P2-5: `filter_transactions_by_chunk_range` must bail when `chunk_size == 0`
+    /// rather than panicking. Mirrors the existing `chunk_size == 0` guard in
+    /// `submit_tx_start_offset` and the `num_chunks_in_partition == 0` guard added
+    /// alongside it.
+    #[test]
+    fn filter_transactions_by_chunk_range_bails_on_zero_chunk_size() {
+        let tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_size: 100,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        let mut slot_miners: BTreeMap<SlotIndex, Arc<Vec<IrysAddress>>> = BTreeMap::new();
+        slot_miners.insert(SlotIndex::new(0), Arc::new(vec![IrysAddress::ZERO]));
+        let err = filter_transactions_by_chunk_range(
+            vec![tx],
+            LedgerChunkOffset::from(0_u64),
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 100)),
+            false, // is_earliest
+            false, // is_latest
+            0,     // chunk_size = 0 → must bail
+            10,    // num_chunks_in_partition
+            &slot_miners,
+        )
+        .expect_err("chunk_size == 0 must fail loud");
+        assert!(
+            err.to_string().contains("chunk_size"),
+            "expected the chunk_size guard message, got: {err}"
+        );
+    }
+
+    /// P1-3: `expired_submit_range` must bail when the expired Submit slot set is a
+    /// non-contiguous prefix (e.g. `{0, 2}` with slot 1 unwritten/excluded). The
+    /// contiguity invariant underpins the `[0, range_end)` promotion filter; a hole
+    /// would cause the filter to over-approximate real expired txs (NC-0042).
+    #[test]
+    fn expired_submit_range_bails_on_non_prefix_expired_set() {
+        use irys_domain::{CommitmentState, PartitionAssignments};
+        use irys_types::{Config, NodeConfig};
+
+        // Default config: num_blocks_in_epoch=100, submit_ledger_epoch_length=5,
+        // num_chunks_in_partition=10. min_blocks = 5 * 100 = 500.
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let mut epoch = EpochSnapshot {
+            ledgers: irys_database::Ledgers::new(&config.consensus, false),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: None,
+            epoch_height: 0,
+        };
+
+        // Allocate 4 Submit slots at height 1 (last_height=1 for all).
+        // Slot 3 is the never-expiring last slot.
+        epoch.ledgers[DataLedger::Submit].allocate_slots(4, 1);
+
+        // Touch slots 0 and 2 only (chunks [0,10) and [20,30)); slot 1 stays
+        // unwritten. With cascade_active=true, unwritten slots are excluded from
+        // expiry, so slot 1 is never returned as expired.
+        let chunks_per_slot = config.consensus.num_chunks_in_partition;
+        epoch.ledgers.touch_filled_slots(
+            DataLedger::Submit,
+            0,
+            chunks_per_slot,
+            chunks_per_slot,
+            1,
+            true,
+        );
+        epoch.ledgers.touch_filled_slots(
+            DataLedger::Submit,
+            2 * chunks_per_slot,
+            3 * chunks_per_slot,
+            chunks_per_slot,
+            1,
+            true,
+        );
+
+        // block_height = min_blocks + 50 → expiry_height = 50. Slots 0 and 2 have
+        // last_height=1 ≤ 50, so they expire. Slot 1 is unwritten (excluded by
+        // cascade). Slot 3 is the last slot (never expires). Result: {0, 2} — a hole.
+        let ep = &config.consensus.epoch;
+        let min_blocks = ep.submit_ledger_epoch_length * ep.num_blocks_in_epoch;
+        let block_height = min_blocks + 50;
+
+        // Sanity: fixture produces the non-prefix set before asserting the guard.
+        assert_eq!(
+            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height, true),
+            vec![0, 2],
+            "fixture must produce the non-prefix expired set {{0, 2}}"
+        );
+
+        // Parent header just needs a Submit total that covers at least slot 2's data.
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.data_ledgers[DataLedger::Submit].total_chunks = 3 * chunks_per_slot;
+
+        let err = expired_submit_range(block_height, &epoch, &parent, &config, true)
+            .expect_err("a non-prefix expired set must fail loud, not over-approximate");
+        assert!(
+            err.to_string().contains("not a contiguous prefix"),
+            "expected the NC-0042 contiguity guard message, got: {err}"
         );
     }
 }
