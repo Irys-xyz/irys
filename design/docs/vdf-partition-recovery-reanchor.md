@@ -595,10 +595,10 @@ Implemented:
   cover the fallible tip-rebuild and the backward-jump liveness handling.
 - **Integration (chain):** `heavy4_slow_network_partition_recovery`
   (`crates/chain-tests/src/multi_node/partition_recovery.rs`) now exercises the
-  re-anchor wiring end-to-end — recovery fires the signal, the supervisor rebuilds
-  from the index and restarts the loop, and the node both adopts the peer's canonical
-  chain and continues mining afterward (the "continued operation after recovery"
-  stage), proving the re-anchor does not wedge a live node.
+  re-anchor wiring end-to-end — recovery fires the signal, the supervisor rebuilds from the
+  block tree's canonical chain (tip) via `create_state_for_canonical_tip` and restarts the loop,
+  and the node both adopts the peer's canonical chain and continues mining afterward (the
+  "continued operation after recovery" stage), proving the re-anchor does not wedge a live node.
 
 - **End-to-end, boundary-spanning (the headline test):**
   `heavy4_slow_partition_recovery_crosses_reset_boundary`

@@ -74,7 +74,7 @@ pub enum VdfValidationResult {
     /// the block tree and the DB). Peer-innocent. The dispatch requeues this a bounded number of
     /// times (covering the transient re-anchor / eviction window) and then parks it as SoftInternal,
     /// rather than the previous unbounded resubmit that spun the single VDF lane forever. See
-    /// `active_validations::handle_prev_step_view_unavailable`.
+    /// `active_validations::prev_step_view_action`.
     PrevStepViewUnavailable,
 }
 
@@ -99,7 +99,7 @@ pub(crate) struct VdfStageBParentMissing {
 /// mid-re-anchor) and we could not obtain the authoritative lineage value, so this must
 /// requeue rather than panic (never-mislabel rule) or be peer-attributed as `Invalid`.
 /// Downcast in `PreemptibleVdfTask::execute` and converted to
-/// `VdfValidationResult::Cancelled` (the peer-innocent requeue lane).
+/// `VdfValidationResult::PrevStepViewUnavailable` (the peer-innocent bounded-retry lane).
 #[derive(Debug, thiserror::Error)]
 #[error("VDF previous-step fork-local view unavailable (ancestor eviction race); requeue")]
 pub(crate) struct VdfPrevStepForkViewUnavailable;
