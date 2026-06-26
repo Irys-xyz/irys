@@ -481,6 +481,16 @@ pub fn create_state_for_canonical_tip(
             .ok_or_else(|| eyre!("VDF re-anchor: missing header for {hash}"))
     })?;
 
+    // Reject an empty rebuild: a buffer with no steps would make `publish_reanchored_state`'s
+    // `get_last_step_and_seed()` panic on the live VDF supervisor thread. Unreachable on a
+    // validated chain (the canonical tip always carries >=1 VDF step), but route it to the
+    // caller's Fallback (resume from the live buffer) rather than unwind the thread.
+    if seeds.is_empty() {
+        return Err(eyre!(
+            "VDF re-anchor: rebuilt canonical buffer is empty; keeping live buffer"
+        ));
+    }
+
     info!(
         "Re-anchoring vdf service to canonical tip at step number {}",
         global_step_number

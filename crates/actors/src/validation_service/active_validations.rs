@@ -127,10 +127,10 @@ pub(super) fn stall_retry_action(
     ) {
         return StallAction::Panic(StallPanicReason::NonCanonical);
     }
-    let retries = if last_stall_step == Some(current_step) {
-        retries + 1
-    } else {
-        1
+    let retries = match last_stall_step {
+        Some(previous_step) if current_step > previous_step => 1,
+        Some(_) => retries.saturating_add(1),
+        None => 1,
     };
     if retries > max_consecutive_noprogress_stalls {
         StallAction::Panic(StallPanicReason::FrozenWriter)
@@ -1174,6 +1174,25 @@ mod tests {
                 retries: 1,
                 last_stall_step: 9
             }
+        );
+    }
+
+    #[test]
+    fn stall_retry_rewind_counts_as_noprogress() {
+        // A LOWER stalled-at step is a re-anchor rewind, not buffer advancement, so it keeps
+        // counting toward the bound rather than resetting — otherwise a writer that only ever
+        // rewinds never trips the frozen-writer crash and canonical tasks requeue forever.
+        assert_eq!(
+            stall_retry_action(BlockPriority::Canonical, Some(10), 1, 8, 2),
+            StallAction::Requeue {
+                retries: 2,
+                last_stall_step: 8
+            }
+        );
+        // Repeated rewinds therefore still reach the bound and crash.
+        assert_eq!(
+            stall_retry_action(BlockPriority::Canonical, Some(10), 2, 8, 2),
+            StallAction::Panic(StallPanicReason::FrozenWriter)
         );
     }
 

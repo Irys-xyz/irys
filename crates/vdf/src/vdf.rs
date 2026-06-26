@@ -1474,6 +1474,47 @@ mod tests {
         );
     }
 
+    /// An empty *rebuild* (a genesis tip carrying no VDF steps — distinct from an empty canonical
+    /// chain) must also produce a controlled `Fallback`: `create_state_for_canonical_tip` rejects
+    /// the stepless buffer so `publish_reanchored_state` is never reached with one (its
+    /// `get_last_step_and_seed` would `.expect`-panic and unwind the supervisor). Unreachable on a
+    /// validated chain; this pins the empty-buffer guard.
+    #[test]
+    fn reanchor_to_canonical_tip_falls_back_on_empty_rebuild() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (_tmp, db) = temp_db();
+
+        let mut live_state = VdfState::new(64, 1_234, None);
+        live_state.seeds.push_back(Seed(H256::repeat_byte(0x77)));
+        let live = Arc::new(std::sync::RwLock::new(live_state));
+        let atomic = Arc::new(AtomicU64::new(1_234));
+        let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // A genesis tip (height 0) with no steps -> build_vdf_seed_buffer yields an empty buffer.
+        let empty_genesis = mock_canonical_block(0, 0x00, 0xFF, &[], 0, 0x90, 0x91);
+
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &[empty_genesis],
+            &db,
+            Arc::new(AtomicBool::new(true)),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+
+        assert!(
+            matches!(outcome, ReanchorOutcome::Fallback(_)),
+            "an empty rebuilt buffer must fall back to the live buffer, not panic in publish_reanchored_state"
+        );
+        assert_eq!(
+            atomic.load(std::sync::atomic::Ordering::Relaxed),
+            1_234,
+            "atomic untouched on fallback (no publish of an empty buffer)"
+        );
+    }
+
     /// Documented behavioural change: when the rebuild fails AND the fallback read lock is poisoned,
     /// `reanchor_to_canonical_tip` returns `Shutdown` directly (the old code kept the stale anchor
     /// and let `run_vdf` re-detect the poison on its next startup read — one dead round-trip).
