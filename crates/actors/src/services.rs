@@ -22,6 +22,7 @@ use tokio::sync::{
     broadcast,
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
 };
+use tokio_util::sync::CancellationToken;
 
 const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
@@ -94,8 +95,6 @@ pub struct ServiceReceivers {
     pub chunk_migration: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedReceiver<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Receiver<Traced<VdfStep>>,
-    /// Re-anchor signal for the VDF supervisor thread (network-partition recovery).
-    pub vdf_reanchor: UnboundedReceiver<()>,
     pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
@@ -118,8 +117,12 @@ pub struct ServiceSendersInner {
     pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Sender<Traced<VdfStep>>,
-    /// Re-anchor signal for the VDF supervisor thread (network-partition recovery).
-    pub vdf_reanchor: UnboundedSender<()>,
+    /// Cancelled by [`BlockTreeService`](crate::block_tree_service::BlockTreeService) after a deep
+    /// network-partition recovery to request a controlled process restart; the relaunch cold-syncs
+    /// the canonical chain and rebuilds VDF state. The lifecycle `select!` maps it to
+    /// `ShutdownReason::PartitionRecoveryRestart`. Replaces the former in-place VDF re-anchor signal.
+    /// See design/docs/vdf-partition-recovery-reanchor.md.
+    pub partition_recovery_restart: CancellationToken,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -148,7 +151,7 @@ impl ServiceSendersInner {
             unbounded_channel::<Traced<MempoolServiceMessage>>();
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
             channel::<Traced<VdfStep>>(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
-        let (vdf_reanchor_sender, vdf_reanchor_receiver) = unbounded_channel::<()>();
+        let partition_recovery_restart = CancellationToken::new();
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
         let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
@@ -177,7 +180,7 @@ impl ServiceSendersInner {
             chunk_migration: chunk_migration_sender,
             mempool: mempool_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
-            vdf_reanchor: vdf_reanchor_sender,
+            partition_recovery_restart,
             storage_modules: sm_sender,
             data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,
@@ -199,7 +202,6 @@ impl ServiceSendersInner {
             chunk_migration: chunk_migration_receiver,
             mempool: mempool_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,
-            vdf_reanchor: vdf_reanchor_receiver,
             storage_modules: sm_receiver,
             data_sync: ds_receiver,
             gossip_broadcast: gossip_broadcast_receiver,

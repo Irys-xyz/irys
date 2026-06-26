@@ -9,7 +9,7 @@ use irys_types::{
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -57,27 +57,12 @@ pub fn run_vdf_for_genesis_block(
     }
 }
 
-/// Why [`run_vdf`] returned, so the supervising VDF thread knows whether to exit
-/// or re-anchor and restart the loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VdfExit {
-    /// Terminal: the shutdown token fired or the VDF state lock was poisoned.
-    /// The supervisor must stop (and the node should shut down).
-    Shutdown,
-    /// A re-anchor was requested (a deep reorg / network-partition recovery
-    /// rewound the canonical chain). The supervisor rebuilds the VDF state from
-    /// the now-canonical block index and restarts the loop. See
-    /// design/docs/vdf-partition-recovery-reanchor.md.
-    Reanchor,
-}
-
 pub fn run_vdf<B: BlockProvider>(
     config: &irys_types::VdfConfig,
     global_step_number: u64,
     current_vdf_hash: H256,
     initial_reset_seed: H256,
     fast_forward_receiver: &mut Receiver<Traced<VdfStep>>,
-    reanchor_receiver: &mut UnboundedReceiver<()>,
     is_mining_enabled: Arc<AtomicBool>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
@@ -85,7 +70,7 @@ pub fn run_vdf<B: BlockProvider>(
     block_provider: B,
     chain_sync_state: ChainSyncState,
     shutdown_token: CancellationToken,
-) -> VdfExit {
+) {
     let _span = tracing::info_span!("vdf_loop").entered();
     let mut next_reset_seed = initial_reset_seed;
     // Step number of the deepest block confirmed past the migration threshold
@@ -102,7 +87,7 @@ pub fn run_vdf<B: BlockProvider>(
             // than re-panic; the lifecycle's vdf_done channel surfaces this
             // as a controlled exit.
             error!("VDF state read lock poisoned at startup; exiting VDF thread");
-            return VdfExit::Shutdown;
+            return;
         }
     };
     // Until the first canonical snapshot read, treat the confirmed step as the canonical
@@ -126,25 +111,7 @@ pub fn run_vdf<B: BlockProvider>(
     loop {
         if shutdown_token.is_cancelled() {
             tracing::info!("VDF loop: shutdown token cancelled, exiting");
-            return VdfExit::Shutdown;
-        }
-
-        // A deep reorg (network-partition recovery) rewound the canonical chain, so the
-        // running hash/global_step and the shared step buffer may carry reset entropy
-        // pinned by the now-orphaned minority fork. Drain every pending request (coalesce
-        // bursts) and hand control back to the supervisor, which rebuilds the VDF state
-        // from the canonical index and restarts this loop at the new anchor. See
-        // design/docs/vdf-partition-recovery-reanchor.md.
-        let mut reanchor_requested = false;
-        while reanchor_receiver.try_recv().is_ok() {
-            reanchor_requested = true;
-        }
-        if reanchor_requested {
-            info!(
-                vdf.global_step_number = global_step_number,
-                "VDF loop: re-anchor requested, returning to supervisor"
-            );
-            return VdfExit::Reanchor;
+            return;
         }
 
         // check for VDF fast forward step
@@ -175,7 +142,8 @@ pub fn run_vdf<B: BlockProvider>(
                 // (`PartOfAPrunedFork` only refuses forks older than that), NOT
                 // `block_migration_depth` — so an earlier comment here claiming such forks are
                 // refused before validation was wrong. Recompute-on-mismatch is what lets the
-                // recovering node validate and adopt the canonical chain (and then re-anchor).
+                // recovering node validate and adopt the canonical chain (which then triggers a
+                // controlled restart to heal the VDF state on relaunch).
                 // See design/docs/vdf-reset-seed-confirmation-gate.md and
                 // design/docs/vdf-partition-recovery-reanchor.md.
                 if let Some(CanonicalVdfSnapshot {
@@ -201,7 +169,7 @@ pub fn run_vdf<B: BlockProvider>(
                         vdf.proposed_step = proposed_ff_step.global_step_number,
                         "VDF thread exiting: store_step failed during fast-forward (lock poisoned)"
                     );
-                    return VdfExit::Shutdown;
+                    return;
                 };
                 if returned == prev_step {
                     // Gap rejected — leave hash and global_step_number
@@ -346,7 +314,7 @@ pub fn run_vdf<B: BlockProvider>(
                 vdf.global_step_number = global_step_number,
                 "VDF thread exiting: store_step failed during local stepping (lock poisoned)"
             );
-            return VdfExit::Shutdown;
+            return;
         };
         global_step_number = returned;
         chain_sync_state.record_vdf_step(global_step_number);
@@ -556,7 +524,6 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, mut ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -582,7 +549,6 @@ mod tests {
                     seed,
                     reset_seed,
                     &mut ff_step_receiver,
-                    &mut reanchor_rx,
                     mining_state,
                     broadcast_mining_service,
                     vdf_state.clone(),
@@ -673,7 +639,6 @@ mod tests {
 
         let broadcast_mining_service = MockMining;
         let (_, mut ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
 
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
 
@@ -695,7 +660,6 @@ mod tests {
                     seed,
                     reset_seed,
                     &mut ff_step_receiver,
-                    &mut reanchor_rx,
                     mining_state,
                     broadcast_mining_service,
                     vdf_state.clone(),
@@ -778,7 +742,6 @@ mod tests {
         let current_seed = H256::random();
         let reset_seed = H256::random();
         let (ff_step_sender, mut ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(false));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -800,7 +763,6 @@ mod tests {
                     current_seed,
                     reset_seed,
                     &mut ff_step_receiver,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state,
@@ -836,81 +798,6 @@ mod tests {
         vdf_thread_handler.join().unwrap();
     }
 
-    /// A re-anchor signal must make the running loop return `VdfExit::Reanchor` (and stop)
-    /// so the supervisor thread can rebuild the VDF state from the canonical block index
-    /// after a deep reorg / network-partition recovery. The shutdown token is never set, so
-    /// `Reanchor` is the only reason the loop can exit here. See
-    /// design/docs/vdf-partition-recovery-reanchor.md.
-    #[tokio::test]
-    async fn reanchor_signal_returns_reanchor_exit() {
-        let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().vdf.reset_frequency = 2;
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new_with_random_peer_id(node_config);
-
-        init_tracing();
-
-        let seed = H256::random();
-        let reset_seed = H256::random();
-
-        let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
-        let vdf_state = mocked_vdf_service(&config);
-        let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        let atomic_step = Arc::new(AtomicU64::new(0));
-
-        // Canonical far ahead so the reset-boundary gate never parks the loop.
-        let mut mock_header = IrysBlockHeader::new_mock_header();
-        mock_header.vdf_limiter_info.global_step_number = 10_000;
-
-        let chain_sync_state = ChainSyncState::new(false, false);
-        let shutdown_token = CancellationToken::new();
-        let handle = std::thread::spawn({
-            let config = config.clone();
-            let shutdown_token = shutdown_token.clone();
-            let mining_state = Arc::clone(&is_mining_enabled);
-            move || {
-                run_vdf(
-                    &config.vdf,
-                    0,
-                    seed,
-                    reset_seed,
-                    &mut ff_rx,
-                    &mut reanchor_rx,
-                    mining_state,
-                    MockMining,
-                    vdf_state.clone(),
-                    atomic_step,
-                    MockBlockProvider(mock_header),
-                    chain_sync_state,
-                    shutdown_token,
-                )
-            }
-        });
-
-        // Let the loop produce a few steps, then request a re-anchor.
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        vdf_steps_guard
-            .wait_for_step(3, Arc::clone(&cancel), Duration::from_secs(5))
-            .await
-            .expect("loop should produce steps before re-anchor");
-        reanchor_tx
-            .send(())
-            .expect("re-anchor receiver should still be alive");
-
-        let exit = handle.join().unwrap();
-        assert_eq!(
-            exit,
-            VdfExit::Reanchor,
-            "a re-anchor signal must make run_vdf return VdfExit::Reanchor"
-        );
-        assert!(
-            !shutdown_token.is_cancelled(),
-            "loop exited via re-anchor, not shutdown"
-        );
-    }
-
     /// Poisons the `vdf_state` RwLock, then drives `run_vdf`. Before F3 the
     /// thread re-panicked at `vdf_state.read().unwrap()` (line 68). After F3
     /// the entry-time read returns a graceful `return`, so `run_vdf` exits
@@ -933,7 +820,6 @@ mod tests {
         );
 
         let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let atomic_step = Arc::new(AtomicU64::new(0));
         let chain_sync_state = ChainSyncState::new(false, false);
@@ -946,7 +832,6 @@ mod tests {
                 H256::zero(),
                 H256::zero(),
                 &mut ff_rx,
-                &mut reanchor_rx,
                 is_mining_enabled,
                 MockMining,
                 vdf_state,
@@ -989,7 +874,6 @@ mod tests {
         let gap_target_step: u64 = 100;
 
         let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         ff_tx
             .send(Traced::new(VdfStep {
                 step: bad_ff_seed,
@@ -1020,7 +904,6 @@ mod tests {
                     initial_seed,
                     reset_seed,
                     &mut ff_rx,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state.clone(),
@@ -1222,7 +1105,6 @@ mod tests {
         let provider = ControllableBlockProvider::new(0);
 
         let (_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -1242,7 +1124,6 @@ mod tests {
                     initial_seed,
                     initial_seed,
                     &mut ff_rx,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state.clone(),
@@ -1332,7 +1213,6 @@ mod tests {
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         let (_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let atomic_step = Arc::new(AtomicU64::new(1));
         let chain_sync_state = ChainSyncState::new(false, false);
@@ -1350,7 +1230,6 @@ mod tests {
                     step1,
                     H256::zero(),
                     &mut ff_rx,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state.clone(),
@@ -1368,7 +1247,7 @@ mod tests {
             .await
             .expect("loop should reach step 3");
         shutdown_token.cancel();
-        assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
+        handle.join().unwrap();
 
         let stored_step3 = vdf_steps_guard
             .get_step(3)
@@ -1466,7 +1345,6 @@ mod tests {
             }))
             .expect("queue FF step before the loop starts");
 
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let atomic_step = Arc::new(AtomicU64::new(1));
         let chain_sync_state = ChainSyncState::new(false, false);
@@ -1484,7 +1362,6 @@ mod tests {
                     step1,
                     H256::zero(),
                     &mut ff_rx,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state.clone(),
@@ -1502,7 +1379,7 @@ mod tests {
             .await
             .expect("loop should consume the FF boundary step and then locally reach step 3");
         shutdown_token.cancel();
-        assert_eq!(handle.join().unwrap(), VdfExit::Shutdown);
+        handle.join().unwrap();
 
         let stored_step3 = vdf_steps_guard
             .get_step(3)
@@ -1561,7 +1438,6 @@ mod tests {
         provider.set_snapshot(pre_boundary_seed, 8, 6);
 
         let (_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
         let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let vdf_state = mocked_vdf_service(config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
@@ -1575,14 +1451,12 @@ mod tests {
             let shutdown_token = shutdown_token.clone();
             let mining_state = Arc::clone(&is_mining_enabled);
             move || {
-                // Discard the VdfExit so the helper's JoinHandle stays JoinHandle<()>.
-                let _ = run_vdf(
+                run_vdf(
                     &config.vdf,
                     0,
                     pre_boundary_seed,
                     pre_boundary_seed,
                     &mut ff_rx,
-                    &mut reanchor_rx,
                     mining_state,
                     MockMining,
                     vdf_state,

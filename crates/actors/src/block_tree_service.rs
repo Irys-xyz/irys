@@ -26,7 +26,7 @@ use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
     num::NonZeroUsize,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicU64},
     time::SystemTime,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
@@ -125,6 +125,11 @@ pub struct BlockTreeServiceInner {
     block_migration_service: BlockMigrationService,
     /// Chain sync state for diagnostics
     pub chain_sync_state: ChainSyncState,
+    /// Shared live VDF global-step counter (kept current by the VDF thread). Read only by the
+    /// partition-recovery restart gate to decide whether a deep reorg actually poisoned the VDF
+    /// buffer — i.e. whether the live step (which free-runs ahead of blocks) crossed a reset
+    /// boundary whose reset seed diverges between the forks.
+    vdf_global_step: Arc<AtomicU64>,
     /// Bounded LRU of block_hashes recently discarded due to a soft-internal
     /// `InternalFailure` (eviction race, payload-cache miss, parent snapshot
     /// pruned). Value is the reason tag captured at discard time.
@@ -325,6 +330,7 @@ impl BlockTreeService {
         block_migration_service: BlockMigrationService,
         cache: Arc<RwLock<BlockTree>>,
         lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
+        vdf_global_step: Arc<AtomicU64>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -349,6 +355,7 @@ impl BlockTreeService {
                         config,
                         service_senders,
                         chain_sync_state,
+                        vdf_global_step,
                         recent_soft_internal_discards: LruCache::new(
                             NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                         ),
@@ -1068,18 +1075,55 @@ impl BlockTreeServiceInner {
                         self.block_migration_service
                             .recover_from_network_partition(fork_height)?;
 
-                        // The minority fork may have crossed a VDF reset boundary, leaving the
-                        // VDF loop's running hash and the shared step buffer poisoned with reset
-                        // entropy pinned by an orphaned block. Signal the VDF supervisor to
-                        // re-anchor to the new canonical tip and restart; it rebuilds the step
-                        // buffer from the block tree's canonical chain. (The index rollback above
-                        // is independent — it only reverts the orphaned fork's storage/supply side
-                        // effects; the VDF rebuild does not read the index.) See
+                        // Heal the VDF buffer ONLY when this recovery actually poisoned it. VDF
+                        // steps BETWEEN reset boundaries are a block-independent SHA chain, so a deep
+                        // reorg that crossed no reset boundary leaves the buffer bit-identical to the
+                        // canonical lineage — no heal needed. The reset seed applied at a boundary is
+                        // pinned by the rotation block at `boundary - reset_frequency`, and the two
+                        // forks pin DIFFERENT seeds only once that rotation block lies ABOVE the LCA
+                        // — i.e. at the SECOND reset boundary above the LCA (the first boundary's
+                        // rotation block is at/below the shared LCA, so both forks share its seed).
+                        // The VDF free-runs AHEAD of blocks, so we test the LIVE step counter (not
+                        // the orphaned blocks): the buffer is poisoned iff it reached that second
+                        // boundary on this (minority) lineage.
+                        //
+                        // Only then do we pay for a heal — a controlled WHOLE-NODE restart. The block
+                        // index was just truncated to the fork parent (the `?` above), so on relaunch
+                        // the cold-start path (`create_state` over the truncated index, then
+                        // trusted-peer fast-forward) rebuilds correct VDF state. Cancelling is
+                        // infallible and idempotent; the lifecycle `select!` maps this token to
+                        // ShutdownReason::PartitionRecoveryRestart, which exits with a distinct code so
+                        // a supervisor relaunches the node. Buffer poisoning is NOT a consensus-safety
+                        // issue (validation resolves VDF steps from each block's own fork-local
+                        // lineage, never the live buffer) — it degrades only this node's mining, which
+                        // is why a non-boundary deep reorg needs neither heal nor restart. See
                         // design/docs/vdf-partition-recovery-reanchor.md.
-                        if let Err(e) = self.service_senders.vdf_reanchor.send(()) {
-                            error!(
-                                "Failed to signal VDF re-anchor after partition recovery: {e}. \
-                                 The VDF buffer may stay poisoned until restart."
+                        let reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+                        let lca_step = fork_block.vdf_limiter_info.global_step_number;
+                        // The second reset boundary above the LCA: the first boundary whose reset
+                        // seed can diverge between the forks.
+                        let first_divergent_boundary =
+                            (lca_step / reset_frequency + 2) * reset_frequency;
+                        let live_vdf_step = self
+                            .vdf_global_step
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        if live_vdf_step >= first_divergent_boundary {
+                            warn!(
+                                live_vdf_step,
+                                lca_step,
+                                first_divergent_boundary,
+                                "Partition recovery crossed a divergent-seed VDF reset boundary; \
+                                 requesting a controlled restart to rebuild VDF state from the \
+                                 canonical chain on relaunch"
+                            );
+                            self.service_senders.partition_recovery_restart.cancel();
+                        } else {
+                            debug!(
+                                live_vdf_step,
+                                lca_step,
+                                first_divergent_boundary,
+                                "Partition recovery did not reach a divergent-seed reset boundary; \
+                                 the VDF buffer is unpoisoned, so no restart is needed"
                             );
                         }
                     }
@@ -1989,6 +2033,7 @@ mod tests {
                 service_senders,
                 block_migration_service,
                 chain_sync_state,
+                vdf_global_step: Arc::new(AtomicU64::new(0)),
                 recent_soft_internal_discards: LruCache::new(
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                 ),

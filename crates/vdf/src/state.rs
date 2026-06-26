@@ -405,82 +405,10 @@ fn build_vdf_seed_buffer(
     Ok(seeds)
 }
 
-/// Rebuild [`VdfState`] anchored at the canonical chain TIP, for partition-recovery re-anchor.
-///
-/// Unlike [`create_state`] (which anchors at the block index's latest item — the LCA after a
-/// partition-recovery truncation), this anchors at the new canonical tip so the rebuilt buffer
-/// carries the recovered range's canonical steps, each with its OWN reset-boundary seed.
-/// Anchoring at the LCA instead leaves the loop to re-cross the recovered range's reset
-/// boundaries by local stepping with the canonical tip's single `next_seed`, which is wrong for
-/// every intermediate boundary — diverging the buffer and re-wedging block validation. See
-/// design/docs/vdf-partition-recovery-reanchor.md.
-///
-/// `canonical_headers` is the block tree's canonical chain (oldest cached .. tip, as returned by
-/// `BlockTree::get_canonical_chain`). The recovered range is always within the block tree (a
-/// reorg is only representable up to `block_tree_depth` deep), so the tip and the whole recovered
-/// range are present here. Block headers are persisted to the DB only at migration, so the
-/// un-migrated tail MUST come from these headers; steps deeper than the cache (needed to fill
-/// `capacity`) fall back to the DB, which holds the migrated ancestors.
-pub fn create_state_for_canonical_tip(
-    canonical_headers: &[Arc<IrysBlockHeader>],
-    db: &DatabaseProvider,
-    is_vdf_mining_enabled: Arc<AtomicBool>,
-    config: &Config,
-) -> eyre::Result<(VdfState, H256)> {
-    let capacity = calc_capacity(config);
-
-    let cached: std::collections::HashMap<H256, Arc<IrysBlockHeader>> = canonical_headers
-        .iter()
-        .map(|h| (h.block_hash, Arc::clone(h)))
-        .collect();
-    let tip: &IrysBlockHeader = canonical_headers
-        .last()
-        .ok_or_else(|| eyre!("canonical chain empty during VDF re-anchor"))?;
-    let global_step_number = tip.vdf_limiter_info.global_step_number;
-    // Captured from the anchor (tip) block; the walk-back below only reads ancestors.
-    let next_seed = tip.vdf_limiter_info.next_seed;
-
-    // This runs on the live VDF supervisor thread (the re-anchor arm of
-    // init_vdf_thread). A transient DB error or an ancestor missing from BOTH the
-    // canonical cache and the DB must surface as an error — the caller keeps the
-    // current buffer and retries on the next re-anchor signal — rather than
-    // panicking and shutting the node down via the thread's CancelOnDrop guard.
-    let tx = db
-        .tx()
-        .map_err(|e| eyre!("VDF re-anchor: opening db tx failed: {e}"))?;
-    // Resolve an ancestor header by hash: the block tree's canonical cache first (the recovered,
-    // un-migrated range), then the DB (migrated ancestors below the cache).
-    let seeds = build_vdf_seed_buffer(tip, capacity, |hash| {
-        if let Some(header) = cached.get(hash) {
-            return Ok((**header).clone());
-        }
-        block_header_by_hash(&tx, hash, false)
-            .map_err(|e| eyre!("VDF re-anchor: header lookup failed for {hash}: {e}"))?
-            .ok_or_else(|| eyre!("VDF re-anchor: missing header for {hash}"))
-    })?;
-
-    info!(
-        "Re-anchoring vdf service to canonical tip at step number {}",
-        global_step_number
-    );
-
-    Ok((
-        VdfState {
-            global_step: global_step_number,
-            global_step_from_the_latest_canonical_block: global_step_number,
-            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-            seeds,
-            capacity,
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-        },
-        next_seed,
-    ))
-}
-
 /// Build a TRANSIENT, read-only VDF step view anchored on `tip`'s OWN lineage — its
 /// `vdf_limiter_info.steps` plus ancestors resolved via `fetch_parent` (oldest at the front, the
 /// tip's last step at the back), filling up to `capacity` steps. Mirrors the walk-back of
-/// [`create_state_for_canonical_tip`] / [`build_vdf_seed_buffer`].
+/// [`build_vdf_seed_buffer`].
 ///
 /// This is the single place that resolves FORK-LOCAL VDF steps for block validation. A node
 /// validating a block on a competing fork (deep partition recovery) must not trust its live VDF
@@ -763,13 +691,12 @@ mod tests {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
-    /// Regression for the partition-recovery re-anchor fix (review Finding #1):
-    /// [`build_vdf_seed_buffer`] — the walk-back behind [`create_state_for_canonical_tip`] — must
+    /// Regression for the partition-recovery fork-local view (review Finding #1):
+    /// [`build_vdf_seed_buffer`] — the walk-back behind [`build_fork_local_view`] — must
     /// reproduce the canonical chain's recorded steps VERBATIM, anchored at the tip. That is what
-    /// lets the re-anchored buffer match (and validate) the canonical chain across the recovered
-    /// range. The broken design re-anchored at the LCA and let the loop re-derive the post-LCA
-    /// steps with the wrong reset seed; rebuilding from the canonical headers instead copies each
-    /// block's own steps, which already encode the correct boundary crossings.
+    /// lets a fork-local view match (and validate) a competing chain across the recovered range:
+    /// it copies each block's own steps, which already encode the correct boundary crossings,
+    /// rather than re-deriving the post-LCA steps with the wrong reset seed.
     #[test]
     fn build_vdf_seed_buffer_reproduces_canonical_steps_anchored_at_tip() {
         fn mock_header(height: u64, hash: u8, prev: u8, steps: &[u8]) -> IrysBlockHeader {
