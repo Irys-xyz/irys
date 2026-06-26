@@ -339,6 +339,13 @@ impl TryFrom<LedgerChunkOffset> for usize {
     }
 }
 
+/// Builds an **inclusive-inclusive** (`ii`) `LedgerChunkOffset` interval.
+///
+/// NOTE: the ledger-expiry consumers treat the resulting interval's `.end()` as
+/// **exclusive** (loops use `< end`, trims use `>= end`). That is self-consistent
+/// across those call sites today, but a future caller using nodit's `.contains()`
+/// on this `ii` interval would double-count the boundary chunk. Reach for
+/// `ledger_chunk_offset_ie!` (exclusive end) if you need half-open semantics.
 #[macro_export]
 macro_rules! ledger_chunk_offset_ii {
     ($start:expr, $end:expr) => {
