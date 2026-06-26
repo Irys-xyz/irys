@@ -15,7 +15,9 @@ mod mempool_ingress_proof_dedup;
 mod poa_cases;
 mod promote_after_submit_expiry;
 mod publish_after_submit_expiry_filtered;
+mod reorg_submit_expiry;
 mod same_block_promotion;
+mod slow_path_submit_expiry;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
@@ -70,7 +72,15 @@ pub(super) struct ExpiryTestSetup {
 ///   - mines the first data block so the txs land in the Submit ledger
 ///
 /// Both tests diverge after this point.
-pub(super) async fn submit_expiry_two_node_setup() -> eyre::Result<ExpiryTestSetup> {
+///
+/// `block_migration_depth` is a parameter so the slow-path test
+/// (`slow_path_submit_expiry.rs`) can set it high enough that an expired tx's
+/// Submit inclusion is still UN-migrated at the verdict block, forcing
+/// `resolve_submit_inclusion`'s by-hash slow path. The §4b/§4c tests pass `1`
+/// (immediate migration → fast path).
+pub(super) async fn submit_expiry_two_node_setup(
+    block_migration_depth: u32,
+) -> eyre::Result<ExpiryTestSetup> {
     let num_blocks_in_epoch: usize = 5;
     let submit_ledger_epoch_length: u64 = 2;
     let chunk_size: u64 = 32;
@@ -83,7 +93,7 @@ pub(super) async fn submit_expiry_two_node_setup() -> eyre::Result<ExpiryTestSet
         let c = genesis_config.consensus.get_mut();
         c.chunk_size = chunk_size;
         c.num_chunks_in_partition = num_chunks_in_partition;
-        c.block_migration_depth = 1;
+        c.block_migration_depth = block_migration_depth;
         c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
         // One ingress proof from the genesis signer makes a tx promotable — keeps
         // both tests single-node on the promotion side.

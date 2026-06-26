@@ -1,23 +1,18 @@
-// NC-0042 §4c validator consensus rule: a block that promotes a tx whose
-// Submit-ledger storage has already expired must be rejected with
-// `ShadowTransactionInvalid` — even when the expiry happened in an *earlier*
-// block (the cross-block silent double-pay, devnet 39960/39962).
+// NC-0042 integration coverage for `resolve_submit_inclusion`'s SLOW path.
 //
-// Scenario (real flow, no DB seeding):
-//   1. Drive enough data txs through the Submit ledger to force a 2nd slot, so
-//      the genesis slot genuinely expires (per-slot expiry; the last slot is
-//      never expired — see `publish_after_submit_expiry_filtered.rs`).
-//   2. Mine honestly to the expiry epoch. The honest producer drops those txs
-//      from promotion (§4b) and perm-fee-refunds them (Pipeline B).
-//   3. AFTER expiry, an `EvilPublishStrategy` produces a block that promotes one
-//      of the already-expired+refunded txs anyway (the malicious/buggy peer).
-//   4. Both the genesis node and a peer must REJECT that block with
-//      `ShadowTransactionInvalid`. Before §4c this block was accepted by every
-//      validator (no check covered the cross-block case) → permanent double-pay.
-//
-// The earlier version of this test hand-inserted `MigratedBlockHashes` rows;
-// that collides with the real chain's migration writes and crashes
-// BlockTreeService. We drive the tx through the real Submit flow instead.
+// The slow path (by-hash parent-ancestry walk) is what resolves a tx's Submit
+// inclusion when that inclusion is NOT yet in the migrated block index. It is
+// covered by unit fixtures (`resolve_submit_inclusion_slow_path_walks_untracked_tree`,
+// `find_block_range_resolves_unmigrated_tail`, the `walk_*` C1 tests), but the
+// §4b/§4c chain-tests all run with `block_migration_depth = 1`, so a real node
+// in those tests always migrates the inclusion before expiry and only ever takes
+// the O(1) fast path. In production `block_migration_depth` is large, so the
+// slow path IS reached. This test pins that integration: it raises
+// `block_migration_depth` so the expired tx's Submit inclusion is still
+// UN-migrated at the verdict block, then asserts (a) the slow path is genuinely
+// taken (the migrated-index lookup returns `None`) and (b) the §4c validator
+// still correctly rejects a block promoting that already-expired tx — proving the
+// by-hash walk resolved the un-migrated inclusion to the correct offsets.
 
 use crate::utils::{assert_validation_error, solution_context};
 use crate::validation::{send_block_and_read_state, submit_expiry_two_node_setup};
@@ -27,6 +22,7 @@ use irys_actors::{
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs,
 };
+use irys_database::{canonical_submit_height, db::IrysDatabaseExt as _};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
@@ -34,12 +30,12 @@ use irys_types::{
 };
 
 #[test_log::test(tokio::test)]
-async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre::Result<()> {
-    /// Forces an already-expired Submit tx into the Publish ledger, with a valid
-    /// ingress proof so the block fails validation *only* on the §4c expiry rule
-    /// (not on a missing/invalid proof). No refund is scheduled in the bundle, so
-    /// the in-constructor defence-in-depth guard does not fire during production —
-    /// the block is built and must be caught at validation time.
+async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> eyre::Result<()> {
+    /// Same evil producer as the §4c test: promotes an already-expired tx with a
+    /// valid ingress proof and schedules NO refund, so the block is built (the
+    /// in-constructor guard does not fire) and must be caught at validation by the
+    /// §4c rule — which here can only succeed if the SLOW path resolved the
+    /// un-migrated Submit inclusion correctly.
     struct EvilPublishStrategy {
         prod: ProductionStrategy,
         expired_tx: DataTransactionHeader,
@@ -79,8 +75,14 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         }
     }
 
-    // --- 1 + 2. Shared config + two-node startup + overflow data posting ---
-    let setup = submit_expiry_two_node_setup(1).await?;
+    // --- 1 + 2. Shared setup, but with a LARGE block_migration_depth. The data
+    //         block sits at height 1 and the slot expires at blocks_per_cycle (10),
+    //         so a depth > (expiry_height - 1) keeps the inclusion un-migrated
+    //         through expiry. 12 is comfortably above that 9 threshold and below
+    //         the testing block_tree_depth (>= 50), so the inclusion still lives in
+    //         the block tree for the by-hash walk to find. ---
+    const BLOCK_MIGRATION_DEPTH: u32 = 12;
+    let setup = submit_expiry_two_node_setup(BLOCK_MIGRATION_DEPTH).await?;
     let genesis_config = setup.genesis_config;
     let genesis_node = setup.genesis_node;
     let peer_node = setup.peer_node;
@@ -88,29 +90,23 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
     let blocks_per_cycle = setup.blocks_per_cycle;
     let seconds_to_wait = setup.seconds_to_wait;
 
-    // --- 3. Mine honestly to the expiry epoch. Pipeline B refunds the slot-0 txs
-    //         here and the honest producer drops them from promotion (§4b). ---
+    // --- 3. Mine honestly to the expiry epoch. The honest producer drops the
+    //         slot-0 txs from promotion (§4b) and refunds them (Pipeline B); both
+    //         now resolve the un-migrated inclusion via the slow path. ---
     let expiry_height = blocks_per_cycle; // = 10
     let height_before_loop = genesis_node.get_canonical_chain_height().await;
     while genesis_node.get_canonical_chain_height().await < expiry_height {
         genesis_node.mine_block().await?;
     }
-    // If the §4b producer filter were absent, the producer would panic at the
-    // expiry epoch block and the chain would stall — the loop would never
-    // terminate. Assert that height advanced so a stall fails fast instead.
     assert!(
         genesis_node.get_canonical_chain_height().await > height_before_loop,
-        "chain must have advanced past the expiry epoch (§4b filter must not have stalled the producer)"
+        "chain must advance past the expiry epoch (slow-path §4b filter must not stall the producer)"
     );
 
-    // --- 4. Pick a target tx and confirm it is genuinely expired at the NEXT
-    //         (cross-block) height we'll produce the evil block at. ---
-    let evil_height = expiry_height + 1; // E+1: cross-block, not the epoch block
-    // The current tip is the parent of the evil block we'll produce at E+1.
+    // --- 4. Pick a target tx expired at the cross-block evil height. ---
+    let evil_height = expiry_height + 1; // E+1
     let evil_parent_block = genesis_node.get_block_by_height(expiry_height).await?;
     let tip_hash = evil_parent_block.block_hash;
-    // Bind the snapshot in its own scope so the block-tree read guard is dropped
-    // before the await below (held-guard-across-await is a clippy deny).
     let tip_snapshot = genesis_node
         .node_ctx
         .block_tree_guard
@@ -132,49 +128,30 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         &genesis_node.node_ctx.db,
     )
     .await?;
-
-    // Differential check: the per-candidate predicate the producer filter and
-    // validator check use (`is_submit_storage_expired`) must agree EXACTLY with the
-    // `expired_submit_tx_ids` walk oracle for every posted tx. Both are now exact
-    // offset comparisons — the refund walk's `same_block` over-inclusion (which this
-    // single-block layout hits) was closed alongside the per-candidate filter
-    // (NC-0042 §4b / R2), so the oracle no longer over-includes whole blocks. We
-    // still drive the evil block off the per-candidate verdict, which is what §4c
-    // enforces.
-    let mut per_candidate_expired = Vec::new();
-    for tx in &txs {
-        let per_candidate = irys_actors::block_producer::ledger_expiry::is_submit_storage_expired(
-            tx.header.id,
-            evil_height,
-            &tip_snapshot,
-            &evil_parent_block,
-            &genesis_node.node_ctx.config,
-            &genesis_node.node_ctx.block_producer_inner.block_index,
-            &genesis_node.node_ctx.block_tree_guard,
-            &genesis_node.node_ctx.mempool_guard,
-            &genesis_node.node_ctx.db,
-        )
-        .await?;
-        assert_eq!(
-            per_candidate,
-            expired_set.contains(&tx.header.id),
-            "is_submit_storage_expired must agree exactly with the expired_submit_tx_ids \
-             walk oracle for tx {} (both are exact offset comparisons — NC-0042 §4b/R2)",
-            tx.header.id,
-        );
-        if per_candidate {
-            per_candidate_expired.push(tx);
-        }
-    }
-
-    let target = per_candidate_expired
-        .first()
-        .copied()
-        .expect("at least one posted tx must be expired by the per-candidate (§4c) verdict");
+    let target = txs
+        .iter()
+        .find(|tx| expired_set.contains(&tx.header.id))
+        .expect("at least one posted tx must be expired at the cross-block evil height");
     let expired_tx = target.header.clone();
 
-    // --- 5. Build a valid ingress proof for the expired tx (genesis signer is
-    //         staked) so the evil block fails ONLY on the §4c expiry rule. ---
+    // --- 5. THE SLOW-PATH PRECONDITION. `resolve_submit_inclusion` takes the slow
+    //         path exactly when the migrated-index lookup returns `None`. Assert
+    //         that for the target tx at the verdict's `max_height` (evil_height - 1)
+    //         so this test cannot silently pass via the fast path. (If this ever
+    //         fails, BLOCK_MIGRATION_DEPTH is too low for the expiry timing.) ---
+    let max_height = evil_height - 1;
+    let migrated_lookup = genesis_node
+        .node_ctx
+        .db
+        .view_eyre(|tx| canonical_submit_height(tx, &expired_tx.id, max_height))?;
+    assert_eq!(
+        migrated_lookup, None,
+        "the expired tx's Submit inclusion must be UN-migrated at max_height {max_height} so \
+         resolve_submit_inclusion takes the by-hash slow path (block_migration_depth = {BLOCK_MIGRATION_DEPTH})"
+    );
+
+    // --- 6. Evil block at E+1 promotes the expired tx; build a valid ingress proof
+    //         so the block fails ONLY on the §4c expiry rule. ---
     let genesis_signer = genesis_config.signer();
     let proof_anchor = genesis_node.get_anchor().await?;
     let chunks: Vec<Vec<u8>> = vec![target.data.clone().unwrap_or_default().into()];
@@ -185,8 +162,6 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         genesis_config.consensus_config().chain_id,
         proof_anchor,
     )?;
-
-    // --- 6. Evil producer builds a block at E+1 that promotes the expired tx ---
     let evil_strategy = EvilPublishStrategy {
         expired_tx: expired_tx.clone(),
         proofs: IngressProofsList(vec![proof]),
@@ -199,7 +174,6 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .expect("evil block should be produced (the guard fires at validation, not production)");
-
     assert_eq!(block.header().height, evil_height, "evil block at E+1");
     assert!(
         block.header().data_ledgers[DataLedger::Publish]
@@ -208,36 +182,30 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         "evil block must promote the expired tx"
     );
 
-    // The §4c rejection message includes "See NC-0042." — match on that to ensure
-    // the block is rejected for the right reason and not an unrelated shadow-tx error.
+    // --- 7. Both nodes must reject it (§4c) — only possible if the slow path
+    //         resolved the un-migrated inclusion to the correct offsets. ---
     let is_nc_0042_expiry_rejection = |e: &ValidationError| match e {
         ValidationError::ShadowTransactionInvalid(msg) => msg.contains("NC-0042"),
         _ => false,
     };
-
-    // --- 7. Both nodes must reject it with ShadowTransactionInvalid (§4c) ---
     let genesis_outcome =
         send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         genesis_outcome,
         is_nc_0042_expiry_rejection,
-        "Genesis must reject a block promoting an already-expired Submit tx (NC-0042 §4c)",
+        "Genesis must reject a block promoting an already-expired Submit tx resolved via the slow path (NC-0042 §4c)",
     );
 
-    // Peer must have the parent chain up to expiry_height before we send it the E+1 block;
-    // otherwise it rejects for ParentBlockMissing rather than ShadowTransactionInvalid.
     peer_node
         .wait_until_height(expiry_height, seconds_to_wait)
         .await?;
-
     let peer_outcome = send_block_and_read_state(&peer_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         peer_outcome,
         is_nc_0042_expiry_rejection,
-        "Peer must reject a block promoting an already-expired Submit tx (NC-0042 §4c)",
+        "Peer must reject a block promoting an already-expired Submit tx resolved via the slow path (NC-0042 §4c)",
     );
 
-    // Neither node should have committed the evil block to the EVM layer.
     genesis_node
         .assert_evm_block_absent(block.header().evm_block_hash, 2)
         .await?;

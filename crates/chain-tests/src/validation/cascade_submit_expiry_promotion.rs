@@ -330,6 +330,52 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
         );
     }
 
+    // Exact no-UNDER-refund guard (NC-0042 M5). The `⊆` check above tolerates an
+    // expired, unpromoted, unrescued tx silently failing to be refunded. Pin it down:
+    // the on-chain refunds must EXACTLY equal the set the expiry refund pipeline
+    // (Pipeline B) computes for this block. Recompute Pipeline B from the SAME
+    // branch-correct inputs the producer used (parent snapshot + parent header + this
+    // block's own Cascade gate + this block's Submit total — the write-window
+    // exclusion correctly drops any slot rescued by a last-write touch this epoch).
+    // This is the Cascade analog of the pre-Cascade `refunded == expired` equality
+    // (`publish_after_submit_expiry_filtered.rs`), made rescue/promotion-aware.
+    let cascade_active_for_block = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(expiry_block.timestamp_secs());
+    let pipeline_b_refunds =
+        irys_actors::block_producer::ledger_expiry::calculate_expired_ledger_fees(
+            &expiry_parent_snapshot,
+            &expiry_parent_block,
+            expiry_height,
+            DataLedger::Submit,
+            &genesis_node.node_ctx.config,
+            genesis_node
+                .node_ctx
+                .block_producer_inner
+                .block_index
+                .clone(),
+            &genesis_node.node_ctx.block_tree_guard,
+            &genesis_node.node_ctx.mempool_guard,
+            &genesis_node.node_ctx.db,
+            true, // expect txs to be promoted -> compute perm-fee refunds for the unpromoted
+            expiry_block.ledger_total_chunks(DataLedger::Submit),
+            cascade_active_for_block,
+        )
+        .await?;
+    let expected_refund_ids: BTreeSet<H256> = pipeline_b_refunds
+        .user_perm_fee_refunds
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
+    assert_eq!(
+        refunded_tx_ids, expected_refund_ids,
+        "on-chain perm-fee refunds must EXACTLY equal Pipeline B's refund set (no \
+         under- or over-refund) — NC-0042 M5"
+    );
+
     // --- 5. §4c: build an evil block at E+1 that promotes an already-expired tx
     //         and confirm a validator rejects it with the NC-0042 error. ---
     let evil_height = expiry_height + 1; // E+1: cross-block, not the epoch block

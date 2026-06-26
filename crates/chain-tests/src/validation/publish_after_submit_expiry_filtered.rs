@@ -65,7 +65,7 @@ use tracing::info;
 async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -> eyre::Result<()> {
     // --- 1 + 2 + 3. Shared config + two-node startup + overflow data posting ---
     // (See submit_expiry_two_node_setup for the parameter rationale.)
-    let setup = submit_expiry_two_node_setup().await?;
+    let setup = submit_expiry_two_node_setup(1).await?;
     let genesis_config = setup.genesis_config;
     let genesis_node = setup.genesis_node;
     let peer_node = setup.peer_node;
