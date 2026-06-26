@@ -61,6 +61,21 @@ pub enum VdfValidationResult {
     ParentMissing {
         parent_hash: BlockHash,
     },
+    /// A cooperative VDF wait stalled (no `global_step` advance for `progress_timeout`). Carries
+    /// the stalled-at step so the dispatch's advancement-keyed bound can distinguish a heal cascade
+    /// (buffer advancing) from a frozen writer. The dispatch — not the spawned task — decides
+    /// requeue (canonical heal) vs panic (non-canonical, or frozen past the bound). See
+    /// `active_validations::handle_stalled_vdf_task` and
+    /// design/docs/vdf-validation-stall-detection.md.
+    Stalled {
+        current_step: u64,
+    },
+    /// The block's fork-local previous-step view could not be built (an ancestor absent from both
+    /// the block tree and the DB). Peer-innocent. The dispatch requeues this a bounded number of
+    /// times (covering the transient re-anchor / eviction window) and then parks it as SoftInternal,
+    /// rather than the previous unbounded resubmit that spun the single VDF lane forever. See
+    /// `active_validations::prev_step_view_action`.
+    PrevStepViewUnavailable,
 }
 
 /// Sentinel error returned from `ensure_vdf_is_valid` when Stage B observes
@@ -84,7 +99,7 @@ pub(crate) struct VdfStageBParentMissing {
 /// mid-re-anchor) and we could not obtain the authoritative lineage value, so this must
 /// requeue rather than panic (never-mislabel rule) or be peer-attributed as `Invalid`.
 /// Downcast in `PreemptibleVdfTask::execute` and converted to
-/// `VdfValidationResult::Cancelled` (the peer-innocent requeue lane).
+/// `VdfValidationResult::PrevStepViewUnavailable` (the peer-innocent bounded-retry lane).
 #[derive(Debug, thiserror::Error)]
 #[error("VDF previous-step fork-local view unavailable (ancestor eviction race); requeue")]
 pub(crate) struct VdfPrevStepForkViewUnavailable;
@@ -450,6 +465,53 @@ impl ValidationService {
                                 // recalculates priority (which may have changed
                                 // due to reorgs) before re-entering the queue.
                                 coordinator.submit_task(task);
+                            }
+                            VdfValidationResult::Stalled { current_step } => {
+                                metrics::record_validation_result("vdf", "stalled");
+                                // A canonical block heals via requeue (re-validation re-sends the
+                                // dropped fast-forward step); a non-canonical block or a frozen
+                                // buffer panics. See `handle_stalled_vdf_task`.
+                                coordinator.handle_stalled_vdf_task(task, current_step);
+                            }
+                            VdfValidationResult::PrevStepViewUnavailable => {
+                                match active_validations::prev_step_view_action(
+                                    task.vdf_prev_step_view_retries,
+                                    active_validations::MAX_PREV_STEP_VIEW_RETRIES,
+                                ) {
+                                    active_validations::PrevStepViewAction::Requeue => {
+                                        // On retry the re-anchored buffer's fast path typically
+                                        // works, or the evicted ancestor has reappeared so the
+                                        // fork-local view builds.
+                                        metrics::record_validation_cancellation(
+                                            "vdf_prev_step_view_requeue",
+                                        );
+                                        let mut task = task;
+                                        task.vdf_prev_step_view_retries += 1;
+                                        coordinator.submit_task(task);
+                                    }
+                                    active_validations::PrevStepViewAction::Park => {
+                                        // Persistent unavailability (pruned ancestor / DB error):
+                                        // park as peer-innocent SoftInternal so the single VDF lane
+                                        // is freed; the block tree recovers it later. (Not an
+                                        // unbounded resubmit, which would spin the lane forever.)
+                                        metrics::record_validation_result(
+                                            "vdf",
+                                            "prev_step_view_unavailable",
+                                        );
+                                        metrics::record_validation_full_duration_ms(
+                                            task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                        );
+                                        vdf_terminal_finalize_via(
+                                            &mut coordinator,
+                                            &self.inner.service_senders.block_tree,
+                                            hash,
+                                            ValidationError::VdfPrevStepViewUnavailable(format!(
+                                                "fork-local prev-step view unavailable after {} retries (block={hash})",
+                                                active_validations::MAX_PREV_STEP_VIEW_RETRIES
+                                            )),
+                                        );
+                                    }
+                                }
                             }
                             VdfValidationResult::ParentMissing { parent_hash } => {
                                 // Stage B observed the parent missing from

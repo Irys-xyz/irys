@@ -4,8 +4,8 @@ use irys_database::block_header_by_hash;
 use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
-    Config, DatabaseProvider, H256, H256List, IrysBlockHeader, U256, VDFLimiterInfo, VdfConfig,
-    block_production::Seed,
+    AtomicVdfStepNumber, Config, DatabaseProvider, H256, H256List, IrysBlockHeader, U256,
+    VDFLimiterInfo, VdfConfig, block_production::Seed,
 };
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
@@ -50,19 +50,36 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn new(
-        capacity: usize,
+    /// Construct from a pre-built seed buffer (oldest step at the front, newest at the back),
+    /// anchored at `global_step`. The canonical step and `minimum_step_to_keep` are derived from
+    /// `global_step` and `capacity`; [`Self::new`] is this with an empty buffer.
+    pub fn from_seeds(
         global_step: u64,
+        capacity: usize,
+        seeds: VecDeque<Seed>,
         is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             global_step,
             global_step_from_the_latest_canonical_block: global_step,
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
-            seeds: VecDeque::with_capacity(capacity),
+            seeds,
             capacity,
             is_vdf_mining_enabled,
         }
+    }
+
+    pub fn new(
+        capacity: usize,
+        global_step: u64,
+        is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self::from_seeds(
+            global_step,
+            capacity,
+            VecDeque::with_capacity(capacity),
+            is_vdf_mining_enabled,
+        )
     }
 
     pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
@@ -174,6 +191,33 @@ impl VdfState {
             .store(false, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// Marker error returned by [`publish_reanchored_state`] when the VDF state `RwLock` is poisoned.
+/// A zero-size type so the re-anchor orchestration can distinguish a terminal poisoned lock (the
+/// supervisor must shut the node down) from a recoverable buffer-rebuild failure.
+#[derive(Debug)]
+pub struct ReanchorLockPoisoned;
+
+/// Publish a re-anchored buffer. The (rewound) tip step is stored into `atomic_step` BEFORE the
+/// buffer is swapped, both under the buffer's single write lock, so `atomic_step <=
+/// buffer.global_step` holds at every instant — a reader can never observe the atomic pointing past
+/// the buffer's newest step. Mirrors [`VdfState::store_step`]'s lock discipline. The fold of the
+/// anchor hash is intentionally left to the caller: it is lock-free, pure-functional post-processing
+/// and must not extend the hold time. Returns the published tip `(step, seed)`; `Err` only on a
+/// poisoned lock.
+pub fn publish_reanchored_state(
+    vdf_state: &AtomicVdfState,
+    atomic_step: &AtomicVdfStepNumber,
+    new_state: VdfState,
+) -> Result<(u64, Seed), ReanchorLockPoisoned> {
+    // Read the tip BEFORE the move so the lock is held for the two stores alone, and return it so
+    // the caller can derive the restart anchor.
+    let tip = new_state.get_last_step_and_seed();
+    let mut guard = vdf_state.write().map_err(|_| ReanchorLockPoisoned)?;
+    atomic_step.store(tip.0, std::sync::atomic::Ordering::Relaxed);
+    *guard = new_state;
+    Ok(tip)
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
@@ -312,54 +356,32 @@ pub fn create_state(
         .map(|item| item.block_hash)
         .expect("To have at least genesis block");
 
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
     let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
+    let tip = block_header_by_hash(&tx, &block_hash, false)
         .unwrap()
         .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
+    let global_step_number = tip.vdf_limiter_info.global_step_number;
 
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    // Shared walk-back with the re-anchor / fork-local paths. Startup reads ancestors from the
+    // DB; a missing header or DB error is fatal here (matching the historical `.unwrap()`s) via
+    // the `expect` below.
+    let seeds = build_vdf_seed_buffer(&tip, capacity, |hash| {
+        block_header_by_hash(&tx, hash, false)?
+            .ok_or_else(|| eyre!("missing header {hash} during VDF state init"))
+    })
+    .expect("startup VDF buffer build from DB");
 
     info!(
         "Initializing vdf service from block's info in step number {}",
         global_step_number
     );
 
-    VdfState {
-        global_step: global_step_number,
-        global_step_from_the_latest_canonical_block: global_step_number,
-        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-        seeds,
+    VdfState::from_seeds(
+        global_step_number,
         capacity,
-        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-    }
+        seeds,
+        Some(is_vdf_mining_enabled),
+    )
 }
 
 /// Walk back from `tip` accumulating up to `capacity` VDF steps into a seed buffer (oldest step
@@ -459,20 +481,28 @@ pub fn create_state_for_canonical_tip(
             .ok_or_else(|| eyre!("VDF re-anchor: missing header for {hash}"))
     })?;
 
+    // Reject an empty rebuild: a buffer with no steps would make `publish_reanchored_state`'s
+    // `get_last_step_and_seed()` panic on the live VDF supervisor thread. Unreachable on a
+    // validated chain (the canonical tip always carries >=1 VDF step), but route it to the
+    // caller's Fallback (resume from the live buffer) rather than unwind the thread.
+    if seeds.is_empty() {
+        return Err(eyre!(
+            "VDF re-anchor: rebuilt canonical buffer is empty; keeping live buffer"
+        ));
+    }
+
     info!(
         "Re-anchoring vdf service to canonical tip at step number {}",
         global_step_number
     );
 
     Ok((
-        VdfState {
-            global_step: global_step_number,
-            global_step_from_the_latest_canonical_block: global_step_number,
-            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-            seeds,
+        VdfState::from_seeds(
+            global_step_number,
             capacity,
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-        },
+            seeds,
+            Some(is_vdf_mining_enabled),
+        ),
         next_seed,
     ))
 }
@@ -497,14 +527,9 @@ pub fn build_fork_local_view(
 ) -> eyre::Result<VdfStateReadonly> {
     let seeds = build_vdf_seed_buffer(tip, capacity, fetch_parent)?;
     let global_step = tip.vdf_limiter_info.global_step_number;
-    Ok(VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        global_step,
-        global_step_from_the_latest_canonical_block: global_step,
-        minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
-        seeds,
-        capacity,
-        is_vdf_mining_enabled: None,
-    }))))
+    Ok(VdfStateReadonly::new(Arc::new(RwLock::new(
+        VdfState::from_seeds(global_step, capacity, seeds, None),
+    ))))
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
@@ -760,7 +785,7 @@ mod tests {
     use super::*;
     use irys_types::{Config, H256List, NodeConfig, VDFLimiterInfo};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::time::Duration;
 
     /// Regression for the partition-recovery re-anchor fix (review Finding #1):
@@ -1253,6 +1278,72 @@ mod tests {
         let mut state = vdf_state_at(current);
         let returned = state.store_step(Seed(H256::zero()), proposed);
         assert_eq!(returned, expected);
+    }
+
+    /// The publish invariant: `publish_reanchored_state` stores the rewound tip into the atomic and
+    /// swaps the buffer under one write lock, leaving `atomic == buffer.global_step == tip.step`. A
+    /// re-anchor is always a rewind, so the published step is below the live buffer's free-run tip.
+    #[test]
+    fn publish_reanchored_state_rewinds_atomic_and_buffer() {
+        // Live buffer far ahead (the loop free-ran above the canonical chain).
+        let live = Arc::new(RwLock::new(vdf_state_at(9_999)));
+        let atomic = Arc::new(AtomicU64::new(9_999));
+
+        // Rebuilt (canonical-tip) buffer at a lower step, carrying its own tip seed.
+        let tip_seed = Seed(H256::repeat_byte(0x42));
+        let mut rebuilt = vdf_state_at(100);
+        rebuilt.seeds.push_back(tip_seed.clone());
+
+        let (step, seed) =
+            publish_reanchored_state(&live, &atomic, rebuilt).expect("healthy lock must publish");
+
+        assert_eq!(step, 100, "returned tip step is the rebuilt step");
+        assert_eq!(
+            seed, tip_seed,
+            "returned tip seed is the rebuilt buffer's back"
+        );
+        assert_eq!(
+            atomic.load(Ordering::Relaxed),
+            100,
+            "atomic must be rewound to the published step"
+        );
+        let guard = live.read().expect("lock not poisoned");
+        assert_eq!(guard.global_step, 100, "buffer must hold the rebuilt step");
+        assert_eq!(
+            guard.seeds.back().cloned(),
+            Some(tip_seed),
+            "buffer must hold the rebuilt contents"
+        );
+    }
+
+    /// A poisoned VDF write lock surfaces as `Err(ReanchorLockPoisoned)` rather than a panic, and
+    /// leaves the atomic untouched (the store happens only after the lock is acquired).
+    #[test]
+    fn publish_reanchored_state_reports_poisoned_lock() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let live = Arc::new(RwLock::new(vdf_state_at(9_999)));
+        let atomic = Arc::new(AtomicU64::new(9_999));
+
+        let poison = Arc::clone(&live);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = poison.write().unwrap();
+            panic!("writer panic to poison the VDF state lock");
+        }));
+        assert!(live.is_poisoned(), "test setup: lock must be poisoned");
+
+        let mut rebuilt = vdf_state_at(100);
+        rebuilt.seeds.push_back(Seed(H256::repeat_byte(0x42)));
+        let result = publish_reanchored_state(&live, &atomic, rebuilt);
+
+        assert!(
+            matches!(result, Err(ReanchorLockPoisoned)),
+            "poisoned lock must surface as ReanchorLockPoisoned, not a panic"
+        );
+        assert_eq!(
+            atomic.load(Ordering::Relaxed),
+            9_999,
+            "atomic must be untouched when the lock is poisoned"
+        );
     }
 
     /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,

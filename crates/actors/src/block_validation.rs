@@ -893,6 +893,14 @@ pub enum ValidationError {
     #[error("Recall range VDF steps unavailable: {0}")]
     RecallRangeStepsUnavailable(String),
 
+    /// The block's fork-local previous-step view could not be built (an ancestor
+    /// is absent from both the block tree and the DB) within the retry bound, so
+    /// the previous-step continuity check has no authoritative source. The block's
+    /// validity is unknown — peer-innocent. Classified SoftInternal (block parks;
+    /// recovered later) instead of spinning the single VDF lane forever.
+    #[error("Fork-local previous-step view unavailable: {0}")]
+    VdfPrevStepViewUnavailable(String),
+
     /// Shadow transaction validation failed (consensus rejection — the
     /// peer's payload doesn't match the expected shadow transactions, has
     /// invalid structure, or carries a treasury mismatch). Construction
@@ -1104,6 +1112,9 @@ impl ValidationError {
             // Not peer-attributable — the block may be valid once VDF catches
             // up. Block parks in cache for passive retry.
             Self::RecallRangeStepsUnavailable(_) => ErrorClass::SoftInternal,
+            // Fork-local previous-step view unbuildable past the retry bound — peer-innocent,
+            // block parks for later recovery rather than spinning the VDF lane.
+            Self::VdfPrevStepViewUnavailable(_) => ErrorClass::SoftInternal,
 
             // Consensus rejections — peer's block is genuinely bad.
             Self::VdfValidationFailed(_)
@@ -1162,7 +1173,8 @@ impl ValidationError {
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
-            | Self::RecallRangeStepsUnavailable(_) => "internal_error",
+            | Self::RecallRangeStepsUnavailable(_)
+            | Self::VdfPrevStepViewUnavailable(_) => "internal_error",
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
             // the generic `"invalid"` would undercount local-state corruption
@@ -1386,6 +1398,15 @@ mod recall_range_error_tests {
     }
 
     #[test]
+    fn validation_error_vdf_prev_step_view_unavailable_is_soft_internal() {
+        let err = ValidationError::VdfPrevStepViewUnavailable("no view".into());
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert!(err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "internal_error");
+    }
+
+    #[test]
     fn validation_error_recall_range_invalid_is_consensus() {
         let err = ValidationError::RecallRangeInvalid("mismatch".into());
         assert_eq!(err.classify(), ErrorClass::Consensus);
@@ -1429,6 +1450,7 @@ impl ValidationError {
             Self::CommitmentWrongOrder { .. } => "commitment_wrong_order",
             Self::ExecutionLayerTransportFailed(_) => "execution_layer_transport_failed",
             Self::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
+            Self::VdfPrevStepViewUnavailable(_) => "vdf_prev_step_view_unavailable",
             Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
             Self::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
             Self::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
@@ -3308,15 +3330,11 @@ pub(crate) fn build_fork_local_recall_view(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<VdfStateReadonly> {
-    let global_step = block.vdf_limiter_info.global_step_number;
-    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
-    let capacity = usize::try_from(
-        global_step
-            .saturating_sub(reset_step_number)
-            .saturating_add(1),
-    )
-    .map_err(|_| eyre::eyre!("fork-local recall view capacity exceeds usize"))?;
-    build_fork_local_view_from_tree_or_db(block, capacity, block_tree, db, "fork-local recall view")
+    let reset_step_number = irys_efficient_sampling::reset_step_number(
+        block.vdf_limiter_info.global_step_number,
+        config,
+    );
+    build_fork_local_view_from_tree_or_db(block, reset_step_number, block_tree, db)
 }
 
 /// Build a transient VDF step view sized to include `block`'s *previous* step
@@ -3338,34 +3356,54 @@ pub(crate) fn build_fork_local_step_view(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<VdfStateReadonly> {
-    let global_step = block.vdf_limiter_info.global_step_number;
-    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
+    let reset_step_number = irys_efficient_sampling::reset_step_number(
+        block.vdf_limiter_info.global_step_number,
+        config,
+    );
     let prev_step = block.vdf_limiter_info.first_step_number().saturating_sub(1);
     // Cover from the lower of {reset boundary, previous step} up to the block's global step so the
     // previous step is in range even when the block crosses a reset boundary.
     let lower = reset_step_number.min(prev_step);
-    let capacity = usize::try_from(global_step.saturating_sub(lower).saturating_add(1))
-        .map_err(|_| eyre::eyre!("fork-local step view capacity exceeds usize"))?;
-    build_fork_local_view_from_tree_or_db(block, capacity, block_tree, db, "fork-local step view")
+    build_fork_local_view_from_tree_or_db(block, lower, block_tree, db)
 }
 
+/// Shared tail of the fork-local view builders: size a transient view to
+/// `[lower ..= block.global_step_number]` and resolve each step from the block's own lineage
+/// (block tree first, DB fallback) via `irys_vdf::state::build_fork_local_view`.
 fn build_fork_local_view_from_tree_or_db(
     block: &IrysBlockHeader,
-    capacity: usize,
+    lower: u64,
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
-    context: &'static str,
 ) -> eyre::Result<VdfStateReadonly> {
-    let tx = db
-        .tx()
-        .map_err(|e| eyre::eyre!("{context}: opening db tx failed: {e}"))?;
+    let capacity = usize::try_from(
+        block
+            .vdf_limiter_info
+            .global_step_number
+            .saturating_sub(lower)
+            .saturating_add(1),
+    )
+    .map_err(|_| eyre::eyre!("fork-local view capacity exceeds usize"))?;
+    // Open the DB read transaction lazily, on the first block-tree miss only. The common case —
+    // a recent block whose ancestors are all in the block tree — never touches the DB, so opening
+    // a read transaction up front is wasted work on the per-block recall-range hot path.
+    let mut tx = None;
     build_fork_local_view(block, capacity, |hash| {
         if let Some(header) = block_tree.read().get_block(hash).cloned() {
             return Ok(header);
         }
-        irys_database::block_header_by_hash(&tx, hash, false)
-            .map_err(|e| eyre::eyre!("{context}: header lookup failed for {hash}: {e}"))?
-            .ok_or_else(|| eyre::eyre!("{context}: missing ancestor {hash} in block tree and db"))
+        if tx.is_none() {
+            tx = Some(
+                db.tx()
+                    .map_err(|e| eyre::eyre!("fork-local view: opening db tx failed: {e}"))?,
+            );
+        }
+        let tx = tx.as_ref().expect("db tx opened on first tree miss");
+        irys_database::block_header_by_hash(tx, hash, false)
+            .map_err(|e| eyre::eyre!("fork-local view: header lookup failed for {hash}: {e}"))?
+            .ok_or_else(|| {
+                eyre::eyre!("fork-local view: missing ancestor {hash} in block tree and db")
+            })
     })
 }
 

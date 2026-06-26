@@ -5737,6 +5737,7 @@ dependencies = [
  "irys-database",
  "irys-domain",
  "irys-efficient-sampling",
+ "irys-testing-utils",
  "irys-types",
  "irys-utils",
  "nodit",

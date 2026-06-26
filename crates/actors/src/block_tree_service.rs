@@ -252,6 +252,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
         VE::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
+        VE::VdfPrevStepViewUnavailable(_) => "vdf_prev_step_view_unavailable",
         // PreValidation has a sub-classifier — only its SoftInternal inner
         // variants (`ParentNotInCache`) reach here. We delegate to the
         // inner's `metric_reason()` so each one gets a distinct,

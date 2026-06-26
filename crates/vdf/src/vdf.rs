@@ -1,10 +1,13 @@
 use crate::metrics;
-use crate::state::AtomicVdfState;
+use crate::state::{
+    AtomicVdfState, ReanchorLockPoisoned, create_state_for_canonical_tip, publish_reanchored_state,
+};
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
 use irys_types::{
-    AtomicVdfStepNumber, H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed,
+    AtomicVdfStepNumber, Config, DatabaseProvider, H256, H256List, IrysBlockHeader, Traced, U256,
+    block_production::Seed,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -405,6 +408,161 @@ pub fn reset_applied_anchor_hash(reset_frequency: u64, step: u64, hash: H256, se
     process_reset(step, hash, reset_frequency, seed)
 }
 
+/// The `(step, hash, reset_seed)` triple [`run_vdf`] restarts from, replacing the three loose
+/// `anchor_*` locals the supervisor previously threaded by hand.
+#[derive(Debug, Clone, Copy)]
+pub struct VdfAnchor {
+    pub step: u64,
+    pub hash: H256,
+    pub reset_seed: H256,
+}
+
+impl VdfAnchor {
+    /// The startup anchor from the latest block. Folds the anchor step's own reset boundary into the
+    /// raw buffer hash when the step lands on one (finding #5), so `run_vdf`'s first step continues
+    /// the canonical lineage; otherwise a no-op. `seed` is the anchoring block's own
+    /// `vdf_limiter_info.seed` (the in-range boundary's entropy); `reset_seed` is the next boundary
+    /// above the block, which the loop applies going forward.
+    #[must_use]
+    pub fn at_startup(
+        reset_frequency: u64,
+        step: u64,
+        hash: H256,
+        seed: H256,
+        reset_seed: H256,
+    ) -> Self {
+        Self {
+            step,
+            hash: reset_applied_anchor_hash(reset_frequency, step, hash, seed),
+            reset_seed,
+        }
+    }
+}
+
+/// The outcome of a re-anchor request. It lets the supervisor choose break, restart, and
+/// notify-mining without touching any VDF-internal mechanics.
+pub enum ReanchorOutcome {
+    /// The buffer was rebuilt and published; restart `run_vdf` from the anchor and notify mining.
+    Reanchored(VdfAnchor),
+    /// The rebuild failed (transient DB error or a missing ancestor) and the buffer was left intact;
+    /// restart from the live tip and do NOT notify mining, since the rotation still matches the
+    /// unchanged buffer.
+    Fallback(VdfAnchor),
+    /// The VDF state lock was poisoned; break the supervisor (terminal shutdown).
+    Shutdown,
+}
+
+/// Re-anchor the VDF to the canonical chain tip after a deep partition recovery.
+///
+/// Rebuilds the step buffer from `canonical_headers` (anchored at the NEW CANONICAL TIP, not the
+/// truncated index's LCA, so the buffer matches the canonical lineage across the whole recovered
+/// range — each block carries its own reset-boundary seed), publishes it via
+/// [`publish_reanchored_state`], drains stale fast-forward steps (which may carry the orphaned
+/// fork's minority-seed steps that `store_step` would otherwise accept and re-poison), and returns
+/// the folded anchor to restart [`run_vdf`] from.
+///
+/// On rebuild failure the live buffer is kept and a raw, UNFOLDED live-tip anchor is returned: the
+/// loop free-ran above the canonical chain, no confirmed block pins the live step's boundary seed,
+/// and folding a guess would re-poison (the #4 hazard); `store_step`'s forward-only rule and
+/// fork-local validation recompute realign instead. Failure must be recoverable rather than fatal —
+/// a panic here would drop the VDF thread's `CancelOnDrop` guard and shut the whole node down
+/// mid-recovery on a transient DB error. There is no retry timer: the rebuild is re-attempted only
+/// when the next deep reorg re-emits the re-anchor signal. See
+/// design/docs/vdf-partition-recovery-reanchor.md.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owns every shared VDF handle the re-anchor mutates"
+)]
+pub fn reanchor_to_canonical_tip(
+    vdf_state: &AtomicVdfState,
+    atomic_step: &AtomicVdfStepNumber,
+    fast_forward_receiver: &mut Receiver<Traced<VdfStep>>,
+    canonical_headers: &[Arc<IrysBlockHeader>],
+    db: &DatabaseProvider,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
+    config: &Config,
+    prev_reset_seed: H256,
+) -> ReanchorOutcome {
+    let (new_state, next_seed) = match create_state_for_canonical_tip(
+        canonical_headers,
+        db,
+        is_vdf_mining_enabled,
+        config,
+    ) {
+        Ok(rebuilt) => rebuilt,
+        Err(e) => {
+            // Rebuild failed (transient DB error, or a canonical ancestor missing from both the
+            // block-tree cache and the DB). Keep the live buffer and resume from its OWN current
+            // tip — the live loop free-ran above the stale startup/previous anchor. Block
+            // validation does NOT trust the live buffer (the VDF-sensitive checks resolve steps
+            // from a fork-local view of the block's own lineage), so a not-yet-rebuilt buffer
+            // cannot reject canonical blocks; it degrades only THIS node's local mining until a
+            // later re-anchor rebuilds it.
+            error!(
+                error = ?e,
+                "VDF re-anchor rebuild failed; resuming from the live buffer's current step (rebuild re-attempted on the next deep-reorg re-anchor)"
+            );
+            let Ok(guard) = vdf_state.read() else {
+                error!(
+                    "VDF state read lock poisoned during re-anchor fallback; exiting VDF thread"
+                );
+                return ReanchorOutcome::Shutdown;
+            };
+            let (live_step, live_seed) = guard.get_last_step_and_seed();
+            // Intentionally NOT reset_applied_anchor_hash'd: the buffer was NOT rebuilt, so we
+            // resume from the live tip, which free-ran ABOVE the canonical chain — no confirmed
+            // block pins live_step's boundary seed to fold (guessing one would re-poison, the #4
+            // hazard). Resume raw; store_step's forward-only rule + fork-local validation realign.
+            return ReanchorOutcome::Fallback(VdfAnchor {
+                step: live_step,
+                hash: live_seed.0,
+                reset_seed: prev_reset_seed,
+            });
+        }
+    };
+
+    let (rebuilt_step, rebuilt_seed) =
+        match publish_reanchored_state(vdf_state, atomic_step, new_state) {
+            Ok(tip) => tip,
+            Err(ReanchorLockPoisoned) => {
+                error!("VDF state write lock poisoned during re-anchor; exiting VDF thread");
+                return ReanchorOutcome::Shutdown;
+            }
+        };
+
+    // Discard any fast-forward steps queued before the re-anchor. They may carry steps pinned by the
+    // orphaned fork's (minority) reset seed; applying them after the buffer was rebuilt to the
+    // canonical TIP would re-poison it via store_step's exact-sequential accept. The canonical steps
+    // are already in the rebuilt buffer, so dropping the queue loses no correct work.
+    let mut drained = 0_u64;
+    while fast_forward_receiver.try_recv().is_ok() {
+        drained += 1;
+    }
+    if drained > 0 {
+        debug!(
+            vdf.drained_fast_forward_steps = drained,
+            "Discarded stale fast-forward steps during VDF re-anchor"
+        );
+    }
+
+    // Fold the rebuilt tip's own reset boundary into the raw buffer hash if the tip step lands on
+    // one (finding #5). The boundary seed is the tip block's own `seed` (set_seeds pins the in-range
+    // boundary's entropy there; `next_seed` targets the next boundary above the block).
+    let tip_anchor_seed = canonical_headers
+        .last()
+        .map_or(next_seed, |tip| tip.vdf_limiter_info.seed);
+    ReanchorOutcome::Reanchored(VdfAnchor {
+        step: rebuilt_step,
+        hash: reset_applied_anchor_hash(
+            config.vdf.reset_frequency as u64,
+            rebuilt_step,
+            rebuilt_seed.0,
+            tip_anchor_seed,
+        ),
+        reset_seed: next_seed,
+    })
+}
+
 /// Returns `true` when the VDF loop must NOT yet cross the upcoming reset boundary.
 ///
 /// The reset seed applied at boundary `B` is pinned by a rotation block at step
@@ -459,10 +617,12 @@ fn store_step(
 mod tests {
     use super::*;
     use crate::state::test_helpers::mocked_vdf_service;
-    use crate::state::{CancelEnum, VdfStateReadonly, vdf_steps_are_valid};
+    use crate::state::{CancelEnum, VdfState, VdfStateReadonly, vdf_steps_are_valid};
     use crate::vdf_sha_verification;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
     use irys_types::*;
     use nodit::interval::ii;
+    use reth_db::mdbx::DatabaseArguments;
     use std::sync::atomic::AtomicU8;
     use std::{
         sync::{Arc, atomic::AtomicU64},
@@ -908,6 +1068,487 @@ mod tests {
         assert!(
             !shutdown_token.is_cancelled(),
             "loop exited via re-anchor, not shutdown"
+        );
+    }
+
+    fn temp_db() -> (irys_testing_utils::tempfile::TempDir, DatabaseProvider) {
+        let tmp = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        (tmp, DatabaseProvider(Arc::new(db)))
+    }
+
+    fn mock_canonical_block(
+        height: u64,
+        hash: u8,
+        prev: u8,
+        steps: &[u8],
+        step_no: u64,
+        seed: u8,
+        next_seed: u8,
+    ) -> Arc<IrysBlockHeader> {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.height = height;
+        h.block_hash = H256::repeat_byte(hash);
+        h.previous_block_hash = H256::repeat_byte(prev);
+        h.vdf_limiter_info.global_step_number = step_no;
+        h.vdf_limiter_info.steps = H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
+        h.vdf_limiter_info.seed = H256::repeat_byte(seed);
+        h.vdf_limiter_info.next_seed = H256::repeat_byte(next_seed);
+        Arc::new(h)
+    }
+
+    /// `reanchor_to_canonical_tip` success path: rebuild from a self-contained canonical chain,
+    /// publish the rewound buffer + atomic, and return the folded tip anchor. The tip step is a
+    /// non-boundary (odd, `reset_frequency` 2), so the fold is a no-op and the anchor hash equals
+    /// the tip's last step.
+    #[test]
+    fn reanchor_to_canonical_tip_rebuilds_and_publishes() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // genesis(h0) <- b1(h1) <- tip(h2), fully self-contained so the rebuild never hits the DB.
+        let genesis = mock_canonical_block(0, 0x00, 0xFF, &[0x10], 1, 0x90, 0x91);
+        let b1 = mock_canonical_block(1, 0x01, 0x00, &[0x11, 0x12], 3, 0x92, 0x93);
+        let tip = mock_canonical_block(2, 0x02, 0x01, &[0x13, 0xBB], 7, 0x94, 0x95);
+        let canonical = vec![genesis, b1, tip];
+
+        let (_tmp, db) = temp_db();
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 9_999, None)));
+        let atomic = Arc::new(AtomicU64::new(9_999));
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        // Stale fast-forward steps queued before the re-anchor (e.g. the orphaned fork's
+        // minority-seed steps). The re-anchor MUST discard them, or store_step would re-poison the
+        // freshly rebuilt canonical buffer with the orphaned lineage. The drained queue is asserted
+        // after the call, so deleting the drain loop fails this test.
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0xAA),
+                global_step_number: 9_998,
+            }))
+            .expect("queue a stale fast-forward step");
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0xAB),
+                global_step_number: 9_999,
+            }))
+            .expect("queue a stale fast-forward step");
+
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &canonical,
+            &db,
+            Arc::new(AtomicBool::new(true)),
+            &config,
+            H256::repeat_byte(0xEE), // prev_reset_seed: unused on the success path
+        );
+
+        let ReanchorOutcome::Reanchored(anchor) = outcome else {
+            panic!("expected Reanchored on a successful rebuild");
+        };
+        assert_eq!(anchor.step, 7, "anchor step is the canonical tip's step");
+        assert_eq!(
+            anchor.hash,
+            H256::repeat_byte(0xBB),
+            "non-boundary tip step -> no-op fold -> anchor hash is the tip's last step"
+        );
+        assert_eq!(
+            anchor.reset_seed,
+            H256::repeat_byte(0x95),
+            "reset seed is the tip's next_seed"
+        );
+        assert_eq!(
+            atomic.load(std::sync::atomic::Ordering::Relaxed),
+            7,
+            "atomic must be published to the rebuilt step"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            7,
+            "buffer must be published to the rebuilt step"
+        );
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "re-anchor must drain the stale fast-forward queue (else store_step could re-poison the rebuilt buffer)"
+        );
+    }
+
+    /// Reproduction for the fast-forward drain stall (Codex P1). On a mining-paused follower the
+    /// VDF loop advances ONLY via fast-forward — it never local-steps (the pause gate in `run_vdf`).
+    /// `reanchor_to_canonical_tip` drains the WHOLE fast-forward queue after rebuilding to the
+    /// canonical tip T, so a legitimate canonical step for T+1 that was in flight at the drain
+    /// instant is lost. `store_step` then gap-rejects the next (higher) canonical step, so the
+    /// buffer is stranded at T and validation's `wait_for_step(>T)` stalls — which
+    /// `active_validations.rs` turns into a node-killing panic.
+    ///
+    /// This characterises the current (buggy) behaviour; a fix must let the paused follower reach
+    /// the stranded step so the final wait succeeds.
+    #[tokio::test]
+    async fn reanchor_drain_strands_paused_follower_at_tip() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Rebuild to canonical tip step 7 (self-contained chain, no DB reads).
+        let genesis = mock_canonical_block(0, 0x00, 0xFF, &[0x10], 1, 0x90, 0x91);
+        let b1 = mock_canonical_block(1, 0x01, 0x00, &[0x11, 0x12], 3, 0x92, 0x93);
+        let tip = mock_canonical_block(2, 0x02, 0x01, &[0x13, 0xBB], 7, 0x94, 0x95);
+        let canonical = vec![genesis, b1, tip];
+
+        let (_tmp, db) = temp_db();
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 7, None)));
+        let atomic = Arc::new(AtomicU64::new(7));
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // A LEGITIMATE canonical fast-forward step for tip+1 (=8), in flight at the drain instant
+        // (the block at step 8 is being adopted while the re-anchor runs).
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .expect("queue the in-flight canonical FF step");
+
+        // Mining paused: this is a syncing follower, the only configuration where the loop cannot
+        // recompute a dropped step.
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &canonical,
+            &db,
+            Arc::clone(&is_mining_enabled),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+        let ReanchorOutcome::Reanchored(anchor) = outcome else {
+            panic!("expected Reanchored on a successful rebuild");
+        };
+        assert_eq!(anchor.step, 7, "re-anchored to the canonical tip");
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "the drain discarded the in-flight canonical step 8 (root of the bug)"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            7,
+            "rebuilt buffer holds canonical steps only up to the tip (step 8 is gone)"
+        );
+
+        // Paused follower resumes run_vdf at the re-anchored tip.
+        let chain_sync_state = ChainSyncState::new(true, false);
+        let shutdown_token = CancellationToken::new();
+        let vdf_steps_guard = VdfStateReadonly::new(live.clone());
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            let live = live.clone();
+            let atomic = Arc::clone(&atomic);
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    anchor.step,
+                    anchor.hash,
+                    anchor.reset_seed,
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    live,
+                    atomic,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        // Let the loop enter its paused path.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The next canonical block's fast-forward starts at step 9 (step 8 was dropped and is never
+        // re-sent). store_step gap-rejects it against the buffer at 7, so it cannot fill the hole a
+        // paused follower has no other way to close.
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x15),
+                global_step_number: 9,
+            }))
+            .await
+            .unwrap();
+
+        // BUG: the buffer never reaches step 8, so validation's wait stalls (-> panic in
+        // active_validations.rs). A fix must make this wait succeed instead.
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let result = vdf_steps_guard
+            .wait_for_step(8, cancel, Duration::from_millis(200))
+            .await;
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .map(std::string::ToString::to_string)
+                .is_some_and(|m| m.contains("did not advance")),
+            "Codex P1: paused follower stalls at the re-anchor tip (got {result:?})"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            7,
+            "buffer stranded at the re-anchor tip — the dropped canonical step is unrecoverable while paused"
+        );
+
+        shutdown_token.cancel();
+        handle.join().unwrap();
+    }
+
+    /// Companion to `reanchor_drain_strands_paused_follower_at_tip`: once the requeued block's
+    /// re-validation re-sends the dropped contiguous step (tip+1 = 8), `run_vdf` consumes it even
+    /// while mining is paused, the buffer advances, and the wait that previously stalled succeeds.
+    /// This is the heal the bounded canonicality-gated requeue (Approach B) relies on.
+    #[tokio::test]
+    async fn reanchor_drain_heals_when_dropped_step_is_resent() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 2;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let genesis = mock_canonical_block(0, 0x00, 0xFF, &[0x10], 1, 0x90, 0x91);
+        let b1 = mock_canonical_block(1, 0x01, 0x00, &[0x11, 0x12], 3, 0x92, 0x93);
+        let tip = mock_canonical_block(2, 0x02, 0x01, &[0x13, 0xBB], 7, 0x94, 0x95);
+        let canonical = vec![genesis, b1, tip];
+
+        let (_tmp, db) = temp_db();
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 7, None)));
+        let atomic = Arc::new(AtomicU64::new(7));
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // Canonical step tip+1 (=8) in flight at the drain instant → dropped by the drain.
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .expect("queue the in-flight canonical FF step");
+
+        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &canonical,
+            &db,
+            Arc::clone(&is_mining_enabled),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+        let ReanchorOutcome::Reanchored(anchor) = outcome else {
+            panic!("expected Reanchored on a successful rebuild");
+        };
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "the drain discarded the in-flight canonical step 8"
+        );
+
+        let chain_sync_state = ChainSyncState::new(true, false);
+        let shutdown_token = CancellationToken::new();
+        let vdf_steps_guard = VdfStateReadonly::new(live.clone());
+        let (_reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<()>();
+
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let mining_state = Arc::clone(&is_mining_enabled);
+            let live = live.clone();
+            let atomic = Arc::clone(&atomic);
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    anchor.step,
+                    anchor.hash,
+                    anchor.reset_seed,
+                    &mut ff_rx,
+                    &mut reanchor_rx,
+                    mining_state,
+                    MockMining,
+                    live,
+                    atomic,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The requeued block's re-validation re-sends the dropped step 8 (contiguous with tip 7).
+        ff_tx
+            .send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0x14),
+                global_step_number: 8,
+            }))
+            .await
+            .unwrap();
+
+        // HEAL: the paused follower consumes the re-sent fast-forward, so the wait that stalled in
+        // the companion test now succeeds and the buffer advances.
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        vdf_steps_guard
+            .wait_for_step(8, cancel, Duration::from_secs(5))
+            .await
+            .expect("re-sent fast-forward must heal the stranded buffer");
+        assert_eq!(
+            live.read().unwrap().global_step,
+            8,
+            "buffer advanced to the re-sent step"
+        );
+
+        shutdown_token.cancel();
+        handle.join().unwrap();
+    }
+
+    /// Rebuild failure (empty canonical chain) -> keep the live buffer untouched and fall back to
+    /// its own tip, carrying the previous reset seed. The atomic is not touched.
+    #[test]
+    fn reanchor_to_canonical_tip_falls_back_on_rebuild_failure() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (_tmp, db) = temp_db();
+
+        let mut live_state = VdfState::new(64, 1_234, None);
+        live_state.seeds.push_back(Seed(H256::repeat_byte(0x77)));
+        let live = Arc::new(std::sync::RwLock::new(live_state));
+        let atomic = Arc::new(AtomicU64::new(1_234));
+        let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &[], // empty canonical chain -> create_state_for_canonical_tip errors
+            &db,
+            Arc::new(AtomicBool::new(true)),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+
+        let ReanchorOutcome::Fallback(anchor) = outcome else {
+            panic!("expected Fallback on rebuild failure");
+        };
+        assert_eq!(
+            anchor.step, 1_234,
+            "fallback resumes from the live tip step"
+        );
+        assert_eq!(
+            anchor.hash,
+            H256::repeat_byte(0x77),
+            "fallback resumes from the live tip seed, unfolded"
+        );
+        assert_eq!(
+            anchor.reset_seed,
+            H256::repeat_byte(0xEE),
+            "fallback carries the previous reset seed"
+        );
+        assert_eq!(
+            atomic.load(std::sync::atomic::Ordering::Relaxed),
+            1_234,
+            "atomic untouched on fallback"
+        );
+        assert_eq!(
+            live.read().unwrap().global_step,
+            1_234,
+            "buffer untouched on fallback"
+        );
+    }
+
+    /// An empty *rebuild* (a genesis tip carrying no VDF steps — distinct from an empty canonical
+    /// chain) must also produce a controlled `Fallback`: `create_state_for_canonical_tip` rejects
+    /// the stepless buffer so `publish_reanchored_state` is never reached with one (its
+    /// `get_last_step_and_seed` would `.expect`-panic and unwind the supervisor). Unreachable on a
+    /// validated chain; this pins the empty-buffer guard.
+    #[test]
+    fn reanchor_to_canonical_tip_falls_back_on_empty_rebuild() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (_tmp, db) = temp_db();
+
+        let mut live_state = VdfState::new(64, 1_234, None);
+        live_state.seeds.push_back(Seed(H256::repeat_byte(0x77)));
+        let live = Arc::new(std::sync::RwLock::new(live_state));
+        let atomic = Arc::new(AtomicU64::new(1_234));
+        let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // A genesis tip (height 0) with no steps -> build_vdf_seed_buffer yields an empty buffer.
+        let empty_genesis = mock_canonical_block(0, 0x00, 0xFF, &[], 0, 0x90, 0x91);
+
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &[empty_genesis],
+            &db,
+            Arc::new(AtomicBool::new(true)),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+
+        assert!(
+            matches!(outcome, ReanchorOutcome::Fallback(_)),
+            "an empty rebuilt buffer must fall back to the live buffer, not panic in publish_reanchored_state"
+        );
+        assert_eq!(
+            atomic.load(std::sync::atomic::Ordering::Relaxed),
+            1_234,
+            "atomic untouched on fallback (no publish of an empty buffer)"
+        );
+    }
+
+    /// Documented behavioural change: when the rebuild fails AND the fallback read lock is poisoned,
+    /// `reanchor_to_canonical_tip` returns `Shutdown` directly (the old code kept the stale anchor
+    /// and let `run_vdf` re-detect the poison on its next startup read — one dead round-trip).
+    #[test]
+    fn reanchor_to_canonical_tip_shuts_down_on_poisoned_lock() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let (_tmp, db) = temp_db();
+
+        let live = Arc::new(std::sync::RwLock::new(VdfState::new(64, 1_234, None)));
+        let atomic = Arc::new(AtomicU64::new(1_234));
+        let (_ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        let poison = Arc::clone(&live);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = poison.write().unwrap();
+            panic!("writer panic to poison the VDF state lock");
+        }));
+        assert!(live.is_poisoned(), "test setup: lock must be poisoned");
+
+        let outcome = reanchor_to_canonical_tip(
+            &live,
+            &atomic,
+            &mut ff_rx,
+            &[], // empty -> rebuild fails -> fallback read hits the poisoned lock
+            &db,
+            Arc::new(AtomicBool::new(true)),
+            &config,
+            H256::repeat_byte(0xEE),
+        );
+
+        assert!(
+            matches!(outcome, ReanchorOutcome::Shutdown),
+            "poisoned fallback read must return Shutdown"
         );
     }
 
