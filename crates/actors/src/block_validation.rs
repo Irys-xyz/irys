@@ -3384,14 +3384,22 @@ fn build_fork_local_view_from_tree_or_db(
             .saturating_add(1),
     )
     .map_err(|_| eyre::eyre!("fork-local view capacity exceeds usize"))?;
-    let tx = db
-        .tx()
-        .map_err(|e| eyre::eyre!("fork-local view: opening db tx failed: {e}"))?;
+    // Open the DB read transaction lazily, on the first block-tree miss only. The common case —
+    // a recent block whose ancestors are all in the block tree — never touches the DB, so opening
+    // a read transaction up front is wasted work on the per-block recall-range hot path.
+    let mut tx = None;
     build_fork_local_view(block, capacity, |hash| {
         if let Some(header) = block_tree.read().get_block(hash).cloned() {
             return Ok(header);
         }
-        irys_database::block_header_by_hash(&tx, hash, false)
+        if tx.is_none() {
+            tx = Some(
+                db.tx()
+                    .map_err(|e| eyre::eyre!("fork-local view: opening db tx failed: {e}"))?,
+            );
+        }
+        let tx = tx.as_ref().expect("db tx opened on first tree miss");
+        irys_database::block_header_by_hash(tx, hash, false)
             .map_err(|e| eyre::eyre!("fork-local view: header lookup failed for {hash}: {e}"))?
             .ok_or_else(|| {
                 eyre::eyre!("fork-local view: missing ancestor {hash} in block tree and db")

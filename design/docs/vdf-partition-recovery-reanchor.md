@@ -240,7 +240,7 @@ index, never the stale minority index.
   > can land *below* a boundary the canonical chain has since passed, and the catch-up
   > local-stepping then needs the *per-boundary* seed (not the tip's). The gate is still
   > untouched, but the seed source is — see
-  > [§2 of Implementation](#2-the-catch-up-reset-seed-hole--and-canonical_vdf_info_at_or_below_step).
+  > [§2 of Implementation](#2-the-catch-up-reset-seed-hole--and-canonical_vdf_snapshot).
 
 ## Implementation: the complete heal (2026-06)
 

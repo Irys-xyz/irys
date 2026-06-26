@@ -498,6 +498,9 @@ impl ValidationService {
                                             "vdf",
                                             "prev_step_view_unavailable",
                                         );
+                                        metrics::record_validation_full_duration_ms(
+                                            task.enqueued_at.elapsed().as_secs_f64() * 1000.0,
+                                        );
                                         vdf_terminal_finalize_via(
                                             &mut coordinator,
                                             &self.inner.service_senders.block_tree,
