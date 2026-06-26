@@ -571,8 +571,13 @@ pub async fn select_best_txs(
                     continue;
                 }
 
-                // Term-only ledgers must not carry a perm_fee
-                if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+                // Term-only ledgers must not carry a perm_fee AT ALL. The validator
+                // (`block_validation` term-ledger prevalidation) and mempool ingress
+                // (`data_txs.rs`) both reject any `perm_fee.is_some()`, so a `Some(0)`
+                // accepted here would make the producer build a block every peer
+                // rejects (producer-more-permissive-than-validator). Match `is_some()`
+                // so the producer can never select such a tx. (NC-0042)
+                if tx.perm_fee.is_some() {
                     debug!(
                         tx.id = ?tx.id,
                         tx.ledger = ?ledger,

@@ -544,6 +544,37 @@ async fn heavy_cascade_mempool_ingress_boundary_for_term_ledgers() -> eyre::Resu
         ),
     }
 
+    // Post-Cascade: OneYear with perm_fee = Some(0) must ALSO be rejected at ingress
+    // (NC-0042 M2). The ingress guard is `perm_fee.is_some()`, so a zero perm_fee is
+    // rejected here and can never reach the producer's tx selector — closing the
+    // producer-more-permissive-than-validator gap where the selector formerly only
+    // skipped `perm_fee > 0`.
+    let one_year_zero_perm_tx = signer.create_transaction_with_fees(
+        data.clone(),
+        ctx.get_anchor().await?,
+        DataLedger::OneYear,
+        one_year_price.term_fee.into(),
+        Some(BoundedFee::zero()),
+    )?;
+    let one_year_zero_perm_tx = signer.sign_transaction(one_year_zero_perm_tx)?;
+    match ctx
+        .ingest_data_tx(one_year_zero_perm_tx.header.clone())
+        .await
+    {
+        Err(AddTxError::TxIngress(TxIngressError::FundMisalignment(msg))) => {
+            assert!(
+                msg.contains("must not have a perm_fee"),
+                "Expected perm_fee rejection message for perm_fee=Some(0), got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("Expected OneYear tx with perm_fee=Some(0) to be rejected"),
+        Err(e) => panic!(
+            "Expected FundMisalignment for OneYear tx with perm_fee=Some(0), got: {:?}",
+            e
+        ),
+    }
+
     // Post-Cascade: OneYear with insufficient term_fee should fail
     assert!(
         one_year_price.term_fee > irys_types::U256::from(0),
