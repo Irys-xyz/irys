@@ -1,4 +1,5 @@
 mod perm_refund;
+mod perm_refund_multi_miner;
 
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;

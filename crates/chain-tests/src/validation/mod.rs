@@ -2,6 +2,7 @@ mod anchor_canonical_reorg;
 mod blobs_rejected;
 mod cascade_block_rejection;
 mod cascade_ledger_shape;
+mod cascade_submit_expiry_promotion;
 mod cascade_term_balance;
 mod cascade_term_expiry;
 mod data_tx_pricing;
@@ -87,6 +88,17 @@ pub(super) async fn submit_expiry_two_node_setup() -> eyre::Result<ExpiryTestSet
         // One ingress proof from the genesis signer makes a tx promotable — keeps
         // both tests single-node on the promotion side.
         c.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        // Pin Cascade OFF. This is the precondition for the `refunded == expired`
+        // EXACT-equality assertion in `publish_after_submit_expiry_filtered.rs`:
+        // pre-Cascade, Pipeline A's §4b drop set and Pipeline B's refund set are
+        // identical. Under Cascade the §4b filter set is a strict SUPERSET of the
+        // refund set (written-slot / last-write anchoring excludes rescued slots
+        // from refunds but not from the promotion filter), so the exact equality
+        // no longer holds. `ConsensusConfig::testing()` already defaults this to
+        // None, but we pin it explicitly so a default change can't silently break
+        // that assertion. The Cascade-active §4b/§4c path is covered separately by
+        // `cascade_submit_expiry_promotion.rs`.
+        c.hardforks.cascade = None;
     }
 
     let user_signer = genesis_config.new_random_signer();
