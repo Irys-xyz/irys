@@ -901,11 +901,17 @@ async fn get_publish_txs_and_proofs(
         // so compute it once here and reuse it per-candidate via `submit_tx_expired`
         // (which then costs at most one canonical Submit-height read each). `None`
         // means nothing has expired as of this block → no candidate is filtered.
+        let cascade_active_for_block = ctx
+            .config
+            .consensus
+            .hardforks
+            .is_cascade_active_at(current_timestamp);
         let expired_submit_range = crate::block_producer::ledger_expiry::expired_submit_range(
             next_block_height,
             epoch_snapshot,
             parent_block_header,
             ctx.config,
+            cascade_active_for_block,
         )?;
 
         for tx_header in &tx_headers {

@@ -4636,11 +4636,16 @@ async fn generate_expected_shadow_transactions(
         // so resolve it once and reuse it per-candidate. Locally derived (parent
         // epoch snapshot, our block_index/mempool/DB); a failure here is a hard
         // node-local fault, not a peer statement. `None` → nothing expired.
+        let cascade_active_for_block = config
+            .consensus
+            .hardforks
+            .is_cascade_active_at(block.timestamp_secs());
         let expired_range = ledger_expiry::expired_submit_range(
             block.height,
             &parent_epoch_snapshot,
             &prev_block,
             config,
+            cascade_active_for_block,
         )
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
         if let Some(range) = &expired_range {

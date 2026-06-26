@@ -360,8 +360,15 @@ pub async fn expired_submit_tx_ids(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<std::collections::BTreeSet<IrysTransactionId>> {
-    let slot_indexes =
-        parent_epoch_snapshot.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height);
+    let cascade_active = config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(parent_epoch_snapshot.epoch_block.timestamp_secs());
+    let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
+        DataLedger::Submit,
+        block_height,
+        cascade_active,
+    );
     if slot_indexes.is_empty() {
         return Ok(std::collections::BTreeSet::new());
     }
@@ -423,11 +430,16 @@ pub async fn is_submit_storage_expired(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<bool> {
+    let cascade_active = config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(parent_epoch_snapshot.epoch_block.timestamp_secs());
     let Some(range) = expired_submit_range(
         block_height,
         parent_epoch_snapshot,
         parent_block_header,
         config,
+        cascade_active,
     )?
     else {
         return Ok(false);
@@ -469,34 +481,31 @@ pub struct ExpiredSubmitRange {
 /// a pure function of the block's own parent, identical on every node regardless
 /// of that node's migration-lagged block-index tip (NC-0042 F2). The branch-
 /// correct mapping from a candidate's inclusion to a chunk offset happens later,
-/// per candidate, in [`submit_tx_expired`].
+/// per candidate, in [`submit_tx_expired`]. `cascade_active` MUST be the
+/// Cascade status of the block being produced/validated; pre-Cascade replay
+/// keeps the old allocation-anchored unwritten-slot expiry behavior.
 pub fn expired_submit_range(
     block_height: u64,
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
     config: &Config,
+    cascade_active: bool,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
-    // The expired Submit slots (also handles "not enough blocks elapsed → empty").
-    let slot_indexes =
-        parent_epoch_snapshot.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height);
+    let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
+        DataLedger::Submit,
+        block_height,
+        cascade_active,
+    );
     let Some(&max_expired_slot) = slot_indexes.iter().max() else {
         return Ok(None);
     };
 
-    // NC-0042 contiguity guard. The `[0, range_end)` collapse below is correct only
-    // if the expired slots are a prefix `{0..=max}`. In normal operation they are:
-    // chunk offsets are cumulative and slots fill sequentially, so `last_height` is
-    // non-decreasing in slot index, and empty pre-allocated slots sit at the top
-    // where the never-expire-the-last-slot rule trims them. A hole (an empty,
-    // non-last slot aged out by its allocation height beneath a still-live lower
-    // slot) would make the prefix over-approximate — deterministically rejecting
-    // valid promotions AND diverging from the slot-exact refund walk
-    // (`collect_expired_partitions`, which only settles slots that actually hold
-    // partitions). The set is a pure function of canonical state, so failing loud
-    // here fails identically on every node (no fork) instead of silently diverging
-    // — same philosophy as the `filter_transactions_by_chunk_range` guard below.
-    // `slot_indexes` is ascending and distinct (`get_all_expired_slot_indexes`
-    // iterates slots in order), so "value at position i equals i" ⇔ prefix-from-0.
+    // Expired Submit slots must be a prefix of the written data. Unwritten
+    // preallocated slots never expire, and Submit data is append-only, so once a
+    // higher slot has written data, later writes cannot return to keep a lower
+    // slot live while that higher written slot expires. If this guard ever fires,
+    // the promotion filter would over-approximate real expired txs and must fail
+    // loud rather than silently diverge.
     if let Some((i, &slot)) = slot_indexes
         .iter()
         .enumerate()
@@ -2705,59 +2714,226 @@ mod tests {
         Ok(())
     }
 
-    /// NC-0042 contiguity guard: `expired_submit_range` collapses the expired
-    /// Submit slots to a single `[0, range_end)` prefix, which is only correct if
-    /// the slots are `{0..=max}`. A hole (an empty, non-last slot aged out by its
-    /// allocation height beneath a still-live lower slot) would over-approximate
-    /// — deterministically rejecting valid promotions AND diverging from the
-    /// slot-exact refund walk. The verdict is a pure function of canonical state,
-    /// so it must fail loud (identically on every node) rather than silently.
-    #[test]
-    fn expired_submit_range_bails_on_non_prefix_expired_set() {
-        fn submit_header_total(total_chunks: u64) -> IrysBlockHeader {
+    /// Canonical P0 repro turned regression: normal epoch-slot allocation
+    /// preallocates future Submit slots, but those unwritten slots must never
+    /// expire. Only slot 0 should expire here; slot 1 remains live because it
+    /// was refreshed by a later write, and slots 2/3 remain live because they
+    /// never held canonical data at all.
+    #[tokio::test]
+    async fn submit_expiry_skips_canonical_unwritten_slots() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height, tables::IrysTables,
+        };
+        use irys_domain::{
+            BlockIndex, BlockTree, BlockTreeReadGuard, CommitmentState, PartitionAssignments,
+        };
+        use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
+        use irys_types::{
+            Config, ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, H256List, LedgerIndexItem, NodeConfig, UnixTimestamp,
+            app_state::DatabaseProvider, hardfork_config::Cascade,
+        };
+        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use std::sync::{Arc, RwLock};
+
+        fn config_with_cascade() -> Config {
+            let mut node_config = NodeConfig::testing();
+            let consensus = node_config.consensus.get_mut();
+            consensus.chunk_size = 1;
+            consensus.num_chunks_in_partition = 10;
+            consensus.hardforks.cascade = Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(0),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            });
+            Config::new_with_random_peer_id(node_config)
+        }
+
+        fn submit_epoch_header(height: u64, total_chunks: u64) -> IrysBlockHeader {
             let mut h = IrysBlockHeader::new_mock_header();
-            h.data_ledgers = vec![irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Submit as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![]),
-                total_chunks,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            }];
+            h.height = height;
+            h.timestamp = irys_types::UnixTimestampMs::from_millis((height as u128) * 1000);
+            h.data_ledgers[DataLedger::Submit].total_chunks = total_chunks;
+            h.data_ledgers[DataLedger::Submit].tx_ids = H256List::new();
             h
         }
 
-        // Build the hole topology in real ledger state: 4 Submit slots allocated
-        // at height 1, then only slot 1 touched (chunks [12,18) with a 10-chunk
-        // partition) → last_height [1, 100, 1, 1]. At an expiry height in (1, 100)
-        // slots 0 and 2 expire while slot 1 stays live; slot 3 is the never-
-        // expiring last slot. So `get_all_expired_term_slot_indexes` returns the
-        // non-prefix set {0, 2}.
-        let mut epoch = EpochSnapshot::default();
-        epoch.ledgers[DataLedger::Submit].allocate_slots(4, 1);
-        epoch
-            .ledgers
-            .touch_filled_slots(DataLedger::Submit, 12, 18, 10, 100);
+        fn submit_chain_header(
+            height: u64,
+            total_chunks: u64,
+            tx_ids: Vec<H256>,
+        ) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers[DataLedger::Submit].total_chunks = total_chunks;
+            h.data_ledgers[DataLedger::Submit].tx_ids = H256List(tx_ids);
+            h
+        }
 
-        let ep = &epoch.config.consensus.epoch;
-        let min_blocks = ep.submit_ledger_epoch_length * ep.num_blocks_in_epoch;
-        let block_height = min_blocks + 50; // expiry_height = 50 ∈ (1, 100)
+        let config = config_with_cascade();
 
-        // Sanity: the fixture really is a hole before we assert the guard fires.
+        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let blocks_per_cycle =
+            config.consensus.epoch.submit_ledger_epoch_length * num_blocks_in_epoch;
+        let epoch1_height = num_blocks_in_epoch;
+        let epoch2_height = 2 * num_blocks_in_epoch;
+        let expiry_epoch_height = blocks_per_cycle + num_blocks_in_epoch;
+        let probe_height = expiry_epoch_height + 1;
+
+        // Canonical epoch evolution:
+        //   h=0      : genesis allocates slot 0
+        //   h=N      : total_chunks jumps to 18, so slots 0/1 receive data and
+        //              several future slots are preallocated but untouched
+        //   h=2N     : total_chunks advances only to 19, refreshing slot 1 alone
+        //   h=3N..6N : no new data, so the touched/stale heights persist
+        // At h=6N+1, slot 0 has expired, slot 1 is still live, and untouched
+        // preallocated slots 2/3 must remain unexpired.
+        let mut epoch = EpochSnapshot {
+            ledgers: irys_database::Ledgers::new(&config.consensus, false),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: None,
+            epoch_height: 0,
+        };
+        let mut epoch0 = submit_epoch_header(0, 0);
+        epoch0.test_sign();
+        epoch.perform_epoch_tasks(&None, &epoch0, vec![])?;
+        let mut epoch1 = submit_epoch_header(epoch1_height, 18);
+        epoch1.test_sign();
+        epoch.perform_epoch_tasks(&Some(epoch0.clone()), &epoch1, vec![])?;
+        let mut epoch2 = submit_epoch_header(epoch2_height, 19);
+        epoch2.test_sign();
+        epoch.perform_epoch_tasks(&Some(epoch1.clone()), &epoch2, vec![])?;
+        let mut prev_epoch = epoch2.clone();
+        for height in
+            (3 * num_blocks_in_epoch..=expiry_epoch_height).step_by(num_blocks_in_epoch as usize)
+        {
+            let mut next_epoch = submit_epoch_header(height, 19);
+            next_epoch.test_sign();
+            epoch.perform_epoch_tasks(&Some(prev_epoch.clone()), &next_epoch, vec![])?;
+            prev_epoch = next_epoch;
+        }
+
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height),
-            vec![0, 2],
-            "fixture must produce the non-prefix expired set {{0, 2}}"
+            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true),
+            vec![0],
+            "canonical epoch processing must skip unwritten preallocated Submit slots"
         );
 
-        let parent = submit_header_total(25); // data through slot 2 (3 × 10 chunks)
-        let err = expired_submit_range(block_height, &epoch, &parent, &epoch.config)
-            .expect_err("a non-prefix expired set must fail loud, not over-approximate");
+        let tx_slot_0 = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_size: 10, // chunks [0,10) -> slot 0
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        let tx_slot_1 = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                data_size: 9, // chunks [10,19) -> slot 1
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+
+        let mut inclusion_genesis = submit_chain_header(0, 0, vec![]);
+        inclusion_genesis.cumulative_diff = 0.into();
+        inclusion_genesis.test_sign();
+        let mut inclusion_block = submit_chain_header(1, 19, vec![tx_slot_0.id, tx_slot_1.id]);
+        inclusion_block.previous_block_hash = inclusion_genesis.block_hash;
+        inclusion_block.cumulative_diff = 1.into();
+        inclusion_block.test_sign();
+
+        let temp_dir = TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        db.update_eyre(|wtx| {
+            insert_tx_header(wtx, &tx_slot_0)?;
+            insert_tx_header(wtx, &tx_slot_1)?;
+            set_data_tx_included_height(wtx, &tx_slot_0.id, 1)?;
+            set_data_tx_included_height(wtx, &tx_slot_1.id, 1)?;
+            insert_block_header(wtx, &inclusion_genesis)?;
+            insert_block_header(wtx, &inclusion_block)?;
+            wtx.put::<irys_database::tables::MigratedBlockHashes>(0, inclusion_genesis.block_hash)?;
+            wtx.put::<irys_database::tables::MigratedBlockHashes>(1, inclusion_block.block_hash)?;
+            Ok(())
+        })?;
+
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        for (height, (hash, submit_total)) in [
+            (inclusion_genesis.block_hash, 0_u64),
+            (inclusion_block.block_hash, 19_u64),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: submit_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+
+        let tree = BlockTree::new(&inclusion_genesis, ConsensusConfig::testing());
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let range = expired_submit_range(probe_height, &epoch, &prev_epoch, &config, true)?
+            .expect("expired Submit slots must produce a range");
         assert!(
-            err.to_string().contains("not a contiguous prefix"),
-            "expected the NC-0042 contiguity guard message, got: {err}"
+            submit_tx_expired(
+                tx_slot_0.id,
+                &range,
+                &config,
+                &block_index,
+                &guard,
+                &MempoolReadGuard::stub(),
+                &db,
+            )
+            .await?,
+            "slot-0 tx must be expired"
         );
+        assert!(
+            !submit_tx_expired(
+                tx_slot_1.id,
+                &range,
+                &config,
+                &block_index,
+                &guard,
+                &MempoolReadGuard::stub(),
+                &db,
+            )
+            .await?,
+            "slot-1 tx must stay live even though later empty slots also expired"
+        );
+
+        Ok(())
     }
 
     /// NC-0042 fail-loud (commit c300d7ec2): a tx whose start offset maps to a
