@@ -1810,6 +1810,17 @@ impl IrysNode {
         let vdf_state = Arc::new(RwLock::new(initial_vdf_state));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
 
+        // Seed the shared VDF global-step counter with the loaded step BEFORE any service that can
+        // process a reorg starts (the validation service and p2p below), so BlockTreeService's
+        // partition-recovery restart gate never observes the placeholder 0 during a startup reorg.
+        // Nothing mutates `vdf_state` until the VDF thread starts further down, so this read matches
+        // the value the loop would otherwise publish.
+        let (global_step_number, last_step_hash) =
+            vdf_state_readonly.read().get_last_step_and_seed();
+        let initial_hash = last_step_hash.0;
+        irys_vdf::metrics::record_vdf_global_step(global_step_number);
+        atomic_global_step_number.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
+
         // Spawn the validation service
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
@@ -1912,14 +1923,6 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        let (global_step_number, last_step_hash) =
-            vdf_state_readonly.read().get_last_step_and_seed();
-        let initial_hash = last_step_hash.0;
-        irys_vdf::metrics::record_vdf_global_step(global_step_number);
-
-        // Publish the loaded initial VDF step into the shared counter created before the block tree
-        // service spawned; the VDF thread keeps it live thereafter.
-        atomic_global_step_number.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
         let packing_controller_handles =
             packing_service.spawn_packing_controllers(runtime_handle.clone());
 
