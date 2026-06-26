@@ -373,12 +373,18 @@ fn build_vdf_seed_buffer(
         block = fetch_parent(&block.previous_block_hash)?;
     }
     if block.height == 0 {
-        // Genesis contributes only its first step. Guard the index so a malformed genesis header
-        // surfaces as a no-op rather than panicking (this runs on cold-start and on the live thread
-        // that builds transient fork-local validation views).
-        if let Some(first) = block.vdf_limiter_info.steps.0.first() {
-            seeds.push_front(Seed(*first));
-        }
+        // Genesis contributes only its first step. A malformed genesis header with no steps is a
+        // hard error rather than a silent short buffer: callers (cold-start `create_state`, the
+        // fork-local validation views) would otherwise treat the misaligned `Ok(seeds)` as valid
+        // VDF state.
+        let first = block
+            .vdf_limiter_info
+            .steps
+            .0
+            .first()
+            .copied()
+            .ok_or_else(|| eyre!("VDF seed buffer: genesis header has no VDF steps"))?;
+        seeds.push_front(Seed(first));
     }
     Ok(seeds)
 }

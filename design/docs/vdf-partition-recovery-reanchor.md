@@ -145,7 +145,7 @@ rotation block is at/below the shared LCA, so both forks share its seed).
 `BlockTreeService` therefore restarts only when the **live VDF step** has reached that second
 boundary:
 
-```
+```text
 first_divergent_boundary = (lca_step / reset_frequency + 2) * reset_frequency
 restart  iff  live_vdf_step + 1 >= first_divergent_boundary
 ```
