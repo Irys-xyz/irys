@@ -16,7 +16,7 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 
 #[tokio::main]
 #[tracing::instrument(level = "trace", skip_all)]
-async fn main() -> eyre::Result<()> {
+async fn main() -> eyre::Result<std::process::ExitCode> {
     // IMPORTANT: Must run before any code that calls `get_version()` (e.g. handshake defaults).
     // The OnceLock is set-once, so late initialization panics.
     irys_types::init_version(
@@ -110,12 +110,17 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
+    // Map the shutdown reason to a process exit code before `stop` consumes it. Only a
+    // partition-recovery restart exits non-zero, signalling the supervisor to relaunch the node;
+    // every other reason exits 0 (the historical behaviour).
+    let exit_code = shutdown_reason.exit_code();
+
     // Spawn watchdog thread to force exit if graceful shutdown hangs
     spawn_shutdown_watchdog(shutdown_reason.clone());
 
     handle.stop(shutdown_reason).await;
 
-    Ok(())
+    Ok(std::process::ExitCode::from(exit_code))
 }
 
 fn init_tracing() -> eyre::Result<()> {

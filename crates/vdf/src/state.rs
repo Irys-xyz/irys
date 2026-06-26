@@ -266,14 +266,11 @@ impl VdfStateReadonly {
                 return Ok(());
             }
 
-            if current_step != last_observed_step {
-                // Any movement resets the stall baseline/timer — including a
-                // BACKWARD jump from a partition-recovery VDF re-anchor, which
-                // rebuilds the buffer at a lower `global_step`. The stall detector
-                // exists to catch a DEAD writer, which leaves `global_step`
-                // constant; only the re-anchor swap ever decreases it (`store_step`
-                // is strictly forward-only), so resetting on a decrease responds to
-                // a genuine liveness event and cannot mask the frozen-writer case.
+            if current_step > last_observed_step {
+                // Forward progress resets the stall baseline/timer. The stall detector
+                // exists to catch a DEAD writer, which leaves `global_step` constant;
+                // `store_step` is strictly forward-only, so the live step never
+                // decreases.
                 last_observed_step = current_step;
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
@@ -312,40 +309,20 @@ pub fn create_state(
         .map(|item| item.block_hash)
         .expect("To have at least genesis block");
 
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
     let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
+    let tip = block_header_by_hash(&tx, &block_hash, false)
         .unwrap()
         .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
+    let global_step_number = tip.vdf_limiter_info.global_step_number;
 
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    // Same walk-back as the fork-local views (see `build_vdf_seed_buffer`), resolving ancestors
+    // from the DB. Cold-start always has genesis present, so the build cannot fail here.
+    let seeds = build_vdf_seed_buffer(&tip, capacity, |hash| {
+        block_header_by_hash(&tx, hash, false)
+            .map_err(|e| eyre!("cold-start VDF buffer: header lookup failed for {hash}: {e}"))?
+            .ok_or_else(|| eyre!("cold-start VDF buffer: missing header for {hash}"))
+    })
+    .expect("cold-start VDF buffer build must succeed (genesis is always present)");
 
     info!(
         "Initializing vdf service from block's info in step number {}",
@@ -364,8 +341,9 @@ pub fn create_state(
 
 /// Walk back from `tip` accumulating up to `capacity` VDF steps into a seed buffer (oldest step
 /// at the front, the tip's last step at the back), resolving each ancestor header via
-/// `fetch_parent`. Genesis (height 0) contributes only its first step. This is the shared
-/// walk-back used by the canonical-tip re-anchor; it mirrors [`create_state`]'s inline loop.
+/// `fetch_parent`. Genesis (height 0) contributes only its first step. Shared by [`create_state`]
+/// (cold-start, resolving ancestors from the DB) and [`build_fork_local_view`] (transient
+/// fork-local validation views).
 fn build_vdf_seed_buffer(
     tip: &IrysBlockHeader,
     capacity: usize,
@@ -395,92 +373,26 @@ fn build_vdf_seed_buffer(
         block = fetch_parent(&block.previous_block_hash)?;
     }
     if block.height == 0 {
-        // Genesis contributes only its first step. Guard the index: this runs on
-        // the live VDF supervisor thread during re-anchor, so a malformed genesis
-        // header must surface as a no-op rather than panicking the node.
-        if let Some(first) = block.vdf_limiter_info.steps.0.first() {
-            seeds.push_front(Seed(*first));
-        }
+        // Genesis contributes only its first step. A malformed genesis header with no steps is a
+        // hard error rather than a silent short buffer: callers (cold-start `create_state`, the
+        // fork-local validation views) would otherwise treat the misaligned `Ok(seeds)` as valid
+        // VDF state.
+        let first = block
+            .vdf_limiter_info
+            .steps
+            .0
+            .first()
+            .copied()
+            .ok_or_else(|| eyre!("VDF seed buffer: genesis header has no VDF steps"))?;
+        seeds.push_front(Seed(first));
     }
     Ok(seeds)
-}
-
-/// Rebuild [`VdfState`] anchored at the canonical chain TIP, for partition-recovery re-anchor.
-///
-/// Unlike [`create_state`] (which anchors at the block index's latest item — the LCA after a
-/// partition-recovery truncation), this anchors at the new canonical tip so the rebuilt buffer
-/// carries the recovered range's canonical steps, each with its OWN reset-boundary seed.
-/// Anchoring at the LCA instead leaves the loop to re-cross the recovered range's reset
-/// boundaries by local stepping with the canonical tip's single `next_seed`, which is wrong for
-/// every intermediate boundary — diverging the buffer and re-wedging block validation. See
-/// design/docs/vdf-partition-recovery-reanchor.md.
-///
-/// `canonical_headers` is the block tree's canonical chain (oldest cached .. tip, as returned by
-/// `BlockTree::get_canonical_chain`). The recovered range is always within the block tree (a
-/// reorg is only representable up to `block_tree_depth` deep), so the tip and the whole recovered
-/// range are present here. Block headers are persisted to the DB only at migration, so the
-/// un-migrated tail MUST come from these headers; steps deeper than the cache (needed to fill
-/// `capacity`) fall back to the DB, which holds the migrated ancestors.
-pub fn create_state_for_canonical_tip(
-    canonical_headers: &[Arc<IrysBlockHeader>],
-    db: &DatabaseProvider,
-    is_vdf_mining_enabled: Arc<AtomicBool>,
-    config: &Config,
-) -> eyre::Result<(VdfState, H256)> {
-    let capacity = calc_capacity(config);
-
-    let cached: std::collections::HashMap<H256, Arc<IrysBlockHeader>> = canonical_headers
-        .iter()
-        .map(|h| (h.block_hash, Arc::clone(h)))
-        .collect();
-    let tip: &IrysBlockHeader = canonical_headers
-        .last()
-        .ok_or_else(|| eyre!("canonical chain empty during VDF re-anchor"))?;
-    let global_step_number = tip.vdf_limiter_info.global_step_number;
-    // Captured from the anchor (tip) block; the walk-back below only reads ancestors.
-    let next_seed = tip.vdf_limiter_info.next_seed;
-
-    // This runs on the live VDF supervisor thread (the re-anchor arm of
-    // init_vdf_thread). A transient DB error or an ancestor missing from BOTH the
-    // canonical cache and the DB must surface as an error — the caller keeps the
-    // current buffer and retries on the next re-anchor signal — rather than
-    // panicking and shutting the node down via the thread's CancelOnDrop guard.
-    let tx = db
-        .tx()
-        .map_err(|e| eyre!("VDF re-anchor: opening db tx failed: {e}"))?;
-    // Resolve an ancestor header by hash: the block tree's canonical cache first (the recovered,
-    // un-migrated range), then the DB (migrated ancestors below the cache).
-    let seeds = build_vdf_seed_buffer(tip, capacity, |hash| {
-        if let Some(header) = cached.get(hash) {
-            return Ok((**header).clone());
-        }
-        block_header_by_hash(&tx, hash, false)
-            .map_err(|e| eyre!("VDF re-anchor: header lookup failed for {hash}: {e}"))?
-            .ok_or_else(|| eyre!("VDF re-anchor: missing header for {hash}"))
-    })?;
-
-    info!(
-        "Re-anchoring vdf service to canonical tip at step number {}",
-        global_step_number
-    );
-
-    Ok((
-        VdfState {
-            global_step: global_step_number,
-            global_step_from_the_latest_canonical_block: global_step_number,
-            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-            seeds,
-            capacity,
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-        },
-        next_seed,
-    ))
 }
 
 /// Build a TRANSIENT, read-only VDF step view anchored on `tip`'s OWN lineage — its
 /// `vdf_limiter_info.steps` plus ancestors resolved via `fetch_parent` (oldest at the front, the
 /// tip's last step at the back), filling up to `capacity` steps. Mirrors the walk-back of
-/// [`create_state_for_canonical_tip`] / [`build_vdf_seed_buffer`].
+/// [`build_vdf_seed_buffer`].
 ///
 /// This is the single place that resolves FORK-LOCAL VDF steps for block validation. A node
 /// validating a block on a competing fork (deep partition recovery) must not trust its live VDF
@@ -763,13 +675,12 @@ mod tests {
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
 
-    /// Regression for the partition-recovery re-anchor fix (review Finding #1):
-    /// [`build_vdf_seed_buffer`] — the walk-back behind [`create_state_for_canonical_tip`] — must
+    /// Regression for the partition-recovery fork-local view (review Finding #1):
+    /// [`build_vdf_seed_buffer`] — the walk-back behind [`build_fork_local_view`] — must
     /// reproduce the canonical chain's recorded steps VERBATIM, anchored at the tip. That is what
-    /// lets the re-anchored buffer match (and validate) the canonical chain across the recovered
-    /// range. The broken design re-anchored at the LCA and let the loop re-derive the post-LCA
-    /// steps with the wrong reset seed; rebuilding from the canonical headers instead copies each
-    /// block's own steps, which already encode the correct boundary crossings.
+    /// lets a fork-local view match (and validate) a competing chain across the recovered range:
+    /// it copies each block's own steps, which already encode the correct boundary crossings,
+    /// rather than re-deriving the post-LCA steps with the wrong reset seed.
     #[test]
     fn build_vdf_seed_buffer_reproduces_canonical_steps_anchored_at_tip() {
         fn mock_header(height: u64, hash: u8, prev: u8, steps: &[u8]) -> IrysBlockHeader {
@@ -1344,45 +1255,5 @@ mod tests {
 
         advancer.await.unwrap();
         assert!(result.is_ok(), "wait should succeed when state advances");
-    }
-
-    /// Regression for the partition-recovery re-anchor (review Finding #2, Mode A):
-    /// a BACKWARD jump in `global_step` (the shared buffer rebuilt at a lower step)
-    /// must reset the stall baseline/timer, not be mistaken for a dead writer.
-    ///
-    /// Timeline (progress_timeout = 10s): advance 100→150 at t=4s, REWIND 150→120 at
-    /// t=8s, then climb to the desired 200 at t=16s. Pre-fix, the climb after the
-    /// rewind never exceeds the pre-rewind `last_observed_step` (150), so
-    /// `last_progress_at` (frozen at t=4s) elapses its 10s window at t=14s and the
-    /// wait spuriously returns `Stalled` (which panics the validation service).
-    /// Post-fix, the rewind at t=8s resets the timer, so the wait reaches 200 first.
-    #[tokio::test(start_paused = true)]
-    async fn wait_for_step_tolerates_backward_reanchor_jump() {
-        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
-        let readonly = VdfStateReadonly::new(Arc::clone(&inner));
-        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        let progress_timeout = std::time::Duration::from_secs(10);
-
-        let advancer = {
-            let inner = Arc::clone(&inner);
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 150; // forward
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 120; // re-anchor rewind (the trigger)
-                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                inner.write().unwrap().global_step = 200; // climb to desired before timeout
-            })
-        };
-
-        let result = readonly
-            .wait_for_step(200, Arc::clone(&cancel), progress_timeout)
-            .await;
-
-        advancer.await.unwrap();
-        assert!(
-            result.is_ok(),
-            "a backward re-anchor jump must reset the stall timer, not surface as Stalled: {result:?}"
-        );
     }
 }
