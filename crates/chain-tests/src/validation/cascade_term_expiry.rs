@@ -1295,3 +1295,165 @@ async fn heavy_cascade_publish_last_write_expiry() -> eyre::Result<()> {
     node.stop().await;
     Ok(())
 }
+
+/// P1 regression (mid-chain Cascade + indexed term-ledger expiry): settling a
+/// ThirtyDay slot that expires AFTER the data has migrated into the block index
+/// must not stall the chain when Cascade was activated mid-chain.
+///
+/// The expiry-fee walk (`block_producer::ledger_expiry::resolve_ledger_offset_to_block`)
+/// resolves each expired chunk offset against the finalized block index. On a
+/// mid-chain activation the pre-activation blocks carry only Publish+Submit — no
+/// ThirtyDay entry — so the index binary search probes a block with no entry for
+/// the ledger. The buggy version used `BlockIndex::get_block_index_item`, which
+/// errors ("Ledger ThirtyDay not found in block at height N") on that probe; the
+/// error bubbles out of BOTH the producer and the validator epoch-block expiry
+/// path, so the expiry epoch can neither be produced nor accepted → the chain
+/// halts. The fix uses the tolerant `get_block_bounds`, which treats a missing
+/// entry as `total_chunks = 0` and keeps searching.
+///
+/// Why the existing term-expiry tests miss it: they activate Cascade at genesis
+/// (`activation_timestamp = 0`), so every block carries all four ledgers and the
+/// index never holds a ThirtyDay-less item. This test activates mid-chain and
+/// keeps the pre-activation phase the majority of the chain, so the binary
+/// search's first probe (`latest_height / 2`) lands on a pre-activation block.
+/// `block_migration_depth = 1` guarantees the ThirtyDay data is in the index
+/// (not the un-migrated tree tail, whose resolution path is unaffected) by the
+/// time it expires.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() -> eyre::Result<()>
+{
+    let num_blocks_in_epoch = 2_u64;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64; // expires 2×2 = 4 blocks after last write
+    let expiry_window = thirty_day_epoch_length * num_blocks_in_epoch; // 4
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        // Cascade intentionally NOT configured yet — activated mid-chain below so
+        // the pre-activation blocks carry only Publish+Submit (the regression).
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let node = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    // === Pre-activation phase: keep it the MAJORITY of the chain ===
+    // The index binary search's first probe is `latest_height / 2`; making the
+    // pre-activation span exceed half the chain at expiry guarantees that probe
+    // hits a pre-activation (ThirtyDay-less) block — the exact trigger.
+    let pre_activation_target = 16_u64;
+    while node.get_canonical_chain_height().await < pre_activation_target {
+        node.mine_block().await?;
+    }
+
+    // === Activate Cascade mid-chain (stop -> set activation = now+1 -> restart) ===
+    let mut stopped = node.stop().await;
+    let activation_timestamp = UnixTimestamp::now()
+        .expect("system time after unix epoch")
+        .as_secs()
+        + 1;
+    stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
+        one_year_epoch_length,
+        thirty_day_epoch_length,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+    let node = stopped.start().await;
+
+    // Mine a couple of cascade-active epochs so activate_cascade runs and the
+    // OneYear/ThirtyDay ledgers come into existence.
+    for _ in 0..(2 * num_blocks_in_epoch) {
+        node.mine_block().await?;
+    }
+
+    // === Post-activation: write 12 chunks of ThirtyDay data ===
+    // 4 txs × 3 chunks = 12 chunks → slot 0 (0-9) fills and slot 1 (10-11) starts,
+    // so slot 0 is non-last and therefore eligible to expire.
+    for i in 0_u8..4 {
+        let mut tx_data = vec![9_u8; 96]; // 96 / 32 = 3 chunks
+        tx_data[0] = i;
+        let price = node.get_data_price(DataLedger::ThirtyDay, 96).await?;
+        let tx = signer.create_transaction_with_fees(
+            tx_data,
+            node.get_anchor().await?,
+            DataLedger::ThirtyDay,
+            BoundedFee::new(price.term_fee),
+            None,
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        node.ingest_data_tx(tx.header.clone()).await?;
+        node.wait_for_mempool(tx.header.id, 30).await?;
+    }
+    let write_height = node.mine_block().await?.height;
+    let write_epoch = next_epoch_boundary(write_height);
+    while node.get_canonical_chain_height().await < write_epoch {
+        node.mine_block().await?;
+    }
+
+    // Sanity: the ThirtyDay ledger now holds data across ≥2 slots, so slot 0 is
+    // non-last and the data is in the migrated index (depth = 1).
+    {
+        let block = node.get_block_by_height(write_epoch).await?;
+        let tree = node.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("epoch snapshot should exist");
+        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
+        assert!(
+            slots.len() >= 2 && !slots[0].is_expired,
+            "ThirtyDay slot 0 must be non-last and not yet expired (slots={}, slot0_expired={})",
+            slots.len(),
+            slots.first().map(|s| s.is_expired).unwrap_or(false),
+        );
+    }
+
+    // === Mine through the expiry epoch ===
+    // At `write_epoch + expiry_window` the producer settles ThirtyDay slot 0,
+    // walking `find_block_range(ThirtyDay)` → `resolve_ledger_offset_to_block`
+    // → the index binary search that probes a pre-activation block. Without the
+    // fix `mine_block` errors here ("Ledger ThirtyDay not found …") and the chain
+    // cannot advance past this epoch.
+    let expiry_epoch = write_epoch + expiry_window;
+    while node.get_canonical_chain_height().await < expiry_epoch {
+        node.mine_block().await?;
+    }
+
+    assert!(
+        node.get_canonical_chain_height().await >= expiry_epoch,
+        "chain must advance through the ThirtyDay expiry epoch without stalling"
+    );
+
+    // Settlement actually ran: slot 0 recycled (is_expired) at the expiry epoch.
+    {
+        let block = node.get_block_by_height(expiry_epoch).await?;
+        let tree = node.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("epoch snapshot should exist");
+        let slots = snapshot.ledgers.get_slots(DataLedger::ThirtyDay);
+        assert!(
+            slots[0].is_expired,
+            "ThirtyDay slot 0 must be expired/recycled at the expiry epoch (proves the \
+             indexed expiry-fee walk completed)"
+        );
+    }
+
+    node.stop().await;
+    Ok(())
+}

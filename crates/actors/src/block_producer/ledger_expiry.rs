@@ -851,13 +851,7 @@ fn resolve_ledger_offset_to_block(
         .map(|item| ledger_total_of_index_item(&item, ledger))
         .unwrap_or(0);
     if offset < index_tip_total {
-        let (height, item) = block_index.get_block_index_item(ledger, offset)?;
-        return Ok((
-            height,
-            item.block_hash,
-            migrated_predecessor_total(block_index, ledger, height)?,
-            ledger_total_of_index_item(&item, ledger),
-        ));
+        return resolve_offset_via_index(block_index, ledger, offset);
     }
 
     // Slow path: un-migrated tail — walk the parent ancestry by hash.
@@ -889,40 +883,42 @@ fn resolve_ledger_offset_to_block(
 
     // Walked off the retained tree window without matching → the offset is below
     // it, hence finalized/migrated; resolve from the index (branch-invariant).
-    let (height, item) = block_index.get_block_index_item(ledger, offset)?;
-    Ok((
-        height,
-        item.block_hash,
-        migrated_predecessor_total(block_index, ledger, height)?,
-        ledger_total_of_index_item(&item, ledger),
-    ))
+    resolve_offset_via_index(block_index, ledger, offset)
 }
 
-/// Cumulative `ledger` total *before* a migrated block at `height` (its base
-/// offset): the predecessor's indexed total, or `0` at genesis. Sound only for
-/// **migrated** heights — then `height - 1` is itself migrated (below the reorg
-/// floor, branch-invariant), so the index read is exact. Used by
-/// [`resolve_ledger_offset_to_block`]'s index fast paths; the un-migrated tail
-/// instead carries `prev_total` straight from the by-hash ancestry walk.
-fn migrated_predecessor_total(
+/// Resolve `offset` to its introducing block via the **finalized block index**,
+/// returning `(height, block_hash, base, total)`.
+///
+/// Uses [`BlockIndex::get_block_bounds`] (anchored at the latest indexed height),
+/// NOT [`BlockIndex::get_block_index_item`]. The two binary-search the same index
+/// but diverge on a probed block whose entry for `ledger` is absent:
+/// `get_block_index_item` errors, while `get_block_bounds` treats it as
+/// `total_chunks = 0` and keeps searching. That tolerance is required for ledgers
+/// introduced after genesis — `OneYear`/`ThirtyDay` at a **mid-chain Cascade
+/// activation**: a pre-activation block carries only `Publish`+`Submit`, so once
+/// a term slot ages into the migrated index and expires, the strict variant would
+/// error the instant the search probes a pre-activation height, bubbling out of
+/// both the producer and validator epoch-block expiry walk → a deterministic
+/// chain stall. Only called for offsets below the migrated index tip (finalized ⇒
+/// branch-invariant), so anchoring at the latest indexed height is branch-safe.
+/// `base` (the predecessor's total) comes straight from the bounds, which compute
+/// it the same way the old `migrated_predecessor_total` did (0 at genesis or when
+/// the predecessor predates the ledger's introduction).
+fn resolve_offset_via_index(
     block_index: &BlockIndex,
     ledger: DataLedger,
-    height: BlockHeight,
-) -> eyre::Result<u64> {
-    if height == 0 {
-        Ok(0)
-    } else {
-        block_index
-            .get_item(height - 1)
-            .map(|i| ledger_total_of_index_item(&i, ledger))
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "migrated predecessor at height {} must be indexed \
-                     (below the reorg floor → finalized)",
-                    height - 1
-                )
-            })
-    }
+    offset: u64,
+) -> eyre::Result<(BlockHeight, H256, u64, u64)> {
+    let bounds = block_index.get_block_bounds(ledger, LedgerChunkOffset::from(offset))?;
+    let item = block_index
+        .get_item(bounds.height)
+        .ok_or_eyre("block bounds height absent from block index")?;
+    Ok((
+        bounds.height,
+        item.block_hash,
+        bounds.start_chunk_offset,
+        bounds.end_chunk_offset,
+    ))
 }
 
 /// Reconstructs `target`'s Submit-ledger **start chunk offset**: the cumulative
@@ -2226,6 +2222,139 @@ mod tests {
         )?
         .expect("expired slot 0 holds data");
         assert_eq!(range.max_block.height, 3);
+
+        Ok(())
+    }
+
+    /// NC-0042 (mid-chain Cascade): `find_block_range` must resolve an expired
+    /// OneYear/ThirtyDay chunk offset even though the block index contains
+    /// PRE-activation items that carry only Publish+Submit (no term-ledger entry).
+    ///
+    /// Regression: `resolve_ledger_offset_to_block`'s index fast path used
+    /// `get_block_index_item`, whose binary search errors ("Ledger OneYear not
+    /// found in block at height N") the instant it probes a pre-activation
+    /// 2-ledger block. On a network where Cascade activates mid-chain, once a
+    /// OneYear/ThirtyDay slot ages into the migrated index and expires, that error
+    /// bubbles out of BOTH the producer and the validator epoch-block expiry path
+    /// → a deterministic chain stall. The tolerant `get_block_bounds` treats a
+    /// probed block lacking the ledger as `total_chunks = 0`, so resolution
+    /// converges on the introducing block instead of erroring.
+    #[test]
+    fn find_block_range_resolves_term_ledger_offset_across_preactivation_index() -> eyre::Result<()>
+    {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{BlockTree, BlockTreeReadGuard};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        let mut node_config = irys_types::NodeConfig::testing();
+        node_config.consensus.get_mut().num_chunks_in_partition = 10;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+
+        // Heights 0-2: PRE-Cascade — only Publish + Submit, no OneYear entry.
+        for (height, submit_total) in [0_u64, 5, 8].into_iter().enumerate() {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: H256::random(),
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: submit_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+        // Heights 3-5: POST-Cascade — OneYear introduced, cumulative totals 5,12,18.
+        for (idx, one_year_total) in [5_u64, 12, 18].into_iter().enumerate() {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: H256::random(),
+                    num_ledgers: 4,
+                    ledgers: vec![
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 8,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: one_year_total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::OneYear,
+                        },
+                        irys_types::LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::ThirtyDay,
+                        },
+                    ],
+                },
+                3 + idx as u64,
+            )?;
+        }
+
+        // Expired OneYear slot 0 ([0,10)). Offset 0 < the index-tip OneYear total
+        // (18), so resolution takes the index fast path, whose binary search over
+        // heights [0,5] probes pre-activation height 2 (which has no OneYear entry).
+        let mut expired = BTreeMap::new();
+        expired.insert(SlotIndex::new(0), vec![IrysAddress::ZERO]);
+
+        // All resolved offsets lie below the migrated tip, so the tree/parent are
+        // unused (same setup as `find_block_range_bounds_by_parent_not_index_tip`).
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+            &genesis,
+            irys_types::ConsensusConfig::testing(),
+        ))));
+        let parent_hash = genesis.block_hash;
+
+        let range = find_block_range(
+            expired,
+            &config,
+            &block_index,
+            DataLedger::OneYear,
+            18, // parent's OneYear total
+            parent_hash,
+            &guard,
+            &db,
+        )?
+        .expect("expired OneYear slot 0 holds data");
+
+        // OneYear slot 0 ([0,10)) spans height 3 (totals 0->5) and height 4 (5->12).
+        assert_eq!(
+            range.min_block.height, 3,
+            "OneYear chunk 0 first appears at height 3"
+        );
+        assert_eq!(
+            range.max_block.height, 4,
+            "OneYear chunk 9 lands at height 4"
+        );
 
         Ok(())
     }
