@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782388876737,
+  "lastUpdate": 1782758682627,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7387,6 +7387,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3318846bab85e44ec015bfc4505d7ab4d9e0f050",
+          "message": "fix(vdf): re-anchor VDF on network-partition recovery (#1457)\n\n* fix(vdf): re-anchor VDF on network-partition recovery\n\nDeep reorgs (fork deeper than block_migration_depth) roll back the block\nindex/storage/supply but left VDF state untouched, so a minority fork that\ncrossed a reset boundary kept a poisoned step buffer and rejected the canonical\npost-boundary blocks (the #1447 wedge, beyond the #1449 gate's coverage).\n\nMake the VDF thread a supervisor loop: BlockTreeService signals vdf_reanchor\nafter recover_from_network_partition, run_vdf returns VdfExit::Reanchor, and the\nsupervisor rebuilds VdfState from the truncated canonical index and restarts the\nloop at the new anchor. Keeping the OS thread reuses the fast-forward channel and\ncore pinning.\n\n* fix(vdf): drain stale fast-forward steps on re-anchor\n\nStale FF steps queued from an orphaned fork could be accepted by the\nrestarted run_vdf loop and re-poison the freshly rebuilt canonical\nbuffer. Drain the FF receiver after the buffer swap during re-anchor.\n\n* fix(vdf): complete partition-recovery re-anchor heal\n\nCatch-up local-stepping now applies the reset seed pinned by the block ending\nat/below each crossed boundary (canonical_vdf_info_at_or_below_step), not the\ntip's next_seed which targeted a higher boundary and re-poisoned post-boundary\nsteps. Plus recompute-on-mismatch for VDF step batches, fork-local recall and\nprev-step validation views, efficient-sampling range reset on re-anchor\n(Reanchored broadcast), and requeue-not-fail on VdfStepRewound.\n\nNever mislabel a local/transient fault as peer invalidity: an unbuildable\nfork-local prev-step view requeues via the Cancelled lane\n(VdfPrevStepForkViewUnavailable) and an unbuildable fork-local recall view\nreclassifies to the soft-internal StepsUnavailable lane, rather than\nterminally rejecting the block. On a re-anchor rebuild failure the VDF\nsupervisor resumes from the live buffer's own tip instead of crashing the node.\n\n* test(vdf): harden pre-existing load-flaky tests\n\nThese flakes predate this branch; their tight wall-clock deadlines can be\nexceeded under parallel-CI CPU contention. None are caused by the re-anchor\nheal — split out from the logic commit so the consensus change stands alone.\n\n- hardfork epoch-boundary test: pre-activation window 10s -> 45s so txs submit\n  before activation despite slow node startup\n- validation_service JoinHandle select! watchdog 1s -> 30s (fail-fast guard,\n  not a timing assertion; spuriously fires on a starved current-thread runtime)\n- slow_ prefix on the perm_ledger expiry and sync-resume tests (180s budget)\n- cascade_reorg: poll for async reorg reinjection instead of a single check\n\n* fix(vdf): seed-buffer off-by-one + review follow-ups\n\nbuild_vdf_seed_buffer/create_state broke out of the walk-back's inner for-loop\nwhen the buffer filled but still fetched the parent and, when that parent was\ngenesis, appended one extra seed (capacity+1). The extra front seed inflates\nseeds.len(), dragging get_steps' first_global_step one step too low and\nmis-mapping the buffer's oldest step. Break the while-loop once the buffer is\nfull, before the parent fetch, in both functions; add a regression test.\n\nAlso two doc/comment accuracy fixes from the review pass (no behavior change):\n- design doc section 2: the at-or-below-step query returns Some(tip) when the\n  VDF runs ahead (a no-op), not the unwrap_or fallback; the fallback fires only\n  when the step is below the earliest cached block.\n- prev-step fork-local Err arm: document that it also covers the built-but-\n  uncoverable (near-genesis) view, and why both share the peer-innocent requeue.\n\n* test(vdf): give heavy4_network_partition_recovery the slow_ budget\n\nRename to heavy4_slow_network_partition_recovery so it matches nextest's\nslow_ override (90s x 2 = 180s) instead of the 60s default. A 10x flake pass of\nthe two partition_recovery e2e tests hit one 60s timeout here when it\nco-scheduled with its heavy4 sibling (each reserves 4 threads, oversubscribing\ncores under the opt-level=3 VDF crypto); it passes 8/8 in isolation (~22-30s),\nand the boundary-crossing heal test passed 10/10. Consistent with the existing\nheavy4_slow_ sibling and commit 6ce879875's pre-existing load-flaky hardening.\nThe body is unchanged (byte-identical to master); only the name/budget moves.\n\n* refactor(vdf-validation): unify prev-step check on the fork-local fallback\n\nThe previous-step continuity check carried two redundant recovery paths: a\nre-wait + VdfStepRewound sentinel when the live-buffer step was absent, and a\nfork-local view when it mismatched. Collapse them: read the live buffer as a\nfast path and treat absent and present-but-mismatched identically, both falling\nthrough to the authoritative fork-local cross-check — the same pattern the\nrecall-range seam already uses.\n\nDeletes the VdfStepRewound sentinel (struct + downcast arm) and the\nasync-window re-wait, with no steady-state cost: the live-buffer fast path is\nretained and the fork-local view is still built only in the rare absent/mismatch\nfallback. Net -43 code LOC.\n\nRecall-range validation is deliberately left as-is: its fork-local view is\nsourced only from the block tree, and the recall window (up to reset_frequency\nsteps) can exceed block_tree_depth on testnet config, so the live buffer must\nremain the primary source.\n\n* Fix fork-local VDF view DB fallback\n\n* Unify canonical VDF reads into one snapshot\n\n* Add deterministic canonical step lookup test\n\n* Fix FF boundary reset seed lookup\n\n* chore: fmt\n\n* Fold the reset boundary into VDF anchor hashes (finding #5)\n\nThe step buffer stores raw step outputs (process_reset folds the carried hash\nonly after a step is stored, and fast-forward stores values verbatim), so an\nanchor hash read back via get_last_step_and_seed is unfolded. When the\n(re-)anchor step is itself a reset boundary, run_vdf's first vdf_sha for step+1\nskipped that boundary's fold and diverged from the canonical lineage. Rare\n(only when an anchor lands exactly on a boundary) and non-safety (validation\nrecomputes from each block's own seed), but it mis-steps local mining until it\nheals.\n\nAdd irys_vdf::vdf::reset_applied_anchor_hash and apply it at both anchor sites:\nthe startup anchor (init_vdf_thread, with latest_block's seed) and the re-anchor\narm (with the rebuilt canonical tip's seed). The boundary seed is the anchoring\nblock's own vdf_limiter_info.seed -- when a block's step range contains a reset\nboundary, set_seeds pins that boundary's entropy in `seed` while `next_seed`\ntargets the next boundary above the block.\n\nAlso fixes finding #7: handle_reanchor now fully resets the recall-range\nrotation via Ranges::new instead of reinitialize() + last_step_num = 0. The\nlatter only pruned last_recall_ranges keys <= last_step_num - 20, leaving stale\nentries {N-19..N} that get_recall_range serves by absolute step (no seed check)\nfor the new lineage after a re-anchor. Adds a deterministic unit test (verified\nto fail under the old reinitialize path).\n\nAlso documents this session's reset-seed fixes in the re-anchor design doc: the\nunified single-lock canonical_vdf_snapshot (#2), the fast-forward path sourcing\nthe per-step seed at P-1 (#4), the fork-local views' block-tree->DB ancestor\nfallback (#1), and the anchor-hash fold (#5).\n\n* docs: clarify fork-local prev-step Err arm and re-anchor failure fallback\n\nTwo comment-only clarifications from the final branch review (no behavior\nchange):\n\n- validation_service.rs: the prev-step fork-local `Err` arm only fires on a\n  build failure (an ancestor absent from BOTH the block tree and the DB, post\n  DB-fallback). A successful `build_fork_local_step_view` is sized to include\n  `prev_output_step_number`, so the old comment's \"built but does not cover the\n  step\" subcase is unreachable -- drop it from the comment and the warn message.\n\n- chain.rs: document why the rebuild-FAILURE fallback intentionally skips\n  `reset_applied_anchor_hash`. It resumes from the live tip, which free-ran\n  above the canonical chain, so no confirmed canonical block pins that step's\n  boundary seed; folding a guessed seed would re-poison (the #4 hazard). Resume\n  raw and let store_step's forward-only rule + fork-local recompute realign.\n\n---------\n\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-06-29T11:25:31-07:00",
+          "tree_id": "2fd452bfa3afe41da1cc90920c81402d610fc55c",
+          "url": "https://github.com/Irys-xyz/irys/commit/3318846bab85e44ec015bfc4505d7ab4d9e0f050"
+        },
+        "date": 1782758680565,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012629,
+            "range": "± 0.000141",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.131919,
+            "range": "± 0.003549",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.280677,
+            "range": "± 0.078643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.484835,
+            "range": "± 0.303714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074886,
+            "range": "± 0.001804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 759.083934,
+            "range": "± 8.999217",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.394642,
+            "range": "± 29.074653",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120143,
+            "range": "± 0.001067",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1198.281564,
+            "range": "± 5.594586",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1576.007184,
+            "range": "± 10.467085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034496,
+            "range": "± 0.001531",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.948199,
+            "range": "± 0.496573",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.529512,
+            "range": "± 1.86484",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
