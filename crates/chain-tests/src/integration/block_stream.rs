@@ -7,8 +7,7 @@ use crate::utils::IrysNodeTest;
 use alloy_core::primitives::ruint::aliases::U256;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
-use futures::TryStreamExt as _;
-use irys_actors::block_stream_service::ReplayStream;
+use irys_actors::block_stream_service::BlockStreamHandle;
 use irys_types::block_stream::{StreamEvent, StreamFrame};
 use irys_types::irys::IrysSigner;
 use irys_types::{H256, NodeConfig};
@@ -34,8 +33,18 @@ async fn next_frame_for(
     }
 }
 
-async fn collect_replay(replay: ReplayStream) -> eyre::Result<Vec<Arc<StreamFrame>>> {
-    replay.try_collect().await
+fn collect_replay(
+    handle: &BlockStreamHandle,
+    start: u64,
+    end: u64,
+) -> eyre::Result<Vec<StreamFrame>> {
+    let mut cursor = start;
+    let mut frames = Vec::new();
+    while let Some((next, page)) = handle.replay_page(cursor, end)? {
+        frames.extend(page);
+        cursor = next;
+    }
+    Ok(frames)
 }
 
 /// Reads `count` frames from the real `/internal/blocks/stream?from_seq=` SSE endpoint over HTTP,
@@ -96,7 +105,7 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
     let handle = node.node_ctx.block_stream_handle.clone();
 
     // Subscribe before producing.
-    let (_replay0, mut live) = handle.subscribe(0)?;
+    let (_, _, mut live) = handle.subscribe(0)?;
 
     // Post a data tx and mine; an `observed` frame carrying its data_root must arrive.
     node.post_publish_data_tx(&user, b"alpha".to_vec()).await?;
@@ -115,8 +124,8 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
 
     // A late subscriber replays history (including that frame at its original seq) with strictly
     // increasing, gapless seqs — the replay→live handover property.
-    let (replay_late, _live_late) = handle.subscribe(0)?;
-    let replay_late = collect_replay(replay_late).await?;
+    let (start, end, _live_late) = handle.subscribe(0)?;
+    let replay_late = collect_replay(&handle, start, end)?;
     assert!(
         replay_late.iter().any(|f| f.seq == seq_with_data),
         "replay must include the earlier frame at its original seq"
@@ -130,7 +139,7 @@ async fn observed_emitted_with_data_roots_and_replays_without_gap() -> eyre::Res
     let mut observed_hashes: Vec<_> = replay_late
         .iter()
         .filter(|f| f.kind() == "observed")
-        .filter_map(|frame| frame.block_hash())
+        .filter_map(StreamFrame::block_hash)
         .collect();
     let total = observed_hashes.len();
     observed_hashes.sort();
@@ -151,7 +160,7 @@ async fn finalized_emitted_on_migration() -> eyre::Result<()> {
     node.cfg.consensus.get_mut().block_migration_depth = 2;
     let node = node.start().await;
     let handle = node.node_ctx.block_stream_handle.clone();
-    let (_replay, mut live) = handle.subscribe(0)?;
+    let (_, _, mut live) = handle.subscribe(0)?;
 
     let blk1 = node.mine_block().await?;
     node.wait_until_height(blk1.height, 10).await?;
@@ -273,7 +282,7 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
     // Subscribe to the genesis node's stream before the fork; setup frames are already durable, so
     // only post-subscribe frames arrive live.
     let handle = genesis_node.node_ctx.block_stream_handle.clone();
-    let (_replay, mut live) = handle.subscribe(0)?;
+    let (_, _, mut live) = handle.subscribe(0)?;
 
     // Isolate both nodes so each builds an independent fork from the same base.
     genesis_node.gossip_disable();
@@ -320,14 +329,10 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
     .await?;
 
     // Snapshot the complete durable log and assert the whole-log invariants on it.
-    let (log, _live_snapshot) = handle.subscribe(0)?;
-    let log = collect_replay(log).await?;
+    let (start, end, _live_snapshot) = handle.subscribe(0)?;
+    let log = collect_replay(&handle, start, end)?;
 
-    let reorged: Vec<&StreamFrame> = log
-        .iter()
-        .filter(|f| f.kind() == "reorged")
-        .map(Arc::as_ref)
-        .collect();
+    let reorged: Vec<&StreamFrame> = log.iter().filter(|f| f.kind() == "reorged").collect();
     assert_eq!(
         reorged.len(),
         1,
@@ -380,7 +385,7 @@ async fn reorged_emitted_for_fork_switch_without_duplicate_observed() -> eyre::R
     let duplicate = log
         .iter()
         .filter(|f| f.kind() == "observed")
-        .filter_map(|frame| frame.block_hash())
+        .filter_map(StreamFrame::block_hash)
         .find(|h| winning.contains(h));
     assert!(
         duplicate.is_none(),

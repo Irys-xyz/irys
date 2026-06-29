@@ -17,11 +17,8 @@ use irys_types::block_stream::{BlockEvent, BlockRef, EventsPage, StreamEvent, St
 use irys_types::{DatabaseProvider, H256, TokioServiceHandle};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::VecDeque;
 use std::num::NonZeroUsize;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, error::TryRecvError};
 use tracing::{Instrument as _, error, info, warn};
 
@@ -41,8 +38,6 @@ const DEDUP_CAPACITY: NonZeroUsize = match NonZeroUsize::new(10_000) {
 /// stream ends) and reconnects with `from_seq` to replay from the durable log — bounding memory
 /// instead of letting a stuck follower accumulate frames without limit.
 const SUBSCRIBER_BUFFER: usize = 1_024;
-/// Maximum number of durable frames decoded at once for an SSE replay.
-const REPLAY_PAGE: usize = 1_024;
 
 /// Max frames a single `GET /internal/blocks/events` page may return; an over-size `limit` is clamped to
 /// this rather than rejected, bounding per-request work.
@@ -80,23 +75,17 @@ impl BlockStreamHandle {
         }
     }
 
-    /// Atomic replay→live handover: under one lock, snapshot the durable replay bounds and register
-    /// a live sender, so no append interleaves between the snapshot and the registration. The returned
-    /// replay reads that immutable range in bounded pages after releasing the fan-out lock.
-    pub fn subscribe(
-        &self,
-        from_seq: u64,
-    ) -> eyre::Result<(ReplayStream, Receiver<Arc<StreamFrame>>)> {
+    /// Atomic replay→live handover: under one lock, snapshot the durable replay bounds `[start, end)` and
+    /// register a live sender, so no append interleaves between the snapshot and the registration. The
+    /// caller replays `[start, end)` via [`Self::replay_page`] (after the fan-out lock is released), then
+    /// tails the live receiver.
+    pub fn subscribe(&self, from_seq: u64) -> eyre::Result<(u64, u64, Receiver<Arc<StreamFrame>>)> {
         let mut live = self
             .live
             .lock()
             .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
         let (start, end) = self.db.view_eyre(|tx| {
-            let lowest = irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0);
-            let logical_len = match irys_database::block_stream_latest_seq(tx)? {
-                Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
-                None => 0,
-            };
+            let (lowest, logical_len) = irys_database::block_stream_log_bounds(tx)?;
             // A cursor beyond the tip is stale — only reachable after a log reset shrank the log. Replay
             // from the retained floor so the follower sees below-cursor frames and rewinds, matching the
             // `/events` beyond-tip clamp; otherwise the SSE follower would silently continue onto the new
@@ -116,7 +105,7 @@ impl BlockStreamHandle {
         if !live.closed {
             live.senders.push(tx);
         }
-        Ok((ReplayStream::new(&self.db, start, end), rx))
+        Ok((start, end, rx))
     }
 
     /// One-shot page over the durable log for `GET /internal/blocks/events`, read in a single
@@ -132,11 +121,7 @@ impl BlockStreamHandle {
         // checked conversions / arithmetic only — never silently manufacture a wrong cursor
         let limit = usize::try_from(limit.min(MAX_PAGE))?;
         self.db.view_eyre(|tx| {
-            let lowest = irys_database::block_stream_lowest_seq(tx)?.unwrap_or(0);
-            let logical_len = match irys_database::block_stream_latest_seq(tx)? {
-                Some(seq) => seq.checked_add(1).ok_or_eyre("block-stream seq overflow")?,
-                None => 0,
-            };
+            let (lowest, logical_len) = irys_database::block_stream_log_bounds(tx)?;
             // A below-floor (truncated) page is a pure resync signal: the follower discards any frames
             // and force-resets its cursor forward to `next_seq` (the floor), so carry no frames — with an
             // empty page `next_seq == lowest` is exactly that floor. A beyond-tip cursor clamps to the
@@ -167,6 +152,30 @@ impl BlockStreamHandle {
                 frames,
             })
         })
+    }
+
+    /// One bounded page of an SSE subscriber's durable replay, capped by the immutable snapshot `end`
+    /// that [`Self::subscribe`] captured. Returns `(next_cursor, frames)` for a contiguous page from
+    /// `cursor`, or `None` when the replay is complete (`cursor >= end`) or must abort because a prune
+    /// advanced the retained floor past `cursor` mid-replay (a `truncated`/no-progress page). On abort the
+    /// cursor has not reached `end`, which is how the caller tells "resync" from "done".
+    ///
+    /// Bounding each page by `end` (not [`Self::events_page`]'s `has_more`, which tracks a moving tip)
+    /// keeps the replay→live handover gap- and duplicate-free; the abort check subsumes the cross-page
+    /// seq-contiguity and short-snapshot guards the old streaming replay carried.
+    pub fn replay_page(
+        &self,
+        cursor: u64,
+        end: u64,
+    ) -> eyre::Result<Option<(u64, Vec<StreamFrame>)>> {
+        if cursor >= end {
+            return Ok(None);
+        }
+        let page = self.events_page(cursor, end - cursor)?;
+        if page.truncated || page.next_seq <= cursor {
+            return Ok(None);
+        }
+        Ok(Some((page.next_seq, page.frames)))
     }
 
     /// Producer-only. Append `event` to the durable log (assigning `seq`) and fan it out, holding
@@ -206,82 +215,6 @@ impl BlockStreamHandle {
             }
             Err(_) => warn!("block-stream fan-out lock poisoned while closing subscribers"),
         }
-    }
-}
-
-/// Bounded, lazy replay of the durable range captured by [`BlockStreamHandle::subscribe`].
-#[derive(Debug)]
-pub struct ReplayStream {
-    db: DatabaseProvider,
-    next_seq: u64,
-    end_seq: u64,
-    buffered: VecDeque<Arc<StreamFrame>>,
-    failed: bool,
-}
-
-impl ReplayStream {
-    fn new(db: &DatabaseProvider, next_seq: u64, end_seq: u64) -> Self {
-        Self {
-            db: DatabaseProvider(Arc::clone(&db.0)), // clone: replay owns shared access to the DB environment
-            next_seq,
-            end_seq,
-            buffered: VecDeque::new(),
-            failed: false,
-        }
-    }
-
-    fn load_page(&mut self) -> eyre::Result<()> {
-        let remaining = self.end_seq.saturating_sub(self.next_seq);
-        let limit = usize::try_from(remaining)
-            .unwrap_or(usize::MAX)
-            .min(REPLAY_PAGE);
-        let raw = self
-            .db
-            .view_eyre(|tx| irys_database::read_block_stream_range(tx, self.next_seq, limit))?;
-        let mut expected = self.next_seq;
-        // Stage the whole page before publishing it: a mid-page decode/seq failure must leave
-        // `buffered` untouched so `poll_next` surfaces the error and then terminates, rather than
-        // draining already-decoded frames after the error (which would break replay ordering).
-        let mut page = VecDeque::new();
-        for (seq, bytes) in raw {
-            if seq != expected {
-                return Err(eyre::eyre!(
-                    "block-stream replay lost seq {expected}; next retained seq is {seq}"
-                ));
-            }
-            page.push_back(Arc::new(decode_frame(seq, &bytes)?));
-            expected = expected
-                .checked_add(1)
-                .ok_or_eyre("block-stream replay seq overflow")?;
-        }
-        if expected == self.next_seq && self.next_seq < self.end_seq {
-            return Err(eyre::eyre!(
-                "block-stream replay ended at seq {} before snapshot end {}",
-                self.next_seq,
-                self.end_seq
-            ));
-        }
-        self.buffered = page;
-        self.next_seq = expected;
-        Ok(())
-    }
-}
-
-impl futures::Stream for ReplayStream {
-    type Item = eyre::Result<Arc<StreamFrame>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some(frame) = self.buffered.pop_front() {
-            return Poll::Ready(Some(Ok(frame)));
-        }
-        if self.failed || self.next_seq >= self.end_seq {
-            return Poll::Ready(None);
-        }
-        if let Err(error) = self.load_page() {
-            self.failed = true;
-            return Poll::Ready(Some(Err(error)));
-        }
-        Poll::Ready(self.buffered.pop_front().map(Ok))
     }
 }
 
@@ -463,11 +396,13 @@ impl Producer {
         self.appends_since_prune += 1;
         if self.appends_since_prune >= PRUNE_INTERVAL {
             self.appends_since_prune = 0;
-            if seq + 1 > RETENTION_EVENTS {
-                let keep_from = seq + 1 - RETENTION_EVENTS;
-                if let Err(e) = self.handle.prune(keep_from) {
-                    warn!(error = ?e, "block-stream log prune failed");
-                }
+            // Fully checked: the subtraction was already guarded, but `seq + 1` was the unchecked add.
+            if let Some(keep_from) = seq
+                .checked_add(1)
+                .and_then(|len| len.checked_sub(RETENTION_EVENTS))
+                && let Err(e) = self.handle.prune(keep_from)
+            {
+                warn!(error = ?e, "block-stream log prune failed");
             }
         }
         Ok(())
@@ -480,38 +415,38 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
     let mut emitted = LruCache::new(DEDUP_CAPACITY);
     let mut finalized = LruCache::new(DEDUP_CAPACITY);
 
-    let tail = (|| -> eyre::Result<Vec<(u64, Vec<u8>)>> {
-        let Some(latest) = db.view_eyre(irys_database::block_stream_latest_seq)? else {
+    // One read tx for both the latest seq and the tail it bounds — an atomic snapshot at startup.
+    let tail = db.view_eyre(|tx| {
+        let Some(latest) = irys_database::block_stream_latest_seq(tx)? else {
             return Ok(Vec::new());
         };
         let capacity = u64::try_from(DEDUP_CAPACITY.get()).unwrap_or(u64::MAX);
-        let start = latest.saturating_sub(capacity);
-        db.view_eyre(|tx| irys_database::read_block_stream_from(tx, start))
-    })();
+        irys_database::read_block_stream_from(tx, latest.saturating_sub(capacity))
+    });
 
-    match tail {
-        Ok(events) => {
-            for (_seq, bytes) in &events {
-                match serde_json::from_slice::<StreamEvent>(bytes) {
-                    Ok(StreamEvent::Observed(block)) => {
-                        emitted.put(block.header.block_hash, ());
-                    }
-                    Ok(StreamEvent::Finalized(block)) => {
-                        finalized.put(block.header.block_hash, ());
-                    }
-                    Ok(StreamEvent::Reorged { new_fork, .. }) => {
-                        for block in new_fork {
-                            emitted.put(block.header.block_hash, ());
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = ?e, "skipping undecodable block-stream log entry during rebuild");
-                    }
-                }
-            }
-        }
+    let events = match tail {
+        Ok(events) => events,
         Err(e) => {
             warn!(error = ?e, "block-stream state rebuild failed; starting with empty de-dup state");
+            return (emitted, finalized);
+        }
+    };
+    for (_seq, bytes) in &events {
+        match serde_json::from_slice::<StreamEvent>(bytes) {
+            Ok(StreamEvent::Observed(block)) => {
+                emitted.put(block.header.block_hash, ());
+            }
+            Ok(StreamEvent::Finalized(block)) => {
+                finalized.put(block.header.block_hash, ());
+            }
+            Ok(StreamEvent::Reorged { new_fork, .. }) => {
+                for block in new_fork {
+                    emitted.put(block.header.block_hash, ());
+                }
+            }
+            Err(e) => {
+                warn!(error = ?e, "skipping undecodable block-stream log entry during rebuild");
+            }
         }
     }
 
@@ -521,7 +456,6 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{StreamExt as _, TryStreamExt as _};
     use irys_database::{
         IrysDatabaseArgs as _, append_block_stream_event, open_or_create_db,
         prune_block_stream_below, tables::IrysTables,
@@ -553,8 +487,14 @@ mod tests {
         serde_json::to_vec(&sample_stream_event()).expect("serialize sample event")
     }
 
-    fn collect_replay(replay: ReplayStream) -> Vec<Arc<StreamFrame>> {
-        futures::executor::block_on(replay.try_collect()).expect("collect replay")
+    fn collect_replay(handle: &BlockStreamHandle, start: u64, end: u64) -> Vec<StreamFrame> {
+        let mut cursor = start;
+        let mut frames = Vec::new();
+        while let Some((next, page)) = handle.replay_page(cursor, end).expect("replay_page") {
+            frames.extend(page);
+            cursor = next;
+        }
+        frames
     }
 
     fn sample_block(height: u64) -> Arc<SealedBlock> {
@@ -663,8 +603,8 @@ mod tests {
     fn events_page_frames_match_sse_replay() {
         let (handle, _tmp) = handle_with_events(3);
         let page = handle.events_page(0, 10).unwrap();
-        let (replay, _live) = handle.subscribe(0).unwrap();
-        let replay = collect_replay(replay);
+        let (start, end, _live) = handle.subscribe(0).unwrap();
+        let replay = collect_replay(&handle, start, end);
         assert_eq!(
             serde_json::to_value(&page.frames).unwrap(),
             serde_json::to_value(&replay).unwrap(),
@@ -677,36 +617,89 @@ mod tests {
         let (handle, _tmp) = handle_with_events(3); // seqs 0,1,2 → logical_len = 3
         // A cursor beyond the tip (only reachable after a reset shrank the log) replays from the floor,
         // so the follower sees below-cursor frames and rewinds — not an empty replay.
-        let (replay, _live) = handle.subscribe(99).unwrap();
-        let replay = collect_replay(replay);
+        let (start, end, _live) = handle.subscribe(99).unwrap();
+        assert_eq!((start, end), (0, 3)); // clamped to the retained floor, not the stale cursor
+        let replay = collect_replay(&handle, start, end);
         assert_eq!(replay.first().map(|f| f.seq), Some(0));
         assert_eq!(replay.len(), 3);
         // Caught up at the tip replays nothing — no re-stream of the whole log.
-        let (replay, _live) = handle.subscribe(3).unwrap();
-        let replay = collect_replay(replay);
-        assert!(replay.is_empty());
+        let (start, end, _live) = handle.subscribe(3).unwrap();
+        assert_eq!((start, end), (3, 3));
+        assert!(collect_replay(&handle, start, end).is_empty());
     }
 
     #[test]
-    fn subscribe_replay_decodes_at_most_one_page_at_a_time() {
-        let event_count = u64::try_from(REPLAY_PAGE).unwrap() + 1;
-        let (handle, _tmp) = handle_with_events(event_count);
-        let (mut replay, _live) = handle.subscribe(0).unwrap();
+    fn subscribe_below_floor_replays_from_floor_while_poll_truncates() {
+        let (handle, _tmp) = handle_with_events(5); // seqs 0..=4 → logical_len = 5
+        handle
+            .db
+            .update_eyre(|tx| prune_block_stream_below(tx, 3))
+            .unwrap(); // floor → 3
 
-        assert!(replay.buffered.is_empty());
-        let first = futures::executor::block_on(replay.next())
-            .expect("first replay item")
-            .expect("decode first replay item");
+        // SSE side: subscribe clamps the below-floor cursor to the floor and replays frames-from-floor.
+        let (start, end, _live) = handle.subscribe(0).unwrap();
+        assert_eq!((start, end), (3, 5));
+        assert_eq!(
+            collect_replay(&handle, start, end)
+                .iter()
+                .map(|f| f.seq)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
 
-        assert_eq!(first.seq, 0);
-        assert_eq!(replay.buffered.len(), REPLAY_PAGE - 1);
+        // Poll side: the raw below-floor cursor gets an empty, truncated resync page (the I6 asymmetry).
+        let page = handle.events_page(0, 10).unwrap();
+        assert!(page.truncated && page.frames.is_empty());
+        assert_eq!(page.next_seq, 3);
+    }
+
+    #[test]
+    fn replay_page_bounds_by_end_not_logical_len() {
+        let (handle, _tmp) = handle_with_events(3); // logical_len = 3
+        let (start, end, _live) = handle.subscribe(0).unwrap(); // end captured = 3
+        // The log grows after subscribe; the replay must still stop at the captured `end`, never reading
+        // seq 3 or 4 (which belong to the live tail).
+        handle
+            .db
+            .update_eyre(|tx| append_block_stream_event(tx, sample_event()))
+            .unwrap();
+        handle
+            .db
+            .update_eyre(|tx| append_block_stream_event(tx, sample_event()))
+            .unwrap();
+        assert_eq!(
+            collect_replay(&handle, start, end)
+                .iter()
+                .map(|f| f.seq)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // replay_page reports done exactly at `end`, not at the new tip.
+        assert!(handle.replay_page(end, end).unwrap().is_none());
+    }
+
+    #[test]
+    fn replay_page_aborts_below_advanced_floor() {
+        let (handle, _tmp) = handle_with_events(5); // seqs 0..=4
+        handle
+            .db
+            .update_eyre(|tx| prune_block_stream_below(tx, 3))
+            .unwrap(); // floor → 3
+
+        // A subscriber that had progressed to cursor 1 is now below the advanced floor: replay_page
+        // aborts (None) with the cursor still short of `end` — how the handler tells resync from done.
+        assert!(handle.replay_page(1, 5).unwrap().is_none());
+        // Resuming from the new floor pages normally.
+        let (next, frames) = handle.replay_page(3, 5).unwrap().expect("page from floor");
+        assert_eq!(next, 5);
+        assert_eq!(frames.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![3, 4]);
     }
 
     #[test]
     fn live_subscribers_share_the_same_frame_allocation() {
         let (handle, _tmp) = handle_with_events(0);
-        let (_replay_a, mut live_a) = handle.subscribe(0).unwrap();
-        let (_replay_b, mut live_b) = handle.subscribe(0).unwrap();
+        let (_, _, mut live_a) = handle.subscribe(0).unwrap();
+        let (_, _, mut live_b) = handle.subscribe(0).unwrap();
 
         handle.append_and_fanout(sample_stream_event()).unwrap();
         let frame_a = live_a.blocking_recv().expect("first live frame");
@@ -736,8 +729,8 @@ mod tests {
         handle.close_live_subscribers();
 
         // Replay still delivers the durable suffix up to the last good seq...
-        let (replay, mut live) = handle.subscribe(0).unwrap();
-        assert_eq!(collect_replay(replay).len(), 2);
+        let (start, end, mut live) = handle.subscribe(0).unwrap();
+        assert_eq!(collect_replay(&handle, start, end).len(), 2);
         // ...but no live sender is registered, so the receiver is already closed and the follower's
         // SSE ends after replay instead of hanging on a tail the halted producer will never feed.
         assert!(live.blocking_recv().is_none());
@@ -759,8 +752,8 @@ mod tests {
 
         producer.drain_queued_signals().expect("drain signals");
 
-        let (replay, _live) = handle.subscribe(0).unwrap();
-        let frames = collect_replay(replay);
+        let (start, end, _live) = handle.subscribe(0).unwrap();
+        let frames = collect_replay(&handle, start, end);
         assert_eq!(
             frames.iter().map(|frame| frame.seq).collect::<Vec<_>>(),
             vec![0, 1]
