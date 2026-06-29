@@ -94,6 +94,15 @@ pub async fn calculate_expired_ledger_fees(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
     expect_txs_to_be_promoted: bool,
+    // `ledger_type`'s cumulative `total_chunks` at the block being produced/validated.
+    // Used to exclude slots written this epoch from the expiring set (they are
+    // rescued by the `last_height` touch and must not be settled here).
+    new_total_chunks: u64,
+    // Cascade status of the epoch block being produced/validated (its own
+    // timestamp — NOT the parent snapshot's). Gates the write-window exclusion
+    // so it mirrors the Cascade-gated `touch_active_ledger_slots`. When false,
+    // settlement matches pre-Cascade master exactly (no exclusion).
+    cascade_active: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Fee distribution is only implemented for Submit ledger. Publish expiry
     // simply resets partitions without fee redistribution.
@@ -104,8 +113,13 @@ pub async fn calculate_expired_ledger_fees(
     );
 
     // Step 1: Collect expired partitions
-    let expired_slots =
-        collect_expired_partitions(parent_epoch_snapshot, block_height, ledger_type)?;
+    let expired_slots = collect_expired_partitions(
+        parent_epoch_snapshot,
+        block_height,
+        ledger_type,
+        new_total_chunks,
+        cascade_active,
+    )?;
 
     tracing::info!(
         "Ledger expiry check at block {}: found {} expired slots for {:?} ledger",
@@ -280,9 +294,21 @@ fn collect_expired_partitions(
     parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     target_ledger_type: DataLedger,
+    new_total_chunks: u64,
+    cascade_active: bool,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<IrysAddress>>> {
     let partition_assignments = &parent_epoch_snapshot.partition_assignments;
-    let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(block_height);
+    // Window-excluded (Cascade only): settle exactly the slots that actually
+    // recycle, so a slot written in its expiry epoch (rescued by the last_height
+    // touch) is not paid here and then again when it later recycles. Pre-Cascade
+    // the touch is gated off, so `cascade_active=false` disables the exclusion
+    // and settlement matches the original master set.
+    let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(
+        block_height,
+        target_ledger_type,
+        new_total_chunks,
+        cascade_active,
+    );
     let mut expired_ledger_slot_indexes = BTreeMap::new();
     if expired_partition_info.is_empty() {
         return Ok(expired_ledger_slot_indexes);
