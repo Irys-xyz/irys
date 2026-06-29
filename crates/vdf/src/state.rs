@@ -143,7 +143,8 @@ impl VdfState {
 
     /// Get steps in the given global steps numbers Interval
     pub fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
-        let vdf_steps_len = self.seeds.len() as u64;
+        let vdf_steps_len =
+            u64::try_from(self.seeds.len()).expect("seed buffer length must fit in u64");
 
         let last_global_step = self.current_step();
 
@@ -290,7 +291,7 @@ impl VdfStateReadonly {
     ) -> eyre::Result<()> {
         use tokio::time::Instant;
 
-        let retries_per_second = 20;
+        let retries_per_second: u32 = 20;
         let mut last_observed_step = self.current_step();
         let mut last_progress_at = Instant::now();
         let mut attempts = 0_u32;
@@ -332,7 +333,7 @@ impl VdfStateReadonly {
                 );
             }
             attempts = attempts.wrapping_add(1);
-            sleep(Duration::from_millis(1000 / retries_per_second as u64)).await;
+            sleep(Duration::from_millis(1000 / u64::from(retries_per_second))).await;
         }
     }
 }

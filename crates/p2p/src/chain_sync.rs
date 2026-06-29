@@ -1973,6 +1973,34 @@ mod tests {
         );
     }
 
+    /// The snapshot also wins when mining was DISABLED before sync: a concurrent
+    /// `start()` during the sync window must be overwritten back to `false` on
+    /// restore. This is the path the unconditional `restore()` fixes — the
+    /// previous conditional version skipped the write when the snapshot was
+    /// `false`, letting the concurrent enable survive.
+    #[test]
+    fn sync_restore_overwrites_concurrent_enable_when_disabled_before_sync() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(false));
+        let controller = VdfController::new(&mining);
+
+        // Begin: snapshot (false) + disable for the sync window.
+        let pause = VdfSyncPause::begin(controller.clone());
+        assert!(!controller.is_enabled(), "begin() keeps mining disabled");
+
+        // Concurrent start() during sync.
+        controller.start();
+        assert!(controller.is_enabled());
+
+        // Restore must overwrite the concurrent enable back to the snapshot (false).
+        pause.restore();
+        assert!(
+            !controller.is_enabled(),
+            "restore overwrites the concurrent enable (snapshot false wins)"
+        );
+    }
+
     mod catch_up_task {
         use super::*;
         use crate::tests::util::data_handler_stub;
