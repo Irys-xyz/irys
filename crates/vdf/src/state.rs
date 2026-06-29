@@ -182,6 +182,26 @@ pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 /// Read-only handle over the shared VDF state. Holds clones of the owned step
 /// counter and mining flag (same allocations as `VdfState`) so `current_step()`
 /// / `is_mining_enabled()` never take the `RwLock`.
+///
+/// The read-only contract is sealed: a production build has no public way to
+/// obtain a writable handle to the underlying state. The former
+/// `into_inner_cloned` escape was removed, and the only mutation entry point
+/// (`test_set_step`) is gated behind the `test-utils` feature. The doc-test
+/// below proves the escape is unreachable — it must fail to compile (keyed on
+/// the removed `into_inner_cloned`, so it holds even if feature unification
+/// enables `test-utils`):
+///
+/// ```compile_fail
+/// use irys_vdf::state::{VdfState, VdfStateReadonly};
+/// use std::sync::atomic::AtomicBool;
+/// use std::sync::{Arc, RwLock};
+///
+/// let mining = Arc::new(AtomicBool::new(false));
+/// let state = Arc::new(RwLock::new(VdfState::new(0, 0, mining)));
+/// let handle = VdfStateReadonly::new(state);
+/// // `into_inner_cloned` was removed: no public writable escape exists.
+/// let _writable = handle.into_inner_cloned();
+/// ```
 #[derive(Debug, Clone)]
 pub struct VdfStateReadonly {
     state: AtomicVdfState,

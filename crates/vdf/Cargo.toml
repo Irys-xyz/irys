@@ -36,7 +36,6 @@ criterion.workspace = true
 proptest.workspace = true
 rstest.workspace = true
 test-log.workspace = true
-trybuild = "1"
 
 [[bench]]
 name = "vdf_bench"
