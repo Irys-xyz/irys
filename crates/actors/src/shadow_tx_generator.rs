@@ -250,8 +250,9 @@ impl<'a> ShadowTxGenerator<'a> {
         // The canonical validator check now lives at `generate_expected_shadow_transactions`
         // in `block_validation.rs` (NC-0042 §4c). It rejects any publish-ledger tx
         // whose Submit-ledger storage has expired as of the block, using the same
-        // expired-partition → tx set that schedules the refunds
-        // (`ledger_expiry::expired_submit_tx_ids`). That covers both the same-block
+        // expired-partition → tx set that schedules the refunds (resolved
+        // per-candidate via `ledger_expiry::expired_submit_range` +
+        // `submit_tx_expired`). That covers both the same-block
         // (`==`) and cross-block (`<`) double-pay cases and subsumes this guard's
         // `==`-only same-block detection. Violations there surface as
         // `ValidationError::ShadowTransactionInvalid` (peer-attributable rejection).

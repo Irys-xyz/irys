@@ -3,8 +3,8 @@ name: Ensure Conventional Commit message
 on: pull_request
 
 permissions:
-  # contents:read lets the action check out the repository; pull-requests:read lets
-  # it query the PR title and description to enforce the conventional-commit format.
+  # contents:read grants read-only repository access; pull-requests:read lets the
+  # action query the PR title and description to enforce the conventional-commit format.
   contents: read
   pull-requests: read
 

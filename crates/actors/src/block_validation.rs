@@ -6100,7 +6100,8 @@ enum TxInclusionState {
 /// correct for test configs that set a tiny `block_tree_depth` without lowering
 /// `tx_anchor_expiry_depth`. See the [`get_previous_tx_inclusions`] docblock.
 fn prior_inclusion_walk_depth(config: &Config) -> u64 {
-    (config.consensus.mempool.tx_anchor_expiry_depth as u64).max(config.consensus.block_tree_depth)
+    u64::from(config.consensus.mempool.tx_anchor_expiry_depth)
+        .max(config.consensus.block_tree_depth)
 }
 
 /// Walks `block_under_validation`'s ancestors via the block tree (DB fallback
