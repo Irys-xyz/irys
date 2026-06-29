@@ -506,7 +506,7 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
 /// - At pre_expiry_epoch: slot 0 is NOT expired
 /// - At expiry_epoch: slot 0 IS expired
 #[test_log::test(tokio::test)]
-async fn heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
+async fn slow_heavy_perm_exact_boundary_expiry() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
     const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
     const BLOCKS_PER_EPOCH: u64 = 3;
@@ -784,7 +784,7 @@ async fn heavy_perm_last_slot_never_expires() -> eyre::Result<()> {
 /// - At least one previously-expired partition hash is reassigned to a new non-expired Publish slot
 /// - The recycled partition's assignment is coherent (ledger_id, slot_index, slot membership)
 #[test_log::test(tokio::test)]
-async fn heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
+async fn slow_heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     const CHUNK_SIZE: u64 = 32;
     const DATA_SIZE: usize = 64; // 2 chunks — enough to trigger slot allocation at epoch boundary
     const BLOCKS_PER_EPOCH: u64 = 3;

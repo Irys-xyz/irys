@@ -27,8 +27,8 @@ use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::{
-    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskStage, VdfValidationResult,
-    record_vdf_task_progress,
+    VdfBlockingTaskFailed, VdfPrevStepForkViewUnavailable, VdfStageBParentMissing, VdfTaskStage,
+    VdfValidationResult, record_vdf_task_progress,
 };
 
 /// Block priority states for validation ordering
@@ -191,6 +191,13 @@ impl PreemptibleVdfTask {
                     VdfValidationResult::ParentMissing {
                         parent_hash: parent_missing.parent_hash,
                     }
+                // Transient race: the block's fork-local lineage view could not be built
+                // (an ancestor was evicted mid reorg / re-anchor) to cross-check a
+                // live-buffer prev-step mismatch. Peer-innocent — requeue rather than
+                // mislabel as Invalid.
+                } else if e.downcast_ref::<VdfPrevStepForkViewUnavailable>().is_some() {
+                    metrics::record_validation_cancellation("vdf_prev_step_fork_view_unavailable");
+                    VdfValidationResult::Cancelled
                 } else {
                     match e.downcast_ref::<WaitForStepError>() {
                         Some(WaitForStepError::Cancelled) => {
@@ -995,6 +1002,13 @@ mod tests {
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
+    /// Watchdog deadline for `select!`s that expect a spawned `JoinHandle` to resolve.
+    /// The timer branch only exists to fail fast instead of hanging the suite if the
+    /// handle never wakes the select; it is NOT a timing assertion. A tight bound (e.g.
+    /// 1s) spuriously fires under parallel-CI CPU starvation on a current-thread runtime
+    /// (the spawned task can't be polled in time), so keep it generously loose.
+    const HANDLE_RESOLVE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Test that BlockPriorityMeta ordering works correctly with manual Ord
     #[test]
     fn test_validation_priority_ordering() {
@@ -1404,7 +1418,7 @@ mod tests {
 
         let result = tokio::select! {
             r = &mut handle => r.unwrap(),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                 panic!("Handle did not resolve — select was not woken");
             }
         };
@@ -1422,7 +1436,7 @@ mod tests {
 
         let result = tokio::select! {
             r = &mut handle => r,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                 panic!("Handle did not resolve after panic");
             }
         };
@@ -1889,7 +1903,7 @@ mod tests {
 
             let result = tokio::select! {
                 r = &mut handle => r.unwrap(),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                _ = tokio::time::sleep(HANDLE_RESOLVE_WATCHDOG) => {
                     panic!("Handle {} did not resolve within timeout", i);
                 }
             };

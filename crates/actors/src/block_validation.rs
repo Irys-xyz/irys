@@ -39,7 +39,7 @@ use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as
 use irys_types::{IngressProof, LedgerChunkOffset, get_ingress_proofs};
 use irys_types::{IrysTransactionId, u256_from_le_bytes as hash_to_number};
 use irys_vdf::last_step_checkpoints_is_valid;
-use irys_vdf::state::VdfStateReadonly;
+use irys_vdf::state::{VdfStateReadonly, build_fork_local_view};
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
@@ -3289,6 +3289,84 @@ pub async fn recall_recall_range_is_valid(
         &block.poa.partition_hash,
     )
     .map_err(RecallRangeError::Mismatch)
+}
+
+/// Build a transient VDF step view covering `block`'s recall-range window
+/// `[reset_step_number ..= global_step_number]`, sourced from the block's OWN lineage (its
+/// ancestors' recorded steps, walked through the block tree) rather than this node's live VDF
+/// buffer.
+///
+/// Used to re-validate the recall range of a block on a competing fork whose post-boundary steps
+/// differ from the (possibly poisoned) local buffer — without trusting that buffer. This is the
+/// single fork-aware step-resolution seam for recall-range validation; it reuses
+/// `irys_vdf::state::build_fork_local_view`. The recall window is only one reset interval wide (a
+/// few blocks back to the last reset boundary), all of which are in-tree for a reorg representable
+/// within `block_tree_depth`.
+pub(crate) fn build_fork_local_recall_view(
+    block: &IrysBlockHeader,
+    config: &ConsensusConfig,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<VdfStateReadonly> {
+    let global_step = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
+    let capacity = usize::try_from(
+        global_step
+            .saturating_sub(reset_step_number)
+            .saturating_add(1),
+    )
+    .map_err(|_| eyre::eyre!("fork-local recall view capacity exceeds usize"))?;
+    build_fork_local_view_from_tree_or_db(block, capacity, block_tree, db, "fork-local recall view")
+}
+
+/// Build a transient VDF step view sized to include `block`'s *previous* step
+/// (`first_step_number - 1`), sourced from the block's OWN lineage (its ancestors' recorded steps,
+/// walked through the block tree) rather than this node's live VDF buffer.
+///
+/// Used by the previous-step continuity check in `ensure_vdf_is_valid` so a node recovering from a
+/// network partition can validate the canonical fork it must adopt even while its live buffer still
+/// holds the poisoned minority lineage past a reset boundary. The partition-recovery re-anchor is
+/// signalled at reorg-detect time but applied asynchronously by the VDF supervisor; a canonical
+/// straggler block whose previous step lands on the divergent boundary and is validated in that
+/// window would otherwise be rejected as terminally `Invalid` with no retry. Unlike the recall
+/// view, this also covers the previous step when it sits *below* the block's reset boundary (a
+/// boundary-crossing block), so `get_step(first_step - 1)` is always in range. Reuses
+/// `irys_vdf::state::build_fork_local_view` — the single fork-aware step-resolution seam.
+pub(crate) fn build_fork_local_step_view(
+    block: &IrysBlockHeader,
+    config: &ConsensusConfig,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<VdfStateReadonly> {
+    let global_step = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step, config);
+    let prev_step = block.vdf_limiter_info.first_step_number().saturating_sub(1);
+    // Cover from the lower of {reset boundary, previous step} up to the block's global step so the
+    // previous step is in range even when the block crosses a reset boundary.
+    let lower = reset_step_number.min(prev_step);
+    let capacity = usize::try_from(global_step.saturating_sub(lower).saturating_add(1))
+        .map_err(|_| eyre::eyre!("fork-local step view capacity exceeds usize"))?;
+    build_fork_local_view_from_tree_or_db(block, capacity, block_tree, db, "fork-local step view")
+}
+
+fn build_fork_local_view_from_tree_or_db(
+    block: &IrysBlockHeader,
+    capacity: usize,
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    context: &'static str,
+) -> eyre::Result<VdfStateReadonly> {
+    let tx = db
+        .tx()
+        .map_err(|e| eyre::eyre!("{context}: opening db tx failed: {e}"))?;
+    build_fork_local_view(block, capacity, |hash| {
+        if let Some(header) = block_tree.read().get_block(hash).cloned() {
+            return Ok(header);
+        }
+        irys_database::block_header_by_hash(&tx, hash, false)
+            .map_err(|e| eyre::eyre!("{context}: header lookup failed for {hash}: {e}"))?
+            .ok_or_else(|| eyre::eyre!("{context}: missing ancestor {hash} in block tree and db"))
+    })
 }
 
 pub fn get_recall_range(
@@ -7829,6 +7907,108 @@ mod tests {
             !matches!(err.classify(), ErrorClass::Consensus),
             "DatabaseError must not be Consensus"
         );
+    }
+
+    fn fork_local_test_header(
+        height: u64,
+        hash: u8,
+        prev_hash: u8,
+        global_step_number: u64,
+        steps: &[u8],
+    ) -> IrysBlockHeader {
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.block_hash = H256::repeat_byte(hash);
+        header.previous_block_hash = H256::repeat_byte(prev_hash);
+        header.vdf_limiter_info.global_step_number = global_step_number;
+        header.vdf_limiter_info.steps =
+            H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
+        header
+    }
+
+    fn fork_local_test_db() -> eyre::Result<(DatabaseProvider, TempDir)> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use reth_db::mdbx::DatabaseArguments;
+
+        let tmp = TempDirBuilder::new().build();
+        let env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        Ok((DatabaseProvider(Arc::new(env)), tmp))
+    }
+
+    #[test]
+    fn fork_local_step_view_falls_back_to_db_and_covers_prev_step_below_reset_boundary()
+    -> eyre::Result<()> {
+        use irys_database::tables::IrysBlockHeaders;
+        use reth_db::transaction::DbTxMut as _;
+
+        let (db, _tmp) = fork_local_test_db()?;
+        let block_tree_guard = dummy_block_tree_guard(&ConsensusConfig::testing());
+        let consensus = NodeConfig::testing()
+            .with_consensus(|c| {
+                c.num_chunks_in_partition = 4;
+                c.num_chunks_in_recall_range = 1;
+            })
+            .consensus_config();
+
+        // reset step for global step 5 with interval 4 is 5, while the previous step of this
+        // block is 3. The step view must therefore include step 3 from the parent lineage.
+        let parent = fork_local_test_header(0, 0x10, 0xFF, 3, &[0x31]);
+        let block = fork_local_test_header(1, 0x11, 0x10, 5, &[0x41, 0x51]);
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(parent.block_hash, parent.clone().into())?;
+            Ok(())
+        })??;
+
+        let view = build_fork_local_step_view(&block, &consensus, &block_tree_guard, &db)?;
+
+        assert_eq!(view.get_step(3)?, H256::repeat_byte(0x31));
+        assert_eq!(view.get_step(4)?, H256::repeat_byte(0x41));
+        assert_eq!(view.get_step(5)?, H256::repeat_byte(0x51));
+        Ok(())
+    }
+
+    #[test]
+    fn fork_local_recall_view_falls_back_to_db_for_reset_window() -> eyre::Result<()> {
+        use irys_database::tables::IrysBlockHeaders;
+        use reth_db::transaction::DbTxMut as _;
+
+        let (db, _tmp) = fork_local_test_db()?;
+        let block_tree_guard = dummy_block_tree_guard(&ConsensusConfig::testing());
+        let consensus = NodeConfig::testing()
+            .with_consensus(|c| {
+                c.num_chunks_in_partition = 4;
+                c.num_chunks_in_recall_range = 1;
+            })
+            .consensus_config();
+
+        // reset step for global step 8 with interval 4 is 5, so recall validation needs steps
+        // 5..=8. Only the tip block is supplied directly; the older half of the window must come
+        // from the DB fallback.
+        let parent = fork_local_test_header(1, 0x20, 0xFF, 6, &[0x51, 0x61]);
+        let block = fork_local_test_header(2, 0x21, 0x20, 8, &[0x71, 0x81]);
+
+        db.update(|tx| -> eyre::Result<()> {
+            tx.put::<IrysBlockHeaders>(parent.block_hash, parent.clone().into())?;
+            Ok(())
+        })??;
+
+        let view = build_fork_local_recall_view(&block, &consensus, &block_tree_guard, &db)?;
+
+        assert_eq!(
+            view.get_steps(ii(5, 8))?.0,
+            vec![
+                H256::repeat_byte(0x51),
+                H256::repeat_byte(0x61),
+                H256::repeat_byte(0x71),
+                H256::repeat_byte(0x81),
+            ]
+        );
+        Ok(())
     }
 }
 
