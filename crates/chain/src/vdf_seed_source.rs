@@ -70,7 +70,8 @@ fn replay_vdf_seeds(
         seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
     }
 
-    let first_step = global_step_number.saturating_sub(seeds.len() as u64) + 1;
+    let seed_count = u64::try_from(seeds.len()).expect("seed window length fits in u64");
+    let first_step = global_step_number.saturating_sub(seed_count) + 1;
     VdfBootstrap {
         global_step: global_step_number,
         first_step,

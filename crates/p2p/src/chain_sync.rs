@@ -81,14 +81,9 @@ impl VdfSyncPause {
     fn begin(vdf_controller: VdfController) -> Self {
         debug!("Sync task: Disabling VDF mining before starting sync");
         let was_mining_enabled_before_sync = vdf_controller.is_enabled();
-        // Disable VDF mining when sync is in progress
-        if was_mining_enabled_before_sync {
-            vdf_controller.stop();
-        } else {
-            debug!(
-                "Sync task: VDF mining was already disabled before sync, not sending disable signal"
-            );
-        }
+        // Always disable mining for the sync window, regardless of the snapshot,
+        // so a concurrent enable is overwritten by the pause (last-writer-wins).
+        vdf_controller.stop();
         Self {
             vdf_controller,
             was_mining_enabled_before_sync,
@@ -97,13 +92,14 @@ impl VdfSyncPause {
 
     /// Restore the pre-sync mining state (last-writer-wins).
     fn restore(&self) {
-        debug!("Sync task: Enabling VDF mining after sync");
-        if self.was_mining_enabled_before_sync {
-            self.vdf_controller
-                .set_enabled(self.was_mining_enabled_before_sync);
-        } else {
-            debug!("Sync task: VDF mining was disabled before sync, not sending enable signal");
-        }
+        debug!(
+            enabled = self.was_mining_enabled_before_sync,
+            "Sync task: Restoring VDF mining state after sync"
+        );
+        // Always write the snapshot back, including the `false` case, so a
+        // concurrent enable during sync does not survive the restore.
+        self.vdf_controller
+            .set_enabled(self.was_mining_enabled_before_sync);
     }
 }
 

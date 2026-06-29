@@ -118,10 +118,11 @@ impl MockedServices {
         let mempool_state = AtomicMempoolState::new(state);
         let mempool_stub = MempoolStub::new(tx, mempool_state);
 
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
         let vdf_state_readonly = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
             0,
             0,
-            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&is_vdf_mining_enabled),
         ))));
 
         let vdf_state = vdf_state_readonly;
@@ -156,7 +157,7 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
-            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
+            is_vdf_mining_enabled,
         }
     }
 }

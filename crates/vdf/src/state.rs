@@ -431,9 +431,20 @@ pub fn create_state(
         first_step,
         ordered_seeds,
     } = seed_source.vdf_bootstrap(capacity);
-    debug_assert_eq!(
-        first_step,
-        global_step.saturating_sub(ordered_seeds.len() as u64) + 1,
+    // Enforce the VdfBootstrap contract in release builds too: a corrupt or buggy
+    // VdfSeedSource must fail fast at startup rather than silently initialize a
+    // non-contiguous or empty seed window (consensus-critical).
+    assert!(
+        !ordered_seeds.is_empty(),
+        "VdfBootstrap must contain at least one seed"
+    );
+    let seed_count =
+        u64::try_from(ordered_seeds.len()).expect("VdfBootstrap seed count must fit in u64");
+    let expected_first_step = global_step
+        .checked_sub(seed_count.saturating_sub(1))
+        .expect("VdfBootstrap contains more seeds than global_step can anchor");
+    assert_eq!(
+        first_step, expected_first_step,
         "VdfBootstrap contiguity contract"
     );
 
