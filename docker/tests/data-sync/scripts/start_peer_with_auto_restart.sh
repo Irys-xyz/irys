@@ -145,7 +145,7 @@ monitor_and_restart() {
 
     # "Stuck" only if >0 and equal
     if [[ "$height" -gt 0 && "$height" -eq "$last_height" ]]; then
-      ((stuck_count++))
+      stuck_count=$((stuck_count + 1))
       log "Stuck at height $height, count: $stuck_count"
 
       if [[ "$stuck_count" -ge "$STUCK_THRESHOLD" ]]; then
@@ -161,7 +161,7 @@ monitor_and_restart() {
 
 restart_node() {
   # Backoff grows with each restart up to a cap
-  ((RESTARTS++))
+  RESTARTS=$((RESTARTS + 1))
   local backoff=$(( RESTART_BACKOFF_BASE ** (RESTARTS-1) ))
   (( backoff > RESTART_BACKOFF_MAX_SEC )) && backoff="$RESTART_BACKOFF_MAX_SEC"
 

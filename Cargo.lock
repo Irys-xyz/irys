@@ -5012,6 +5012,7 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "alloy-eips",
+ "async-stream",
  "awc",
  "base58",
  "eyre",

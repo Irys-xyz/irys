@@ -7,6 +7,7 @@ pub mod commitment;
 pub mod config;
 pub mod get_chunk;
 pub mod index;
+pub mod internal;
 pub mod ledger;
 pub mod mempool;
 pub mod mining;

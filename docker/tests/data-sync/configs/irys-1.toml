@@ -85,6 +85,10 @@ max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 1
+# Raised from the 15s default: under this cluster's load a node's VDF clock can pause
+# >15s during fast-forward catch-up, tripping the never-mislabel stall panic. Node-local,
+# NOT consensus-hashed. See design/docs/vdf-validation-stall-detection.md
+progress_timeout_secs = 120
 
 [consensus.Custom]
 chain_id = 1270
@@ -97,6 +101,7 @@ block_tree_depth = 50
 num_chunks_in_partition = 60
 num_chunks_in_recall_range = 10
 num_partitions_per_slot = 3
+num_partitions_per_term_ledger_slot = 3
 entropy_packing_iterations = 1000
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
@@ -138,6 +143,10 @@ balance = "0x152cf4e72a974f1c0000"
 
 # Hardhat test account 2
 [consensus.Custom.reth.alloc.0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC]
+balance = "0x152cf4e72a974f1c0000"
+
+# netwatch data-upload probe signer (key.hex)
+[consensus.Custom.reth.alloc.0x8b2e5fbf97c990dfc06b3c1fe1639a4a694901ee]
 balance = "0x152cf4e72a974f1c0000"
 
 [consensus.Custom.mempool]

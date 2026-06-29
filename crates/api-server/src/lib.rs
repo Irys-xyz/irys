@@ -65,6 +65,9 @@ pub struct ApiState {
     /// Shared with `BlockTreeService` so `/v1/tip` reads the same in-process
     /// canonical-advance / reorg timestamps the OTEL gauges record.
     pub block_tree_lifecycle: Arc<BlockTreeLifecycleTimestamps>,
+    /// Shared handle to the block-stream producer; the `/internal` SSE handlers call
+    /// `subscribe(from_seq)` on it.
+    pub block_stream: Arc<irys_actors::block_stream_service::BlockStreamHandle>,
 }
 
 impl ApiState {
@@ -194,13 +197,16 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
         actix_workers = ?actix_workers,
         "Starting API server"
     );
+    // The `/internal/*` routes are unauthenticated; mount them only when the deployment opts in
+    // (having network-restricted the HTTP bind to a trusted gateway), never by default.
+    let expose_internal_api = app_state.config.node_config.http.expose_internal_api;
     let state = web::Data::new(app_state);
     let mut server = HttpServer::new(move || {
         let span = tracing::info_span!(target: "irys-api-http", "api_server");
         let _guard = span.enter();
 
         let awc_client = awc::Client::new();
-        App::new()
+        let app = App::new()
             .app_data(state.clone())
             .app_data(web::Data::new(awc_client))
             .app_data(
@@ -218,8 +224,13 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             )
             // not a permanent redirect, so we can redirect to the highest API version
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
-            .service(routes())
-            .wrap(Cors::permissive())
+            .service(routes());
+        let app = if expose_internal_api {
+            app.service(routes::internal::internal_routes())
+        } else {
+            app
+        };
+        app.wrap(Cors::permissive())
             .wrap(TracingLogger::default())
             .wrap(metrics::RequestMetrics)
     })

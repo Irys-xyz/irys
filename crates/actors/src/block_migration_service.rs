@@ -504,8 +504,16 @@ impl BlockMigrationService {
     ///
     /// The cache read lock is held only while collecting blocks, then released
     /// before performing DB writes and block index mutations.
+    ///
+    /// Migrates the slice of blocks (oldest-first) from the index head up to `migration_block`,
+    /// invoking `on_migrated` for each block the moment it is fully persisted — so a mid-batch
+    /// failure still signals the blocks that did migrate.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %migration_block.block_hash, block.height = migration_block.height))]
-    pub fn migrate_blocks(&self, migration_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
+    pub fn migrate_blocks(
+        &self,
+        migration_block: &Arc<IrysBlockHeader>,
+        mut on_migrated: impl FnMut(&Arc<SealedBlock>),
+    ) -> eyre::Result<()> {
         debug!("migrating block via BlockMigrationService");
 
         // Collect blocks under the cache read lock, then release it.
@@ -531,6 +539,10 @@ impl BlockMigrationService {
 
         for sealed_block in &prepared {
             self.persist_block(sealed_block)?;
+            // Signal this block as finalized the moment its DB/index commit lands: that commit is
+            // irreversible, so the later reward and chunk-migration steps may fail without stranding
+            // an already-migrated block in the index but absent from the follower stream.
+            on_migrated(sealed_block);
             if let Some(supply_state) = &self.supply_state {
                 let block = sealed_block.header();
                 supply_state.add_block_reward(block.height, block.reward_amount)?;
