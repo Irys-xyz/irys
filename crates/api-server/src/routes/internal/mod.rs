@@ -152,11 +152,16 @@ async fn blocks_range(
     state: web::Data<ApiState>,
     query: web::Query<RangeQuery>,
 ) -> Result<web::Json<Vec<BlockEvent>>, ApiError> {
-    let span = query.to_height.saturating_sub(query.from_height);
-    if span > MAX_BLOCK_RANGE {
+    // Inclusive count: the handler resolves `from_height..=to_height`, so a span of N covers N + 1
+    // heights. Cap the inclusive count so the documented MAX_BLOCK_RANGE bound is exact.
+    let height_count = query
+        .to_height
+        .saturating_sub(query.from_height)
+        .saturating_add(1);
+    if height_count > MAX_BLOCK_RANGE {
         return Err(ApiError::InvalidBlockParameter {
             parameter: format!(
-                "block range {}..={} spans {span} heights, exceeding the maximum {MAX_BLOCK_RANGE}",
+                "block range {}..={} spans {height_count} heights, exceeding the maximum {MAX_BLOCK_RANGE}",
                 query.from_height, query.to_height
             ),
         });
