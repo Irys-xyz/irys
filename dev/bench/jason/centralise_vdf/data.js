@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782388876737,
+  "lastUpdate": 1782741610782,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7387,6 +7387,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "6bc215bf34849c07277f2c5e9ea5b9d2e8ae5fb9",
+          "message": "refactor(vdf): centralise VDF state ownership in irys-vdf",
+          "timestamp": "2026-06-25T11:45:08Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1461/commits/6bc215bf34849c07277f2c5e9ea5b9d2e8ae5fb9"
+        },
+        "date": 1782741609669,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011923,
+            "range": "± 0.000065",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119275,
+            "range": "± 0.000817",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.195176,
+            "range": "± 0.003335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.890181,
+            "range": "± 0.020797",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074626,
+            "range": "± 0.000542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 744.421059,
+            "range": "± 0.917523",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 968.099533,
+            "range": "± 0.588194",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120036,
+            "range": "± 0.000116",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1197.051307,
+            "range": "± 0.807892",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1556.387508,
+            "range": "± 1.06517",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034468,
+            "range": "± 0.000265",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 204.172853,
+            "range": "± 0.555553",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 265.323156,
+            "range": "± 0.266367",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00013,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
