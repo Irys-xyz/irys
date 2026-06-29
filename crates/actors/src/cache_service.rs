@@ -2747,4 +2747,158 @@ mod tests {
 
         Ok(())
     }
+
+    /// `prune_ingress_proofs` must handle ≥2 expired signers for the same data_root in
+    /// one pass: both their rows must be deleted while the surviving signer's row is kept.
+    ///
+    /// Setup — three distinct remote signers for one `data_root`:
+    /// - `addr_a`: valid anchor (genesis block hash) → NOT expired → must survive
+    /// - `addr_b`: invalid anchor (random unknown hash) → expired → must be deleted
+    /// - `addr_c`: invalid anchor (different random hash) → expired → must be deleted
+    ///
+    /// After one pass of `prune_ingress_proofs`:
+    /// - addr_b and addr_c proofs are gone
+    /// - addr_a proof is still present
+    #[tokio::test]
+    async fn prune_ingress_proofs_deletes_two_expired_signers_preserves_one() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Shared data_root for all three proofs.
+        let data_root = H256::random();
+        // A txid present in the CDR's txid_set; promoted_height = None → any_unpromoted = true.
+        let txid = H256::random();
+
+        // Three distinct remote signer addresses (none is the local node's address).
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random();
+
+        // Genesis block provides the valid anchor.
+        let genesis_block = new_mock_signed_header();
+        let valid_anchor = genesis_block.block_hash;
+        // Two distinct unknown hashes → both proofs expired.
+        let expired_anchor_b = H256::random();
+        let expired_anchor_c = H256::random();
+
+        db.update(|wtx| -> eyre::Result<()> {
+            // CDR with one pending (unpromoted) txid.
+            let cdr = CachedDataRoot {
+                data_size: 64,
+                data_size_confirmed: false,
+                txid_set: vec![txid],
+                block_set: vec![],
+                expiry_height: None,
+                cached_at: irys_types::UnixTimestamp::now()?,
+            };
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+
+            // Unpromoted tx header (promoted_height = None by default).
+            let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: txid,
+                    data_root,
+                    data_size: 64,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            });
+            database::insert_tx_header(wtx, &tx_header)?;
+
+            let make_proof = |anchor: H256| {
+                let mut p = IngressProof::default();
+                p.data_root = data_root;
+                p.anchor = anchor;
+                p
+            };
+
+            // addr_a: valid anchor → not expired → survives.
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(valid_anchor),
+                addr_a,
+            )?;
+            // addr_b and addr_c: expired anchors → will be pruned.
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(expired_anchor_b),
+                addr_b,
+            )?;
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &make_proof(expired_anchor_c),
+                addr_c,
+            )?;
+
+            Ok(())
+        })??;
+
+        // Sanity: three proofs inserted.
+        let initial_count = db.view_eyre(|rtx| {
+            Ok(irys_database::ingress_proofs_by_data_root(rtx, data_root)?.len())
+        })?;
+        assert_eq!(initial_count, 3, "expected 3 proofs before pruning");
+
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        service_task.prune_ingress_proofs()?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Exactly one proof must remain — addr_a's.
+            let remaining = irys_database::ingress_proofs_by_data_root(rtx, data_root)?;
+            assert_eq!(
+                remaining.len(),
+                1,
+                "only addr_a's proof should survive; got {}",
+                remaining.len()
+            );
+            assert_eq!(
+                remaining[0].1.address, addr_a,
+                "surviving proof must belong to addr_a"
+            );
+
+            // Per-key checks using ingress_proof_by_data_root_address.
+            assert!(
+                irys_database::ingress_proof_by_data_root_address(rtx, data_root, addr_a)?
+                    .is_some(),
+                "addr_a proof must survive"
+            );
+            assert!(
+                irys_database::ingress_proof_by_data_root_address(rtx, data_root, addr_b)?
+                    .is_none(),
+                "addr_b expired proof must be deleted"
+            );
+            assert!(
+                irys_database::ingress_proof_by_data_root_address(rtx, data_root, addr_c)?
+                    .is_none(),
+                "addr_c expired proof must be deleted"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
 }

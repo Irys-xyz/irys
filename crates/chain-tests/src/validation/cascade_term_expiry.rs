@@ -1363,6 +1363,13 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
     }
 
     // === Activate Cascade mid-chain (stop -> set activation = now+1 -> restart) ===
+    // Wall-clock dependency: +1s ensures activation is strictly after all
+    // pre-restart blocks (their timestamps are <= now(); `cascade_at` activates on
+    // inclusive >=, so now() alone could collide with the tip's second and wrongly
+    // mark a historical epoch cascade-active during replay). The subsequent
+    // `2 * num_blocks_in_epoch` mining loop gives ample real-time margin (each
+    // mined block advances the clock by at least 1 s) to cross the activation
+    // timestamp before any expiry work is done — so this is tolerated, not a race.
     let mut stopped = node.stop().await;
     let activation_timestamp = UnixTimestamp::now()
         .expect("system time after unix epoch")

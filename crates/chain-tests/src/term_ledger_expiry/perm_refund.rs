@@ -97,7 +97,19 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .expect("Transaction should have perm_fee");
     node.wait_for_mempool(tx2.header.id, 10).await?;
     debug!("tx2: id={}, perm_fee={}", tx2.header.id, tx2_perm_fee);
-    node.mine_block().await?;
+    let block2 = node.mine_block().await?;
+
+    // tx2 must be in the second Submit block so it occupies a higher slot than tx1
+    // (confirmed-alone-in-slot-1). This is load-bearing: the per-tx expiry
+    // attribution keys on start-offset slot, so a mis-placed tx2 would make the
+    // wrong tx expire and silently invert the refund expectations.
+    assert!(
+        block2
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .is_some_and(|ids| ids.contains(&tx2.header.id)),
+        "tx2 (to-be-promoted) must appear in the second Submit block"
+    );
 
     // Upload chunks for tx2 to trigger promotion
     info!("Promoting tx2 by uploading chunks");

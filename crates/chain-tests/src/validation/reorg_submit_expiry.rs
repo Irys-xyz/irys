@@ -19,8 +19,9 @@
 //!       canonical tip across the expiry epoch onto the winning branch.
 
 use crate::utils::IrysNodeTest;
+use irys_actors::block_producer::ledger_expiry::calculate_expired_ledger_fees;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{H256, NodeConfig};
+use irys_types::{DataLedger, H256, NodeConfig};
 use reth::rpc::types::TransactionTrait as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -85,7 +86,7 @@ async fn heavy_reorg_across_submit_expiry_epoch_settles_on_winning_branch() -> e
             .await?;
         txs.push(tx);
     }
-    let posted_ids: BTreeSet<H256> = txs.iter().map(|t| t.header.id).collect();
+    let _posted_ids: BTreeSet<H256> = txs.iter().map(|t| t.header.id).collect();
 
     // h1 (data + commitments), h2 (epoch: 2nd Submit slot + peer partitions).
     genesis_node.mine_block().await?;
@@ -196,9 +197,58 @@ async fn heavy_reorg_across_submit_expiry_epoch_settles_on_winning_branch() -> e
         "the winning branch's expiry block must perm-fee-refund the expired slot-0 Submit txs \
          (branch-correct settlement must survive the reorg across the expiry epoch)"
     );
+
+    // Exact equality against Pipeline B: recompute what the refund pipeline would
+    // produce for this block and assert the on-chain set matches it exactly — a
+    // partial or missing refund fails the test.
+    let expiry_parent_block = genesis_node
+        .get_block_by_height(blocks_per_cycle - 1)
+        .await?;
+    let expiry_parent_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_epoch_snapshot(&expiry_block.previous_block_hash)
+        .expect("epoch snapshot for the expiry block's parent");
+    // Cascade is OFF (hardforks.cascade = None above), so cascade_active_for_block is false.
+    let cascade_active_for_block = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(expiry_block.timestamp_secs());
+    let pipeline_b = calculate_expired_ledger_fees(
+        &expiry_parent_snapshot,
+        &expiry_parent_block,
+        blocks_per_cycle,
+        DataLedger::Submit,
+        &genesis_node.node_ctx.config,
+        genesis_node
+            .node_ctx
+            .block_producer_inner
+            .block_index
+            .clone(),
+        &genesis_node.node_ctx.block_tree_guard,
+        &genesis_node.node_ctx.mempool_guard,
+        &genesis_node.node_ctx.db,
+        true,
+        expiry_block.ledger_total_chunks(DataLedger::Submit),
+        cascade_active_for_block,
+    )
+    .await?;
+    let expected_refunds: BTreeSet<H256> = pipeline_b
+        .user_perm_fee_refunds
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
     assert!(
-        refunded.is_subset(&posted_ids),
-        "every refund must correspond to a posted Submit tx (got {refunded:?})"
+        !expected_refunds.is_empty(),
+        "fixture must produce refunds (non-vacuous)"
+    );
+    assert_eq!(
+        refunded, expected_refunds,
+        "winning branch's on-chain refunds must EXACTLY equal Pipeline B's refund set \
+         (branch-correct settlement across the reorg)"
     );
 
     peer2_node.stop().await;
