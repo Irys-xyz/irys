@@ -345,15 +345,17 @@ pub async fn expired_submit_tx_ids(
     parent_block_header: &IrysBlockHeader,
     block_height: u64,
     config: &Config,
+    // Cascade status of the block being produced/validated (its OWN timestamp),
+    // NOT the parent epoch snapshot's. Must mirror exactly what production passes
+    // to `expired_submit_range`, so this differential-test oracle stays faithful
+    // at the activation epoch boundary (NC-0042) — previously this derived it from
+    // `parent_epoch_snapshot.epoch_block.timestamp_secs()`, which lags the block.
+    cascade_active: bool,
     block_index: BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<std::collections::BTreeSet<IrysTransactionId>> {
-    let cascade_active = config
-        .consensus
-        .hardforks
-        .is_cascade_active_at(parent_epoch_snapshot.epoch_block.timestamp_secs());
     let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
         DataLedger::Submit,
         block_height,
@@ -415,15 +417,13 @@ pub async fn is_submit_storage_expired(
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
     config: &Config,
+    // The block-under-test's own Cascade status — see `expired_submit_tx_ids`.
+    cascade_active: bool,
     block_index: &BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<bool> {
-    let cascade_active = config
-        .consensus
-        .hardforks
-        .is_cascade_active_at(parent_epoch_snapshot.epoch_block.timestamp_secs());
     let Some(range) = expired_submit_range(
         block_height,
         parent_epoch_snapshot,
@@ -514,6 +514,15 @@ pub fn expired_submit_range(
     // header (not this node's block-index tip) is what makes the verdict
     // branch-deterministic.
     let p = config.consensus.num_chunks_in_partition;
+    // Fail loud on a zero partition size rather than silently disabling the
+    // §4b/§4c filter: with `p == 0`, `range_end` would collapse to 0 and this
+    // function would return `Ok(None)` (no candidate filtered), while the refund
+    // walk (`filter_transactions_by_chunk_range`) bails — an asymmetric silent
+    // bypass. `Config::validate` also rejects `p == 0`; this guards any path that
+    // bypassed validation (NC-0042).
+    if p == 0 {
+        eyre::bail!("num_chunks_in_partition must be non-zero for Submit-expiry range math");
+    }
     let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
     let range_end = (max_expired_slot as u64 + 1)
         .saturating_mul(p)
@@ -1311,7 +1320,9 @@ fn filter_transactions_by_chunk_range(
     for (idx, tx) in transactions.iter().enumerate() {
         let chunks = tx.data_size.div_ceil(chunk_size);
         let tx_start = current_offset;
-        let tx_end = current_offset + chunks;
+        // saturating: a malformed/huge data_size must not wrap the cumulative
+        // offset in release builds (the comparisons below would then misclassify).
+        let tx_end = LedgerChunkOffset::from((*current_offset).saturating_add(chunks));
 
         tracing::debug!(
             "Tx {}: id={}, data_size={}, chunks={}, tx_start={}, tx_end={}",
@@ -1547,7 +1558,8 @@ impl SlotIndex {
         chunks_per_partition: u64,
         max_offset: LedgerChunkOffset,
     ) -> LedgerChunkRange {
-        let start = LedgerChunkOffset::from(self.0 * chunks_per_partition).min(max_offset);
+        let start =
+            LedgerChunkOffset::from(self.0.saturating_mul(chunks_per_partition)).min(max_offset);
         let end = start + chunks_per_partition;
         let end = end.min(max_offset);
         LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
@@ -3065,6 +3077,31 @@ mod tests {
             )
             .await?,
             "slot-1 tx must stay live even though later empty slots also expired"
+        );
+
+        // Walk-oracle parity + the new `cascade_active` parameter: the (now
+        // parameterized) `expired_submit_tx_ids` walk must return EXACTLY the
+        // per-candidate–expired set — only the slot-0 tx — when passed the block's
+        // own Cascade status. Previously the oracle derived Cascade from the parent
+        // epoch snapshot's timestamp, which lags the block and was wrong at the
+        // activation boundary; full mid-chain activation is covered end-to-end by
+        // the `cascade_term_expiry` chain-tests.
+        let oracle = expired_submit_tx_ids(
+            &epoch,
+            &prev_epoch,
+            probe_height,
+            &config,
+            true, // the block-under-test's own Cascade status (activation at genesis here)
+            block_index.clone(),
+            &guard,
+            &MempoolReadGuard::stub(),
+            &db,
+        )
+        .await?;
+        assert_eq!(
+            oracle,
+            std::collections::BTreeSet::from([tx_slot_0.id]),
+            "walk oracle must equal the per-candidate verdicts (slot-0 expired, slot-1 live)"
         );
 
         Ok(())

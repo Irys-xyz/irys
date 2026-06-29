@@ -113,11 +113,18 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
         .read()
         .get_epoch_snapshot(&tip_hash)
         .expect("epoch snapshot for the current tip");
+    let evil_cascade_active = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(evil_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &tip_snapshot,
         &evil_parent_block,
         evil_height,
         &genesis_node.node_ctx.config,
+        evil_cascade_active,
         genesis_node
             .node_ctx
             .block_producer_inner
@@ -154,7 +161,13 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
     //         so the block fails ONLY on the §4c expiry rule. ---
     let genesis_signer = genesis_config.signer();
     let proof_anchor = genesis_node.get_anchor().await?;
-    let chunks: Vec<Vec<u8>> = vec![target.data.clone().unwrap_or_default().into()];
+    // Fail fast on a missing payload rather than silently building the ingress
+    // proof over an empty chunk — that would change what is proven and could
+    // mask a fixture regression (the posted tx's data must still be retained).
+    let target_data = target.data.clone().expect(
+        "posted tx payload must be retained to build the ingress proof (fixture invariant)",
+    );
+    let chunks: Vec<Vec<u8>> = vec![target_data.into()];
     let proof = generate_ingress_proof(
         &genesis_signer,
         expired_tx.data_root,

@@ -17,7 +17,13 @@ impl SubmitLedgerMetadata {
         num_blocks_in_epoch: u64,
         submit_ledger_epoch_length: u64,
     ) -> Self {
-        let blocks_per_cycle = submit_ledger_epoch_length * num_blocks_in_epoch;
+        // checked_mul matches `TermLedger::get_*_slot_indexes` / `Config::validate`:
+        // an overflowing product must fail loud, not wrap (release builds) into a
+        // bogus tiny cycle length. `Config::validate` rejects such configs, so this
+        // only fires on a call path that bypassed validation.
+        let blocks_per_cycle = submit_ledger_epoch_length
+            .checked_mul(num_blocks_in_epoch)
+            .expect("submit_ledger_epoch_length * num_blocks_in_epoch overflows u64");
         let position_in_cycle = block_height % blocks_per_cycle;
         let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
         let epochs_remaining = submit_ledger_epoch_length - epoch_in_cycle;

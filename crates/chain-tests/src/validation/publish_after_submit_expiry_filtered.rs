@@ -212,11 +212,18 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         expiry_parent_block.block_hash, expiry_block.previous_block_hash,
         "parent header must be the expiry block's parent"
     );
+    let expiry_cascade_active = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(expiry_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &expiry_parent_snapshot,
         &expiry_parent_block,
         expiry_height,
         &genesis_node.node_ctx.config,
+        expiry_cascade_active,
         genesis_node
             .node_ctx
             .block_producer_inner

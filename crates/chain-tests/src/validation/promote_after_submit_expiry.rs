@@ -117,11 +117,20 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         .read()
         .get_epoch_snapshot(&tip_hash)
         .expect("epoch snapshot for the current tip");
+    // The block-under-test's own Cascade status — exactly what production passes
+    // to `expired_submit_range`; compute once and reuse for both oracle helpers.
+    let evil_cascade_active = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(evil_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &tip_snapshot,
         &evil_parent_block,
         evil_height,
         &genesis_node.node_ctx.config,
+        evil_cascade_active,
         genesis_node
             .node_ctx
             .block_producer_inner
@@ -149,6 +158,7 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
             &tip_snapshot,
             &evil_parent_block,
             &genesis_node.node_ctx.config,
+            evil_cascade_active,
             &genesis_node.node_ctx.block_producer_inner.block_index,
             &genesis_node.node_ctx.block_tree_guard,
             &genesis_node.node_ctx.mempool_guard,

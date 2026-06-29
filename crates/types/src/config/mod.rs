@@ -103,6 +103,21 @@ impl Config {
             );
         }
 
+        // Partition/recall sizing must be non-zero. Zero breaks every chunk-offset
+        // and slot computation: e.g. ledger-expiry `compute_chunk_range` /
+        // `expired_submit_range` would make the §4b/§4c filter silently no-op
+        // (range_end collapses to 0), while the refund walk bails — an asymmetric
+        // silent bypass. The `div_ceil` below would also panic on a zero recall
+        // range. Reject loudly here. (NC-0042)
+        ensure!(
+            self.consensus.num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        ensure!(
+            self.consensus.num_chunks_in_recall_range > 0,
+            "num_chunks_in_recall_range must be > 0"
+        );
+
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
         let minimum_step_capacity = self
             .consensus
@@ -1255,7 +1270,7 @@ mod tests {
             "expected the slot-lifetime guard, got: {err}"
         );
 
-        // Production, lifetime > block_tree_depth (default 5 * 360 = 1800 > 50) -> ok.
+        // Production, lifetime > block_tree_depth (default 5 * 100 = 500 > 50) -> ok.
         let node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_ok());

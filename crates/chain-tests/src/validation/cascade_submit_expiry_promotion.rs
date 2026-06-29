@@ -263,11 +263,21 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
         .read()
         .get_epoch_snapshot(&expiry_block.previous_block_hash)
         .expect("epoch snapshot for the expiry block's parent");
+    // The expiry block's own Cascade status — exactly what production passes to
+    // `expired_submit_range` / `calculate_expired_ledger_fees`; compute once and
+    // reuse for the oracle and the Pipeline B recompute below.
+    let cascade_active_for_block = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(expiry_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &expiry_parent_snapshot,
         &expiry_parent_block,
         expiry_height,
         &genesis_node.node_ctx.config,
+        cascade_active_for_block,
         genesis_node
             .node_ctx
             .block_producer_inner
@@ -298,7 +308,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     let evm_block = genesis_node
         .wait_for_evm_block(expiry_block.evm_block_hash, seconds_to_wait)
         .await?;
-    let refunded_tx_ids: BTreeSet<H256> = evm_block
+    let refunded_tx_id_list: Vec<H256> = evm_block
         .body
         .transactions
         .into_iter()
@@ -314,6 +324,16 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
             }
         })
         .collect();
+    let refunded_tx_ids: BTreeSet<H256> = refunded_tx_id_list.iter().copied().collect();
+    // Multiplicity guard (NC-0042): a duplicate PermFeeRefund for the same tx — an
+    // over-refund / double-pay — would be silently collapsed by the set and slip
+    // past the exact-equality check below. Assert the raw on-chain refund list has
+    // no duplicates before deduping.
+    assert_eq!(
+        refunded_tx_id_list.len(),
+        refunded_tx_ids.len(),
+        "on-chain perm-fee refunds must contain no duplicate tx (no over-refund) — NC-0042"
+    );
     assert!(
         !refunded_tx_ids.is_empty(),
         "at least one expired Submit tx must be perm-fee-refunded at the expiry epoch \
@@ -339,12 +359,6 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     // exclusion correctly drops any slot rescued by a last-write touch this epoch).
     // This is the Cascade analog of the pre-Cascade `refunded == expired` equality
     // (`publish_after_submit_expiry_filtered.rs`), made rescue/promotion-aware.
-    let cascade_active_for_block = genesis_node
-        .node_ctx
-        .config
-        .consensus
-        .hardforks
-        .is_cascade_active_at(expiry_block.timestamp_secs());
     let pipeline_b_refunds =
         irys_actors::block_producer::ledger_expiry::calculate_expired_ledger_fees(
             &expiry_parent_snapshot,
@@ -390,6 +404,12 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
 
     // Pick a target tx that the per-candidate (§4c) predicate marks expired at the
     // evil block's height, under the Cascade gate.
+    let evil_cascade_active = genesis_node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(evil_parent_block.timestamp_secs());
     let mut target: Option<&irys_types::DataTransaction> = None;
     for tx in &txs {
         let per_candidate = irys_actors::block_producer::ledger_expiry::is_submit_storage_expired(
@@ -398,6 +418,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
             &tip_snapshot,
             &evil_parent_block,
             &genesis_node.node_ctx.config,
+            evil_cascade_active,
             &genesis_node.node_ctx.block_producer_inner.block_index,
             &genesis_node.node_ctx.block_tree_guard,
             &genesis_node.node_ctx.mempool_guard,

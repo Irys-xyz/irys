@@ -556,6 +556,11 @@ impl Ledgers {
             if num_slots > 0 && slot_index == last_slot_index {
                 continue;
             }
+            // INVARIANT: Publish slots have `has_been_written` populated by
+            // `touch_filled_slots`, which `EpochSnapshot::touch_active_ledger_slots`
+            // calls unconditionally over `active_ledgers()` (incl. Publish) before
+            // expiry runs — so the post-Cascade unwritten-slot exclusion below is
+            // safe for the perm ledger too.
             let written_ok = !cascade_active || slot.has_been_written;
             if written_ok && slot.last_height <= expiry_height && !slot.is_expired {
                 result.push((slot_index, slot.partitions.clone(), perm_ledger_id));
