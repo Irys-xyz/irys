@@ -242,13 +242,15 @@ pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<Data
             db
         }
         DatabaseEnvKind::RO => {
-            let db = DatabaseEnv::open(
-                &db_path,
-                access,
-                irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-                    .with_log_level(None)
-                    .with_exclusive(Some(false)),
-            )?;
+            // Honor the consensus DB geometry (same as the RW path and the node),
+            // then layer the RO-specific flags on top — so a read-only open against
+            // a test/constrained-geometry config doesn't reserve reth's large
+            // default map. (Opening an existing DB maps its on-disk geometry; this
+            // keeps the virtual-address-space reservation aligned with the RW path.)
+            let args = irys_database::consensus_db_args(&config.database)?
+                .with_log_level(None)
+                .with_exclusive(Some(false));
+            let db = DatabaseEnv::open(&db_path, access, args)?;
             //note: any migrations will fail, as this is RO env, but if they needed to run the database was out of date and you should open it as RW and migrate it first before continuing.
             irys_database::migration::ensure_db_version_compatible(&db)?;
             db
