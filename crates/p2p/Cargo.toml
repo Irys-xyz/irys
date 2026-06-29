@@ -40,6 +40,9 @@ semver.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 irys-testing-utils.workspace = true
+# Enable the irys-vdf test-utils feature for p2p tests so the sealed VDF-state
+# mutation handle (VdfStateReadonly::test_set_step) is available.
+irys-vdf = { workspace = true, features = ["test-utils"] }
 irys-types = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
 irys-actors = { workspace = true, features = ["test-utils"] }
