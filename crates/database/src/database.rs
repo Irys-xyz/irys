@@ -1031,8 +1031,8 @@ pub fn append_block_stream_event<T: DbTx + DbTxMut>(tx: &T, value: Vec<u8>) -> e
     Ok(next_seq)
 }
 
-/// Reads block-stream events with `seq >= from_seq`, ascending — the replay suffix served on
-/// `subscribe(from_seq)`.
+/// Reads block-stream events with `seq >= from_seq`, ascending — used by the producer's startup de-dup
+/// state rebuild (`rebuild_state`).
 pub fn read_block_stream_from<T: DbTx>(tx: &T, from_seq: u64) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
     let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
     let mut events = Vec::new();
@@ -1071,6 +1071,22 @@ pub fn block_stream_latest_seq<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
 pub fn block_stream_lowest_seq<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
     let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
     Ok(cursor.first()?.map(|(seq, _)| seq))
+}
+
+/// Returns `(lowest_retained_seq, logical_len)` for the block-stream log in one read: the lowest retained
+/// `seq` (the prune floor, `0` if empty) and the current highest retained `seq` plus one (`0` if empty —
+/// no high-watermark is persisted, so a fully emptied log reports `0`). Shared by the SSE `subscribe`
+/// snapshot and the `/events` poll so both derive the cursor window from one read; each clamps that
+/// window differently by design, so only the read is shared, never the clamp.
+pub fn block_stream_log_bounds<T: DbTx>(tx: &T) -> eyre::Result<(u64, u64)> {
+    let lowest = block_stream_lowest_seq(tx)?.unwrap_or(0);
+    let logical_len = match block_stream_latest_seq(tx)? {
+        Some(seq) => seq
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("block-stream seq overflow"))?,
+        None => 0,
+    };
+    Ok((lowest, logical_len))
 }
 
 /// Prunes block-stream events with `seq < keep_from_seq` — count-based retention, deleting the
@@ -1203,6 +1219,32 @@ mod tests {
         // Pruning advances the retained floor.
         db.update_eyre(|tx| prune_block_stream_below(tx, 2))?;
         assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn block_stream_log_bounds_reports_floor_and_logical_len() -> eyre::Result<()> {
+        use super::{append_block_stream_event, block_stream_log_bounds, prune_block_stream_below};
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        // Empty log: floor 0, logical_len 0.
+        assert_eq!(db.view_eyre(block_stream_log_bounds)?, (0, 0));
+
+        for b in [b"a", b"b", b"c"] {
+            db.update_eyre(|tx| append_block_stream_event(tx, b.to_vec()))?;
+        } // seqs 0..=2 → logical_len 3
+        assert_eq!(db.view_eyre(block_stream_log_bounds)?, (0, 3));
+
+        // Pruning advances the floor; logical_len (highest seq + 1) is unchanged.
+        db.update_eyre(|tx| prune_block_stream_below(tx, 2))?;
+        assert_eq!(db.view_eyre(block_stream_log_bounds)?, (2, 3));
         Ok(())
     }
 

@@ -23,8 +23,6 @@ use irys_types::{
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
 
 pub fn internal_routes() -> impl HttpServiceFactory {
     web::scope("internal")
@@ -40,30 +38,58 @@ struct StreamQuery {
     from_seq: u64,
 }
 
-/// `GET /internal/blocks/stream?from_seq=` — the SSE stream. Replays the durable suffix from
-/// `from_seq`, then tails live frames, each framed as `data: {json}\n\n`.
+/// `GET /internal/blocks/stream?from_seq=` — the SSE stream. Replays the durable suffix `[start, end)`
+/// captured atomically by `subscribe` (looping the same poll primitive via `replay_page`), then tails the
+/// live frames, each framed as `data: {json}\n\n`.
 async fn blocks_stream(
     state: web::Data<ApiState>,
     query: web::Query<StreamQuery>,
 ) -> Result<HttpResponse, ApiError> {
-    let (replay, live) = state
+    // Atomic handover: subscribe snapshots the immutable replay bound `end` and registers the live sender
+    // under one lock, so the live tail begins at exactly `seq = end` (no gap/dup). `start` is already
+    // clamped to the retained floor for a stale cursor, so paging from it replays frames-from-floor — the
+    // SSE rewind; the poll endpoint passes the raw cursor instead and gets a truncated page.
+    let (start, end, mut live) = state
         .block_stream
         .subscribe(query.from_seq)
         .map_err(|e| ApiError::Internal { err: e.to_string() })?;
-
-    let body = replay
-        .chain(ReceiverStream::new(live).map(Ok::<_, eyre::Report>))
-        .map(frame_to_sse);
+    let handle = Arc::clone(&state.block_stream);
+    let body = async_stream::try_stream! {
+        // Replay the immutable [start, end) snapshot one bounded page at a time. replay_page caps each
+        // page by `end` (not events_page's has_more, which tracks a moving tip), so the live tail begins
+        // exactly at seq=end.
+        let mut cursor = start;
+        while let Some((next, frames)) = handle
+            .replay_page(cursor, end)
+            .map_err(actix_web::error::ErrorInternalServerError)?
+        {
+            for frame in &frames {
+                yield sse_bytes(frame)?;
+            }
+            cursor = next;
+        }
+        if cursor < end {
+            // replay_page returned None before reaching `end`: a prune advanced the floor past the cursor
+            // mid-replay. End the SSE as a clean EOF so the follower reconnects and resyncs — do not fall
+            // through to the live tail (that would push a seq gap onto the wire).
+            return;
+        }
+        // Live tail [end, ..). `recv` yields `None` when the producer halts and drops the sender, ending
+        // the SSE cleanly after replay.
+        while let Some(frame) = live.recv().await {
+            yield sse_bytes(&frame)?;
+        }
+    };
 
     Ok(HttpResponse::Ok()
         .content_type("text/event-stream")
-        .streaming(body))
+        // Explicit error type: try_stream! cannot infer it through actix's generic `.streaming`, which
+        // only bounds `E: Into<BoxError>`.
+        .streaming::<_, actix_web::Error>(body))
 }
 
-fn frame_to_sse(frame: eyre::Result<Arc<StreamFrame>>) -> Result<web::Bytes, actix_web::Error> {
-    let frame = frame.map_err(actix_web::error::ErrorInternalServerError)?;
-    let json = serde_json::to_string(frame.as_ref())
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+fn sse_bytes(frame: &StreamFrame) -> Result<web::Bytes, actix_web::Error> {
+    let json = serde_json::to_string(frame).map_err(actix_web::error::ErrorInternalServerError)?;
     Ok(web::Bytes::from(format!("data: {json}\n\n")))
 }
 
