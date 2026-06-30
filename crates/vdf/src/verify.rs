@@ -33,15 +33,21 @@ pub fn is_seed_data_valid(
     if are_seeds_valid {
         Ok(())
     } else {
+        let expected_next_seed = expected_seed_data.0;
+        let expected_seed = expected_seed_data.1;
         tracing::error!(
-            "Seed data is invalid. Expected: {:?}, got: {:?}",
-            expected_seed_data,
-            vdf_info
+            ?expected_seed,
+            ?expected_next_seed,
+            got_seed = ?vdf_info.seed,
+            got_next_seed = ?vdf_info.next_seed,
+            "Seed data is invalid"
         );
         Err(eyre::eyre!(
-            "Expected: {:?}, got: {:?}",
-            expected_seed_data,
-            vdf_info
+            "seed data is invalid: expected seed={:?}, next_seed={:?}; got seed={:?}, next_seed={:?}",
+            expected_seed,
+            expected_next_seed,
+            vdf_info.seed,
+            vdf_info.next_seed
         ))
     }
 }

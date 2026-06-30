@@ -1731,17 +1731,33 @@ mod tests {
         assert_eq!(result.metric_label(), "invalid");
     }
 
-    /// The seeds stage records its label through `granular_metric_label`; a
-    /// `SeedDataInvalid` rejection must surface as `"invalid"` — not
-    /// `"seed_data_invalid"` (which is `metric_reason`). This pins the label the
-    /// centralised `irys_vdf::verify::is_seed_data_valid` path emits once its
-    /// `eyre` error is mapped back to `ValidationError::SeedDataInvalid`.
+    /// The seeds stage records its label through `granular_metric_label`. This
+    /// drives a real `irys_vdf::verify::is_seed_data_valid` failure and maps its
+    /// `eyre` error exactly as `block_validation_task` does, pinning that a
+    /// `SeedDataInvalid` rejection surfaces as `"invalid"` (not `"seed_data_invalid"`,
+    /// which is `metric_reason`).
     #[test]
     fn seed_data_invalid_dispatches_to_invalid_with_label() {
-        let result: ValidationResult = crate::block_validation::ValidationError::SeedDataInvalid(
-            "Expected: .., got: ..".to_string(),
-        )
-        .into();
+        use irys_types::{BlockHash, H256, H256List, IrysBlockHeader};
+        let reset_frequency = 2;
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.block_hash = BlockHash::from_slice(&[4; 32]);
+        parent.vdf_limiter_info.seed = BlockHash::from_slice(&[2; 32]);
+        parent.vdf_limiter_info.next_seed = BlockHash::from_slice(&[3; 32]);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.global_step_number = 3;
+        block.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
+        block.vdf_limiter_info.set_seeds(reset_frequency, &parent);
+        // Corrupt the embedded seeds so verification fails.
+        block.vdf_limiter_info.seed = BlockHash::from_slice(&[5; 32]);
+        block.vdf_limiter_info.next_seed = BlockHash::from_slice(&[6; 32]);
+
+        let err = irys_vdf::verify::is_seed_data_valid(&block, &parent, reset_frequency)
+            .expect_err("corrupted seeds must fail verification");
+        // Mirror the block_validation_task seeds-stage mapping of the eyre error.
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::SeedDataInvalid(err.to_string()).into();
         assert!(matches!(result, ValidationResult::Invalid(_)));
         assert_eq!(result.granular_metric_label(), "invalid");
     }

@@ -1034,10 +1034,7 @@ impl ValidationServiceInner {
             let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
             match tokio::task::spawn_blocking(move || {
-                ensure!(
-                    is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency).is_ok(),
-                    "Seed data is invalid"
-                );
+                is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency)?;
                 Ok::<(), eyre::Report>(())
             })
             .await
