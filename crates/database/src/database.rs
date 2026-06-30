@@ -61,7 +61,11 @@ impl IrysDatabaseArgs for DatabaseArguments {
     }
 
     fn irys_testing() -> eyre::Result<DatabaseArguments> {
-        Self::irys_default(DbSyncMode::UtterlyNoSync)
+        // Cap the geometry so each unit-test DB doesn't reserve reth's 8 TiB
+        // default map — many concurrent test envs would otherwise exhaust the
+        // process's virtual address space (see `TEST_DB_GEOMETRY_MAX_SIZE`).
+        Ok(Self::irys_default(DbSyncMode::UtterlyNoSync)?
+            .with_geometry_max_size(Some(irys_types::TEST_DB_GEOMETRY_MAX_SIZE)))
     }
 
     fn irys_cache(sync_mode: DbSyncMode) -> eyre::Result<DatabaseArguments> {
@@ -75,6 +79,36 @@ impl IrysDatabaseArgs for DatabaseArguments {
             // caller-provided sync_mode, not by this preset.
             .with_sync_mode(Some(sync_mode.into())))
     }
+}
+
+/// Builds [`DatabaseArguments`] for the **main consensus** database from a
+/// [`irys_types::DatabaseConfig`]. Production uses reth's large default geometry;
+/// when the config sets `geometry_max_size` (test configs do) that caps both the
+/// max DB size and the virtual address-space reservation MDBX makes at open, so
+/// many concurrent node databases don't exhaust the process's address space.
+pub fn consensus_db_args(
+    db_config: &irys_types::DatabaseConfig,
+) -> eyre::Result<DatabaseArguments> {
+    let mut args = DatabaseArguments::irys_default(db_config.sync_mode)?;
+    if let Some(max_size) = db_config.geometry_max_size {
+        args = args.with_geometry_max_size(Some(max_size));
+    }
+    Ok(args)
+}
+
+/// Builds [`DatabaseArguments`] for a **storage submodule** database from a
+/// [`irys_types::DatabaseConfig`]. Production reserves 2 TiB; `geometry_max_size`
+/// (set by test configs) overrides that with a small cap.
+pub fn submodule_db_args(
+    db_config: &irys_types::DatabaseConfig,
+) -> eyre::Result<DatabaseArguments> {
+    let max_size = db_config
+        .geometry_max_size
+        .unwrap_or(2 * irys_types::TERABYTE);
+    Ok(
+        DatabaseArguments::irys_default(db_config.sync_mode)?
+            .with_geometry_max_size(Some(max_size)),
+    )
 }
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
@@ -197,24 +231,42 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// orphaned tip can leave a stranded `included_height` / `promoted_height`
 /// behind, and Phase-1 scrub only fires on reorg.
 ///
-/// `MigratedBlockHashes` (MBH) IS fork-aware past `block_migration_depth`
-/// — `validate_reorg_within_migration_depth` aborts any reorg that would
-/// rewrite a migrated row, so MBH attests the canonical hash from every
-/// chain's perspective.
+/// `MigratedBlockHashes` (MBH) records the local node's canonical block hash
+/// at each migrated height.  It is *branch-invariant* — attests the same hash
+/// from every chain's perspective — ONLY for heights below the reorg floor.
+///
+/// **Reorg ceiling moved.**  Network-partition / deep-reorg recovery
+/// removed the old `validate_reorg_within_migration_depth` gate (now dead): a
+/// reorg can rewind and rewrite already-migrated MBH rows up to
+/// `block_tree_depth` deep (`recover_from_network_partition` →
+/// `truncate_to_height` → `delete_block_index_range`).  So within
+/// `(tip - block_tree_depth, tip - block_migration_depth]`, MBH is a
+/// LOCAL-canonical view that can change across a reorg and disagree between
+/// nodes evaluating competing forks.  Only heights at/below
+/// `tip - block_tree_depth` are finalized and safe to key on by existence
+/// alone.
 ///
 /// The two helpers in this section return a height from `IrysDataTxMetadata`
-/// only if MBH confirms it ≤ `max_height`.  They return primitive
-/// `Option<u64>` (no header mutation) so call sites can't accidentally
-/// treat a stranded hint as canonical.
-///
-/// **Fork-awareness caveat (reorg-readiness).**  The "MBH-verified ⇒
-/// canonical-on-every-chain" inference rests on `block_migration_depth`
-/// being the absolute reorg ceiling.  If deeper reorgs are ever permitted,
-/// MBH rows past `block_migration_depth` become a LOCAL-canonical view
-/// that can disagree with the chain a validator is evaluating.  These
-/// helpers (and every site that reads from them) must be audited together
-/// with the `Searching { Publish }` arm in `data_txs_are_valid` when that
-/// invariant changes.
+/// only if MBH has a row for it ≤ `max_height`.  They return primitive
+/// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
+/// stranded hint as canonical.  Because the existence check is NOT
+/// branch-invariant in the window above, every caller must either (a) only
+/// consult these helpers for heights guaranteed below the reorg floor, or
+/// (b) treat the result as a hint and confirm membership against the evaluated
+/// branch's own ancestry.  Current callers:
+///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
+///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
+///     only falls back to these helpers for inclusions older than
+///     `tx_anchor_expiry_depth`.
+///   - the NC-0042 expiry fast path
+///     (`ledger_expiry::resolve_submit_inclusion`) relies on the config
+///     invariant that a ledger slot's lifetime exceeds `block_tree_depth`
+///     (enforced in `Config::validate`), so any *expired* tx's inclusion is
+///     necessarily below the reorg floor.
+///   - `lookup_via_migrated_metadata` (`tx_inclusion.rs`) re-reads the block
+///     and re-checks Submit membership before trusting the height.
+/// Re-audit all of these together (and the `Searching { Publish }` arm in
+/// `data_txs_are_valid`) whenever the reorg ceiling or those windows change.
 fn canonical_metadata_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
@@ -409,7 +461,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // their block_set populated by `BlockMigrationService::persist_metadata`
     // Phase 3, and unconfirmed entries get `expiry_height` set by
     // `cache_data_root_with_expiry`.  Direct callers of `cache_data_root`
-    // that bypass both paths (test fixtures, pre-fix code) can produce
+    // that bypass both paths (e.g. test fixtures) can produce
     // this state — warn so operators see them.
     if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
         warn!(
@@ -732,8 +784,49 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
-pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
-    Ok(tx.delete::<IngressProofs>(data_root, None)?)
+/// Deletes only the ingress proof row for a specific (data_root, address) pair,
+/// leaving proofs from other signers intact.
+/// Returns `true` if a row was deleted, `false` if no matching row was found.
+///
+/// **Test-only** (`#[cfg(test)]`). This performs **no content check** (no TOCTOU
+/// guard), so it must never become a production deletion path: gating it on
+/// `cfg(test)` makes that misuse impossible at compile time. Production callers
+/// that need TOCTOU safety must use [`delete_ingress_proof_if_unchanged`].
+#[cfg(test)]
+pub(crate) fn delete_ingress_proof_by_signer<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    address: IrysAddress,
+) -> eyre::Result<bool> {
+    // O(1) seek: no need to scan all dup values for this data_root.
+    if let Some(existing) = ingress_proof_by_data_root_address(tx, data_root, address)? {
+        tx.delete::<IngressProofs>(data_root, Some(existing))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Deletes the ingress proof for (data_root, address) ONLY if the stored row
+/// still matches `expected`. Used by the prune loop to close the TOCTOU window
+/// between the scan and the delete: if another task stored a fresh proof for the
+/// same key between the scan and this call, the stale scanned value will not
+/// match and the fresh proof is preserved.
+/// Returns `true` if the row was deleted, `false` if absent or content differs.
+pub fn delete_ingress_proof_if_unchanged<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    expected: CompactCachedIngressProof,
+) -> eyre::Result<bool> {
+    let address = expected.address;
+    match ingress_proof_by_data_root_address(tx, data_root, address)? {
+        // Compare inner CachedIngressProof (derives PartialEq); the wrapper does not.
+        Some(current) if current.0 == expected.0 => {
+            tx.delete::<IngressProofs>(data_root, Some(current))?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 pub fn store_ingress_proof(
@@ -1137,6 +1230,190 @@ mod tests {
             db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))?,
             "peer should be gone after delete"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_ingress_proof_by_signer_deletes_only_that_signer() -> eyre::Result<()> {
+        use super::{
+            delete_ingress_proof_by_signer, ingress_proof_by_data_root_address,
+            ingress_proofs_by_data_root,
+        };
+        use crate::{
+            db::IrysDatabaseExt as _,
+            db_cache::CachedDataRoot,
+            tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
+        };
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let data_root = H256::random();
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random();
+
+        // Build minimal distinct proofs for addr_a and addr_b.
+        let make_proof = |address: IrysAddress, proof_hash: H256| {
+            let mut p = irys_types::IngressProof::default();
+            p.data_root = data_root;
+            p.proof = proof_hash;
+            CompactCachedIngressProof(CachedIngressProof { address, proof: p })
+        };
+
+        let proof_a = make_proof(addr_a, H256::from([1_u8; 32]));
+        let proof_b = make_proof(addr_b, H256::from([2_u8; 32]));
+
+        // Seed: minimal CDR + two proof rows.
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::default(),
+                },
+            )?;
+            tx.put::<IngressProofs>(data_root, proof_a.clone())?;
+            tx.put::<IngressProofs>(data_root, proof_b.clone())?;
+            Ok(())
+        })?;
+
+        // Both rows present initially.
+        assert_eq!(
+            db.view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))?
+                .len(),
+            2,
+            "expected 2 proofs after seeding"
+        );
+
+        // Delete addr_a — must return true and remove only that row.
+        let deleted = db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_a))?;
+        assert!(deleted, "deleting addr_a row must return true");
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_none(),
+            "addr_a proof must be gone"
+        );
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_b))?
+                .is_some(),
+            "addr_b proof must survive"
+        );
+
+        // Deleting addr_a again returns false (already absent).
+        let deleted_again =
+            db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_a))?;
+        assert!(!deleted_again, "second delete of addr_a must return false");
+
+        // Deleting a never-stored addr_c returns false.
+        let deleted_c =
+            db.update_eyre(|tx| delete_ingress_proof_by_signer(tx, data_root, addr_c))?;
+        assert!(!deleted_c, "delete of absent addr_c must return false");
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_ingress_proof_if_unchanged_preserves_refreshed_proof() -> eyre::Result<()> {
+        use super::{delete_ingress_proof_if_unchanged, ingress_proof_by_data_root_address};
+        use crate::{
+            db::IrysDatabaseExt as _,
+            db_cache::CachedDataRoot,
+            tables::{CachedDataRoots, CompactCachedIngressProof, IngressProofs},
+        };
+        use irys_types::{IrysAddress, ingress::CachedIngressProof};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+
+        let data_root = H256::random();
+        let addr_a = IrysAddress::random();
+
+        let make_proof = |proof_hash: H256| {
+            let mut p = irys_types::IngressProof::default();
+            p.data_root = data_root;
+            p.proof = proof_hash;
+            CompactCachedIngressProof(CachedIngressProof {
+                address: addr_a,
+                proof: p,
+            })
+        };
+
+        let proof_p1 = make_proof(H256::from([0xAA_u8; 32]));
+        let proof_p2 = make_proof(H256::from([0xBB_u8; 32]));
+
+        // absent-key case: returns false without error.
+        let absent = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p1.clone()))?;
+        assert!(!absent, "absent key must return false");
+
+        // Insert CDR and P1.
+        db.update_eyre(|tx| {
+            tx.put::<CachedDataRoots>(
+                data_root,
+                CachedDataRoot {
+                    data_size: 64,
+                    data_size_confirmed: false,
+                    txid_set: vec![],
+                    block_set: vec![],
+                    expiry_height: None,
+                    cached_at: irys_types::UnixTimestamp::default(),
+                },
+            )?;
+            tx.put::<IngressProofs>(data_root, proof_p1.clone())?;
+            Ok(())
+        })?;
+
+        // Simulate refresh: replace P1 with P2 in the store (overwrite between scan and delete).
+        db.update_eyre(|tx| {
+            tx.delete::<IngressProofs>(data_root, Some(proof_p1.clone()))?;
+            tx.put::<IngressProofs>(data_root, proof_p2.clone())?;
+            Ok(())
+        })?;
+
+        // CAS with stale P1 must return false and leave P2 intact.
+        let stale = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p1.clone()))?;
+        assert!(
+            !stale,
+            "stale expected value must return false (TOCTOU guard)"
+        );
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_some(),
+            "P2 must still be present after stale CAS"
+        );
+
+        // CAS with current P2 must return true and remove the row.
+        let deleted = db
+            .update_eyre(|tx| delete_ingress_proof_if_unchanged(tx, data_root, proof_p2.clone()))?;
+        assert!(deleted, "matching expected value must return true");
+
+        assert!(
+            db.view_eyre(|tx| ingress_proof_by_data_root_address(tx, data_root, addr_a))?
+                .is_none(),
+            "row must be gone after successful CAS delete"
+        );
+
         Ok(())
     }
 

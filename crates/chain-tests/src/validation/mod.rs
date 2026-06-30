@@ -2,6 +2,7 @@ mod anchor_canonical_reorg;
 mod blobs_rejected;
 mod cascade_block_rejection;
 mod cascade_ledger_shape;
+mod cascade_submit_expiry_promotion;
 mod cascade_term_balance;
 mod cascade_term_expiry;
 mod data_tx_pricing;
@@ -12,7 +13,11 @@ mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
 mod poa_cases;
+mod promote_after_submit_expiry;
+mod publish_after_submit_expiry_filtered;
+mod reorg_submit_expiry;
 mod same_block_promotion;
+mod slow_path_submit_expiry;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
@@ -34,11 +39,121 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256,
-    H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock,
-    SystemTransactionLedger,
+    BlockBody, CommitmentTransaction, DataTransaction, DataTransactionHeader,
+    DataTransactionHeaderV1, H256, H256List, IrysBlockHeader, IrysTransactionCommon as _,
+    NodeConfig, SealedBlock, SystemTransactionLedger,
 };
 use irys_types::{DataLedger, SendTraced as _, SystemLedger};
+
+/// Shared test-setup result used by both the §4b producer test and the §4c
+/// validator test. Both tests require the same config, two-node topology, and
+/// initial data-tx posting step; only what they do *after* the data block differs.
+pub(super) struct ExpiryTestSetup {
+    pub genesis_config: NodeConfig,
+    pub genesis_node: IrysNodeTest<IrysNodeCtx>,
+    pub peer_node: IrysNodeTest<IrysNodeCtx>,
+    /// The txs posted to the Submit ledger (each with embedded data bytes).
+    pub txs: Vec<DataTransaction>,
+    /// The signer used to post the data txs and to fund the genesis accounts.
+    pub user_signer: irys_types::irys::IrysSigner,
+    /// `num_blocks_in_epoch * submit_ledger_epoch_length` — the height at which
+    /// the genesis Submit slot expires and the expiry epoch block is produced.
+    pub blocks_per_cycle: u64,
+    /// Number of blocks per epoch (= 5 in both tests).
+    pub num_blocks_in_epoch: u64,
+    pub seconds_to_wait: usize,
+}
+
+/// Builds the common two-node expiry setup used by both §4b and §4c tests:
+///   - config: 5-block epochs, 2-epoch Submit ledger, 32-byte chunks, 10-chunk partitions
+///   - starts genesis + peer nodes
+///   - posts `num_chunks_in_partition + 2` single-chunk data txs to overflow one partition
+///     (forces a 2nd Submit slot so the genesis slot is non-last and can expire)
+///   - mines the first data block so the txs land in the Submit ledger
+///
+/// Both tests diverge after this point.
+///
+/// `block_migration_depth` is a parameter so the slow-path test
+/// (`slow_path_submit_expiry.rs`) can set it high enough that an expired tx's
+/// Submit inclusion is still UN-migrated at the verdict block, forcing
+/// `resolve_submit_inclusion`'s by-hash slow path. The §4b/§4c tests pass `1`
+/// (immediate migration → fast path).
+pub(super) async fn submit_expiry_two_node_setup(
+    block_migration_depth: u32,
+) -> eyre::Result<ExpiryTestSetup> {
+    let num_blocks_in_epoch: usize = 5;
+    let submit_ledger_epoch_length: u64 = 2;
+    let chunk_size: u64 = 32;
+    let num_chunks_in_partition: u64 = 10;
+    let blocks_per_cycle = num_blocks_in_epoch as u64 * submit_ledger_epoch_length;
+    let seconds_to_wait = 40_usize;
+
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    {
+        let c = genesis_config.consensus.get_mut();
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.block_migration_depth = block_migration_depth;
+        c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+        // One ingress proof from the genesis signer makes a tx promotable — keeps
+        // both tests single-node on the promotion side.
+        c.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        // Pin Cascade OFF. This is the precondition for the `refunded == expired`
+        // EXACT-equality assertion in `publish_after_submit_expiry_filtered.rs`:
+        // pre-Cascade, Pipeline A's §4b drop set and Pipeline B's refund set are
+        // identical. Under Cascade the §4b filter set is a strict SUPERSET of the
+        // refund set (written-slot / last-write anchoring excludes rescued slots
+        // from refunds but not from the promotion filter), so the exact equality
+        // no longer holds. `ConsensusConfig::testing()` already defaults this to
+        // None, but we pin it explicitly so a default change can't silently break
+        // that assertion. The Cascade-active §4b/§4c path is covered separately by
+        // `cascade_submit_expiry_promotion.rs`.
+        c.hardforks.cascade = None;
+    }
+
+    let user_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&user_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_config = genesis_node.testing_peer_with_signer(&user_signer);
+    let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
+
+    // Post enough single-chunk txs to overflow one partition (forces a 2nd Submit slot
+    // so genesis slot 0 is non-last and expires at blocks_per_cycle).
+    let num_txs = (num_chunks_in_partition + 2) as usize;
+    let anchor = genesis_node.get_anchor().await?;
+    let mut txs = Vec::with_capacity(num_txs);
+    for i in 0..num_txs {
+        let data = vec![100 + i as u8; chunk_size as usize];
+        let tx = genesis_node.post_data_tx(anchor, data, &user_signer).await;
+        genesis_node
+            .wait_for_mempool(tx.header.id, seconds_to_wait)
+            .await?;
+        txs.push(tx);
+    }
+    genesis_node.mine_block().await?;
+
+    // Wait for the peer to sync to the genesis node's canonical height before
+    // returning — downstream tests that exercise the validator path on peer_node
+    // race if we hand back an unsynced peer.
+    let genesis_height = genesis_node.get_canonical_chain_height().await;
+    peer_node
+        .wait_until_height(genesis_height, seconds_to_wait)
+        .await?;
+
+    Ok(ExpiryTestSetup {
+        genesis_config,
+        genesis_node,
+        peer_node,
+        txs,
+        user_signer,
+        blocks_per_cycle,
+        num_blocks_in_epoch: num_blocks_in_epoch as u64,
+        seconds_to_wait,
+    })
+}
 
 // Helper function to send a block directly to the block tree service for validation
 pub(crate) async fn send_block_to_block_tree(

@@ -206,7 +206,7 @@ pub async fn capacity_chunk_solution(
             sleep(Duration::from_millis(200)).await;
             tries += 1;
         }
-        // Never advance past the latest AVAILABLE VDF step. When the #1449 confirmation gate parks
+        // Never advance past the latest AVAILABLE VDF step. When the confirmation gate parks
         // the VDF at a reset boundary, `global_step` stops here; targeting the un-produced boundary
         // step would make `get_steps` fail. Mining a solution at an available step still produces a
         // block, which advances the confirmed step so the gate releases for the next block (exactly
@@ -2153,6 +2153,9 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .timestamp_secs();
             irys_types::UnixTimestamp::from_secs(parent_secs.as_secs() + 1)
         };
+        // Mirror production (block_producer::fetch_best_mempool_txs): the publish
+        // -candidate expiry filter (NC-0042 §4b) resolves expiry per candidate
+        // from the block index + parent epoch snapshot inside the tx selector.
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &self.node_ctx.block_tree_guard,
             db: &self.node_ctx.db,
@@ -2160,6 +2163,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             config: &self.node_ctx.config,
             mempool_state: self.node_ctx.mempool_guard.atomic_state(),
             chunk_ingress_state: &self.node_ctx.chunk_ingress_state,
+            block_index: &self.node_ctx.block_producer_inner.block_index,
+            mempool_guard: &self.node_ctx.mempool_guard,
         };
         irys_actors::tx_selector::select_best_txs(parent_block_hash, new_block_timestamp, &ctx)
             .await

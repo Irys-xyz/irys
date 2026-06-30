@@ -17,7 +17,16 @@ impl SubmitLedgerMetadata {
         num_blocks_in_epoch: u64,
         submit_ledger_epoch_length: u64,
     ) -> Self {
-        let blocks_per_cycle = submit_ledger_epoch_length * num_blocks_in_epoch;
+        // checked_mul matches `TermLedger::get_*_slot_indexes` / `Config::validate`:
+        // an overflowing product must fail loud, not wrap (release builds) into a
+        // bogus tiny cycle length. The `> 0` filter additionally rejects a zero
+        // product (either factor zero): without it `block_height % 0` below panics
+        // opaquely. `Config::validate` rejects such configs, so this only fires on
+        // a call path that bypassed validation (e.g. a test-mode Display/API path).
+        let blocks_per_cycle = submit_ledger_epoch_length
+            .checked_mul(num_blocks_in_epoch)
+            .filter(|b| *b > 0)
+            .expect("submit_ledger_epoch_length * num_blocks_in_epoch must be non-zero and not overflow u64");
         let position_in_cycle = block_height % blocks_per_cycle;
         let epoch_in_cycle = position_in_cycle / num_blocks_in_epoch;
         let epochs_remaining = submit_ledger_epoch_length - epoch_in_cycle;
@@ -30,6 +39,16 @@ impl SubmitLedgerMetadata {
         }
     }
 }
+
+// NOTE: There is deliberately no per-tx "absolute expiry height" helper here.
+// Submit-ledger expiry is a per-*slot* property
+// (`TermLedger::get_all_expired_slot_indexes`): a slot expires at
+// `slot.last_height + blocks_per_cycle`, except the last/newest slot is never
+// expired, and slots are allocated at arbitrary epoch boundaries — not cycle
+// boundaries. A per-tx cycle-math approximation of expiry diverges from this and
+// caused both a false-positive (rejecting valid promotions) and a false-negative
+// (missing a double-pay) in the first NC-0042 fix. Promotion/refund decisions
+// must use the expired-partition set (`ledger_expiry::expired_submit_tx_ids`).
 
 /// Calculates the number of epochs remaining before the submit ledger expires.
 /// Returns a value from 1 to submit_ledger_epoch_length (never 0).

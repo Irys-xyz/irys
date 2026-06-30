@@ -56,10 +56,19 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
     // ==================== ACTION ====================
-    // Post two transactions with permanent fees
     info!("Posting transactions from both users");
 
-    // User1: Transaction that will NOT be promoted (no chunks uploaded)
+    // User1: an UNPROMOTED tx. Mine it ALONE first so it deterministically owns the
+    // lowest chunk offsets (slot 0 — the slot this test expires).
+    //
+    // Why this matters: a block's on-chain tx order is set by `compare_tx`, NOT post
+    // order, so co-locating both txs in one block left which one landed in slot 0 to
+    // chance. The per-tx expiry refund attributes a tx to the partition its START
+    // offset falls in (see the ledger_expiry module doc), so if the *promoted* tx had
+    // sorted into slot 0, the unpromoted tx would sit in a non-expiring slot and get
+    // no refund. The earlier over-inclusive refund walk swept the whole boundary block
+    // and masked this; the NC-0042 fix makes attribution exact, so placement must be
+    // deterministic.
     let tx1 = node
         .post_data_tx(anchor, vec![1_u8; DATA_SIZE], &user1_signer)
         .await;
@@ -69,8 +78,16 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .expect("Transaction should have perm_fee");
     node.wait_for_mempool(tx1.header.id, 10).await?;
     debug!("tx1: id={}, perm_fee={}", tx1.header.id, tx1_perm_fee);
+    let block1 = node.mine_block().await?;
+    assert!(
+        block1
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .is_some_and(|s| s.len() == 1 && s[0] == tx1.header.id),
+        "tx1 (unpromoted) should be alone in slot 0 at block 1"
+    );
 
-    // User2: Transaction that WILL be promoted (chunks uploaded)
+    // User2: a tx that WILL be promoted, mined in the next block (higher slots).
     let tx2 = node
         .post_data_tx(anchor, vec![2_u8; DATA_SIZE], &user2_signer)
         .await;
@@ -80,17 +97,18 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
         .expect("Transaction should have perm_fee");
     node.wait_for_mempool(tx2.header.id, 10).await?;
     debug!("tx2: id={}, perm_fee={}", tx2.header.id, tx2_perm_fee);
+    let block2 = node.mine_block().await?;
 
-    // Mine block to include both transactions in Submit ledger
-    info!("Mining block to include transactions");
-    let block1 = node.mine_block().await?;
-    let tx_ids = block1.get_data_ledger_tx_ids();
-    let submit_txs = tx_ids
-        .get(&DataLedger::Submit)
-        .expect("Submit ledger should have transactions");
+    // tx2 must be in the second Submit block so it occupies a higher slot than tx1
+    // (confirmed-alone-in-slot-1). This is load-bearing: the per-tx expiry
+    // attribution keys on start-offset slot, so a mis-placed tx2 would make the
+    // wrong tx expire and silently invert the refund expectations.
     assert!(
-        submit_txs.contains(&tx1.header.id) && submit_txs.contains(&tx2.header.id),
-        "Both transactions should be in Submit ledger"
+        block2
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::Submit)
+            .is_some_and(|ids| ids.contains(&tx2.header.id)),
+        "tx2 (to-be-promoted) must appear in the second Submit block"
     );
 
     // Upload chunks for tx2 to trigger promotion

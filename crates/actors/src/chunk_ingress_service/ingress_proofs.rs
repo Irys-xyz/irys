@@ -2,10 +2,10 @@ use super::ChunkIngressServiceInner;
 use crate::cache_service::{CacheServiceAction, CacheServiceSender};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
+use irys_database::store_ingress_proof;
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
-use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
@@ -181,22 +181,6 @@ impl ChunkIngressServiceInner {
         } else {
             Ok(())
         }
-    }
-
-    pub(crate) fn remove_ingress_proof(
-        irys_db: &DatabaseProvider,
-        data_root: DataRoot,
-    ) -> Result<(), IngressProofError> {
-        irys_db
-            .update_scoped(|rw_tx| -> Result<(), DatabaseError> {
-                delete_ingress_proof(rw_tx, data_root)
-                    .map_err(|report| DatabaseError::Other(report.to_string()))?;
-                Ok(())
-            })
-            .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
-            .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?;
-
-        Ok(())
     }
 
     pub(crate) fn is_ingress_proof_expired_static(

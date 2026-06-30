@@ -3,6 +3,7 @@ pub(crate) mod helpers;
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
+use crate::mempool_guard::MempoolReadGuard;
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{OptionExt as _, eyre};
@@ -15,7 +16,7 @@ use irys_database::{
     tx_header_by_txid,
 };
 use irys_domain::{
-    BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
+    BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
     HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -77,6 +78,12 @@ pub struct TxSelectionContext<'a> {
     pub config: &'a Config,
     pub mempool_state: &'a AtomicMempoolState,
     pub chunk_ingress_state: &'a ChunkIngressState,
+    /// Canonical block index — the NC-0042 §4b publish-candidate filter uses it
+    /// to resolve each candidate's Submit inclusion block.
+    pub block_index: &'a BlockIndex,
+    /// Mempool guard — used by the §4b filter to read the inclusion block's
+    /// Submit-ledger tx headers (same lookup path as the expiry walk).
+    pub mempool_guard: &'a MempoolReadGuard,
 }
 
 /// Main entry point: selects the best transactions from the mempool for block production.
@@ -564,8 +571,13 @@ pub async fn select_best_txs(
                     continue;
                 }
 
-                // Term-only ledgers must not carry a perm_fee
-                if tx.perm_fee.is_some_and(|f| f > BoundedFee::zero()) {
+                // Term-only ledgers must not carry a perm_fee AT ALL. The validator
+                // (`block_validation` term-ledger prevalidation) and mempool ingress
+                // (`data_txs.rs`) both reject any `perm_fee.is_some()`, so a `Some(0)`
+                // accepted here would make the producer build a block every peer
+                // rejects (producer-more-permissive-than-validator). Match `is_some()`
+                // so the producer can never select such a tx. (NC-0042)
+                if tx.perm_fee.is_some() {
                     debug!(
                         tx.id = ?tx.id,
                         tx.ledger = ?ledger,
@@ -769,6 +781,13 @@ async fn get_publish_txs_and_proofs(
     let mut publish_proofs: Vec<IngressProof> = Vec::new();
     // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
     let next_block_height = current_height + 1;
+    // Parent of the block we're producing (`select_best_txs` truncates the
+    // canonical chain at the parent, so it is the last entry). Bounds the §4b
+    // expiry check to data as of the parent rather than this node's moving tip.
+    let parent_block_header = canonical
+        .last()
+        .ok_or_eyre("canonical chain must contain the parent block")?
+        .header();
 
     // only max anchor age is constrained for ingress proofs
     let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
@@ -875,14 +894,30 @@ async fn get_publish_txs_and_proofs(
         // `Validated` entry can leak its Submit tx_ids here, making the
         // fast-path say "already submitted" for a tx whose Submit inclusion is
         // about to be rolled back. The producer then skips the DB fallback
-        // (line ~893) and includes the tx as a publish candidate; peer
-        // validators catch any genuine double-publish via Vector B's
-        // canonical-DB check, so the worst case is a rejected block (no
-        // consensus impact, producer pays the cost).
+        // and includes the tx as a publish candidate; peer validators catch any
+        // genuine double-publish via Vector B's canonical-DB check, so the worst
+        // case is a rejected block (no consensus impact, producer pays the cost).
         let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
             acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
             acc
         });
+
+        // NC-0042 §4b: the expired-Submit range is the same for every candidate,
+        // so compute it once here and reuse it per-candidate via `submit_tx_expired`
+        // (which then costs at most one canonical Submit-height read each). `None`
+        // means nothing has expired as of this block → no candidate is filtered.
+        let cascade_active_for_block = ctx
+            .config
+            .consensus
+            .hardforks
+            .is_cascade_active_at(current_timestamp);
+        let expired_submit_range = crate::block_producer::ledger_expiry::expired_submit_range(
+            next_block_height,
+            epoch_snapshot,
+            parent_block_header,
+            ctx.config,
+            cascade_active_for_block,
+        )?;
 
         for tx_header in &tx_headers {
             debug!(
@@ -906,14 +941,17 @@ async fn get_publish_txs_and_proofs(
             // ledgers (OneYear / ThirtyDay) reject `ledger_id == Publish` at
             // structural validation, so a `Some` from the canonical DB index
             // is sufficient evidence of prior Submit.
+            //
+            // Prior-Submit gate: live-tree candidates are in the canonical fold;
+            // others must have a canonical (migrated) Submit inclusion. The §4b
+            // expiry check below resolves the inclusion itself (branch-correct),
+            // so we only need the gate's continue-on-missing side effect here.
             if !submit_txs_from_canonical.contains(&tx_header.id) {
                 match ctx
                     .db
                     .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
                 {
-                    Ok(Some(_)) => {
-                        // canonical Submit inclusion past the live-tree window
-                    }
+                    Ok(Some(_)) => {}
                     Ok(None) => {
                         warn!(
                             tx.id = ?tx_header.id,
@@ -940,6 +978,34 @@ async fn get_publish_txs_and_proofs(
                         continue;
                     }
                 }
+            }
+
+            // NC-0042 §4b: drop publish candidates whose Submit-ledger storage has
+            // expired as of the block we're producing. `submit_tx_expired` is the
+            // per-candidate form of the expired-tx set that the refund pipeline
+            // (Pipeline B) acts on, so "is this tx refunded?" and "may this tx be
+            // promoted?" cannot diverge. A tx that is expired here is (or will be,
+            // at the next epoch) perm-fee-refunded; promoting it would be a
+            // same-block or cross-block double-pay.
+            if let Some(range) = &expired_submit_range
+                && crate::block_producer::ledger_expiry::submit_tx_expired(
+                    tx_header.id,
+                    range,
+                    ctx.config,
+                    ctx.block_index,
+                    ctx.block_tree,
+                    ctx.mempool_guard,
+                    ctx.db,
+                )
+                .await?
+            {
+                warn!(
+                    tx.id = ?tx_header.id,
+                    tx.data_root = ?tx_header.data_root,
+                    next_block_height,
+                    "Submit-ledger storage expired; tx is non-promotable (would conflict with perm_fee refund) — see NC-0042",
+                );
+                continue;
             }
 
             // If it's not promoted, validate the proofs

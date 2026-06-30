@@ -137,6 +137,11 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     let config = genesis_node.node_ctx.config.clone();
     let mempool_guard = genesis_node.node_ctx.mempool_guard.clone();
     let chunk_ingress_state = genesis_node.node_ctx.chunk_ingress_state.clone();
+    let block_index = genesis_node
+        .node_ctx
+        .block_producer_inner
+        .block_index
+        .clone();
     let parent_hash = parent.block_hash;
     let parent_timestamp = {
         let tree = block_tree.read();
@@ -146,6 +151,8 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
     };
 
     let result = tokio::task::spawn(async move {
+        // This test exercises stale-txid handling in the publish-candidate path,
+        // not Submit-ledger expiry, so no tx is expired here.
         let ctx = irys_actors::tx_selector::TxSelectionContext {
             block_tree: &block_tree,
             db: &db,
@@ -153,6 +160,8 @@ async fn stale_txid_in_cached_data_root_blocks_block_production() -> eyre::Resul
             config: &config,
             mempool_state: mempool_guard.atomic_state(),
             chunk_ingress_state: &chunk_ingress_state,
+            block_index: &block_index,
+            mempool_guard: &mempool_guard,
         };
         irys_actors::tx_selector::select_best_txs(
             parent_hash,

@@ -1,4 +1,5 @@
 mod perm_refund;
+mod perm_refund_multi_miner;
 
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;
@@ -99,8 +100,12 @@ async fn heavy_ledger_expiry_multiple_txs_per_block() -> eyre::Result<()> {
         num_blocks_in_epoch: 3,
         num_transactions: 7,
         txs_per_block: 2,
-        data_size_per_tx: 32,         // 1 chunk per tx
-        expected_expired_tx_count: 5, // first slot expires
+        data_size_per_tx: 32, // 1 chunk per tx
+        // Two Submit slots expire (slot 0 = chunks [0,5) = tx0-4, slot 1 = [5,10)
+        // = tx5,tx6) → all 7 txs, each once: the walk must include slot 1's
+        // not-yet-migrated tail txs rather than truncating at the migration-lagged
+        // block-index tip (NC-0042 R1).
+        expected_expired_tx_count: 7,
     })
     .await
 }
@@ -183,8 +188,12 @@ async fn heavy_ledger_expiry_multiple_partitions_expire() -> eyre::Result<()> {
         num_blocks_in_epoch: 3,        // Changed to 3 blocks per epoch
         num_transactions: 10,          // 10 txs that span boundaries
         txs_per_block: 4,
-        data_size_per_tx: 64,         // 2 chunks per tx to span boundaries
-        expected_expired_tx_count: 6, // First 6 txs expire (slots 0-2)
+        data_size_per_tx: 64, // 2 chunks per tx to span boundaries
+        // Slots 0,1,2 expire (chunk range [0,9)). By the "owned by the partition
+        // its start offset falls in" rule, that's tx0-4 (starts 0,2,4,6,8 < 9) —
+        // 5 txs, each once — boundary-block txs are attributed to a single slot
+        // by start offset, not double-counted across per-slot events (NC-0042).
+        expected_expired_tx_count: 5,
     })
     .await
 }

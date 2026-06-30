@@ -305,8 +305,10 @@ impl EpochSnapshot {
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
-        // Cascade activation and the retention `last_height` touch both gate on
-        // the same activation timestamp; evaluate the gate once.
+        // The retention `last_height` refresh gates on Cascade activation; the
+        // "this slot has canonical data" marker is updated unconditionally so
+        // post-Cascade expiry can distinguish written slots from empty preallocations
+        // (pre-Cascade, allocation-aged unwritten slots still expire).
         let cascade_active = self
             .config
             .consensus
@@ -324,25 +326,23 @@ impl EpochSnapshot {
 
         self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
 
-        // Cascade retention fix: a slot's expiry clock should count from the
-        // last epoch data was written into it, not from when it was allocated.
-        // Gated on the Cascade hardfork so pre-activation replay is unchanged.
-        // Must run AFTER allocation (so this epoch's new slots exist) and BEFORE
-        // expiry (so freshly-written slots aren't expired this same epoch).
+        // Update the canonical write window AFTER allocation (so this epoch's
+        // new slots exist) and BEFORE expiry (so freshly-written slots aren't
+        // expired this same epoch). The "was ever written" marker is always
+        // updated; only the last-write-height refresh is Cascade-gated.
         //
         // LOCKSTEP: the recycle set produced here (touch then `expire_ledger_slots`
         // on this post-touch snapshot) MUST equal the set the fee model settles,
         // which `block_producer::ledger_expiry` derives by calling
         // `get_expiring_partition_info` on the PARENT snapshot with the same
-        // window exclusion. Both the touch above and that exclusion are gated on
-        // this same `cascade_active` (the new epoch block's Cascade status); if
-        // one is gated and the other isn't they diverge — a slot would recycle
-        // here yet still be settled, or vice versa. Keep the two gates aligned.
-        if cascade_active {
-            self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block);
-        }
+        // window exclusion. The last-height refresh above and that exclusion are
+        // gated on this same `cascade_active` (the new epoch block's Cascade
+        // status); if one is gated and the other isn't they diverge — a slot
+        // would recycle here yet still be settled, or vice versa. Keep the two
+        // gates aligned.
+        self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block, cascade_active);
 
-        self.expire_ledger_slots(new_epoch_block);
+        self.expire_ledger_slots(new_epoch_block, cascade_active);
 
         self.apply_unpledges(&new_epoch_commitments)?;
 
@@ -508,10 +508,10 @@ impl EpochSnapshot {
     /// Loops through all ledgers and looks for slots that are older
     /// than their configured epoch length. Marks them expired and stores
     /// the expired partition hashes in the epoch snapshot.
-    fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader) {
+    fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader, cascade_active: bool) {
         let epoch_height = new_epoch_block.height;
         let expired_partitions: Vec<ExpiringPartitionInfo> =
-            self.ledgers.expire_partitions(epoch_height);
+            self.ledgers.expire_partitions(epoch_height, cascade_active);
 
         // Return early if there's no more work to do
         if expired_partitions.is_empty() {
@@ -562,11 +562,12 @@ impl EpochSnapshot {
     /// the per-ledger cumulative `total_chunks` between the previous and current
     /// epoch blocks (the same values `calculate_additional_slots` reads).
     ///
-    /// Caller gates this on the Cascade hardfork.
+    /// Caller passes whether the last-write-height refresh is Cascade-active.
     fn touch_active_ledger_slots(
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
+        refresh_last_height: bool,
     ) {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         for ledger in self.ledgers.active_ledgers() {
@@ -581,6 +582,7 @@ impl EpochSnapshot {
                 new_total,
                 chunks_per_slot,
                 new_epoch_block.height,
+                refresh_last_height,
             );
         }
     }
@@ -1365,10 +1367,26 @@ impl EpochSnapshot {
         };
 
         self.ledgers
-            .get_expiring_partitions(epoch_height)
+            .get_expiring_partitions(epoch_height, cascade_active)
             .into_iter()
             .filter(|info| info.ledger_id == ledger && !written_this_epoch(info.slot_index))
             .collect()
+    }
+
+    /// Slot indexes of the given term `ledger` whose storage has expired as of
+    /// `epoch_height`, **inclusive** of slots that expired at an earlier epoch.
+    /// Unlike `get_expiring_partition_info` (newly-expiring only, used by the
+    /// refund pipeline), this is the set the NC-0042 publish-candidate filter and
+    /// validator check key on: a tx is non-promotable for every block at-or-after
+    /// its Submit slot's expiry. See `Ledgers::get_all_expired_term_slot_indexes`.
+    pub fn get_all_expired_term_slot_indexes(
+        &self,
+        ledger: DataLedger,
+        epoch_height: u64,
+        cascade_active: bool,
+    ) -> Vec<usize> {
+        self.ledgers
+            .get_all_expired_term_slot_indexes(ledger, epoch_height, cascade_active)
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {

@@ -225,25 +225,32 @@ pub(crate) fn cli_init_reth_provider() -> eyre::Result<(
 }
 
 pub(crate) fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {
-    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+    use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
 
     let config = load_node_config_from_env()?;
     let db_path = config.irys_consensus_data_dir();
 
     let db_env = match access {
         DatabaseEnvKind::RW => {
-            let db = open_or_create_irys_consensus_data_db(&db_path, config.database.sync_mode)?;
+            // Honor the full database config (sync mode AND geometry_max_size),
+            // same as the node path in chain.rs — not just the sync mode.
+            let db = open_or_create_irys_consensus_data_db_with_args(
+                &db_path,
+                irys_database::consensus_db_args(&config.database)?,
+            )?;
             irys_database::migration::ensure_db_version_compatible(&db)?;
             db
         }
         DatabaseEnvKind::RO => {
-            let db = DatabaseEnv::open(
-                &db_path,
-                access,
-                irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
-                    .with_log_level(None)
-                    .with_exclusive(Some(false)),
-            )?;
+            // Honor the consensus DB geometry (same as the RW path and the node),
+            // then layer the RO-specific flags on top — so a read-only open against
+            // a test/constrained-geometry config doesn't reserve reth's large
+            // default map. (Opening an existing DB maps its on-disk geometry; this
+            // keeps the virtual-address-space reservation aligned with the RW path.)
+            let args = irys_database::consensus_db_args(&config.database)?
+                .with_log_level(None)
+                .with_exclusive(Some(false));
+            let db = DatabaseEnv::open(&db_path, access, args)?;
             //note: any migrations will fail, as this is RO env, but if they needed to run the database was out of date and you should open it as RW and migrate it first before continuing.
             irys_database::migration::ensure_db_version_compatible(&db)?;
             db

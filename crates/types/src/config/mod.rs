@@ -103,6 +103,24 @@ impl Config {
             );
         }
 
+        // Chunk/partition/recall sizing must be non-zero. Zero breaks every
+        // chunk-offset and slot computation: e.g. ledger-expiry `compute_chunk_range`
+        // / `expired_submit_range` would make the §4b/§4c filter silently no-op
+        // (range_end collapses to 0), while the refund walk bails — an asymmetric
+        // silent bypass. `chunk_size == 0` is the same hazard one level down:
+        // `submit_tx_start_offset` returns `None` (→ tx read as "not expired") while
+        // `filter_transactions_by_chunk_range` bails loud. The `div_ceil` below would
+        // also panic on a zero recall range. Reject loudly here. (NC-0042)
+        ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
+        ensure!(
+            self.consensus.num_chunks_in_partition > 0,
+            "num_chunks_in_partition must be > 0"
+        );
+        ensure!(
+            self.consensus.num_chunks_in_recall_range > 0,
+            "num_chunks_in_recall_range must be > 0"
+        );
+
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
         let minimum_step_capacity = self
             .consensus
@@ -123,21 +141,31 @@ impl Config {
             "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
         );
 
-        // The reset-boundary confirmation gate (issue #1447) parks the VDF loop at a boundary
+        // The reset-boundary confirmation gate parks the VDF loop at a boundary
         // until the rotation block is confirmed (block_migration_depth deep). For the gate to
         // reopen before the next boundary — i.e. for honest mining not to wedge — a reset
         // window must comfortably outspan the confirmation lag. With the VDF clocked at ~1
         // step/sec a block spans ~block_time steps, so the lag is block_migration_depth blocks
-        // ≈ block_migration_depth * block_time steps; require 2x that for headroom. See
-        // design/docs/vdf-reset-seed-confirmation-gate.md.
+        // ≈ block_migration_depth * block_time steps; require 2x that for headroom.
         let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
         let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
             .saturating_mul(self.consensus.difficulty_adjustment.block_time);
+        // Reject rather than clamp: a saturating 2x would floor the requirement and
+        // could accept an under-sized reset window when the true 2x overflows u64.
+        let required_reset_window_steps =
+            confirmation_lag_steps.checked_mul(2).ok_or_else(|| {
+                eyre::eyre!(
+                    "2x the confirmation lag overflows u64 (confirmation lag {} steps = block_migration_depth {} x block_time {}s); reduce block_migration_depth or block_time",
+                    confirmation_lag_steps,
+                    self.consensus.block_migration_depth,
+                    self.consensus.difficulty_adjustment.block_time,
+                )
+            })?;
         ensure!(
-            reset_window_steps >= confirmation_lag_steps.saturating_mul(2),
-            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary (issue #1447 gate)",
+            reset_window_steps >= required_reset_window_steps,
+            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary",
             reset_window_steps,
-            confirmation_lag_steps.saturating_mul(2),
+            required_reset_window_steps,
             self.consensus.block_migration_depth,
             self.consensus.difficulty_adjustment.block_time,
         );
@@ -243,14 +271,117 @@ impl Config {
             );
         }
 
+        // These feed the slot-lifetime / expiry multiply (`epoch_length *
+        // num_blocks_in_epoch`) on every path, including test mode where the
+        // slot-lifetime > block_tree_depth guard below is skipped. A zero in either
+        // collapses every slot's lifetime to 0 blocks (so every slot reads as expired
+        // immediately) and can panic the runtime `checked_mul(...).expect(...)` expiry
+        // math. Reject unconditionally, matching the publish_ledger_epoch_length check.
+        ensure!(
+            self.consensus.epoch.num_blocks_in_epoch > 0,
+            "num_blocks_in_epoch must be > 0"
+        );
+        ensure!(
+            self.consensus.epoch.submit_ledger_epoch_length > 0,
+            "submit_ledger_epoch_length must be > 0"
+        );
+
+        // NC-0042 / deep-reorg safety: a term-ledger slot's lifetime must exceed
+        // the reorg window. Once a slot expires, the promotion filter and refund
+        // walk resolve each expired tx's ledger inclusion through the *migrated*
+        // block index (`canonical_submit_height` / `migrated_predecessor_total`),
+        // which is only branch-invariant BELOW the reorg floor. Deep reorgs
+        // can now rewind already-migrated blocks up to `block_tree_depth`
+        // deep, so if a slot's lifetime is shorter than that window it could
+        // expire while an expired tx's inclusion is still reorg-mutable — two
+        // honest nodes could then resolve different inclusions and fork. A slot
+        // lives `epoch_length * num_blocks_in_epoch` blocks, so require that to
+        // exceed `block_tree_depth` for every ledger whose expiry is resolved
+        // this way.
+        //
+        // Enforced for real networks only: test configs deliberately use tiny
+        // epochs and never trigger deep adversarial reorgs (resolution there
+        // stays within the controlled, shallow-reorg regime).
+        if !self.node_config.run_mode.is_test() {
+            let num_blocks_in_epoch = self.consensus.epoch.num_blocks_in_epoch;
+            // (config field, epochs-until-expiry) for every ledger whose
+            // expired-tx inclusion is resolved via the migrated block index.
+            //
+            // `publish_ledger_epoch_length` is intentionally NOT in this list:
+            // Publish-ledger expiry never resolves an expired tx's inclusion through
+            // the migrated-index / by-hash walk this guard protects (only Submit and
+            // the Cascade term ledgers do — see `ledger_expiry`), so its lifetime
+            // need not exceed `block_tree_depth`. (It has its own overflow check
+            // above.)
+            let mut slot_lifetimes = vec![(
+                "submit_ledger_epoch_length",
+                self.consensus.epoch.submit_ledger_epoch_length,
+            )];
+            // The Cascade term ledgers (OneYear/ThirtyDay) expire and refund via
+            // the same migrated-index walk; ThirtyDay is the tightest bound.
+            if let Some(cascade) = self.consensus.hardforks.cascade.as_ref() {
+                slot_lifetimes.push((
+                    "cascade.thirty_day_epoch_length",
+                    cascade.thirty_day_epoch_length,
+                ));
+                slot_lifetimes.push((
+                    "cascade.one_year_epoch_length",
+                    cascade.one_year_epoch_length,
+                ));
+            }
+            for (field, epoch_length) in slot_lifetimes {
+                // checked_mul, not saturating: an overflowing product would clamp to
+                // u64::MAX and silently satisfy the `> block_tree_depth` guard below,
+                // yet the runtime expiry math (`TermLedger::get_expired_slot_indexes`'s
+                // `checked_mul(...).expect(...)`) would then panic on the same overflow.
+                // Reject it here, matching the publish_ledger_epoch_length check above.
+                let slot_lifetime_blocks = epoch_length
+                    .checked_mul(num_blocks_in_epoch)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "{field} ({epoch_length}) * num_blocks_in_epoch \
+                             ({num_blocks_in_epoch}) overflows u64"
+                        )
+                    })?;
+                ensure!(
+                    slot_lifetime_blocks > self.consensus.block_tree_depth,
+                    "{field} ({epoch_length}) * num_blocks_in_epoch ({num_blocks_in_epoch}) = slot \
+                     lifetime {slot_lifetime_blocks} blocks must be > block_tree_depth ({}): \
+                     expired-tx promotion/refund resolution reads the migrated block index, which \
+                     deep reorgs can rewind up to block_tree_depth deep — a shorter slot lifetime \
+                     leaves an expired tx's inclusion reorg-mutable, risking a consensus fork \
+                     (NC-0042)",
+                    self.consensus.block_tree_depth,
+                );
+            }
+
+            // Tx anchors must resolve INSIDE the reorg window so prevalidation's
+            // inclusion/anchor walks can confirm them branch-correctly by-hash. A
+            // tx anchored older than the tree would fall to the by-height index/MBH
+            // shortcut, which is only branch-invariant below the reorg floor
+            // — see `get_previous_tx_inclusions` and the ingress-anchor walk in
+            // `block_discovery`. `tx_anchor_expiry_depth` bounds how old a tx anchor
+            // can be, so cap it at `block_tree_depth`. (`ingress_proof_anchor_expiry_depth`
+            // is deliberately NOT capped: ingress anchors past the floor are resolved
+            // from the finalized index, which is safe.)
+            ensure!(
+                u64::from(self.consensus.mempool.tx_anchor_expiry_depth)
+                    <= self.consensus.block_tree_depth,
+                "tx_anchor_expiry_depth ({}) must be <= block_tree_depth ({}): a tx anchored older \
+                 than the reorg window would be resolved via the by-height index shortcut, which is \
+                 only branch-invariant below the reorg floor — risking a consensus fork",
+                self.consensus.mempool.tx_anchor_expiry_depth,
+                self.consensus.block_tree_depth,
+            );
+        }
+
         // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
         // version.  When > 0, the value flows through `get_assigned_ingress_proofs`
         // (block_validation.rs) where the per-proof intersection loop picks
         // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
         // consensus-fork vector when `block_range` straddles multiple Submit
-        // slots.  The determinism fix lives on `fix/assigned-miners-determinism`
-        // and is a consensus rule change that must be coordinated with a
-        // network upgrade.  Under all currently-deployed configs the value is
+        // slots.  The determinism fix is a consensus rule change that must be
+        // coordinated with a network upgrade.  Under all currently-deployed configs the value is
         // 0 and the non-deterministic path is vacuous; raising it without the
         // determinism fix risks divergence between nodes.
         //
@@ -264,7 +395,7 @@ impl Config {
                 .number_of_ingress_proofs_from_assignees
                 == 0,
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
-             until fix/assigned-miners-determinism lands — the current `get_assigned_ingress_proofs` \
+             until the assigned-miners determinism fix lands — the current `get_assigned_ingress_proofs` \
              impl picks `assigned_miners` via non-deterministic HashMap iteration when \
              block_range intersects multiple Submit slots",
             self.consensus
@@ -276,7 +407,7 @@ impl Config {
             ensure!(
                 fork.number_of_ingress_proofs_from_assignees == 0,
                 "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
-                 must be 0 until fix/assigned-miners-determinism lands — see frontier guard above",
+                 must be 0 until the assigned-miners determinism fix lands — see frontier guard above",
                 fork.number_of_ingress_proofs_from_assignees,
             );
         }
@@ -1149,6 +1280,125 @@ mod tests {
             .publish_ledger_epoch_length = Some(u64::MAX);
         let config = Config::new_with_random_peer_id(node_config);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_submit_slot_lifetime_vs_block_tree_depth_validation() {
+        // NC-0042 / deep-reorg guard: in non-test (production) mode a term-ledger
+        // slot's lifetime (epoch_length * num_blocks_in_epoch) must exceed
+        // block_tree_depth, so an expired tx's inclusion is always below the reorg
+        // floor where the migrated-index fast path is branch-invariant. The
+        // testing default block_tree_depth is 50.
+
+        // Production, lifetime <= block_tree_depth -> rejected.
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        // submit_ledger_epoch_length default 5 * num_blocks_in_epoch 5 = 25 <= 50.
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = 5;
+        let config = Config::new_with_random_peer_id(node_config);
+        let err = config
+            .validate()
+            .expect_err("slot lifetime <= block_tree_depth must fail in production")
+            .to_string();
+        assert!(
+            err.contains("NC-0042"),
+            "expected the slot-lifetime guard, got: {err}"
+        );
+
+        // Production, lifetime > block_tree_depth (default 5 * 100 = 500 > 50) -> ok.
+        let node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // Test mode: the guard is skipped even when the invariant is violated.
+        let mut node_config = NodeConfig::testing(); // RunMode::Test
+        node_config.consensus.get_mut().epoch.num_blocks_in_epoch = 5; // 25 <= 50
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(
+            config.validate().is_ok(),
+            "test-mode configs must skip the slot-lifetime guard"
+        );
+
+        // Cascade arm: a Cascade term-ledger whose lifetime <= block_tree_depth is
+        // rejected even when Submit passes. submit 5 * 11 = 55 > 50 (ok), but
+        // thirty_day 4 * 11 = 44 <= 50 — so the guard must fire on the Cascade arm.
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 11;
+            c.hardforks.cascade = Some(crate::hardfork_config::Cascade {
+                activation_timestamp: crate::UnixTimestamp::from_secs(0),
+                one_year_epoch_length: 365, // 365 * 11 = 4015 > 50 (ok)
+                thirty_day_epoch_length: 4, // 4 * 11 = 44 <= 50 (fails)
+                annual_cost_per_gb: crate::hardfork_config::Cascade::default_annual_cost_per_gb(),
+            });
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("a Cascade term-ledger lifetime <= block_tree_depth must fail")
+            .to_string();
+        assert!(
+            err.contains("cascade.thirty_day_epoch_length") && err.contains("NC-0042"),
+            "expected the Cascade thirty-day slot-lifetime guard, got: {err}"
+        );
+
+        // Overflow: epoch_length * num_blocks_in_epoch must be rejected (not saturated
+        // to u64::MAX), so a config that validates can't later panic in the runtime
+        // expiry math (`TermLedger::get_expired_slot_indexes`'s checked_mul.expect).
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 2;
+            c.epoch.submit_ledger_epoch_length = u64::MAX; // u64::MAX * 2 overflows
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("an overflowing slot lifetime must be rejected, not saturated")
+            .to_string();
+        assert!(
+            err.contains("overflows u64"),
+            "expected the slot-lifetime overflow guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_tx_anchor_expiry_depth_vs_block_tree_depth_validation() {
+        // Production: tx_anchor_expiry_depth must not exceed block_tree_depth, so a
+        // tx anchor always resolves inside the reorg window (branch-correct by-hash).
+        // testing default is block_tree_depth = 50.
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        node_config
+            .consensus
+            .get_mut()
+            .mempool
+            .tx_anchor_expiry_depth = 60; // > 50
+        let config = Config::new_with_random_peer_id(node_config);
+        let err = config
+            .validate()
+            .expect_err("tx_anchor_expiry_depth > block_tree_depth must fail in production")
+            .to_string();
+        assert!(
+            err.contains("tx_anchor_expiry_depth"),
+            "expected the tx-anchor vs tree-depth guard, got: {err}"
+        );
+
+        // Production: tx_anchor_expiry_depth == block_tree_depth (testing default 50) -> ok.
+        let node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(config.validate().is_ok());
+
+        // Test mode: the guard is skipped even when violated (tests set tiny
+        // block_tree_depth without lowering tx_anchor_expiry_depth).
+        let mut node_config = NodeConfig::testing(); // RunMode::Test
+        node_config
+            .consensus
+            .get_mut()
+            .mempool
+            .tx_anchor_expiry_depth = 60;
+        let config = Config::new_with_random_peer_id(node_config);
+        assert!(
+            config.validate().is_ok(),
+            "test-mode configs must skip the tx-anchor vs tree-depth guard"
+        );
     }
 
     #[test]

@@ -52,7 +52,7 @@ use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reward_curve::HalvingCurve;
-use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
+use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db_with_args;
 use irys_types::BlockHash;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{
@@ -2774,9 +2774,10 @@ fn init_reth_db(
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
-    let irys_db_env = open_or_create_irys_consensus_data_db(
+    let irys_db_env = open_or_create_irys_consensus_data_db_with_args(
         node_config.irys_consensus_data_dir(),
-        node_config.database.sync_mode,
+        // Args (incl. the test geometry cap) derived from the node's DatabaseConfig.
+        irys_database::consensus_db_args(&node_config.database)?,
     )?;
     irys_database::migration::ensure_db_version_compatible(&irys_db_env)?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
