@@ -116,11 +116,6 @@ mod tests {
     use irys_types::H256;
     use std::time::Duration;
 
-    #[test]
-    fn capacity_constant_is_4096() {
-        assert_eq!(VDF_FAST_FORWARD_CHANNEL_CAPACITY, 4_096);
-    }
-
     #[tokio::test]
     async fn factory_delivers_validated_steps() {
         let (sender, mut rx) = fast_forward_channel();

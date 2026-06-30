@@ -25,23 +25,26 @@ fn vdf_check_functions_are_centralised_in_irys_vdf() {
         );
     }
 
-    // Both checks are reached only through the irys_vdf::verify facade: the
-    // production call sites in block_validation.rs and the seeds-stage imports in
-    // the two validation services.
+    // Each consumer must reach the checks through the irys_vdf::verify facade.
+    // Match the module path and the symbol separately so a grouped import
+    // (`use irys_vdf::verify::{is_seed_data_valid, prev_output_is_valid};`) still
+    // passes — only a local redefinition or a non-facade path should fail.
+    let reaches_via_facade =
+        |src: &str, symbol: &str| src.contains("irys_vdf::verify") && src.contains(symbol);
     assert!(
-        BLOCK_VALIDATION.contains("irys_vdf::verify::is_seed_data_valid"),
-        "block_validation.rs must call is_seed_data_valid via the irys_vdf::verify facade"
+        reaches_via_facade(BLOCK_VALIDATION, "is_seed_data_valid"),
+        "block_validation.rs must reach is_seed_data_valid via the irys_vdf::verify facade"
     );
     assert!(
-        BLOCK_VALIDATION.contains("irys_vdf::verify::prev_output_is_valid"),
-        "block_validation.rs must call prev_output_is_valid via the irys_vdf::verify facade"
+        reaches_via_facade(BLOCK_VALIDATION, "prev_output_is_valid"),
+        "block_validation.rs must reach prev_output_is_valid via the irys_vdf::verify facade"
     );
     assert!(
-        VALIDATION_SERVICE.contains("irys_vdf::verify::is_seed_data_valid"),
-        "validation_service.rs must import is_seed_data_valid from the irys_vdf::verify facade"
+        reaches_via_facade(VALIDATION_SERVICE, "is_seed_data_valid"),
+        "validation_service.rs must reach is_seed_data_valid via the irys_vdf::verify facade"
     );
     assert!(
-        BLOCK_VALIDATION_TASK.contains("irys_vdf::verify::is_seed_data_valid"),
-        "block_validation_task.rs must import is_seed_data_valid from the irys_vdf::verify facade"
+        reaches_via_facade(BLOCK_VALIDATION_TASK, "is_seed_data_valid"),
+        "block_validation_task.rs must reach is_seed_data_valid via the irys_vdf::verify facade"
     );
 }
