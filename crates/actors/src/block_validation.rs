@@ -4531,53 +4531,30 @@ async fn generate_expected_shadow_transactions(
             .consensus
             .hardforks
             .is_cascade_active_at(block.timestamp_secs());
-        let mut result = ledger_expiry::calculate_expired_ledger_fees(
-            &parent_epoch_snapshot,
-            &prev_block,
-            block.height,
-            DataLedger::Submit,
-            config,
-            block_index.clone(),
-            block_tree_guard,
-            mempool_guard,
-            db,
-            true, // expect txs to be promoted — return perm fee refund if not
-            block.ledger_total_chunks(DataLedger::Submit),
-            cascade_active_for_block,
-        )
-        .in_current_span()
-        .await
-        .map_err(node_fault)?;
-
-        // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
-        let cascade_active = config
+        let cascade_active_for_epoch = config
             .consensus
             .hardforks
             .is_cascade_active_for_epoch(&parent_epoch_snapshot);
-        if cascade_active {
-            for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
-                let delta = ledger_expiry::calculate_expired_ledger_fees(
-                    &parent_epoch_snapshot,
-                    &prev_block,
-                    block.height,
-                    ledger,
-                    config,
-                    block_index.clone(),
-                    block_tree_guard,
-                    mempool_guard,
-                    db,
-                    false, // no promotion for these ledgers
-                    block.ledger_total_chunks(ledger),
-                    cascade_active_for_block,
-                )
-                .in_current_span()
-                .await
-                .map_err(node_fault)?;
-                result.merge(delta);
-            }
-        }
-
-        result
+        // Each ledger's cumulative `total_chunks` is read straight from the header
+        // being validated — the producer computed the identical value, so both
+        // settle the same expiring set. Shared with the producer so the
+        // Submit + Cascade-gated term-ledger settlement cannot drift between sides.
+        ledger_expiry::calculate_all_expired_ledger_fees(
+            &parent_epoch_snapshot,
+            &prev_block,
+            block.height,
+            config,
+            &block_index,
+            block_tree_guard,
+            mempool_guard,
+            db,
+            cascade_active_for_block,
+            cascade_active_for_epoch,
+            |ledger| block.ledger_total_chunks(ledger),
+        )
+        .in_current_span()
+        .await
+        .map_err(node_fault)?
     } else {
         ledger_expiry::LedgerExpiryBalanceDelta::default()
     };
@@ -4631,6 +4608,23 @@ async fn generate_expected_shadow_transactions(
     // slot expired at an *earlier* epoch (cross-block double-pay, devnet 39962)
     // are both in the set. A tx whose Submit inclusion is in this very block
     // (same-block Submit→Publish) is not — its slot can't have expired yet.
+    //
+    // CLEAN-CUTOVER DECISION (NC-0042 P1, deliberate — confirmed off-chain): this
+    // rejection — and the refund/fee-algorithm changes it interlocks with (the
+    // per-slot miner attribution, sole-block dual-trim, and dropped +1 chunk-advance
+    // in `ledger_expiry`) — are NOT Cascade-gated. Only the *slot-set selection*
+    // (the write-window exclusion in `get_expiring_partition_info`) is. So a node
+    // replaying history from genesis applies these rules to PRE-Cascade blocks too
+    // (`expired_submit_range` still returns allocation-anchored expired slots when
+    // `cascade_active=false`). We accept this because no persistent (mainnet /
+    // non-resettable-testnet) pre-softfork data-tx history exists that could trip it
+    // — the only blocks it would newly reject are exactly the buggy
+    // already-expired-promotion blocks this fix exists to forbid, which must not
+    // exist on any chain we replay. If that assumption is ever falsified, gate this
+    // block and the refund-algorithm changes behind
+    // `is_cascade_active_at(block.timestamp_secs())` so pre-activation replay
+    // reproduces old behavior bit-for-bit. Pinned by the mixed-mode test
+    // `slow_heavy_cascade_midchain_submit_expiry_refunds_across_activation`.
     {
         // The expired-Submit range is the same for every publish tx in this block,
         // so resolve it once and reuse it per-candidate. Locally derived (parent
@@ -6099,7 +6093,7 @@ enum TxInclusionState {
 /// production (so the reorg window is the binding term there); `max` keeps this
 /// correct for test configs that set a tiny `block_tree_depth` without lowering
 /// `tx_anchor_expiry_depth`. See the [`get_previous_tx_inclusions`] docblock.
-fn prior_inclusion_walk_depth(config: &Config) -> u64 {
+pub(crate) fn prior_inclusion_walk_depth(config: &Config) -> u64 {
     u64::from(config.consensus.mempool.tx_anchor_expiry_depth)
         .max(config.consensus.block_tree_depth)
 }

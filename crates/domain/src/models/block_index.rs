@@ -204,7 +204,7 @@ impl BlockIndex {
                     .find(|item| item.ledger == ledger)
                     .map(|item| item.total_chunks)
                     .unwrap_or(0);
-                prev_total + chunks_added
+                prev_total.saturating_add(chunks_added)
             } else {
                 chunks_added
             };

@@ -1114,8 +1114,9 @@ pub trait BlockProdStrategy {
             &mempool_bundle.publish_txs.txs,
             self.inner().config.consensus.chunk_size,
         );
-        let publish_total_chunks =
-            prev_block_header.data_ledgers[DataLedger::Publish].total_chunks + publish_chunks_added;
+        let publish_total_chunks = prev_block_header.data_ledgers[DataLedger::Publish]
+            .total_chunks
+            .saturating_add(publish_chunks_added);
         let opt_proofs = mempool_bundle.publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
@@ -1184,8 +1185,9 @@ pub trait BlockProdStrategy {
         }
         let chunk_size = self.inner().config.consensus.chunk_size;
         let submit_chunks_added = calculate_chunks_added(&mempool_bundle.submit_txs, chunk_size);
-        let submit_total_chunks =
-            prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
+        let submit_total_chunks = prev_block_header.data_ledgers[DataLedger::Submit]
+            .total_chunks
+            .saturating_add(submit_chunks_added);
 
         let cascade_active = self
             .inner()
@@ -1294,7 +1296,7 @@ pub trait BlockProdStrategy {
                         .find(|l| l.ledger_id == DataLedger::OneYear as u32)
                         .map(|l| l.total_chunks)
                         .unwrap_or(0)
-                        + one_year_chunks_added;
+                        .saturating_add(one_year_chunks_added);
 
                     let thirty_day_chunks_added =
                         calculate_chunks_added(&mempool_bundle.thirty_day_txs, chunk_size);
@@ -1304,7 +1306,7 @@ pub trait BlockProdStrategy {
                         .find(|l| l.ledger_id == DataLedger::ThirtyDay as u32)
                         .map(|l| l.total_chunks)
                         .unwrap_or(0)
-                        + thirty_day_chunks_added;
+                        .saturating_add(thirty_day_chunks_added);
 
                     ledgers.push(DataTransactionLedger {
                         ledger_id: DataLedger::OneYear.into(),
@@ -1841,79 +1843,53 @@ pub trait BlockProdStrategy {
         mempool_txs: &MempoolTxs,
     ) -> eyre::Result<LedgerExpiryBalanceDelta> {
         let chunk_size = self.inner().config.consensus.chunk_size;
-        // Gate for the write-window exclusion: the Cascade status of THIS block
-        // (its own timestamp — the value `perform_epoch_tasks` reads to gate the
-        // `touch_active_ledger_slots` that rescues these slots). Must not use the
-        // parent-snapshot helper below: at the activation epoch the parent still
-        // predates activation, which would disable the exclusion while the touch
-        // already runs — settling a slot that did not recycle.
+        // Cascade status of THIS block (its own timestamp — the value
+        // `perform_epoch_tasks` reads to gate the `touch_active_ledger_slots` that
+        // rescues slots written this epoch). Gates the write-window exclusion, and
+        // must NOT be the parent-snapshot helper `is_cascade_active_for_epoch`
+        // below, which lags by an epoch at the activation boundary.
         let cascade_active_for_block = self
             .inner()
             .config
             .consensus
             .hardforks
             .is_cascade_active_at(block_timestamp.to_secs());
-        // `ledger`'s cumulative total_chunks at the block being produced =
-        // parent total + chunks added by this block's selected txs. This is the
-        // exact value that lands in the block header (see produce_block_*), and
-        // the validator reads it straight from the header — so both sides agree.
-        // It lets the fee calc exclude slots written this epoch (rescued by the
-        // last_height touch) from the expiring set.
-        let new_total = |ledger: DataLedger, txs: &[DataTransactionHeader]| -> u64 {
-            prev_block_header.ledger_total_chunks(ledger) + calculate_chunks_added(txs, chunk_size)
-        };
-
-        let mut result = ledger_expiry::calculate_expired_ledger_fees(
-            parent_epoch_snapshot,
-            prev_block_header,
-            block_height,
-            DataLedger::Submit,
-            &self.inner().config,
-            self.inner().block_index.clone(),
-            &self.inner().block_tree_guard,
-            &self.inner().mempool_guard,
-            &self.inner().db,
-            true, // expect txs to be promoted — return perm fee refund if not
-            new_total(DataLedger::Submit, &mempool_txs.submit_tx),
-            cascade_active_for_block,
-        )
-        .in_current_span()
-        .await?;
-
-        // When Cascade is active, also process OneYear and ThirtyDay term ledgers.
-        // These are term-only (no promotion), so expect_txs_to_be_promoted = false.
-        let cascade_active = self
+        let cascade_active_for_epoch = self
             .inner()
             .config
             .consensus
             .hardforks
             .is_cascade_active_for_epoch(parent_epoch_snapshot);
-        if cascade_active {
-            for (ledger, txs) in [
-                (DataLedger::OneYear, &mempool_txs.one_year_tx),
-                (DataLedger::ThirtyDay, &mempool_txs.thirty_day_tx),
-            ] {
-                let delta = ledger_expiry::calculate_expired_ledger_fees(
-                    parent_epoch_snapshot,
-                    prev_block_header,
-                    block_height,
-                    ledger,
-                    &self.inner().config,
-                    self.inner().block_index.clone(),
-                    &self.inner().block_tree_guard,
-                    &self.inner().mempool_guard,
-                    &self.inner().db,
-                    false, // no promotion for these ledgers
-                    new_total(ledger, txs),
-                    cascade_active_for_block,
-                )
-                .in_current_span()
-                .await?;
-                result.merge(delta);
-            }
-        }
 
-        Ok(result)
+        // The producer's per-ledger `total_chunks` at this block = parent total +
+        // chunks added by this block's selected txs. This is the exact value that
+        // lands in the block header (see produce_block_*), so the validator — which
+        // reads it from that header — settles the identical expiring set.
+        ledger_expiry::calculate_all_expired_ledger_fees(
+            parent_epoch_snapshot,
+            prev_block_header,
+            block_height,
+            &self.inner().config,
+            &self.inner().block_index,
+            &self.inner().block_tree_guard,
+            &self.inner().mempool_guard,
+            &self.inner().db,
+            cascade_active_for_block,
+            cascade_active_for_epoch,
+            |ledger| {
+                let txs: &[DataTransactionHeader] = match ledger {
+                    DataLedger::Submit => &mempool_txs.submit_tx,
+                    DataLedger::OneYear => &mempool_txs.one_year_tx,
+                    DataLedger::ThirtyDay => &mempool_txs.thirty_day_tx,
+                    _ => &[],
+                };
+                prev_block_header
+                    .ledger_total_chunks(ledger)
+                    .saturating_add(calculate_chunks_added(txs, chunk_size))
+            },
+        )
+        .in_current_span()
+        .await
     }
 }
 
@@ -2027,8 +2003,8 @@ pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> UnixTimes
 /// # Returns
 /// Total number of chunks needed, including padding for partial chunks
 pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) -> u64 {
-    let bytes_added = txs.iter().fold(0, |acc, tx| {
-        acc + tx.data_size.div_ceil(chunk_size) * chunk_size
+    let bytes_added = txs.iter().fold(0_u64, |acc, tx| {
+        acc.saturating_add(tx.data_size.div_ceil(chunk_size).saturating_mul(chunk_size))
     });
 
     bytes_added / chunk_size

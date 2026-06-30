@@ -62,17 +62,17 @@ use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, eyre};
 use irys_database::{
-    block_header_by_hash, canonical_submit_height, db::IrysDatabaseExt as _,
-    reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
+    block_header_by_hash, canonical_promoted_height, canonical_submit_height,
+    db::IrysDatabaseExt as _, reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
 };
-use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
+use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, U256,
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
 };
 use nodit::{InclusiveInterval as _, interval::ii};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Calculates the aggregated fees owed to miners when data ledgers expire.
@@ -173,8 +173,36 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 6: Fetch transactions
     let all_tx_ids: Vec<_> = tx_to_miners.keys().copied().collect();
-    let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
-    transactions.sort_by(irys_types::DataTransactionHeader::compare_tx);
+
+    // NC-0042 P0: resolve which of these txs were promoted **on this block's own
+    // branch** before computing refunds. The refund-suppression decision must
+    // never read `DataTransactionHeader::promoted_height` from the fetched header
+    // — `get_data_tx_in_parallel` prefers the node-local mempool copy, where
+    // `promoted_height` is set at block confirmation within the reorg window
+    // (`mempool_service::apply_block_confirmed_updates`) and is therefore
+    // branch-variant: two forks contesting the slot-expiry boundary would
+    // disagree about whether a tx was promoted → divergent refund sets →
+    // consensus fork. `resolve_promoted_on_branch` answers purely from the
+    // block's parent ancestry (by-hash), mirroring `resolve_submit_inclusion`.
+    // Only the Submit ledger refunds (`expect_txs_to_be_promoted`); for term
+    // ledgers the walk is skipped entirely.
+    let promoted_on_branch = if expect_txs_to_be_promoted {
+        resolve_promoted_on_branch(
+            &all_tx_ids,
+            parent_block_header.block_hash,
+            block_height,
+            config,
+            block_tree_guard,
+            db,
+        )?
+    } else {
+        BTreeSet::new()
+    };
+
+    // No sort here: `aggregate_balance_deltas` sorts by `compare_tx` (it owns the
+    // "refunds sorted by tx_id" determinism invariant), so a sort at this site is
+    // redundant.
+    let transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
 
     // Step 7: Calculate fees
     tracing::debug!(
@@ -193,6 +221,7 @@ pub async fn calculate_expired_ledger_fees(
         parent_epoch_snapshot,
         config,
         expect_txs_to_be_promoted,
+        &promoted_on_branch,
     )?;
 
     let total_fees = fees
@@ -207,6 +236,75 @@ pub async fn calculate_expired_ledger_fees(
     );
 
     Ok(fees)
+}
+
+/// Producer/validator-shared orchestration of [`calculate_expired_ledger_fees`]
+/// across the expiring data ledgers: always the Submit ledger (promotion expected
+/// → perm-fee refunds for unpromoted txs), plus — only when Cascade is active for
+/// the epoch — the OneYear and ThirtyDay term ledgers (no promotion). Returns the
+/// merged delta.
+///
+/// This is the single home for the three-call pattern so producer↔validator parity
+/// is **mechanical, not hand-maintained**: both sides pass the same
+/// `cascade_active_for_block` (the block's OWN timestamp — gates the write-window
+/// exclusion to match `touch_active_ledger_slots`, and must NOT be the
+/// epoch-lagging `is_cascade_active_for_epoch`) and `cascade_active_for_epoch`
+/// (gates whether the term ledgers settle at all). The ONLY legitimate difference —
+/// each ledger's cumulative `total_chunks` at this block — is supplied by
+/// `new_total_chunks`: the producer computes `parent + chunks_added`, the validator
+/// reads it straight from the header it is validating.
+pub async fn calculate_all_expired_ledger_fees(
+    parent_epoch_snapshot: &EpochSnapshot,
+    parent_block_header: &IrysBlockHeader,
+    block_height: u64,
+    config: &Config,
+    block_index: &BlockIndex,
+    block_tree_guard: &BlockTreeReadGuard,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+    cascade_active_for_block: bool,
+    cascade_active_for_epoch: bool,
+    new_total_chunks: impl Fn(DataLedger) -> u64,
+) -> eyre::Result<LedgerExpiryBalanceDelta> {
+    let mut result = calculate_expired_ledger_fees(
+        parent_epoch_snapshot,
+        parent_block_header,
+        block_height,
+        DataLedger::Submit,
+        config,
+        block_index.clone(),
+        block_tree_guard,
+        mempool_guard,
+        db,
+        true, // Submit: expect promotion — refund the perm fee for unpromoted txs
+        new_total_chunks(DataLedger::Submit),
+        cascade_active_for_block,
+    )
+    .await?;
+
+    // Term ledgers (no promotion) only settle once Cascade is active for the epoch.
+    if cascade_active_for_epoch {
+        for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+            let delta = calculate_expired_ledger_fees(
+                parent_epoch_snapshot,
+                parent_block_header,
+                block_height,
+                ledger,
+                config,
+                block_index.clone(),
+                block_tree_guard,
+                mempool_guard,
+                db,
+                false, // term ledgers: no promotion expected
+                new_total_chunks(ledger),
+                cascade_active_for_block,
+            )
+            .await?;
+            result.merge(delta);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Boundary + middle block processing (algorithm steps 3-5): maps every tx in the
@@ -651,13 +749,13 @@ fn resolve_submit_inclusion(
         let item = block_index
             .get_item(h)
             .ok_or_eyre("canonical_submit_height returned a height absent from the block index")?;
-        let total = submit_total_of_index_item(&item);
+        let total = ledger_total_of_index_item(&item, DataLedger::Submit);
         let base = if h == 0 {
             0
         } else {
             block_index
                 .get_item(h - 1)
-                .map(|i| submit_total_of_index_item(&i))
+                .map(|i| ledger_total_of_index_item(&i, DataLedger::Submit))
                 .ok_or_eyre(
                     "migrated predecessor must be indexed \
                      (below the reorg floor → finalized)",
@@ -685,13 +783,13 @@ fn resolve_submit_inclusion(
                 height: header.height,
                 prev_hash: header.previous_block_hash,
                 submit_total: header.ledger_total_chunks(DataLedger::Submit),
-                includes_txid: block_includes_submit_tx(header, &txid),
+                includes_txid: block_includes_ledger_tx(header, DataLedger::Submit, &txid),
             })
         },
         |height| {
             block_index
                 .get_item(height)
-                .map(|item| submit_total_of_index_item(&item))
+                .map(|item| ledger_total_of_index_item(&item, DataLedger::Submit))
         },
         // C1 gate input: is `hash` the canonical block at `height` per
         // `MigratedBlockHashes`? (shared with `assert_canonical_via_mbh`.)
@@ -764,18 +862,123 @@ fn walk_submit_inclusion(
     Ok(None)
 }
 
-/// Whether `header`'s Submit ledger includes `txid` (per-block `tx_ids`).
-fn block_includes_submit_tx(header: &IrysBlockHeader, txid: &IrysTransactionId) -> bool {
+/// Whether `header` includes `txid` in `ledger`'s per-block `tx_ids`.
+///
+/// For `Submit` this is plain membership. For `Publish` it is the **branch-correct
+/// promotion signal**: a tx's promotion is recorded by adding its id to the
+/// promoting block's Publish ledger (`mempool_service` derives the mempool
+/// `promoted_height` from exactly this set), so Publish membership on a branch is
+/// the branch-correct "was this tx promoted here?" answer.
+fn block_includes_ledger_tx(
+    header: &IrysBlockHeader,
+    ledger: DataLedger,
+    txid: &IrysTransactionId,
+) -> bool {
     header
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == DataLedger::Submit as u32)
-        .is_some_and(|l| l.tx_ids.0.contains(txid))
+        .get_data_ledger_tx_ids_ordered(ledger)
+        .is_some_and(|ids| ids.contains(txid))
 }
 
-/// Cumulative Submit chunk total from a migrated block-index item.
-fn submit_total_of_index_item(item: &BlockIndexItem) -> u64 {
-    ledger_total_of_index_item(item, DataLedger::Submit)
+/// Branch-correct set of `candidate_txids` that were **promoted on the
+/// block-being-settled's own branch** — the refund-suppression analogue of
+/// [`resolve_submit_inclusion`] and the fix for the NC-0042 P0 consensus-fork
+/// vector.
+///
+/// The fetched [`DataTransactionHeader::promoted_height`] is node-local mempool
+/// state: it is set at block confirmation *within the reorg window*
+/// (`mempool_service::apply_block_confirmed_updates`) and cleared only on reorg,
+/// so it is **branch-variant**. Gating a perm-fee refund on it lets two forks
+/// contesting a slot-expiry boundary compute different refund sets — a divergent
+/// shadow-tx/treasury set → consensus fork. The answer here is instead a pure
+/// function of the block's **own parent ancestry** (`parent_block_hash`), never
+/// the node's canonical tip or live mempool.
+///
+/// Primary path — branch walk: from `parent_block_hash`, walk the parent chain
+/// **by hash** (retained tree first, DB fallback for tree-evicted headers — as in
+/// the validator's `get_previous_tx_inclusions`) over the full reorg window
+/// ([`prior_inclusion_walk_depth`] = `max(tx_anchor_expiry_depth,
+/// block_tree_depth)`), marking any candidate found in a block's Publish ledger
+/// as promoted. Walking the entire reorg window guarantees every branch-variant
+/// (recent) promotion is resolved here by-hash on this block's own branch.
+///
+/// Finalized fallback — [`canonical_promoted_height`]: for candidates NOT found
+/// by the walk, consult the MBH-verified canonical promotion height, capped
+/// strictly **below the walked window**. Below the reorg floor
+/// `MigratedBlockHashes` is branch-invariant (see `canonical_metadata_height` in
+/// `irys_database`), so an old finalized promotion (one made long before expiry,
+/// outside the reorg window) resolves identically on every node/branch.
+fn resolve_promoted_on_branch(
+    candidate_txids: &[IrysTransactionId],
+    parent_block_hash: H256,
+    block_height: u64,
+    config: &Config,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BTreeSet<IrysTransactionId>> {
+    let walk_depth = crate::block_validation::prior_inclusion_walk_depth(config);
+    let walk_min_height = block_height.saturating_sub(walk_depth);
+
+    let mut remaining: BTreeSet<IrysTransactionId> = candidate_txids.iter().copied().collect();
+    let mut promoted: BTreeSet<IrysTransactionId> = BTreeSet::new();
+
+    // Primary path: by-hash parent walk over the reorg window. `height` is
+    // tracked explicitly (ancestry is contiguous: each parent is height-1) so the
+    // loop only ever attempts to resolve ancestors that are *within* the window —
+    // an in-window ancestor missing from BOTH the tree and the DB is a local
+    // inconsistency and fails loud (classified NodeFault upstream), never a silent
+    // under-suppression that could diverge from a healthy node.
+    {
+        let tree = block_tree_guard.read();
+        let mut cursor = parent_block_hash;
+        let mut height = block_height.saturating_sub(1); // parent height
+        while !remaining.is_empty() && height >= walk_min_height {
+            // Resolve the ancestor header by hash (tree first, DB fallback). An
+            // in-window ancestor missing from BOTH is a local inconsistency → fail
+            // loud (NodeFault upstream), never a silent under-suppression.
+            let header = block_header_from_tree_then_db(&tree, db, &cursor)?.ok_or_else(|| {
+                eyre!(
+                    "expiry promotion walk: ancestor {cursor} at height {height} \
+                     (within the reorg window) is missing from both the block tree \
+                     and the DB"
+                )
+            })?;
+            debug_assert_eq!(
+                header.height, height,
+                "expiry promotion walk descended onto a non-contiguous ancestor"
+            );
+            remaining.retain(|txid| {
+                if block_includes_ledger_tx(&header, DataLedger::Publish, txid) {
+                    promoted.insert(*txid);
+                    false
+                } else {
+                    true
+                }
+            });
+            if height == 0 {
+                break; // genesis has no parent
+            }
+            cursor = header.previous_block_hash;
+            height -= 1;
+        }
+    }
+
+    // Finalized fallback: a promotion older than the walked window is below the
+    // reorg floor, where MBH (and thus `canonical_promoted_height`) is
+    // branch-invariant. Cap strictly below the window so a reorg-mutable height
+    // can never be trusted here — the walk already covered that band by hash.
+    if !remaining.is_empty() {
+        let max_height = walk_min_height.saturating_sub(1);
+        db.view_eyre(|tx| {
+            for txid in &remaining {
+                if canonical_promoted_height(tx, txid, max_height)?.is_some() {
+                    promoted.insert(*txid);
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    Ok(promoted)
 }
 
 /// Cumulative chunk total for `ledger` from a migrated block-index item
@@ -955,19 +1158,33 @@ fn submit_tx_start_offset(
     None
 }
 
-/// Fetches a block header from block tree or database
+/// Resolve a block header BY HASH against an **already-held** tree read guard,
+/// falling back to the DB for headers evicted from the retained tree window. The
+/// single home for the "tree-first, DB-fallback, by-hash" resolution the
+/// fork-ancestry walks share — takes the held `&BlockTree` so a caller can hold the
+/// guard across an entire walk (no per-step re-lock). `None` ⇒ the hash is in
+/// neither the tree nor the DB.
+fn block_header_from_tree_then_db(
+    tree: &BlockTree,
+    db: &DatabaseProvider,
+    hash: &H256,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    if let Some(header) = tree.get_block(hash) {
+        return Ok(Some(header.clone()));
+    }
+    db.view_eyre(|tx| block_header_by_hash(tx, hash, false))
+}
+
+/// Fetches a block header from the block tree or database, acquiring the read guard
+/// for a single lookup. For walks that hold the guard across many lookups, call
+/// [`block_header_from_tree_then_db`] directly with the held guard.
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
 async fn get_block_by_hash(
     block_hash: H256,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<IrysBlockHeader> {
-    // Check block tree first
-    if let Some(header) = block_tree_guard.read().get_block(&block_hash).cloned() {
-        return Ok(header);
-    }
-    // Fallback to database
-    db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+    block_header_from_tree_then_db(&block_tree_guard.read(), db, &block_hash)?
         .ok_or_eyre("block not found in db")
 }
 
@@ -1467,12 +1684,18 @@ impl LedgerExpiryBalanceDelta {
 /// - `epoch_snapshot`: Used to resolve miner addresses to reward addresses at payout time
 /// - `config`: Node configuration
 /// - `expect_txs_to_be_promoted`: Whether transactions are expected to be promoted
+/// - `promoted_on_branch`: tx ids that were promoted on the block-being-settled's
+///   own branch (resolved branch-correctly by [`resolve_promoted_on_branch`]). A
+///   perm-fee refund is suppressed iff the tx is in this set. Pre-computed (rather
+///   than read from `DataTransactionHeader::promoted_height`) because the fetched
+///   header's `promoted_height` is node-local mempool state and branch-variant.
 fn aggregate_balance_deltas(
     mut transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
     epoch_snapshot: &EpochSnapshot,
     config: &Config,
     expect_txs_to_be_promoted: bool,
+    promoted_on_branch: &BTreeSet<IrysTransactionId>,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     let mut balance_delta = LedgerExpiryBalanceDelta::default();
     transactions.sort_by(irys_types::DataTransactionHeader::compare_tx); // This ensures refunds will be sorted by tx_id
@@ -1518,9 +1741,13 @@ fn aggregate_balance_deltas(
             continue;
         }
 
-        // process refunds of perm fee if the tx was not promoted
+        // process refunds of perm fee if the tx was not promoted **on this
+        // branch**. Promotion is resolved branch-correctly upstream
+        // (`resolve_promoted_on_branch`); we must NOT consult
+        // `data_tx.promoted_height()` here — it is node-local mempool state and
+        // would fork the refund set across competing branches (NC-0042 P0).
         {
-            if data_tx.promoted_height().is_none() {
+            if !promoted_on_branch.contains(&data_tx.id) {
                 // Only process refund if perm_fee exists (should always be present if tx is expected to be promoted)
                 let perm_fee = data_tx
                     .perm_fee
@@ -1534,8 +1761,7 @@ fn aggregate_balance_deltas(
             } else {
                 tracing::debug!(
                     tx.id = ?data_tx.id,
-                    tx.promoted_height = ?data_tx.promoted_height(),
-                    "Tx was promoted, no refund needed",
+                    "Tx was promoted on this branch, no refund needed",
                 );
             }
         }
@@ -1560,7 +1786,10 @@ impl SlotIndex {
     ) -> LedgerChunkRange {
         let start =
             LedgerChunkOffset::from(self.0.saturating_mul(chunks_per_partition)).min(max_offset);
-        let end = start + chunks_per_partition;
+        // saturating_add for parity with the saturating_mul above; the following
+        // .min(max_offset) clamps to real on-chain totals, so saturation can never
+        // change a reachable result (overflow needs totals near u64::MAX).
+        let end = LedgerChunkOffset::from((*start).saturating_add(chunks_per_partition));
         let end = end.min(max_offset);
         LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
     }
@@ -1655,6 +1884,7 @@ mod tests {
             &epoch_snapshot,
             &config,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
 
@@ -1742,9 +1972,15 @@ mod tests {
         let mut tx_to_miners = BTreeMap::new();
         tx_to_miners.insert(tx1.id, Arc::new(vec![miner1, miner2, miner3]));
 
-        let result =
-            aggregate_balance_deltas(vec![tx1], &tx_to_miners, &epoch_snapshot, &config, false)
-                .unwrap();
+        let result = aggregate_balance_deltas(
+            vec![tx1],
+            &tx_to_miners,
+            &epoch_snapshot,
+            &config,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
 
         // 2850 split 3 ways = 950 each; pool gets 2x (1900), miner3 gets 1x (950)
         assert_eq!(result.reward_balance_increment.len(), 2);
@@ -1802,9 +2038,15 @@ mod tests {
         tx_to_miners.insert(txs[3].id, Arc::new(vec![miner_b]));
 
         let epoch_snapshot = EpochSnapshot::default();
-        let result =
-            aggregate_balance_deltas(txs.to_vec(), &tx_to_miners, &epoch_snapshot, &config, false)
-                .unwrap();
+        let result = aggregate_balance_deltas(
+            txs.to_vec(),
+            &tx_to_miners,
+            &epoch_snapshot,
+            &config,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
 
         // Single miner per tx ⇒ that miner gets the whole treasury slice. Compute
         // it via TermFeeCharges so the assertion tracks the real fee model.
@@ -2858,6 +3100,302 @@ mod tests {
         assert_eq!(submit_span_verdict(inc.base, inc.total, 5), Some(false));
 
         Ok(())
+    }
+
+    /// NC-0042 P0 (consensus-fork fix): the perm-fee refund suppression must read
+    /// promotion from the block's OWN branch, never node-local mempool/DB state.
+    /// This proves [`resolve_promoted_on_branch`] answers purely from
+    /// `parent_block_hash` ancestry — the SAME txid resolves as promoted when
+    /// walking the fork that promoted it and as un-promoted when walking the fork
+    /// that did not, so two honest producers on competing branches compute
+    /// matching (branch-determined) refund sets regardless of any local hint.
+    #[test]
+    fn resolve_promoted_on_branch_reads_only_the_blocks_own_branch() -> eyre::Result<()> {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use irys_domain::{
+            BlockTree, BlockTreeReadGuard, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot,
+        };
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{BlockTransactions, SealedBlock};
+        use reth_db::mdbx::DatabaseArguments;
+        use std::sync::RwLock;
+
+        // A header carrying `publish_tx_ids` in its Publish ledger (the promotion
+        // signal `block_includes_publish_tx` reads) plus an empty Submit ledger.
+        fn with_publish(height: u64, publish_tx_ids: Vec<H256>) -> IrysBlockHeader {
+            let ledger = |id: DataLedger, tx_ids: Vec<H256>| irys_types::DataTransactionLedger {
+                ledger_id: id as u32,
+                tx_root: H256::zero(),
+                tx_ids: irys_types::H256List(tx_ids),
+                total_chunks: 0,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            };
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![
+                ledger(DataLedger::Publish, publish_tx_ids),
+                ledger(DataLedger::Submit, vec![]),
+            ];
+            h
+        }
+
+        let target = H256::random();
+
+        // genesis h0 → h1, then a fork at h2: `promoted` includes `target` in its
+        // Publish ledger, `bare` does not. A settlement block at height 3 walks
+        // back from whichever h2 is its parent.
+        let mut genesis = with_publish(0, vec![]);
+        let mut h1 = with_publish(1, vec![]);
+        let mut h2_promoted = with_publish(2, vec![target]);
+        let mut h2_bare = with_publish(2, vec![]);
+
+        let guard = {
+            genesis.cumulative_diff = 0.into();
+            genesis.test_sign();
+            let mut tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
+            tree.mark_tip(&genesis.block_hash).unwrap();
+
+            h1.previous_block_hash = genesis.block_hash;
+            h1.cumulative_diff = 1.into();
+            h1.test_sign();
+
+            h2_promoted.previous_block_hash = h1.block_hash;
+            h2_promoted.cumulative_diff = 2.into();
+            h2_promoted.test_sign();
+
+            // Distinct cumulative_diff so the sibling is a genuine second child of
+            // h1, not a duplicate. We never mark either h2 as tip — the walk is
+            // driven by the explicit `parent_block_hash`, not fork choice.
+            h2_bare.previous_block_hash = h1.block_hash;
+            h2_bare.cumulative_diff = 3.into();
+            h2_bare.test_sign();
+
+            for h in [&h1, &h2_promoted, &h2_bare] {
+                let sealed = Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(h.clone()),
+                    BlockTransactions::default(),
+                ));
+                tree.add_block(
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    dummy_ema_snapshot(),
+                )?;
+            }
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+        };
+
+        // Empty db ⇒ the finalized `canonical_promoted_height` fallback finds
+        // nothing; the by-hash branch walk is the sole decider.
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
+
+        // Walking the promoting fork → `target` IS promoted (refund suppressed).
+        let on_promoted =
+            resolve_promoted_on_branch(&[target], h2_promoted.block_hash, 3, &config, &guard, &db)?;
+        assert!(
+            on_promoted.contains(&target),
+            "target IS promoted on the fork whose ancestry includes the Publish inclusion"
+        );
+
+        // Walking the bare fork → `target` is NOT promoted (refund emitted), even
+        // though a sibling branch (and any node-local hint) promoted it.
+        let on_bare =
+            resolve_promoted_on_branch(&[target], h2_bare.block_hash, 3, &config, &guard, &db)?;
+        assert!(
+            on_bare.is_empty(),
+            "target is NOT promoted on the fork whose ancestry never included it"
+        );
+
+        Ok(())
+    }
+
+    /// NC-0042 P0 — the exact trap, as a reintroduction guard. The original bug
+    /// gated the refund on a **node-local** promotion signal. The most tempting
+    /// wrong "fix" is to keep using the node-local `IrysDataTxMetadata`
+    /// `promoted_height` hint via a by-height lookup — which is branch-invariant
+    /// only BELOW the reorg floor. This pins that: with a stale `promoted_height`
+    /// hint planted in the DB **inside the reorg window** (and `MigratedBlockHashes`
+    /// agreeing, so a naive `canonical_promoted_height(parent_height)` WOULD report
+    /// it promoted), `resolve_promoted_on_branch` must STILL report the tx as
+    /// un-promoted because the block's own branch never carried it in a Publish
+    /// ledger. Any regression to a fast-path-first by-height lookup, or a finalized
+    /// fallback whose cap reaches into the reorg window, fails this test.
+    #[test]
+    fn resolve_promoted_on_branch_ignores_in_window_node_local_hint() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _, canonical_promoted_height, insert_tx_header, open_or_create_db,
+            set_data_tx_included_height, set_data_tx_promoted_height, tables::IrysTables,
+            tables::MigratedBlockHashes,
+        };
+        use irys_domain::{BlockTree, BlockTreeReadGuard};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+        use irys_types::{
+            BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, SealedBlock,
+        };
+        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use std::sync::RwLock;
+
+        // Submit-only headers ⇒ `target` is NEVER in a Publish ledger on this
+        // branch, so the branch walk must conclude "not promoted".
+        fn submit_only(height: u64) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers = vec![irys_types::DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: irys_types::H256List(vec![]),
+                total_chunks: 0,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            h
+        }
+
+        let target = H256::random();
+
+        // Linear chain genesis h0 → h1 → h2. A settlement block at height 3 walks
+        // back from h2.
+        let mut headers = [submit_only(0), submit_only(1), submit_only(2)];
+        let guard = {
+            let mut iter = headers.iter_mut();
+            let genesis = iter.next().unwrap();
+            genesis.cumulative_diff = 0.into();
+            genesis.test_sign();
+            let mut prev = genesis.block_hash;
+            let mut tree = BlockTree::new(genesis, irys_types::ConsensusConfig::testing());
+            tree.mark_tip(&prev).unwrap();
+            for h in iter {
+                h.previous_block_hash = prev;
+                h.cumulative_diff = h.height.into();
+                h.test_sign();
+                prev = h.block_hash;
+                let sealed = Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(h.clone()),
+                    BlockTransactions::default(),
+                ));
+                tree.add_block(
+                    &sealed,
+                    Arc::new(irys_domain::CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    irys_domain::dummy_ema_snapshot(),
+                )?;
+            }
+            BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)))
+        };
+
+        let temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Plant the stale node-local promotion hint at height 1 (inside the reorg
+        // window for the block at height 3) with MBH agreeing — exactly the
+        // node-local state the old code read and the new code must ignore.
+        let target_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: target,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+        db.update_eyre(|wtx| {
+            insert_tx_header(wtx, &target_header)?;
+            // included_height is a precondition for promoted_height; the inclusion
+            // sits below the reorg floor (slot-lifetime invariant) so its exact
+            // value is immaterial here.
+            set_data_tx_included_height(wtx, &target, 1)?;
+            set_data_tx_promoted_height(wtx, &target, 1)?;
+            wtx.put::<MigratedBlockHashes>(1, headers[1].block_hash)?;
+            Ok(())
+        })?;
+
+        let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
+
+        // The trap is live: a naive by-height lookup at the parent height WOULD
+        // report `target` promoted (hint 1 ≤ 2 and MBH[1] is set).
+        let naive = db.view_eyre(|tx| canonical_promoted_height(tx, &target, 2))?;
+        assert_eq!(
+            naive,
+            Some(1),
+            "precondition: the stale in-window hint would fool a parent-height lookup"
+        );
+
+        // The branch-correct resolver ignores it: `target` is not in any Publish
+        // ledger on h2's ancestry, and the finalized fallback is capped below the
+        // walked reorg window.
+        let promoted =
+            resolve_promoted_on_branch(&[target], headers[2].block_hash, 3, &config, &guard, &db)?;
+        assert!(
+            promoted.is_empty(),
+            "resolver must ignore the node-local in-window promoted_height hint"
+        );
+
+        Ok(())
+    }
+
+    /// NC-0042 P0 regression guard at the settlement layer: `aggregate_balance_deltas`
+    /// bases refund suppression on the branch-resolved `promoted_on_branch` set,
+    /// NOT on the fetched header's node-local `promoted_height`. A tx whose header
+    /// still carries a (branch-variant) `promoted_height = Some` from local mempool
+    /// state must STILL be refunded when it is absent from the branch set — the
+    /// exact divergence the pre-fix `data_tx.promoted_height().is_none()` check
+    /// produced. (On the pre-fix code this asserts fails: no refund is emitted.)
+    #[test]
+    fn aggregate_refunds_use_branch_set_not_node_local_promoted_height() {
+        let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
+
+        let signer = IrysAddress::random();
+        let mut tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(1000).into(),
+                perm_fee: Some(irys_types::BoundedFee::from(777_u64)),
+                signer,
+                data_size: 100,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+        // Stale, branch-variant node-local promotion state on the fetched header.
+        tx.set_promoted_height(Some(5));
+
+        let miner = IrysAddress::random();
+        let mut tx_to_miners = BTreeMap::new();
+        tx_to_miners.insert(tx.id, Arc::new(vec![miner]));
+
+        let epoch_snapshot = EpochSnapshot::default();
+
+        // Branch-resolved set is EMPTY ⇒ tx was NOT promoted on this branch ⇒ refund,
+        // regardless of the header's `promoted_height = Some(5)`.
+        let result = aggregate_balance_deltas(
+            vec![tx.clone()],
+            &tx_to_miners,
+            &epoch_snapshot,
+            &config,
+            true, // expect_txs_to_be_promoted (Submit ledger)
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.user_perm_fee_refunds,
+            vec![(tx.id, irys_types::BoundedFee::from(777_u64).get(), signer)],
+            "refund must follow the branch set despite header promoted_height = Some"
+        );
     }
 
     /// Canonical P0 repro turned regression: normal epoch-slot allocation
