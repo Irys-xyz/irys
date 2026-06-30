@@ -801,8 +801,11 @@ impl InnerCacheTask {
         let mut walker = cursor.walk(None)?;
         // Carries the full proof content so the delete phase can compare before deleting
         // (closes the TOCTOU window: a fresh proof stored between the scan and the delete
-        // will not match the scanned content and will be preserved).
-        let mut to_delete: Vec<(DataRoot, CompactCachedIngressProof)> = Vec::new();
+        // will not match the scanned content and will be preserved). The bool flags an
+        // orphan deletion (no `CachedDataRoots` entry at scan time); for those the delete
+        // phase also re-checks the root is still absent, so a root re-cached between scan
+        // and delete keeps its proof.
+        let mut to_delete: Vec<(DataRoot, CompactCachedIngressProof, bool)> = Vec::new();
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
@@ -830,7 +833,7 @@ impl InnerCacheTask {
             // Associated txids
             let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
                 debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
-                to_delete.push((data_root, compact));
+                to_delete.push((data_root, compact, true));
                 continue;
             };
 
@@ -858,7 +861,7 @@ impl InnerCacheTask {
 
             if at_capacity {
                 // Unpromoted + expired + at capacity: delete
-                to_delete.push((data_root, compact));
+                to_delete.push((data_root, compact, false));
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
             } else if is_locally_produced && any_unpromoted {
                 match check_result.regeneration_action {
@@ -879,7 +882,7 @@ impl InnerCacheTask {
                 }
             } else {
                 // Not local + expired: delete
-                to_delete.push((data_root, compact));
+                to_delete.push((data_root, compact, false));
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (remote or fully-promoted)");
             }
         }
@@ -898,15 +901,21 @@ impl InnerCacheTask {
         // between the scan and this delete will not match the scanned value and is preserved.
         if !to_delete.is_empty() {
             let mut deleted_count = 0_usize;
-            for (root, scanned) in to_delete.iter() {
+            for (root, scanned, is_orphan) in to_delete.iter() {
                 match self.db.update_eyre(|rw_tx| {
+                    // Orphan deletions were scheduled because the data root had no
+                    // `CachedDataRoots` entry at scan time. Re-check inside the write tx:
+                    // if the root was re-cached since the scan, keep its proof.
+                    if *is_orphan && cached_data_root_by_data_root(rw_tx, *root)?.is_some() {
+                        return Ok(false);
+                    }
                     delete_ingress_proof_if_unchanged(rw_tx, *root, scanned.clone())
                 }) {
                     Ok(true) => deleted_count += 1,
                     Ok(false) => {
                         debug!(
                             ingress_proof.data_root = ?root,
-                            "Skipping stale delete: proof was refreshed since scan"
+                            "Skipping stale delete: proof was refreshed or data root re-cached since scan"
                         );
                     }
                     Err(e) => {
