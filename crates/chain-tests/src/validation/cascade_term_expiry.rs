@@ -593,16 +593,20 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
         "pre-activation: touch gated off, slot 0 keeps its genesis last_height"
     );
 
-    // === Activate Cascade mid-chain via stop -> set activation = now -> restart ===
-    let mut stopped = node.stop().await;
-    // +1s so activation is STRICTLY after every pre-restart block: their
-    // timestamps are all <= now() (second-granular), and `cascade_at` activates
-    // on inclusive equality (>=), so `now()` alone could collide with the tip's
-    // second and wrongly mark a historical epoch cascade-active during replay.
-    let activation_timestamp = UnixTimestamp::now()
-        .expect("system time after unix epoch")
+    // === Activate Cascade mid-chain via stop -> set activation = tip+1 -> restart ===
+    // Anchor activation to the chain tip's timestamp, NOT wall-clock: tip + 1s is
+    // strictly after every pre-restart block (`cascade_at` activates on inclusive >=),
+    // so historical blocks stay pre-activation and only newly-mined blocks are
+    // cascade-active. Chain-derived, so it's immune to a backward CLOCK_REALTIME lurch
+    // that could make `now()` land at/before the tip (see block_producer::current_timestamp).
+    let tip_height = node.get_canonical_chain_height().await;
+    let activation_timestamp = node
+        .get_block_by_height(tip_height)
+        .await?
+        .timestamp_secs()
         .as_secs()
         + 1;
+    let mut stopped = node.stop().await;
     stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
         activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
         one_year_epoch_length,
@@ -1362,19 +1366,20 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
         node.mine_block().await?;
     }
 
-    // === Activate Cascade mid-chain (stop -> set activation = now+1 -> restart) ===
-    // Wall-clock dependency: +1s ensures activation is strictly after all
-    // pre-restart blocks (their timestamps are <= now(); `cascade_at` activates on
-    // inclusive >=, so now() alone could collide with the tip's second and wrongly
-    // mark a historical epoch cascade-active during replay). The subsequent
-    // `2 * num_blocks_in_epoch` mining loop gives ample real-time margin (each
-    // mined block advances the clock by at least 1 s) to cross the activation
-    // timestamp before any expiry work is done — so this is tolerated, not a race.
-    let mut stopped = node.stop().await;
-    let activation_timestamp = UnixTimestamp::now()
-        .expect("system time after unix epoch")
+    // === Activate Cascade mid-chain (stop -> set activation = tip+1 -> restart) ===
+    // Anchor activation to the chain tip's timestamp, NOT wall-clock: tip + 1s is
+    // strictly after every pre-restart block (`cascade_at` activates on inclusive >=),
+    // so historical blocks stay pre-activation and only newly-mined blocks are
+    // cascade-active. Chain-derived, so it's immune to a backward CLOCK_REALTIME lurch
+    // that could make `now()` land at/before the tip (see block_producer::current_timestamp).
+    let tip_height = node.get_canonical_chain_height().await;
+    let activation_timestamp = node
+        .get_block_by_height(tip_height)
+        .await?
+        .timestamp_secs()
         .as_secs()
         + 1;
+    let mut stopped = node.stop().await;
     stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
         activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
         one_year_epoch_length,
@@ -1523,15 +1528,19 @@ async fn slow_heavy_cascade_midchain_submit_expiry_refunds_across_activation() -
     node.mine_until_next_epoch().await?;
     let pre_activation_height = node.get_canonical_chain_height().await;
 
-    // === Activate Cascade mid-chain: stop → set activation = now+1 → restart. The
-    // +1s keeps activation strictly after every pre-restart block's (second-granular)
-    // timestamp, so historical blocks stay pre-activation and only newly mined blocks
-    // are cascade-active — deterministic, no wall-clock race. ===
-    let mut stopped = node.stop().await;
-    let activation_timestamp = UnixTimestamp::now()
-        .expect("system time after unix epoch")
+    // === Activate Cascade mid-chain: stop → set activation = tip+1 → restart. Anchor
+    // to the chain tip's timestamp (NOT wall-clock): tip + 1s is strictly after every
+    // pre-restart block (`cascade_at` activates on inclusive >=), so historical blocks
+    // stay pre-activation and only newly mined blocks are cascade-active — deterministic
+    // and immune to a backward CLOCK_REALTIME lurch (see block_producer::current_timestamp). ===
+    let tip_height = node.get_canonical_chain_height().await;
+    let activation_timestamp = node
+        .get_block_by_height(tip_height)
+        .await?
+        .timestamp_secs()
         .as_secs()
         + 1;
+    let mut stopped = node.stop().await;
     stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
         activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
         one_year_epoch_length,
