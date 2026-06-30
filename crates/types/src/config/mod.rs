@@ -103,12 +103,15 @@ impl Config {
             );
         }
 
-        // Partition/recall sizing must be non-zero. Zero breaks every chunk-offset
-        // and slot computation: e.g. ledger-expiry `compute_chunk_range` /
-        // `expired_submit_range` would make the §4b/§4c filter silently no-op
+        // Chunk/partition/recall sizing must be non-zero. Zero breaks every
+        // chunk-offset and slot computation: e.g. ledger-expiry `compute_chunk_range`
+        // / `expired_submit_range` would make the §4b/§4c filter silently no-op
         // (range_end collapses to 0), while the refund walk bails — an asymmetric
-        // silent bypass. The `div_ceil` below would also panic on a zero recall
-        // range. Reject loudly here. (NC-0042)
+        // silent bypass. `chunk_size == 0` is the same hazard one level down:
+        // `submit_tx_start_offset` returns `None` (→ tx read as "not expired") while
+        // `filter_transactions_by_chunk_range` bails loud. The `div_ceil` below would
+        // also panic on a zero recall range. Reject loudly here. (NC-0042)
+        ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
         ensure!(
             self.consensus.num_chunks_in_partition > 0,
             "num_chunks_in_partition must be > 0"
@@ -278,6 +281,13 @@ impl Config {
             let num_blocks_in_epoch = self.consensus.epoch.num_blocks_in_epoch;
             // (config field, epochs-until-expiry) for every ledger whose
             // expired-tx inclusion is resolved via the migrated block index.
+            //
+            // `publish_ledger_epoch_length` is intentionally NOT in this list:
+            // Publish-ledger expiry never resolves an expired tx's inclusion through
+            // the migrated-index / by-hash walk this guard protects (only Submit and
+            // the Cascade term ledgers do — see `ledger_expiry`), so its lifetime
+            // need not exceed `block_tree_depth`. (It has its own overflow check
+            // above.)
             let mut slot_lifetimes = vec![(
                 "submit_ledger_epoch_length",
                 self.consensus.epoch.submit_ledger_epoch_length,
