@@ -3482,7 +3482,7 @@ fn load_owning_tx_for_poa(
                     if is_poa_owning_leaf(cursor, h.data_size, tx_leaf_min_byte_range) {
                         return Some(h.clone());
                     }
-                    cursor += h.data_size as u128;
+                    cursor += u128::from(h.data_size);
                     None
                 })
         })
