@@ -204,7 +204,17 @@ impl BlockIndex {
                     .find(|item| item.ledger == ledger)
                     .map(|item| item.total_chunks)
                     .unwrap_or(0);
-                prev_total.saturating_add(chunks_added)
+                // A saturating add would silently clamp and corrupt the persisted
+                // ledger boundary; reject the block instead so callers see the overflow.
+                prev_total.checked_add(chunks_added).ok_or_else(|| {
+                    eyre::eyre!(
+                        "ledger {:?} total_chunks overflow at height {}: prev_total {} + chunks_added {}",
+                        ledger,
+                        block.height,
+                        prev_total,
+                        chunks_added
+                    )
+                })?
             } else {
                 chunks_added
             };
