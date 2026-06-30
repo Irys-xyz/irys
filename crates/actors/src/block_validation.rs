@@ -4584,9 +4584,8 @@ async fn generate_expected_shadow_transactions(
 
     // NC-0042: peer-attributable consensus rule — no Publish-ledger tx may have
     // its Submit-ledger storage already expired as of this block.
-    //   == block.height  →  same-block epoch collision (Bug A, devnet 39960)
-    //   <  block.height  →  cross-block silent double-pay (devnet 39962 — every
-    //                       validator accepted it pre-fix)
+    //   == block.height  →  same-block epoch collision
+    //   <  block.height  →  cross-block silent double-pay
     //
     // Producer-side: `tx_selector::get_publish_txs_and_proofs` already filters
     // out expired candidates (using this same set) so an honest producer never
@@ -4605,7 +4604,7 @@ async fn generate_expected_shadow_transactions(
     //
     // This is a strict superset of the old same-block guard: a tx whose Submit
     // slot expires *at* this block (same-block epoch collision) and a tx whose
-    // slot expired at an *earlier* epoch (cross-block double-pay, devnet 39962)
+    // slot expired at an *earlier* epoch (cross-block double-pay)
     // are both in the set. A tx whose Submit inclusion is in this very block
     // (same-block Submit→Publish) is not — its slot can't have expired yet.
     //
@@ -5422,7 +5421,7 @@ pub async fn data_txs_are_valid(
                         // widened, this arm could run inside the reorg-mutable
                         // `(tip - block_tree_depth, tip - block_migration_depth]`
                         // band and fork — widening the walk to the reorg window is
-                        // exactly what makes this fallback safe post-#1405; see the
+                        // exactly what makes this fallback safe; see the
                         // `get_previous_tx_inclusions` docblock.)
                         //
                         // `canonical_submit_height` is sufficient evidence of
@@ -6087,7 +6086,7 @@ enum TxInclusionState {
 ///     bounded by `ingress_proof_anchor_expiry_depth` (NOT the tx anchor), so an
 ///     inclusion inside the reorg window must be resolved branch-correctly by-hash
 ///     here rather than via the by-height index/MBH fallback, which is only
-///     branch-invariant below the reorg floor (#1405).
+///     branch-invariant below the reorg floor.
 ///
 /// `Config::validate` enforces `tx_anchor_expiry_depth <= block_tree_depth` in
 /// production (so the reorg window is the binding term there); `max` keeps this
@@ -6127,7 +6126,7 @@ pub(crate) fn prior_inclusion_walk_depth(config: &Config) -> u64 {
 ///    `block_under_validation`'s own ancestry; resolving it via the by-height
 ///    index/MBH shortcut (the `Searching { ledger_current: Publish }` arm in
 ///    `data_txs_are_valid`) is only branch-invariant BELOW the reorg floor, which
-///    deep reorgs (#1405) moved from `block_migration_depth` to `block_tree_depth`.
+///    deep reorgs moved from `block_migration_depth` to `block_tree_depth`.
 ///    Walking the full reorg window guarantees that fallback is reached only for
 ///    *finalized* inclusions, where node-canonical == every branch.
 ///
@@ -6566,7 +6565,7 @@ mod tests {
         Ok(())
     }
 
-    /// REGRESSION (RISK-2 / #1405 deep-reorg walk depth): `get_previous_tx_inclusions`
+    /// REGRESSION (deep-reorg walk depth): `get_previous_tx_inclusions`
     /// must resolve a promotion's prior Submit branch-correctly by-hash for the whole
     /// reorg window — not just `tx_anchor_expiry_depth`. A Publish candidate C at
     /// height 5 promotes tx T whose prior Submit sits at height 1 (depth 4) — inside
@@ -6728,7 +6727,7 @@ mod tests {
         Ok(())
     }
 
-    /// Pins the RISK-2 walk-depth derivation: the prevalidation prior-inclusion
+    /// Pins the walk-depth derivation: the prevalidation prior-inclusion
     /// walk must cover `max(tx_anchor_expiry_depth, block_tree_depth)` so a
     /// promotion's prior Submit inside the reorg window is resolved by-hash (not
     /// via the branch-incorrect by-height fallback). A revert to just

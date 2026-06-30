@@ -534,7 +534,7 @@ impl BlockDiscoveryServiceInner {
         // get any remaining valid_ingress_anchor_block hashes from the block index
         // we do not need the full block headers, so we use the block index
         {
-            // NC-0042 / #1405: the deepest by-hash ancestor we reached above
+            // NC-0042: the deepest by-hash ancestor we reached above
             // (`parent_block`, at `bt_finished_height`) is on THIS block's chain.
             // Push its hash BY-HASH — it sits ABOVE the index handoff below, so it
             // must NOT be taken from the (reorg-mutable) block index, which is only

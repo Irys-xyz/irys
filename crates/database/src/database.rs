@@ -235,7 +235,7 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// at each migrated height.  It is *branch-invariant* — attests the same hash
 /// from every chain's perspective — ONLY for heights below the reorg floor.
 ///
-/// **Reorg ceiling moved (#1405).**  Network-partition / deep-reorg recovery
+/// **Reorg ceiling moved.**  Network-partition / deep-reorg recovery
 /// removed the old `validate_reorg_within_migration_depth` gate (now dead): a
 /// reorg can rewind and rewrite already-migrated MBH rows up to
 /// `block_tree_depth` deep (`recover_from_network_partition` →
@@ -461,7 +461,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // their block_set populated by `BlockMigrationService::persist_metadata`
     // Phase 3, and unconfirmed entries get `expiry_height` set by
     // `cache_data_root_with_expiry`.  Direct callers of `cache_data_root`
-    // that bypass both paths (test fixtures, pre-fix code) can produce
+    // that bypass both paths (e.g. test fixtures) can produce
     // this state — warn so operators see them.
     if cached_data_root.block_set.is_empty() && cached_data_root.expiry_height.is_none() {
         warn!(

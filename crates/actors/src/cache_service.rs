@@ -1366,7 +1366,7 @@ mod tests {
     //
     // Real prod ingress goes through `cache_data_root_with_expiry`, which sets
     // `expiry_height` to `anchor + tx_anchor_expiry_depth`.  Direct callers of
-    // `cache_data_root(_, _, None)` (this fixture, pre-fix code paths) leave
+    // `cache_data_root(_, _, None)` (this fixture) leave
     // `expiry_height = None`.  We set it manually here to mirror what the
     // mempool ingress path produces, so the test exercises the realistic
     // "unconfirmed entry with expiry in the future" state rather than the

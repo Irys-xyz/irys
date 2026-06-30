@@ -716,7 +716,7 @@ struct SubmitInclusion {
 ///
 /// Fast path: `canonical_submit_height` resolves migrated inclusions in O(1)
 /// from the canonical index / `MigratedBlockHashes`. Migrated rows are only
-/// branch-invariant BELOW the reorg floor — since #1405 a deep reorg can rewrite
+/// branch-invariant BELOW the reorg floor — a deep reorg can rewrite
 /// them up to `block_tree_depth` deep. This is safe HERE because
 /// `submit_tx_expired` only acts on *expired* Submit slots, and `Config::validate`
 /// requires a slot's lifetime (`submit_ledger_epoch_length * num_blocks_in_epoch`)
@@ -1044,7 +1044,7 @@ fn assert_canonical_via_mbh(db: &DatabaseProvider, hash: H256, height: u64) -> e
 /// offsets this is called with: callers only resolve *expired* partitions, which
 /// the slot-lifetime > `block_tree_depth` config invariant keeps below the reorg
 /// floor, so a migrated offset's block is finalized and shared by every branch
-/// (migrated rows above the floor are reorg-mutable since #1405, but expired
+/// (migrated rows above the floor are reorg-mutable, but expired
 /// offsets never reach there); an un-migrated offset's block is on the parent's
 /// own chain.
 fn resolve_ledger_offset_to_block(
@@ -3351,9 +3351,9 @@ mod tests {
     /// bases refund suppression on the branch-resolved `promoted_on_branch` set,
     /// NOT on the fetched header's node-local `promoted_height`. A tx whose header
     /// still carries a (branch-variant) `promoted_height = Some` from local mempool
-    /// state must STILL be refunded when it is absent from the branch set — the
-    /// exact divergence the pre-fix `data_tx.promoted_height().is_none()` check
-    /// produced. (On the pre-fix code this asserts fails: no refund is emitted.)
+    /// state must STILL be refunded when it is absent from the branch set. Gating
+    /// the refund on the header's node-local `promoted_height` instead of the
+    /// branch-resolved set would wrongly suppress it — exactly what this guards.
     #[test]
     fn aggregate_refunds_use_branch_set_not_node_local_promoted_height() {
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());

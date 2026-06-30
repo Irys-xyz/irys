@@ -141,19 +141,18 @@ impl Config {
             "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
         );
 
-        // The reset-boundary confirmation gate (issue #1447) parks the VDF loop at a boundary
+        // The reset-boundary confirmation gate parks the VDF loop at a boundary
         // until the rotation block is confirmed (block_migration_depth deep). For the gate to
         // reopen before the next boundary — i.e. for honest mining not to wedge — a reset
         // window must comfortably outspan the confirmation lag. With the VDF clocked at ~1
         // step/sec a block spans ~block_time steps, so the lag is block_migration_depth blocks
-        // ≈ block_migration_depth * block_time steps; require 2x that for headroom. See
-        // design/docs/vdf-reset-seed-confirmation-gate.md.
+        // ≈ block_migration_depth * block_time steps; require 2x that for headroom.
         let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
         let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
             .saturating_mul(self.consensus.difficulty_adjustment.block_time);
         ensure!(
             reset_window_steps >= confirmation_lag_steps.saturating_mul(2),
-            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary (issue #1447 gate)",
+            "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary",
             reset_window_steps,
             confirmation_lag_steps.saturating_mul(2),
             self.consensus.block_migration_depth,
@@ -266,7 +265,7 @@ impl Config {
         // walk resolve each expired tx's ledger inclusion through the *migrated*
         // block index (`canonical_submit_height` / `migrated_predecessor_total`),
         // which is only branch-invariant BELOW the reorg floor. Deep reorgs
-        // (#1405) can now rewind already-migrated blocks up to `block_tree_depth`
+        // can now rewind already-migrated blocks up to `block_tree_depth`
         // deep, so if a slot's lifetime is shorter than that window it could
         // expire while an expired tx's inclusion is still reorg-mutable — two
         // honest nodes could then resolve different inclusions and fork. A slot
@@ -333,7 +332,7 @@ impl Config {
             // Tx anchors must resolve INSIDE the reorg window so prevalidation's
             // inclusion/anchor walks can confirm them branch-correctly by-hash. A
             // tx anchored older than the tree would fall to the by-height index/MBH
-            // shortcut, which is only branch-invariant below the reorg floor (#1405)
+            // shortcut, which is only branch-invariant below the reorg floor
             // — see `get_previous_tx_inclusions` and the ingress-anchor walk in
             // `block_discovery`. `tx_anchor_expiry_depth` bounds how old a tx anchor
             // can be, so cap it at `block_tree_depth`. (`ingress_proof_anchor_expiry_depth`
@@ -355,9 +354,8 @@ impl Config {
         // (block_validation.rs) where the per-proof intersection loop picks
         // `assigned_miners` via HashMap iteration order over `slot_ranges` — a
         // consensus-fork vector when `block_range` straddles multiple Submit
-        // slots.  The determinism fix lives on `fix/assigned-miners-determinism`
-        // and is a consensus rule change that must be coordinated with a
-        // network upgrade.  Under all currently-deployed configs the value is
+        // slots.  The determinism fix is a consensus rule change that must be
+        // coordinated with a network upgrade.  Under all currently-deployed configs the value is
         // 0 and the non-deterministic path is vacuous; raising it without the
         // determinism fix risks divergence between nodes.
         //
@@ -371,7 +369,7 @@ impl Config {
                 .number_of_ingress_proofs_from_assignees
                 == 0,
             "consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees ({}) must be 0 \
-             until fix/assigned-miners-determinism lands — the current `get_assigned_ingress_proofs` \
+             until the assigned-miners determinism fix lands — the current `get_assigned_ingress_proofs` \
              impl picks `assigned_miners` via non-deterministic HashMap iteration when \
              block_range intersects multiple Submit slots",
             self.consensus
@@ -383,7 +381,7 @@ impl Config {
             ensure!(
                 fork.number_of_ingress_proofs_from_assignees == 0,
                 "consensus.hardforks.next_name_tbd.number_of_ingress_proofs_from_assignees ({}) \
-                 must be 0 until fix/assigned-miners-determinism lands — see frontier guard above",
+                 must be 0 until the assigned-miners determinism fix lands — see frontier guard above",
                 fork.number_of_ingress_proofs_from_assignees,
             );
         }

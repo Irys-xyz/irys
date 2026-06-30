@@ -1,7 +1,7 @@
 // NC-0042 §4c validator consensus rule: a block that promotes a tx whose
 // Submit-ledger storage has already expired must be rejected with
 // `ShadowTransactionInvalid` — even when the expiry happened in an *earlier*
-// block (the cross-block silent double-pay, devnet 39960/39962).
+// block (the cross-block silent double-pay).
 //
 // Scenario (real flow, no DB seeding):
 //   1. Drive enough data txs through the Submit ledger to force a 2nd slot, so

@@ -206,7 +206,7 @@ pub async fn capacity_chunk_solution(
             sleep(Duration::from_millis(200)).await;
             tries += 1;
         }
-        // Never advance past the latest AVAILABLE VDF step. When the #1449 confirmation gate parks
+        // Never advance past the latest AVAILABLE VDF step. When the confirmation gate parks
         // the VDF at a reset boundary, `global_step` stops here; targeting the un-produced boundary
         // step would make `get_steps` fail. Mining a solution at an available step still produces a
         // block, which advances the confirmed step so the gate releases for the next block (exactly
