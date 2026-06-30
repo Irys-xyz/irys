@@ -7,8 +7,8 @@
 //! Why a normal "gossip the head only" setup doesn't exercise this:
 //! when peer receives a head whose parent isn't in its tree,
 //! `block_pool` runs the orphan-fetch cascade — each fetched ancestor is
-//! validated and `fast_forward_vdf_steps_from_block` bridges the peer's
-//! VDF state over the gap. By the time the head reaches VDF validation,
+//! validated and its validated steps are fast-forwarded into the peer's
+//! VDF state, bridging the gap. By the time the head reaches VDF validation,
 //! peer's `global_step` has caught up and the progress check correctly
 //! does not fire.
 //!

@@ -5741,6 +5741,7 @@ dependencies = [
  "nodit",
  "openssl",
  "opentelemetry",
+ "opentelemetry_sdk",
  "proptest",
  "rayon",
  "rstest",

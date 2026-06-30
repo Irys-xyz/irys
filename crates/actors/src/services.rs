@@ -16,14 +16,12 @@ use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage, Traced};
-use irys_vdf::VdfStep;
+use irys_vdf::{VdfFastForwardSender, VdfStep, fast_forward_channel};
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel},
+    mpsc::{Receiver, UnboundedReceiver, UnboundedSender, unbounded_channel},
 };
-
-const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct ServiceSenders(pub Arc<ServiceSendersInner>);
@@ -115,7 +113,7 @@ pub struct ServiceSendersInner {
     pub chunk_ingress: UnboundedSender<Traced<ChunkIngressMessage>>,
     pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
-    pub vdf_fast_forward: Sender<Traced<VdfStep>>,
+    pub vdf_fast_forward: VdfFastForwardSender,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -142,8 +140,7 @@ impl ServiceSendersInner {
             unbounded_channel::<Traced<ChunkMigrationServiceMessage>>();
         let (mempool_sender, mempool_receiver) =
             unbounded_channel::<Traced<MempoolServiceMessage>>();
-        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
-            channel::<Traced<VdfStep>>(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = fast_forward_channel();
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
         let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =

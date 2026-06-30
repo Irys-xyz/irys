@@ -12,7 +12,6 @@ irys_utils::define_metrics! {
     gauge SYNC_STATE("irys.sync.state", "Node sync state (1=synced, 0=syncing)");
     gauge NODE_UP("irys.node.up", "Node liveness indicator (1=up)");
     gauge NODE_UPTIME("irys.node.uptime_seconds", "Node uptime in seconds");
-    gauge VDF_MINING_ENABLED("irys.vdf.mining_enabled", "Whether VDF mining is enabled (1=yes, 0=no)");
     gauge STORAGE_MODULES_TOTAL("irys.storage.modules_total", "Total number of storage modules");
     gauge PARTITIONS_ASSIGNED("irys.storage.partitions_assigned", "Number of storage modules with a partition assigned");
     gauge PARTITIONS_UNASSIGNED("irys.storage.partitions_unassigned", "Number of storage modules without a partition assigned");
@@ -52,10 +51,6 @@ pub(crate) fn record_node_up() {
 pub(crate) fn record_node_uptime() {
     let start = NODE_START_TIME.get_or_init(Instant::now);
     NODE_UPTIME.record(start.elapsed().as_secs(), &[]);
-}
-
-pub(crate) fn record_vdf_mining_enabled(enabled: bool) {
-    VDF_MINING_ENABLED.record(u64::from(enabled), &[]);
 }
 
 pub(crate) fn record_storage_modules_total(count: u64) {

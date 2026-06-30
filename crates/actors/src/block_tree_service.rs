@@ -1731,6 +1731,21 @@ mod tests {
         assert_eq!(result.metric_label(), "invalid");
     }
 
+    /// The seeds stage records its label through `granular_metric_label`; a
+    /// `SeedDataInvalid` rejection must surface as `"invalid"` — not
+    /// `"seed_data_invalid"` (which is `metric_reason`). This pins the label the
+    /// centralised `irys_vdf::verify::is_seed_data_valid` path emits once its
+    /// `eyre` error is mapped back to `ValidationError::SeedDataInvalid`.
+    #[test]
+    fn seed_data_invalid_dispatches_to_invalid_with_label() {
+        let result: ValidationResult = crate::block_validation::ValidationError::SeedDataInvalid(
+            "Expected: .., got: ..".to_string(),
+        )
+        .into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        assert_eq!(result.granular_metric_label(), "invalid");
+    }
+
     /// A local/runtime PreValidationError must convert to InternalFailure so
     /// downstream consumers don't mark the block as consensus-invalid.
     #[test]

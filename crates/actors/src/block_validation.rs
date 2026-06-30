@@ -1,4 +1,4 @@
-use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::block_tree_service::BlockTreeServiceMessage;
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
     block_producer::ledger_expiry,
@@ -1479,7 +1479,12 @@ pub async fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(block, previous_block)?;
+    if irys_vdf::verify::prev_output_is_valid(block, previous_block).is_err() {
+        return Err(PreValidationError::VDFPreviousOutputMismatch {
+            got: block.vdf_limiter_info.prev_output,
+            expected: previous_block.vdf_limiter_info.output,
+        });
+    }
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -1566,10 +1571,7 @@ pub async fn prevalidate_block(
 
     // Validate VDF seeds/next_seed against parent before any VDF-related processing
     let vdf_reset_frequency: u64 = config.vdf.reset_frequency as u64;
-    if !matches!(
-        is_seed_data_valid(block, previous_block, vdf_reset_frequency),
-        ValidationResult::Valid
-    ) {
+    if irys_vdf::verify::is_seed_data_valid(block, previous_block, vdf_reset_frequency).is_err() {
         return Err(PreValidationError::VDFCheckpointsInvalid(
             "Seed data is invalid".to_string(),
         ));
@@ -1975,20 +1977,6 @@ fn validate_transactions<T: IrysTransactionCommon + Sync>(
     })
 }
 
-pub fn prev_output_is_valid(
-    block: &IrysBlockHeader,
-    previous_block: &IrysBlockHeader,
-) -> Result<(), PreValidationError> {
-    if block.vdf_limiter_info.prev_output == previous_block.vdf_limiter_info.output {
-        Ok(())
-    } else {
-        Err(PreValidationError::VDFPreviousOutputMismatch {
-            got: block.vdf_limiter_info.prev_output,
-            expected: previous_block.vdf_limiter_info.output,
-        })
-    }
-}
-
 // compares block timestamp against parent block
 // errors if the block has a lower timestamp than the parent block
 // compares timestamps of block against current system time
@@ -2238,6 +2226,7 @@ pub fn height_is_valid(
 #[cfg(test)]
 mod prevalidation_error_classification_tests {
     use super::*;
+    use crate::block_tree_service::ValidationResult;
     use rstest::rstest;
 
     /// `InternalTaskJoin` is a local runtime failure (verifier panicked); it
@@ -4634,34 +4623,6 @@ fn validate_shadow_transactions_match(
     Ok(())
 }
 
-#[tracing::instrument(level = "trace", skip_all)]
-pub fn is_seed_data_valid(
-    block_header: &IrysBlockHeader,
-    previous_block_header: &IrysBlockHeader,
-    reset_frequency: u64,
-) -> ValidationResult {
-    let vdf_info = &block_header.vdf_limiter_info;
-    let expected_seed_data = vdf_info.calculate_seeds(reset_frequency, previous_block_header);
-
-    // TODO: difficulty validation adjustment is likely needs to be done here too,
-    //  but difficulty is not yet implemented
-    let are_seeds_valid =
-        expected_seed_data.0 == vdf_info.next_seed && expected_seed_data.1 == vdf_info.seed;
-    if are_seeds_valid {
-        ValidationResult::Valid
-    } else {
-        error!(
-            "Seed data is invalid. Expected: {:?}, got: {:?}",
-            expected_seed_data, vdf_info
-        );
-        ValidationError::SeedDataInvalid(format!(
-            "Expected: {:?}, got: {:?}",
-            expected_seed_data, vdf_info
-        ))
-        .into()
-    }
-}
-
 /// Validates that commitment transactions in a block are ordered correctly
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
@@ -6675,65 +6636,6 @@ mod tests {
                 chunk_size,
             );
         }
-    }
-
-    #[tokio::test]
-    async fn is_seed_data_valid_should_validate_seeds() {
-        let reset_frequency = 2;
-
-        let mut parent_header = IrysBlockHeader::new_mock_header();
-        let parent_seed = BlockHash::from_slice(&[2; 32]);
-        let parent_next_seed = BlockHash::from_slice(&[3; 32]);
-        parent_header.block_hash = BlockHash::from_slice(&[4; 32]);
-        parent_header.vdf_limiter_info.seed = parent_seed;
-        parent_header.vdf_limiter_info.next_seed = parent_next_seed;
-
-        let mut header_2 = IrysBlockHeader::new_mock_header();
-        // Reset frequency is 2, so setting global_step_number to 3 and adding 2 steps
-        //  should result in the seeds being rotated
-        header_2.vdf_limiter_info.global_step_number = 3;
-        header_2.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
-        header_2
-            .vdf_limiter_info
-            .set_seeds(reset_frequency, &parent_header);
-        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
-
-        assert_eq!(
-            header_2.vdf_limiter_info.next_seed,
-            parent_header.block_hash
-        );
-        assert_eq!(header_2.vdf_limiter_info.seed, parent_next_seed);
-        assert!(
-            matches!(is_valid, ValidationResult::Valid),
-            "Seed data should be valid"
-        );
-
-        // Now let's try to rotate the seeds when no rotation is needed by increasing the
-        // reset frequency - this makes the previously calculated seeds invalid
-        let large_reset_frequency = 100;
-        let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
-        assert!(
-            matches!(
-                &is_valid,
-                ValidationResult::Invalid(rejection)
-                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
-            ),
-            "Seed data should be invalid due to wrong reset frequency"
-        );
-
-        // Now let's try to set some random seeds that are not valid
-        header_2.vdf_limiter_info.seed = BlockHash::from_slice(&[5; 32]);
-        header_2.vdf_limiter_info.next_seed = BlockHash::from_slice(&[6; 32]);
-        let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
-
-        assert!(
-            matches!(
-                &is_valid,
-                ValidationResult::Invalid(rejection)
-                    if matches!(rejection.err(), ValidationError::SeedDataInvalid(_))
-            ),
-            "Seed data should be invalid with random seeds"
-        );
     }
 
     fn poa_test(

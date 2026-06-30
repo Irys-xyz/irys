@@ -1141,7 +1141,7 @@ impl IrysNode {
                     metrics::record_sync_state(!info.is_syncing);
                     metrics::record_node_up();
                     metrics::record_node_uptime();
-                    metrics::record_vdf_mining_enabled(vdf_controller.is_enabled());
+                    irys_vdf::metrics::record_vdf_mining_enabled(vdf_controller.is_enabled());
                     let modules = storage_modules_guard.read();
                     let total = modules.len() as u64;
                     let assigned = modules
