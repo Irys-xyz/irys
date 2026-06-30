@@ -14,6 +14,12 @@ tokio.workspace = true
 irys-database.workspace = true
 reth-db.workspace = true
 
+[features]
+# Exposes test-only helpers (e.g. `open_or_create_irys_consensus_data_db`, which
+# applies the small TEST_DB_GEOMETRY_MAX_SIZE cap) to downstream crates' test
+# builds. Production code must never enable this — it opens the consensus DB via
+# `consensus_db_args` + `open_or_create_irys_consensus_data_db_with_args` instead.
+test-utils = []
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
