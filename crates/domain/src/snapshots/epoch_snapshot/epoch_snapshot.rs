@@ -306,8 +306,9 @@ impl EpochSnapshot {
         self.previous_epoch_block = previous_epoch_block.clone();
 
         // The retention `last_height` refresh gates on Cascade activation; the
-        // "this slot has canonical data" marker must be updated regardless so
-        // preallocated-but-never-written slots never expire.
+        // "this slot has canonical data" marker is updated unconditionally so
+        // post-Cascade expiry can distinguish written slots from empty preallocations
+        // (pre-Cascade, allocation-aged unwritten slots still expire).
         let cascade_active = self
             .config
             .consensus

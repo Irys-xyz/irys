@@ -4597,10 +4597,21 @@ async fn generate_expected_shadow_transactions(
     // (tests, future callers). The rule here is canonical; the constructor guard
     // is defence-in-depth only.
     //
-    // The expired set is derived from the *same* expired-partition → block → tx walk
-    // that schedules `user_perm_fee_refunds`, so "is this tx refunded?" and "may
-    // this tx be promoted?" cannot diverge (the structural flaw the earlier
-    // cycle-math approximation introduced — see NC-0042 §4b).
+    // `submit_tx_expired` keys off `get_all_expired_term_slot_indexes` — the
+    // *inclusive* all-expired Submit slot set. That is a strict SUPERSET of the set
+    // the refund pipeline settles (`get_expiring_partition_info`, which additionally
+    // drops slots `written_this_epoch`). The containment is the load-bearing
+    // property: a refunded tx is always in this blocked set, so "refunded" ⇒ "not
+    // promotable" and the double-pay this fix forbids (refund + permanent storage)
+    // cannot occur. The converse is intentionally NOT exact — a slot rescued from
+    // refund by the write-window exclusion (it received Submit data this epoch) is
+    // still treated as expired here, because the promotion path reads the *parent*
+    // epoch snapshot (pre-`touch_active_ledger_slots`) and cannot see the current
+    // epoch's write. That is conservative (never a double-pay) and self-healing:
+    // once the epoch `touch` bumps the slot's `last_height` it leaves the blocked
+    // set for the rest of the epoch, so at worst a promotion is delayed one block at
+    // the epoch boundary. Replaces the earlier cycle-math approximation — see
+    // NC-0042 §4b.
     //
     // This is a strict superset of the old same-block guard: a tx whose Submit
     // slot expires *at* this block (same-block epoch collision) and a tx whose
@@ -4643,7 +4654,8 @@ async fn generate_expected_shadow_transactions(
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
         if let Some(range) = &expired_range {
             for tx in &publish_ledger_with_txs.txs {
-                // Per-candidate form of the (refund-pipeline-shared) expired-tx set.
+                // Per-candidate form of the inclusive all-expired Submit set (a
+                // superset of the refund set; see the §4b/§4c note above).
                 let expired = ledger_expiry::submit_tx_expired(
                     tx.id,
                     range,
