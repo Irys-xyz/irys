@@ -150,11 +150,22 @@ impl Config {
         let reset_window_steps = self.consensus.vdf.reset_frequency as u64;
         let confirmation_lag_steps = (self.consensus.block_migration_depth as u64)
             .saturating_mul(self.consensus.difficulty_adjustment.block_time);
+        // Reject rather than clamp: a saturating 2x would floor the requirement and
+        // could accept an under-sized reset window when the true 2x overflows u64.
+        let required_reset_window_steps =
+            confirmation_lag_steps.checked_mul(2).ok_or_else(|| {
+                eyre::eyre!(
+                    "2x the confirmation lag overflows u64 (confirmation lag {} steps = block_migration_depth {} x block_time {}s); reduce block_migration_depth or block_time",
+                    confirmation_lag_steps,
+                    self.consensus.block_migration_depth,
+                    self.consensus.difficulty_adjustment.block_time,
+                )
+            })?;
         ensure!(
-            reset_window_steps >= confirmation_lag_steps.saturating_mul(2),
+            reset_window_steps >= required_reset_window_steps,
             "vdf.reset_frequency ({} steps) must be >= 2x the confirmation lag ({} steps = block_migration_depth {} x block_time {}s); a smaller reset window wedges honest mining at the reset boundary",
             reset_window_steps,
-            confirmation_lag_steps.saturating_mul(2),
+            required_reset_window_steps,
             self.consensus.block_migration_depth,
             self.consensus.difficulty_adjustment.block_time,
         );
