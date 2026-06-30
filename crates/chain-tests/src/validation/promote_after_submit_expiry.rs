@@ -187,7 +187,10 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
     //         staked) so the evil block fails ONLY on the §4c expiry rule. ---
     let genesis_signer = genesis_config.signer();
     let proof_anchor = genesis_node.get_anchor().await?;
-    let chunks: Vec<Vec<u8>> = vec![target.data.clone().unwrap_or_default().into()];
+    let target_data = target.data.clone().expect(
+        "posted tx payload must be retained to build the ingress proof (fixture invariant)",
+    );
+    let chunks: Vec<Vec<u8>> = vec![target_data.into()];
     let proof = generate_ingress_proof(
         &genesis_signer,
         expired_tx.data_root,
