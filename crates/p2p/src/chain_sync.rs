@@ -74,6 +74,9 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 struct VdfSyncPause {
     vdf_controller: VdfController,
     was_mining_enabled_before_sync: bool,
+    /// Disarm flag: an explicit `restore()` sets this so the `Drop` guard does
+    /// not re-apply the snapshot on the normal path.
+    restored: bool,
 }
 
 impl VdfSyncPause {
@@ -87,17 +90,37 @@ impl VdfSyncPause {
         Self {
             vdf_controller,
             was_mining_enabled_before_sync,
+            restored: false,
         }
     }
 
-    /// Restore the pre-sync mining state (last-writer-wins).
-    fn restore(&self) {
+    /// Restore the pre-sync mining state (last-writer-wins) and disarm the `Drop`
+    /// guard. Idempotent: a second call (or the guard) is a no-op.
+    fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
         debug!(
             enabled = self.was_mining_enabled_before_sync,
             "Sync task: Restoring VDF mining state after sync"
         );
         // Always write the snapshot back, including the `false` case, so a
         // concurrent enable during sync does not survive the restore.
+        self.vdf_controller
+            .set_enabled(self.was_mining_enabled_before_sync);
+        self.restored = true;
+    }
+}
+
+impl Drop for VdfSyncPause {
+    /// Safety net: if the (detached) sync task is cancelled or panics before the
+    /// explicit `restore()` runs, reinstate the pre-sync mining state so mining
+    /// is never left disabled. A normal `restore()` disarms this via `restored`.
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        debug!("Sync task: VdfSyncPause dropped before restore; reinstating mining state");
         self.vdf_controller
             .set_enabled(self.was_mining_enabled_before_sync);
     }
@@ -295,7 +318,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
                 // Snapshot the mining flag and disable mining for the duration
                 // of the sync. Restored after sync_chain via `restore()` below.
-                let vdf_sync_pause = VdfSyncPause::begin(vdf_controller);
+                let mut vdf_sync_pause = VdfSyncPause::begin(vdf_controller);
 
                 if let Err(err) = block_pool
                     .repair_missing_payloads_if_any(reth_service, Arc::clone(&gossip_data_handler))
@@ -1959,7 +1982,7 @@ mod tests {
         let controller = VdfController::new(&mining);
 
         // Begin: snapshot (true) + disable for the sync window.
-        let pause = VdfSyncPause::begin(controller.clone());
+        let mut pause = VdfSyncPause::begin(controller.clone());
         assert!(!controller.is_enabled(), "begin() disables mining");
 
         // Concurrent stop_vdf() during sync — will be lost on restore.
@@ -1986,7 +2009,7 @@ mod tests {
         let controller = VdfController::new(&mining);
 
         // Begin: snapshot (false) + disable for the sync window.
-        let pause = VdfSyncPause::begin(controller.clone());
+        let mut pause = VdfSyncPause::begin(controller.clone());
         assert!(!controller.is_enabled(), "begin() keeps mining disabled");
 
         // Concurrent start() during sync.
@@ -1998,6 +2021,27 @@ mod tests {
         assert!(
             !controller.is_enabled(),
             "restore overwrites the concurrent enable (snapshot false wins)"
+        );
+    }
+
+    /// If the (detached) sync task is cancelled or panics before `restore()`
+    /// runs, the `Drop` guard must reinstate the pre-sync mining state so mining
+    /// is never left wedged off.
+    #[test]
+    fn sync_pause_drop_reinstates_mining_if_restore_not_called() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(true));
+        let controller = VdfController::new(&mining);
+
+        {
+            let _pause = VdfSyncPause::begin(controller.clone());
+            assert!(!controller.is_enabled(), "begin() disables mining");
+            // Drop without an explicit restore() (simulates task cancel/panic).
+        }
+        assert!(
+            controller.is_enabled(),
+            "Drop reinstates the pre-sync mining state"
         );
     }
 
