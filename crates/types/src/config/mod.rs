@@ -260,6 +260,21 @@ impl Config {
             );
         }
 
+        // These feed the slot-lifetime / expiry multiply (`epoch_length *
+        // num_blocks_in_epoch`) on every path, including test mode where the
+        // slot-lifetime > block_tree_depth guard below is skipped. A zero in either
+        // collapses every slot's lifetime to 0 blocks (so every slot reads as expired
+        // immediately) and can panic the runtime `checked_mul(...).expect(...)` expiry
+        // math. Reject unconditionally, matching the publish_ledger_epoch_length check.
+        ensure!(
+            self.consensus.epoch.num_blocks_in_epoch > 0,
+            "num_blocks_in_epoch must be > 0"
+        );
+        ensure!(
+            self.consensus.epoch.submit_ledger_epoch_length > 0,
+            "submit_ledger_epoch_length must be > 0"
+        );
+
         // NC-0042 / deep-reorg safety: a term-ledger slot's lifetime must exceed
         // the reorg window. Once a slot expires, the promotion filter and refund
         // walk resolve each expired tx's ledger inclusion through the *migrated*
