@@ -29,6 +29,7 @@ fn build_tiers() -> [Tier; 3] {
         throttle: false,
         progress_timeout_secs: 30,
         validation_batch_size: 32,
+        core_pinning: irys_types::CorePinning::Auto,
     };
 
     let mainnet_consensus = ConsensusConfig::mainnet().vdf;
@@ -41,6 +42,7 @@ fn build_tiers() -> [Tier; 3] {
         throttle: false,
         progress_timeout_secs: 30,
         validation_batch_size: 32,
+        core_pinning: irys_types::CorePinning::Auto,
     };
 
     [

@@ -12,6 +12,7 @@ use irys_types::{
     BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
+use irys_vdf::state::VdfController;
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -61,6 +62,69 @@ pub enum ChainSyncError {
 
 /// Type alias for sync service results
 pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
+
+/// Production helper that pauses VDF mining for the duration of a sync and
+/// restores the pre-sync state afterwards.
+///
+/// **Last-writer-wins** (deliberately preserved — changing it is a functional
+/// change, out of scope; see design plan §2): the sync snapshots the enabled
+/// flag, disables mining, then on `restore` re-applies the SNAPSHOT. A
+/// concurrent `stop_vdf()` during the sync window is therefore overwritten on
+/// restore. Reason-aware pause semantics are future work.
+struct VdfSyncPause {
+    vdf_controller: VdfController,
+    was_mining_enabled_before_sync: bool,
+    /// Disarm flag: an explicit `restore()` sets this so the `Drop` guard does
+    /// not re-apply the snapshot on the normal path.
+    restored: bool,
+}
+
+impl VdfSyncPause {
+    /// Snapshot the mining flag and disable mining for the sync window.
+    fn begin(vdf_controller: VdfController) -> Self {
+        debug!("Sync task: Disabling VDF mining before starting sync");
+        let was_mining_enabled_before_sync = vdf_controller.is_enabled();
+        // Always disable mining for the sync window, regardless of the snapshot,
+        // so a concurrent enable is overwritten by the pause (last-writer-wins).
+        vdf_controller.stop();
+        Self {
+            vdf_controller,
+            was_mining_enabled_before_sync,
+            restored: false,
+        }
+    }
+
+    /// Restore the pre-sync mining state (last-writer-wins) and disarm the `Drop`
+    /// guard. Idempotent: a second call (or the guard) is a no-op.
+    fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
+        debug!(
+            enabled = self.was_mining_enabled_before_sync,
+            "Sync task: Restoring VDF mining state after sync"
+        );
+        // Always write the snapshot back, including the `false` case, so a
+        // concurrent enable during sync does not survive the restore.
+        self.vdf_controller
+            .set_enabled(self.was_mining_enabled_before_sync);
+        self.restored = true;
+    }
+}
+
+impl Drop for VdfSyncPause {
+    /// Safety net: if the (detached) sync task is cancelled or panics before the
+    /// explicit `restore()` runs, reinstate the pre-sync mining state so mining
+    /// is never left disabled. A normal `restore()` disarms this via `restored`.
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        debug!("Sync task: VdfSyncPause dropped before restore; reinstating mining state");
+        self.vdf_controller
+            .set_enabled(self.was_mining_enabled_before_sync);
+    }
+}
 
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
@@ -137,8 +201,10 @@ pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     is_sync_task_spawned: Arc<AtomicBool>,
     gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
-    /// An atomic bool to enable or disable VDF mining when sync is in progress
-    is_vdf_mining_enabled: Arc<AtomicBool>,
+    /// Controller for enabling/disabling VDF mining when sync is in progress.
+    /// Wraps the single shared mining-enable `Arc<AtomicBool>` owned by
+    /// `VdfState`.
+    vdf_controller: VdfController,
     is_update_whitelist_task_running: Arc<AtomicBool>,
     runtime_handle: tokio::runtime::Handle,
 }
@@ -186,7 +252,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         block_pool: Arc<BlockPool<B, M>>,
         gossip_data_handler: Arc<GossipDataHandler<M, B>>,
         reth_service: Option<mpsc::UnboundedSender<Traced<RethServiceMessage>>>,
-        is_vdf_mining_enabled: Arc<AtomicBool>,
+        vdf_controller: VdfController,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
@@ -198,7 +264,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             is_sync_task_spawned: Arc::new(AtomicBool::new(false)),
             gossip_data_handler,
             reth_service,
-            is_vdf_mining_enabled,
+            vdf_controller,
             is_update_whitelist_task_running: Arc::new(AtomicBool::new(false)),
             runtime_handle,
         }
@@ -237,7 +303,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
         let reth_service = self.reth_service.clone();
-        let is_vdf_mining_enabled = Arc::clone(&self.is_vdf_mining_enabled);
+        let vdf_controller = self.vdf_controller.clone();
         let start_sync_from_height = self.block_index.read().latest_height();
         let runtime_handle = self.runtime_handle.clone();
 
@@ -250,14 +316,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     .hydrate_peers_online_status(&peer_list)
                     .await;
 
-                debug!("Sync task: Disabling VDF mining before starting sync");
-                let was_mining_enabled_before_sync = is_vdf_mining_enabled.load(Ordering::Relaxed);
-                // Disable VDF mining when sync is in progress
-                if was_mining_enabled_before_sync {
-                    is_vdf_mining_enabled.store(false, Ordering::Relaxed);
-                } else {
-                    debug!("Sync task: VDF mining was already disabled before sync, not sending disable signal");
-                }
+                // Snapshot the mining flag and disable mining for the duration
+                // of the sync. Restored after sync_chain via `restore()` below.
+                let mut vdf_sync_pause = VdfSyncPause::begin(vdf_controller);
 
                 if let Err(err) = block_pool
                     .repair_missing_payloads_if_any(reth_service, Arc::clone(&gossip_data_handler))
@@ -281,12 +342,8 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 )
                 .await;
 
-                debug!("Sync task: Enabling VDF mining after sync");
-                if was_mining_enabled_before_sync {
-                    is_vdf_mining_enabled.store(was_mining_enabled_before_sync, Ordering::Relaxed);
-                } else {
-                    debug!("Sync task: VDF mining was disabled before sync, not sending enable signal");
-                }
+                // Restore the pre-sync mining state (last-writer-wins).
+                vdf_sync_pause.restore();
 
                 is_sync_task_spawned.store(false, Ordering::Relaxed);
 
@@ -299,9 +356,10 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 }
 
                 if let Some(response_sender) = response
-                    && let Err(e) = response_sender.send(res) {
-                        error!("Failed to send the sync response: {:?}", e);
-                    }
+                    && let Err(e) = response_sender.send(res)
+                {
+                    error!("Failed to send the sync response: {:?}", e);
+                }
             }
             .in_current_span(),
         );
@@ -1911,6 +1969,81 @@ mod tests {
         })
     }
     use irys_types::BlockHash;
+
+    /// Pins the (deliberately preserved) last-writer-wins pause/restore via the
+    /// production `VdfSyncPause` helper: sync snapshots the enabled flag,
+    /// disables mining, then restores the SNAPSHOT. A concurrent disable during
+    /// the window is intentionally overwritten on restore.
+    #[test]
+    fn sync_pause_restore_is_last_writer_wins() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(true));
+        let controller = VdfController::new(&mining);
+
+        // Begin: snapshot (true) + disable for the sync window.
+        let mut pause = VdfSyncPause::begin(controller.clone());
+        assert!(!controller.is_enabled(), "begin() disables mining");
+
+        // Concurrent stop_vdf() during sync — will be lost on restore.
+        controller.stop();
+
+        // Restore the pre-sync snapshot (sync end).
+        pause.restore();
+        assert!(
+            controller.is_enabled(),
+            "restore re-enables to the pre-sync snapshot (last-writer-wins)"
+        );
+    }
+
+    /// The snapshot also wins when mining was DISABLED before sync: a concurrent
+    /// `start()` during the sync window must be overwritten back to `false` on
+    /// restore. This is the path the unconditional `restore()` fixes — the
+    /// previous conditional version skipped the write when the snapshot was
+    /// `false`, letting the concurrent enable survive.
+    #[test]
+    fn sync_restore_overwrites_concurrent_enable_when_disabled_before_sync() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(false));
+        let controller = VdfController::new(&mining);
+
+        // Begin: snapshot (false) + disable for the sync window.
+        let mut pause = VdfSyncPause::begin(controller.clone());
+        assert!(!controller.is_enabled(), "begin() keeps mining disabled");
+
+        // Concurrent start() during sync.
+        controller.start();
+        assert!(controller.is_enabled());
+
+        // Restore must overwrite the concurrent enable back to the snapshot (false).
+        pause.restore();
+        assert!(
+            !controller.is_enabled(),
+            "restore overwrites the concurrent enable (snapshot false wins)"
+        );
+    }
+
+    /// If the (detached) sync task is cancelled or panics before `restore()`
+    /// runs, the `Drop` guard must reinstate the pre-sync mining state so mining
+    /// is never left wedged off.
+    #[test]
+    fn sync_pause_drop_reinstates_mining_if_restore_not_called() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(true));
+        let controller = VdfController::new(&mining);
+
+        {
+            let _pause = VdfSyncPause::begin(controller.clone());
+            assert!(!controller.is_enabled(), "begin() disables mining");
+            // Drop without an explicit restore() (simulates task cancel/panic).
+        }
+        assert!(
+            controller.is_enabled(),
+            "Drop reinstates the pre-sync mining state"
+        );
+    }
 
     mod catch_up_task {
         use super::*;

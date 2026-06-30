@@ -1403,11 +1403,6 @@ impl NodeConfig {
         self.base_directory.join("block_index")
     }
 
-    /// get the `vdf_steps` directory path
-    pub fn vdf_steps_dir(&self) -> PathBuf {
-        self.base_directory.join("vdf_steps")
-    }
-
     /// get the peer info directory path
     pub fn peer_info_dir(&self) -> PathBuf {
         self.base_directory.join("peer_info")
@@ -1503,6 +1498,19 @@ mod run_mode_tests {
         let json = serde_json::to_string(&pinning).unwrap();
         let deserialized: CorePinning = serde_json::from_str(&json).unwrap();
         assert_eq!(pinning, deserialized);
+    }
+
+    /// The runtime `VdfConfig` merge must carry `core_pinning` through from the
+    /// node source struct — it was previously dropped (read separately in chain.rs).
+    #[rstest]
+    #[case(CorePinning::Disabled)]
+    #[case(CorePinning::Auto)]
+    #[case(CorePinning::Core(7))]
+    fn vdf_config_merge_propagates_core_pinning(#[case] pinning: CorePinning) {
+        let mut node_config = NodeConfig::testing();
+        node_config.vdf.core_pinning = pinning;
+        let vdf = node_config.vdf();
+        assert_eq!(vdf.core_pinning, pinning);
     }
 
     #[test]

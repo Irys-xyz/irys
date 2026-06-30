@@ -967,7 +967,7 @@ impl ValidationServiceInner {
             vdf.first_step_number = first_step_number,
             vdf.global_step_number = vdf_info.global_step_number,
             vdf.prev_output_step_number = prev_output_step_number,
-            vdf.local_step = self.vdf_state.read().global_step,
+            vdf.local_step = self.vdf_state.current_step(),
             "ensure_vdf_is_valid: entered"
         );
 

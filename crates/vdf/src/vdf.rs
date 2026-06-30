@@ -3,11 +3,7 @@ use crate::state::AtomicVdfState;
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
-use irys_types::{
-    AtomicVdfStepNumber, H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed,
-};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use irys_types::{H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
@@ -63,10 +59,8 @@ pub fn run_vdf<B: BlockProvider>(
     current_vdf_hash: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: Receiver<Traced<VdfStep>>,
-    is_mining_enabled: Arc<AtomicBool>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
-    atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
     chain_sync_state: ChainSyncState,
     shutdown_token: CancellationToken,
@@ -80,8 +74,12 @@ pub fn run_vdf<B: BlockProvider>(
     // 0-confirmation fork-loser seed (issue #1447) nor a seed re-pinned by a reorg.
     // Because it tracks the confirmed chain (which only advances as blocks migrate), it
     // is also reorg- and startup-safe with no per-seed bookkeeping.
-    let mut canonical_global_step_number = match vdf_state.read() {
-        Ok(guard) => guard.canonical_step(),
+    // Extract both the confirmed canonical step and the shared mining-enable
+    // flag under a single read guard. The flag is the SSOT `Arc<AtomicBool>`
+    // owned by `VdfState`; cloning the `Arc` once here lets the loop gate on it
+    // lock-free thereafter.
+    let (mut canonical_global_step_number, is_mining_enabled) = match vdf_state.read() {
+        Ok(guard) => (guard.canonical_step(), guard.mining_flag()),
         Err(_) => {
             // A prior panic in another caller poisoned the lock. Bail rather
             // than re-panic; the lifecycle's vdf_done channel surfaces this
@@ -153,7 +151,6 @@ pub fn run_vdf<B: BlockProvider>(
                 let prev_step = global_step_number;
                 let Some(returned) = store_step(
                     proposed_ff_step.step,
-                    &atomic_vdf_global_step,
                     &vdf_state,
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
@@ -297,7 +294,6 @@ pub fn run_vdf<B: BlockProvider>(
 
         let Some(returned) = store_step(
             hash,
-            &atomic_vdf_global_step,
             &vdf_state,
             global_step_number + 1,
             canonical_global_step_number,
@@ -378,7 +374,6 @@ pub fn is_reset_boundary_blocked(
 #[must_use]
 fn store_step(
     hash: H256,
-    atomic_vdf_global_step: &AtomicVdfStepNumber,
     vdf_state: &AtomicVdfState,
     new_global_step_number: u64,
     canonical_global_step_number: u64,
@@ -392,8 +387,9 @@ fn store_step(
     };
 
     vdf_guard.set_canonical_step(canonical_global_step_number);
+    // VdfState now owns the single step counter; store_step publishes it
+    // under this write guard (no separate external atomic to mirror).
     let global_step_number = vdf_guard.store_step(Seed(hash), new_global_step_number);
-    atomic_vdf_global_step.store(global_step_number, std::sync::atomic::Ordering::Relaxed);
     Some(global_step_number)
 }
 
@@ -401,19 +397,23 @@ fn store_step(
 mod tests {
     use super::*;
     use crate::state::test_helpers::mocked_vdf_service;
-    use crate::state::{CancelEnum, VdfStateReadonly, vdf_steps_are_valid};
+    use crate::state::{CancelEnum, VdfController, VdfStateReadonly, vdf_steps_are_valid};
     use crate::vdf_sha_verification;
     use irys_types::*;
     use nodit::interval::ii;
     use std::sync::atomic::AtomicU8;
-    use std::{
-        sync::{Arc, atomic::AtomicU64},
-        time::Duration,
-    };
+    use std::{sync::Arc, time::Duration};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, level_filters::LevelFilter};
     use tracing_subscriber::{fmt::SubscriberBuilder, util::SubscriberInitExt as _};
+
+    /// Enable mining on a mocked VDF state. `run_vdf` reads the mining flag from
+    /// the state (the SSOT `Arc<AtomicBool>`), so tests toggle it there rather
+    /// than passing a separate flag argument.
+    fn enable_mining(vdf_state: &AtomicVdfState) {
+        VdfController::new(&vdf_state.read().unwrap().mining_flag()).start();
+    }
 
     struct MockMining;
 
@@ -497,19 +497,15 @@ mod tests {
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
-
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-
-        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+        enable_mining(&vdf_state);
 
         let mut mock_header = IrysBlockHeader::new_mock_header();
         // Set global step number to 2 to simulate a scenario where canonical chain progresses
         mock_header.vdf_limiter_info.global_step_number = 2;
 
         let chain_sync_state = ChainSyncState::new(false, false);
-        let mining_state = Arc::clone(&is_mining_enabled);
         let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
@@ -521,10 +517,8 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
-                    mining_state,
                     broadcast_mining_service,
                     vdf_state.clone(),
-                    atomic_global_step_number,
                     MockBlockProvider(mock_header),
                     chain_sync_state,
                     shutdown_token,
@@ -535,7 +529,7 @@ mod tests {
         // wait for some vdf steps
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let step_num = vdf_steps_guard.read().global_step;
+        let step_num = vdf_steps_guard.read().current_step();
 
         assert!(
             step_num > 4,
@@ -612,15 +606,11 @@ mod tests {
         let broadcast_mining_service = MockMining;
         let (_, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
 
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
-
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-
-        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
+        enable_mining(&vdf_state);
 
         let chain_sync_state = ChainSyncState::new(false, false);
-        let mining_state = Arc::clone(&is_mining_enabled);
         let shutdown_token = CancellationToken::new();
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
@@ -632,10 +622,8 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
-                    mining_state,
                     broadcast_mining_service,
                     vdf_state.clone(),
-                    atomic_global_step_number,
                     MockBlockProvider::new(),
                     chain_sync_state,
                     shutdown_token,
@@ -646,7 +634,7 @@ mod tests {
         // wait for some vdf steps
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let step_num = vdf_steps_guard.read().global_step;
+        let step_num = vdf_steps_guard.read().current_step();
 
         assert_eq!(step_num, 3);
 
@@ -714,18 +702,16 @@ mod tests {
         let current_seed = H256::random();
         let reset_seed = H256::random();
         let (ff_step_sender, ff_step_receiver) = mpsc::channel::<Traced<VdfStep>>(16);
-        let is_mining_enabled = Arc::new(AtomicBool::new(false));
+        // Mining stays disabled (mocked_vdf_service defaults the flag to false):
+        // this test exercises the fast-forward path while mining is paused.
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        let atomic_global_step_number = Arc::new(AtomicU64::new(0));
         let chain_sync_state = ChainSyncState::new(true, false);
         let shutdown_token = CancellationToken::new();
 
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
-            let mining_state = Arc::clone(&is_mining_enabled);
             let vdf_state = vdf_state.clone();
-            let atomic_global_step_number = atomic_global_step_number.clone();
             let chain_sync_state = chain_sync_state.clone();
             let shutdown_token = shutdown_token.clone();
             move || {
@@ -735,10 +721,8 @@ mod tests {
                     current_seed,
                     reset_seed,
                     ff_step_receiver,
-                    mining_state,
                     MockMining,
                     vdf_state,
-                    atomic_global_step_number,
                     MockBlockProvider::new(),
                     chain_sync_state,
                     shutdown_token,
@@ -792,8 +776,8 @@ mod tests {
         );
 
         let (_ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
-        let atomic_step = Arc::new(AtomicU64::new(0));
+        // Lock is already poisoned; run_vdf bails at the entry-time read before
+        // it ever reads the mining flag, so no need to enable mining here.
         let chain_sync_state = ChainSyncState::new(false, false);
         let shutdown_token = CancellationToken::new();
 
@@ -804,10 +788,8 @@ mod tests {
                 H256::zero(),
                 H256::zero(),
                 ff_rx,
-                is_mining_enabled,
                 MockMining,
                 vdf_state,
-                atomic_step,
                 MockBlockProvider::new(),
                 chain_sync_state,
                 shutdown_token,
@@ -854,10 +836,9 @@ mod tests {
             .await
             .unwrap();
 
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        let atomic_step = Arc::new(AtomicU64::new(0));
+        enable_mining(&vdf_state);
 
         // Canonical far ahead so the "too far ahead" guard never pauses.
         let mut mock_header = IrysBlockHeader::new_mock_header();
@@ -868,7 +849,7 @@ mod tests {
         let vdf_thread = std::thread::spawn({
             let config = config.clone();
             let shutdown_token = shutdown_token.clone();
-            let mining_state = Arc::clone(&is_mining_enabled);
+            let vdf_state = vdf_state.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -876,10 +857,8 @@ mod tests {
                     initial_seed,
                     reset_seed,
                     ff_rx,
-                    mining_state,
                     MockMining,
-                    vdf_state.clone(),
-                    atomic_step,
+                    vdf_state,
                     MockBlockProvider(mock_header),
                     chain_sync_state,
                     shutdown_token,
@@ -891,7 +870,7 @@ mod tests {
         shutdown_token.cancel();
         vdf_thread.join().unwrap();
 
-        let step_num = vdf_steps_guard.read().global_step;
+        let step_num = vdf_steps_guard.read().current_step();
         assert!(step_num > 0, "VDF should produce sequential steps");
         assert!(
             step_num < gap_target_step,
@@ -1067,10 +1046,9 @@ mod tests {
         let provider = ControllableBlockProvider::new(0);
 
         let (_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        let atomic_step = Arc::new(AtomicU64::new(0));
+        enable_mining(&vdf_state);
         let chain_sync_state = ChainSyncState::new(false, false);
         let shutdown_token = CancellationToken::new();
 
@@ -1078,7 +1056,7 @@ mod tests {
             let config = config.clone();
             let provider = provider.clone();
             let shutdown_token = shutdown_token.clone();
-            let mining_state = Arc::clone(&is_mining_enabled);
+            let vdf_state = vdf_state.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -1086,10 +1064,8 @@ mod tests {
                     initial_seed,
                     initial_seed,
                     ff_rx,
-                    mining_state,
                     MockMining,
-                    vdf_state.clone(),
-                    atomic_step,
+                    vdf_state,
                     provider,
                     chain_sync_state,
                     shutdown_token,
@@ -1120,7 +1096,7 @@ mod tests {
             parked.is_err(),
             "must park at the boundary while the seed's rotation block is unconfirmed"
         );
-        assert_eq!(vdf_steps_guard.read().global_step, 7);
+        assert_eq!(vdf_steps_guard.read().current_step(), 7);
 
         // Advance the confirmed chain to the rotation point (step 4): now 8 > 4 + 4 is false.
         provider.set_confirmed(4);
@@ -1161,10 +1137,9 @@ mod tests {
         provider.set_snapshot(pre_boundary_seed, 8, 6);
 
         let (_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
-        let is_mining_enabled = Arc::new(AtomicBool::new(true));
         let vdf_state = mocked_vdf_service(config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
-        let atomic_step = Arc::new(AtomicU64::new(0));
+        enable_mining(&vdf_state);
         let chain_sync_state = ChainSyncState::new(false, false);
         let shutdown_token = CancellationToken::new();
 
@@ -1172,7 +1147,7 @@ mod tests {
             let config = config.clone();
             let provider = provider.clone();
             let shutdown_token = shutdown_token.clone();
-            let mining_state = Arc::clone(&is_mining_enabled);
+            let vdf_state = vdf_state.clone();
             move || {
                 run_vdf(
                     &config.vdf,
@@ -1180,10 +1155,8 @@ mod tests {
                     pre_boundary_seed,
                     pre_boundary_seed,
                     ff_rx,
-                    mining_state,
                     MockMining,
                     vdf_state,
-                    atomic_step,
                     provider,
                     chain_sync_state,
                     shutdown_token,
@@ -1200,7 +1173,7 @@ mod tests {
             .await
             .expect("loop should reach step 15, parked one short of boundary 16");
         assert_eq!(
-            vdf_steps_guard.read().global_step,
+            vdf_steps_guard.read().current_step(),
             15,
             "loop must be parked exactly at step 15"
         );
@@ -1265,7 +1238,7 @@ mod tests {
             still_parked.is_err(),
             "confirmation gate must refuse the unconfirmed loser seed (regression guard for #1447)"
         );
-        assert_eq!(clean_guard.read().global_step, 15);
+        assert_eq!(clean_guard.read().current_step(), 15);
 
         // The fork resolves: the winner's rotation block becomes canonical AND is confirmed,
         // so the loop crosses boundary 16 applying the winner seed.
