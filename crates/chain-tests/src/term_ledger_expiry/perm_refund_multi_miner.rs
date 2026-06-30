@@ -179,7 +179,7 @@ async fn slow_heavy_per_miner_expiry_reward_attribution_two_miners() -> eyre::Re
     while posted < PEER_PLEDGE_COUNT {
         let batch = PLEDGE_BATCH.min(PEER_PLEDGE_COUNT - posted);
         for _ in 0..batch {
-            node.post_pledge_commitment_with_signer(&peer_signer).await;
+            let _pledge = node.post_pledge_commitment_with_signer(&peer_signer).await;
         }
         posted += batch;
         node.mine_block().await?;

@@ -56,7 +56,7 @@ use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
-    DataLedger, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader, NodeConfig,
+    DataLedger, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader, NodeConfig, U256,
     UnixTimestamp, UnixTimestampMs, hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
@@ -308,7 +308,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
     let evm_block = genesis_node
         .wait_for_evm_block(expiry_block.evm_block_hash, seconds_to_wait)
         .await?;
-    let refunded_tx_id_list: Vec<H256> = evm_block
+    let refunded_list: Vec<(H256, U256)> = evm_block
         .body
         .transactions
         .into_iter()
@@ -318,19 +318,19 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
             let packet = shadow_tx.as_v1()?;
             match packet {
                 TransactionPacket::PermFeeRefund(refund) if refund.target == user_addr => {
-                    Some(H256(refund.irys_ref.into()))
+                    Some((H256(refund.irys_ref.into()), U256::from(refund.amount)))
                 }
                 _ => None,
             }
         })
         .collect();
-    let refunded_tx_ids: BTreeSet<H256> = refunded_tx_id_list.iter().copied().collect();
+    let refunded_tx_ids: BTreeSet<H256> = refunded_list.iter().map(|(id, _)| *id).collect();
     // Multiplicity guard (NC-0042): a duplicate PermFeeRefund for the same tx — an
     // over-refund / double-pay — would be silently collapsed by the set and slip
     // past the exact-equality check below. Assert the raw on-chain refund list has
     // no duplicates before deduping.
     assert_eq!(
-        refunded_tx_id_list.len(),
+        refunded_list.len(),
         refunded_tx_ids.len(),
         "on-chain perm-fee refunds must contain no duplicate tx (no over-refund) — NC-0042"
     );
@@ -339,7 +339,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
         "at least one expired Submit tx must be perm-fee-refunded at the expiry epoch \
          (else the §4b/no-double-pay check is vacuous)"
     );
-    for refunded in &refunded_tx_ids {
+    for (refunded, _) in &refunded_list {
         assert!(
             expired_set.contains(refunded),
             "every refunded tx must be in the expired set (refund ⊆ expired under Cascade)"
@@ -379,14 +379,19 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
             cascade_active_for_block,
         )
         .await?;
-    let expected_refund_ids: BTreeSet<H256> = pipeline_b_refunds
+    // Assert both id-set equality AND per-id refund amounts match Pipeline B (no
+    // under-/over-refund and no wrong-amount shadow tx).
+    let mut on_chain_id_amounts: Vec<(H256, U256)> = refunded_list.clone();
+    on_chain_id_amounts.sort_by_key(|(id, _)| *id);
+    let mut expected_id_amounts: Vec<(H256, U256)> = pipeline_b_refunds
         .user_perm_fee_refunds
         .iter()
-        .map(|(id, _, _)| *id)
+        .map(|(id, amount, _)| (*id, *amount))
         .collect();
+    expected_id_amounts.sort_by_key(|(id, _)| *id);
     assert_eq!(
-        refunded_tx_ids, expected_refund_ids,
-        "on-chain perm-fee refunds must EXACTLY equal Pipeline B's refund set (no \
+        on_chain_id_amounts, expected_id_amounts,
+        "on-chain perm-fee refunds must EXACTLY equal Pipeline B's refund set and amounts (no \
          under- or over-refund) — NC-0042 M5"
     );
 

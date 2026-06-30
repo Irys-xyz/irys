@@ -1464,3 +1464,130 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
     node.stop().await;
     Ok(())
 }
+
+/// NC-0042 P1 (clean-cutover, mixed-mode): a Submit tx **included before Cascade
+/// activation** must be correctly perm-fee-refunded when its slot **expires after
+/// activation**, and the chain must progress past that expiry epoch without a
+/// §4c-induced halt. The §4c rejection + the refund/fee algorithm are
+/// intentionally NOT Cascade-gated (see the CLEAN-CUTOVER note above the §4c block
+/// in `block_validation`), so this exercises them across the pre→post activation
+/// boundary — the coverage the all-pre-Cascade (`perm_refund`) and no-expiry
+/// midchain (`..._submit_last_height_transition`) tests each leave open.
+///
+/// A single unpromoted 16-chunk tx (512B / 32B) spans slots 0..3 with a 4-chunk
+/// partition, so slot 0 is non-last (expirable) and the tx is attributed to it.
+/// We activate Cascade mid-chain BEFORE slot 0's expiry, then mine until the
+/// refund shadow-tx appears — the expiry height is found data-driven because the
+/// allocation→fill anchoring transition at activation can shift it.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_cascade_midchain_submit_expiry_refunds_across_activation() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let submit_ledger_epoch_length = 2_u64;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    // Small partition so one 16-chunk tx spans several slots ⇒ slot 0 is non-last.
+    let num_chunks_in_partition = 4_u64;
+    let data_size = 512_usize;
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        // Cascade intentionally NOT configured yet — activated mid-chain below.
+    });
+
+    let user = config.new_random_signer();
+    let user_addr = user.address();
+    config.fund_genesis_accounts(vec![&user]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 8)?;
+    let node = test_node
+        .start_and_wait_for_packing("midchain_expiry", 30)
+        .await;
+
+    // === Pre-Cascade: include one UNPROMOTED Submit tx (no chunks uploaded → never
+    // promoted → refundable). Its 16 chunks span slots 0..3, so slot 0 is non-last
+    // and will expire; the tx is attributed to slot 0 by its start offset. ===
+    let anchor = node.get_block_by_height(0).await?.block_hash;
+    let tx = node
+        .post_data_tx(anchor, vec![1_u8; data_size], &user)
+        .await;
+    let tx_perm_fee = tx.header.perm_fee.expect("data tx must carry a perm_fee");
+    node.wait_for_mempool(tx.header.id, 20).await?;
+    node.mine_block().await?;
+    // One epoch so the slot allocation settles while still pre-Cascade.
+    node.mine_until_next_epoch().await?;
+    let pre_activation_height = node.get_canonical_chain_height().await;
+
+    // === Activate Cascade mid-chain: stop → set activation = now+1 → restart. The
+    // +1s keeps activation strictly after every pre-restart block's (second-granular)
+    // timestamp, so historical blocks stay pre-activation and only newly mined blocks
+    // are cascade-active — deterministic, no wall-clock race. ===
+    let mut stopped = node.stop().await;
+    let activation_timestamp = UnixTimestamp::now()
+        .expect("system time after unix epoch")
+        .as_secs()
+        + 1;
+    stopped.cfg.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
+        one_year_epoch_length,
+        thirty_day_epoch_length,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+    let node = stopped.start().await;
+
+    // === Mine post-activation until slot 0 expires and `tx` is refunded. The
+    // expiry epoch is detected data-driven (scan each epoch block's shadow txs for
+    // a PermFeeRefund to the user) rather than hard-coded, since the anchoring
+    // transition can move it. ===
+    let mut refund_amount = U256::from(0);
+    let mut refund_height = 0_u64;
+    const MAX_EPOCHS: usize = 16;
+    'mine: for _ in 0..MAX_EPOCHS {
+        let (_, height) = node.mine_until_next_epoch().await?;
+        let block = node.get_block_by_height(height).await?;
+        let evm_block = node.wait_for_evm_block(block.evm_block_hash, 20).await?;
+        for evm_tx in evm_block.body.transactions {
+            if evm_tx.input().len() < 4 {
+                continue;
+            }
+            let Ok(shadow_tx) = ShadowTransaction::decode(&mut evm_tx.input().as_ref()) else {
+                continue;
+            };
+            let Some(TransactionPacket::PermFeeRefund(refund)) = shadow_tx.as_v1() else {
+                continue;
+            };
+            if refund.target == user_addr.to_alloy_address() {
+                refund_amount = U256::from_le_bytes(refund.amount.to_le_bytes());
+                refund_height = height;
+                break 'mine;
+            }
+        }
+    }
+
+    // The refund settled AFTER activation (mixed-mode: pre-Cascade inclusion,
+    // post-activation expiry) — the §4c/refund path ran cascade-active over a
+    // pre-activation tx and did not halt.
+    assert!(
+        refund_height > pre_activation_height,
+        "refund must settle after Cascade activation (refund_height={refund_height}, \
+         pre_activation_height={pre_activation_height})"
+    );
+    assert_eq!(
+        refund_amount, tx_perm_fee,
+        "pre-Cascade-included unpromoted tx must be refunded its full perm_fee at the \
+         post-activation expiry"
+    );
+    // Chain kept progressing past the expiry epoch (no §4c-induced stall).
+    assert!(
+        node.get_canonical_chain_height().await >= refund_height,
+        "chain must progress past the post-activation expiry epoch"
+    );
+
+    node.stop().await;
+    Ok(())
+}

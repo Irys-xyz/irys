@@ -11,12 +11,13 @@ use irys_actors::{
 };
 use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::IngressProofsList;
+use irys_types::hardfork_config::Cascade;
 use irys_types::storage_pricing::{
     Amount, calculate_perm_fee_from_config, calculate_term_fee_from_config,
 };
 use irys_types::{
-    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256,
-    UnixTimestamp,
+    BoundedFee, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
+    OracleConfig, U256, UnixTimestamp,
 };
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -821,6 +822,153 @@ async fn same_block_promoted_tx_with_ema_price_change_gets_rejected() -> eyre::R
             )
         },
         "block with insufficient perm_fee should be rejected",
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// Verify the block validator rejects a block whose OneYear (term-ledger) transaction
+/// carries a `perm_fee = Some(0)`.
+///
+/// The rejection site is the structural pre-pass in `data_txs_are_valid` (block_validation.rs):
+///
+///   ```text
+///   for tx in one_year_txs {
+///       ...
+///       if tx.perm_fee.is_some() {
+///           return Err(PreValidationError::TermLedgerTxHasPermFee { tx_id: tx.id });
+///       }
+///   }
+///   ```
+///
+/// Normal API ingress / the mempool reject such a tx before it reaches block production, so
+/// coverage requires injecting it directly via an evil `BlockProdStrategy` that overrides
+/// `get_mempool_txs` — bypassing ingress entirely.  The term_fee is set to the API-quoted
+/// value so the block would otherwise be valid, ensuring the sole rejection cause is the
+/// forbidden `perm_fee` field presence.
+#[test_log::test(tokio::test)]
+async fn heavy_block_term_ledger_tx_with_perm_fee_gets_rejected() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub malicious_tx: DataTransactionHeader,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
+        ) -> Result<
+            irys_actors::block_producer::MempoolTxsBundle,
+            irys_actors::tx_selector::TxSelectorError,
+        > {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                one_year_txs: vec![self.malicious_tx.clone()],
+                thirty_day_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
+            })
+        }
+    }
+
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    // Activate Cascade from genesis so OneYear/ThirtyDay ledgers are live.
+    genesis_config.consensus.get_mut().hardforks.cascade = Some(Cascade {
+        activation_timestamp: UnixTimestamp::from_secs(0),
+        one_year_epoch_length: 365,
+        thirty_day_epoch_length: 30,
+        annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+    });
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    // Build a OneYear tx with a valid term_fee but perm_fee = Some(0).
+    // The valid term_fee ensures the block would be accepted but for the perm_fee presence.
+    let data = vec![42_u8; 1024];
+    let data_size = data.len() as u64;
+    let price_info = genesis_node
+        .get_data_price(DataLedger::OneYear, data_size)
+        .await?;
+
+    let mut malicious_tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::OneYear,
+        price_info.term_fee.into(), // valid term_fee
+        None,
+    )?;
+    // Force perm_fee = Some(0): term-ledger txs must have perm_fee = None.
+    malicious_tx.header.perm_fee = Some(BoundedFee::zero());
+    let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
+
+    let genesis_block_prod = &genesis_node.node_ctx.block_producer_inner;
+    let block_prod_strategy = EvilBlockProdStrategy {
+        malicious_tx: malicious_tx.header.clone(),
+        prod: ProductionStrategy {
+            inner: Arc::new(BlockProducerInner {
+                config: Config::new_with_random_peer_id(
+                    genesis_node.node_ctx.config.node_config.clone(),
+                ),
+                db: genesis_block_prod.db.clone(),
+                block_discovery: genesis_block_prod.block_discovery.clone(),
+                mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
+                service_senders: genesis_block_prod.service_senders.clone(),
+                reward_curve: genesis_block_prod.reward_curve.clone(),
+                vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
+                block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                mempool_guard: genesis_block_prod.mempool_guard.clone(),
+                price_oracle: genesis_block_prod.price_oracle.clone(),
+                reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
+                reth_provider: genesis_block_prod.reth_provider.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
+                block_index: genesis_block_prod.block_index.clone(),
+                reth_node_adapter: genesis_block_prod.reth_node_adapter.clone(),
+                chunk_ingress_state: genesis_block_prod.chunk_ingress_state.clone(),
+            }),
+        },
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // OneYear txs don't go through the mempool gossip path, so no gossip needed.
+    let outcome =
+        send_block_and_read_state(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    // The structural pre-pass in `data_txs_are_valid` fires before any fee arithmetic:
+    //   `if tx.perm_fee.is_some() { return Err(TermLedgerTxHasPermFee { .. }) }`
+    assert_validation_error(
+        outcome,
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::TermLedgerTxHasPermFee { .. })
+            )
+        },
+        "block with OneYear tx carrying perm_fee=Some(0) must be rejected with TermLedgerTxHasPermFee",
     );
 
     genesis_node.stop().await;

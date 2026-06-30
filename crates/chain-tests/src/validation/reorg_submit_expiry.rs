@@ -177,7 +177,7 @@ async fn heavy_reorg_across_submit_expiry_epoch_settles_on_winning_branch() -> e
     let evm_block = genesis_node
         .wait_for_evm_block(expiry_block.evm_block_hash, seconds_to_wait)
         .await?;
-    let refunded: BTreeSet<H256> = evm_block
+    let refunded_list: Vec<H256> = evm_block
         .body
         .transactions
         .into_iter()
@@ -192,6 +192,14 @@ async fn heavy_reorg_across_submit_expiry_epoch_settles_on_winning_branch() -> e
             }
         })
         .collect();
+    let refunded: BTreeSet<H256> = refunded_list.iter().copied().collect();
+    // Multiplicity guard: a duplicate PermFeeRefund would be silently collapsed by
+    // the set and slip past the exact-equality check below (over-refund / double-pay).
+    assert_eq!(
+        refunded_list.len(),
+        refunded.len(),
+        "no over-refund: each expired tx refunded exactly once"
+    );
     assert!(
         !refunded.is_empty(),
         "the winning branch's expiry block must perm-fee-refund the expired slot-0 Submit txs \

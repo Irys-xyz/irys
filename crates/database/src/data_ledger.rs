@@ -1069,6 +1069,11 @@ mod tests {
 
         let mut ledger = TermLedger::new(DataLedger::Submit, &config, epoch_length);
         ledger.allocate_slots(1, 0); // single slot allocated at genesis
+        // Mark the slot written so the `!cascade_active || has_been_written`
+        // write-window shortcut passes (cascade_active=true below) and the slot is
+        // excluded ONLY by the last-slot rule under test — not vacuously skipped as
+        // an unwritten slot.
+        ledger.slots[0].has_been_written = true;
 
         // Even far past the cycle boundary, the only slot is the last slot and
         // never expires — exactly where the cycle-math approximation diverged.

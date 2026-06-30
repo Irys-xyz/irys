@@ -135,6 +135,14 @@ pub(super) async fn submit_expiry_two_node_setup(
     }
     genesis_node.mine_block().await?;
 
+    // Wait for the peer to sync to the genesis node's canonical height before
+    // returning — downstream tests that exercise the validator path on peer_node
+    // race if we hand back an unsynced peer.
+    let genesis_height = genesis_node.get_canonical_chain_height().await;
+    peer_node
+        .wait_until_height(genesis_height, seconds_to_wait)
+        .await?;
+
     Ok(ExpiryTestSetup {
         genesis_config,
         genesis_node,

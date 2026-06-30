@@ -121,7 +121,12 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
     let chain_id = genesis_config.consensus_config().chain_id;
     let proof_anchor = genesis_node.get_anchor().await?;
     for tx in &txs {
-        let chunks: Vec<Vec<u8>> = vec![tx.data.clone().unwrap_or_default().into()];
+        let chunks: Vec<Vec<u8>> = vec![
+            tx.data
+                .clone()
+                .expect("posted tx must carry data bytes")
+                .into(),
+        ];
         let proof = generate_ingress_proof(
             &genesis_signer,
             tx.header.data_root,
