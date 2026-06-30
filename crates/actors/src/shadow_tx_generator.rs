@@ -249,13 +249,18 @@ impl<'a> ShadowTxGenerator<'a> {
         //
         // The canonical validator check now lives at `generate_expected_shadow_transactions`
         // in `block_validation.rs` (NC-0042 §4c). It rejects any publish-ledger tx
-        // whose Submit-ledger storage has expired as of the block, using the same
-        // expired-partition → tx set that schedules the refunds (resolved
-        // per-candidate via `ledger_expiry::expired_submit_range` +
-        // `submit_tx_expired`). That covers both the same-block
-        // (`==`) and cross-block (`<`) double-pay cases and subsumes this guard's
-        // `==`-only same-block detection. Violations there surface as
-        // `ValidationError::ShadowTransactionInvalid` (peer-attributable rejection).
+        // whose Submit-ledger storage has expired as of the block, keyed on the
+        // *inclusive* all-expired Submit slot set (resolved per-candidate via
+        // `ledger_expiry::expired_submit_range` + `submit_tx_expired`). That set is a
+        // strict SUPERSET of the set the refund pipeline schedules — under Cascade the
+        // refund pipeline additionally drops slots written this epoch, which §4c still
+        // treats as expired. The containment is the load-bearing property: a refunded
+        // tx is always in this blocked set, so "refunded" ⇒ "non-promotable" and the
+        // double-pay cannot occur (the over-blocking is conservative and self-heals).
+        // The check covers both the same-block (`==`) and cross-block (`<`) double-pay
+        // cases and subsumes this guard's `==`-only same-block detection. Violations
+        // there surface as `ValidationError::ShadowTransactionInvalid`
+        // (peer-attributable rejection).
         //
         // This in-constructor guard is defence-in-depth for non-validation
         // construction paths (tests, future callers).  If it fires from a
