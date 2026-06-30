@@ -116,11 +116,11 @@ pub async fn capacity_chunk_solution(
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
     let mut i = 1;
-    let initial_step_num = vdf_steps_guard.read().current_step();
+    let initial_step_num = vdf_steps_guard.current_step();
     let mut step_num: u64 = 0;
     while i < max_wait_retries && step_num < initial_step_num + 2 {
         sleep(Duration::from_secs(1)).await;
-        step_num = vdf_steps_guard.read().current_step();
+        step_num = vdf_steps_guard.current_step();
         i += 1;
     }
 
@@ -202,11 +202,11 @@ pub async fn capacity_chunk_solution(
         // Advance to next step and wait a bit to allow VDF to progress
         let next_step_target = current_step.saturating_add(1);
         let mut tries = 0_u8;
-        while vdf_steps_guard.read().current_step() < next_step_target && tries < 10 {
+        while vdf_steps_guard.current_step() < next_step_target && tries < 10 {
             sleep(Duration::from_millis(200)).await;
             tries += 1;
         }
-        current_step = vdf_steps_guard.read().current_step().max(next_step_target);
+        current_step = vdf_steps_guard.current_step().max(next_step_target);
     }
 
     // Fallback: if no valid solution found, return the best-effort solution for the latest step (may fail prevalidation)
@@ -1152,7 +1152,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let max_seconds = coverage_adjusted_timeout(max_seconds);
         let deadline = Instant::now() + Duration::from_secs(max_seconds as u64);
         loop {
-            let current_step = self.node_ctx.vdf_steps_guard.read().current_step();
+            let current_step = self.node_ctx.vdf_steps_guard.current_step();
             if current_step >= target_step {
                 info!("VDF step {} reached target {}", current_step, target_step);
                 return Ok(());
@@ -3686,7 +3686,7 @@ pub async fn solution_context_with_poa_chunk(
                     "VDF steps unavailable: timed out waiting for (prev,current) pair"
                 ));
             }
-            let s = vdf_steps_guard.read().current_step();
+            let s = vdf_steps_guard.current_step();
             if s >= 1
                 && let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s))
                 && steps.len() >= 2

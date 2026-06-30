@@ -90,14 +90,22 @@ impl VdfSyncPause {
         }
     }
 
-    /// Restore the pre-sync mining state (last-writer-wins).
-    fn restore(&self) {
+    /// Restore the pre-sync mining state (last-writer-wins). Consumes the guard;
+    /// the snapshot write-back happens in `Drop`, so it also runs if the sync
+    /// task panics or is aborted before reaching this call.
+    fn restore(self) {
         debug!(
             enabled = self.was_mining_enabled_before_sync,
             "Sync task: Restoring VDF mining state after sync"
         );
+    }
+}
+
+impl Drop for VdfSyncPause {
+    fn drop(&mut self) {
         // Always write the snapshot back, including the `false` case, so a
-        // concurrent enable during sync does not survive the restore.
+        // concurrent enable during sync does not survive the restore — and so an
+        // aborted or panicking sync task cannot leave mining stuck disabled.
         self.vdf_controller
             .set_enabled(self.was_mining_enabled_before_sync);
     }

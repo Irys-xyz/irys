@@ -54,6 +54,19 @@ fn replay_vdf_seeds(
     let mut steps_remaining = capacity;
 
     while steps_remaining > 0 && block.height > 0 {
+        // Fail fast on a non-contiguous seed history: a block's steps must bridge
+        // cleanly from its parent's global step. The downstream `create_state`
+        // contract only re-checks the derived arithmetic, not the actual step
+        // numbers, so a hole here would otherwise install a mis-mapped window.
+        let prev = get_header(&block.previous_block_hash);
+        let step_count =
+            u64::try_from(block.vdf_limiter_info.steps.0.len()).expect("step count fits in u64");
+        assert_eq!(
+            prev.vdf_limiter_info.global_step_number + step_count,
+            block.vdf_limiter_info.global_step_number,
+            "non-contiguous VDF seed history during bootstrap replay",
+        );
+
         // get all the steps out of the block
         for step in block.vdf_limiter_info.steps.0.iter().rev() {
             seeds.push_front(Seed(*step));
@@ -63,10 +76,21 @@ fn replay_vdf_seeds(
             }
         }
         // get the previous block
-        block = get_header(&block.previous_block_hash);
+        block = prev;
     }
 
     if block.height == 0 {
+        // One-based genesis contract: the genesis anchor carries exactly its
+        // single step at global step 1.
+        assert_eq!(
+            block.vdf_limiter_info.global_step_number, 1,
+            "genesis anchor must sit at VDF global step 1",
+        );
+        assert_eq!(
+            block.vdf_limiter_info.steps.0.len(),
+            1,
+            "genesis anchor must carry exactly one VDF step",
+        );
         seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
     }
 
@@ -178,5 +202,17 @@ mod tests {
             bootstrap.ordered_seeds,
             VecDeque::from(vec![Seed(h(1)), Seed(h(2)), Seed(h(3)), Seed(h(4))]),
         );
+    }
+
+    /// A non-contiguous seed history — a block whose `steps` do not bridge from
+    /// its parent's global step — must fail fast during bootstrap replay.
+    #[test]
+    #[should_panic(expected = "non-contiguous VDF seed history")]
+    fn non_contiguous_history_panics() {
+        // genesis at step 1, but block1 claims step 4 with only two steps [3, 4]
+        // — step 2 is missing, so block1 does not bridge from genesis.
+        let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
+        let block1 = header(h(10), h(0), 1, 4, &[h(3), h(4)]);
+        let _ = replay_vdf_seeds(block1.block_hash, 64, reader(vec![genesis, block1]));
     }
 }

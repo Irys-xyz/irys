@@ -440,9 +440,20 @@ pub fn create_state(
     );
     let seed_count =
         u64::try_from(ordered_seeds.len()).expect("VdfBootstrap seed count must fit in u64");
+    // The legitimate maximum window is `capacity + 1` (the genesis-anchor edge
+    // case in the seed-replay walk); a larger deque from a buggy source would
+    // persist through `store_step`'s pop-one/push-one and corrupt consensus state.
+    assert!(
+        ordered_seeds.len() <= capacity.saturating_add(1),
+        "VdfBootstrap seed window exceeds capacity + genesis anchor"
+    );
+    let capacity_u64 = u64::try_from(capacity).expect("VDF capacity must fit in u64");
     let expected_first_step = global_step
         .checked_sub(seed_count.saturating_sub(1))
         .expect("VdfBootstrap contains more seeds than global_step can anchor");
+    // One-based genesis contract: a valid window anchors at step 1 or later, so a
+    // step-zero bootstrap is a corrupt seed source, not a legitimate genesis.
+    assert!(expected_first_step >= 1, "VdfBootstrap one-based contract");
     assert_eq!(
         first_step, expected_first_step,
         "VdfBootstrap contiguity contract"
@@ -456,7 +467,7 @@ pub fn create_state(
     VdfState {
         global_step: Arc::new(AtomicU64::new(global_step)),
         global_step_from_the_latest_canonical_block: global_step,
-        minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
+        minimum_step_to_keep: global_step.saturating_sub(capacity_u64),
         seeds: ordered_seeds,
         capacity,
         is_vdf_mining_enabled,
