@@ -622,7 +622,12 @@ pub fn expired_submit_range(
         eyre::bail!("num_chunks_in_partition must be non-zero for Submit-expiry range math");
     }
     let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
-    let range_end = (max_expired_slot as u64 + 1)
+    // `max_expired_slot` is a slot index (usize); the checked conversion documents
+    // the invariant and `saturating_add` keeps the lone `+1` from wrapping.
+    let max_expired_slot = u64::try_from(max_expired_slot)
+        .map_err(|_| eyre::eyre!("expired Submit slot index does not fit in u64"))?;
+    let range_end = max_expired_slot
+        .saturating_add(1)
         .saturating_mul(p)
         .min(parent_total);
     if range_end == 0 {
