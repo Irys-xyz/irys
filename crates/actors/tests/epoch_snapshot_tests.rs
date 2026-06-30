@@ -25,7 +25,7 @@ use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use std::{sync::atomic::AtomicU64, time::Duration};
+use std::{sync::atomic::AtomicBool, time::Duration};
 use tracing::{debug, error};
 
 #[tokio::test]
@@ -523,12 +523,14 @@ async fn partition_expiration_and_repacking_test() {
         }
     });
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
+    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
+        10,
+        0,
+        Arc::new(AtomicBool::new(false)),
+    ))));
 
     let mut mining_service_handles = Vec::new();
     let mut mining_service_controllers = Vec::new();
-
-    let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
     let should_mine = true;
     for sm in &storage_modules {
@@ -538,7 +540,6 @@ async fn partition_expiration_and_repacking_test() {
             sm.clone(),
             should_mine,
             vdf_steps_guard.clone(),
-            atomic_global_step_number.clone(),
             U256::zero(),
         );
 

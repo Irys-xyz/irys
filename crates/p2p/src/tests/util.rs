@@ -337,8 +337,11 @@ impl GossipServiceTestFixture {
             ),
         );
 
-        let vdf_state_stub =
-            VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
+        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
+            0,
+            0,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ))));
 
         let vdf_state = vdf_state_stub;
         let mut vdf_receiver = vdf_fast_forward_rx;
@@ -348,9 +351,7 @@ impl GossipServiceTestFixture {
                     Some(traced_step) => {
                         let (step, _parent_span) = traced_step.into_parts();
                         debug!("Received VDF step: {:?}", step);
-                        let state = vdf_state.into_inner_cloned();
-                        let mut lock = state.write().unwrap();
-                        lock.global_step = step.global_step_number;
+                        vdf_state.test_set_step(step.global_step_number);
                     }
                     None => {
                         debug!("VDF receiver channel closed");

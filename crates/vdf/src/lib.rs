@@ -5,7 +5,6 @@ use eyre::Context as _;
 use irys_types::block_production::Seed;
 use irys_types::{H256, H256List, U256, VDFLimiterInfo, VdfConfig};
 use openssl::sha;
-pub use rayon;
 use rayon::prelude::*;
 use sha2::compress256;
 use sha2::digest::generic_array::GenericArray;
@@ -16,6 +15,9 @@ pub mod metrics;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;
+pub mod verify;
+
+pub use vdf_utils::{VdfFastForwardSender, fast_forward_channel};
 
 const SHA256_IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,

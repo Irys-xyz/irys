@@ -13,8 +13,8 @@ use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_storage::ii;
 use irys_types::{
-    AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
-    PartitionChunkRange, SendTraced as _, TokioServiceHandle, U256,
+    Config, H256List, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
+    SendTraced as _, TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, u256_from_le_bytes,
 };
@@ -55,7 +55,6 @@ pub struct PartitionMiningServiceInner {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStateReadonly,
-    atomic_global_step_number: AtomicVdfStepNumber,
 }
 
 impl PartitionMiningServiceInner {
@@ -65,7 +64,6 @@ impl PartitionMiningServiceInner {
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
-        atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
     ) -> Self {
         Self {
@@ -81,7 +79,6 @@ impl PartitionMiningServiceInner {
             )
             .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig"),
             steps_guard,
-            atomic_global_step_number,
         }
     }
 
@@ -303,9 +300,7 @@ impl PartitionMiningServiceInner {
             return;
         }
 
-        let current_step = self
-            .atomic_global_step_number
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let current_step = self.steps_guard.current_step();
 
         debug!(
             "Mining partition {} with seed {:?} step number {} current step {}",

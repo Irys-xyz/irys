@@ -1,16 +1,13 @@
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::{bail, eyre};
-use irys_database::block_header_by_hash;
-use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
-    Config, DatabaseProvider, H256, H256List, U256, VDFLimiterInfo, VdfConfig,
+    AtomicVdfStepNumber, Config, H256, H256List, U256, VDFLimiterInfo, VdfConfig,
     block_production::Seed,
 };
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
-use reth_db::Database as _;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
     ops::Range,
@@ -33,16 +30,29 @@ pub enum WaitForStepError {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct VdfState {
-    /// last global step stored
-    pub global_step: u64,
+    /// Last global step stored — the single source of truth for the step
+    /// number. Held as an `Arc<AtomicU64>` so the mining hot path and the read
+    /// handle observe it WITHOUT taking the `RwLock` (same allocation, shared
+    /// by `VdfStateReadonly`). Private so the SSOT cannot be replaced after
+    /// construction; mutate via `store_step`/`set_canonical_step`, read via
+    /// `current_step`/`step_counter`.
+    ///
+    /// `Relaxed` is sufficient: every writer runs under the `RwLock` write
+    /// guard (`store_step`), which serialises writers; any reader that also
+    /// needs the seed deque re-takes the read lock, which provides the
+    /// happens-before edge. The bare counter only ever needs a coherent
+    /// scalar, not ordering against the deque.
+    global_step: AtomicVdfStepNumber,
     /// maximum number of seeds to store in seeds VecDeque
     pub capacity: usize,
     /// stored seeds
     pub seeds: VecDeque<Seed>,
-    /// whether the VDF thread is mining or paused
-    pub is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
+    /// whether the VDF thread is mining or paused. The single shared
+    /// allocation (same `Arc` as the `VdfController` and the read handle);
+    /// private so it cannot be swapped out after construction.
+    is_vdf_mining_enabled: Arc<AtomicBool>,
     /// global step from the latest canonical block
     global_step_from_the_latest_canonical_block: u64,
     /// minimum global step to keep in the seeds VecDeque
@@ -50,19 +60,32 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn new(
-        capacity: usize,
-        global_step: u64,
-        is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
-    ) -> Self {
+    pub fn new(capacity: usize, global_step: u64, is_vdf_mining_enabled: Arc<AtomicBool>) -> Self {
         Self {
-            global_step,
+            global_step: Arc::new(AtomicU64::new(global_step)),
             global_step_from_the_latest_canonical_block: global_step,
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
             capacity,
             is_vdf_mining_enabled,
         }
+    }
+
+    /// Lock-free read of the single source-of-truth step counter.
+    pub fn current_step(&self) -> u64 {
+        self.global_step.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle to the owned step counter (same allocation). Lets the read
+    /// handle observe the SSOT counter without taking the `RwLock`.
+    pub(crate) fn step_counter(&self) -> AtomicVdfStepNumber {
+        Arc::clone(&self.global_step)
+    }
+
+    /// Shared handle to the owned mining-enable flag (same allocation). Lets the
+    /// read handle / controller observe and toggle mining without the `RwLock`.
+    pub(crate) fn mining_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.is_vdf_mining_enabled)
     }
 
     pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
@@ -76,7 +99,7 @@ impl VdfState {
 
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
         (
-            self.global_step,
+            self.current_step(),
             self.seeds
                 .back()
                 .cloned()
@@ -85,24 +108,25 @@ impl VdfState {
     }
 
     pub fn store_step(&mut self, seed: Seed, global_step: u64) -> u64 {
-        if self.global_step >= global_step {
-            return self.global_step;
+        let current = self.current_step();
+        if current >= global_step {
+            return current;
         }
-        if self.global_step + 1 != global_step {
+        if current + 1 != global_step {
             // Gap path: previously panicked, now log and no-op so the VDF
             // loop catches up via normal stepping. Callers detect the no-op
-            // by observing the returned step == self.global_step.
+            // by observing the returned step == self.current_step().
             //
             // pop_front MUST stay in the sequential branch below — a stale
             // pop_front here silently shrinks the seed buffer on every gap
             // until `get_last_step_and_seed` panics on an empty deque.
             error!(
-                current = self.global_step,
+                current = current,
                 proposed = global_step,
-                gap = global_step.saturating_sub(self.global_step + 1),
+                gap = global_step.saturating_sub(current + 1),
                 "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
             );
-            return self.global_step;
+            return current;
         }
         // Saturating to usize::MAX means seeds.len() >= vdf_depth is always
         // false, so the buffer never trims in this edge case. Safe — only
@@ -113,22 +137,15 @@ impl VdfState {
             self.seeds.pop_front();
         }
         self.seeds.push_back(seed);
-        self.global_step += 1;
+        self.global_step.store(current + 1, Ordering::Relaxed);
         global_step
-    }
-
-    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
-    pub fn increment_step(&mut self, seed: Seed) -> u64 {
-        let new_step = self.global_step + 1;
-        self.store_step(seed, new_step);
-        new_step
     }
 
     /// Get steps in the given global steps numbers Interval
     pub fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
         let vdf_steps_len = self.seeds.len() as u64;
 
-        let last_global_step = self.global_step;
+        let last_global_step = self.current_step();
 
         // first available global step should be at least one.
         // TODO: Should this instead panic! as something has gone very wrong?
@@ -158,38 +175,67 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
-
-    pub fn start_mining(&self) -> eyre::Result<()> {
-        self.is_vdf_mining_enabled
-            .as_ref()
-            .ok_or(eyre!("Mining state sender isn't set!"))?
-            .store(true, Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub fn stop_mining(&self) -> eyre::Result<()> {
-        self.is_vdf_mining_enabled
-            .as_ref()
-            .ok_or(eyre!("Mining state sender isn't set!"))?
-            .store(false, Ordering::Relaxed);
-        Ok(())
-    }
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Read-only handle over the shared VDF state. Holds clones of the owned step
+/// counter and mining flag (same allocations as `VdfState`) so `current_step()`
+/// / `is_mining_enabled()` never take the `RwLock`.
+///
+/// The read-only contract is sealed: a production build has no public way to
+/// obtain a writable handle to the underlying state. The former
+/// `into_inner_cloned` escape was removed, and the only mutation entry point
+/// (`test_set_step`) is gated behind the `test-utils` feature. The doc-test
+/// below proves the escape is unreachable — it must fail to compile (keyed on
+/// the removed `into_inner_cloned`, so it holds even if feature unification
+/// enables `test-utils`):
+///
+/// ```compile_fail
+/// use irys_vdf::state::{VdfState, VdfStateReadonly};
+/// use std::sync::atomic::AtomicBool;
+/// use std::sync::{Arc, RwLock};
+///
+/// let mining = Arc::new(AtomicBool::new(false));
+/// let state = Arc::new(RwLock::new(VdfState::new(0, 0, mining)));
+/// let handle = VdfStateReadonly::new(state);
+/// // `into_inner_cloned` was removed: no public writable escape exists.
+/// let _writable = handle.into_inner_cloned();
+/// ```
 #[derive(Debug, Clone)]
-pub struct VdfStateReadonly(AtomicVdfState);
+pub struct VdfStateReadonly {
+    state: AtomicVdfState,
+    global_step: AtomicVdfStepNumber,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
+}
 
 impl VdfStateReadonly {
-    /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
-        Self(state)
+    /// Creates a read handle, capturing the owned step counter and mining flag
+    /// (same allocations) once at construction so the lock-free accessors never
+    /// re-take the `RwLock`. No longer `const`: it reads the lock once here.
+    /// Handles lock poisoning the same way `read()` does.
+    pub fn new(state: AtomicVdfState) -> Self {
+        let (global_step, is_vdf_mining_enabled) = {
+            let guard = state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (guard.step_counter(), guard.mining_flag())
+        };
+        Self {
+            state,
+            global_step,
+            is_vdf_mining_enabled,
+        }
     }
 
-    pub fn into_inner_cloned(&self) -> AtomicVdfState {
-        self.0.clone()
+    /// Lock-free current global step (reads the owned atomic).
+    pub fn current_step(&self) -> u64 {
+        self.global_step.load(Ordering::Relaxed)
+    }
+
+    /// Lock-free mining-enabled read (reads the owned flag).
+    pub fn is_mining_enabled(&self) -> bool {
+        self.is_vdf_mining_enabled.load(Ordering::Relaxed)
     }
 
     /// Read access to internal steps queue.
@@ -202,7 +248,7 @@ impl VdfStateReadonly {
     /// re-cascade through consensus-critical callers (mining, validation,
     /// `wait_for_step`) whose only useful response is to drop work.
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
-        self.0.read().unwrap_or_else(|poisoned| {
+        self.state.read().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "VDF state RwLock poisoned by a prior writer panic; \
                  recovering inner guard for read-only access. The node \
@@ -245,7 +291,7 @@ impl VdfStateReadonly {
         use tokio::time::Instant;
 
         let retries_per_second = 20;
-        let mut last_observed_step = self.read().global_step;
+        let mut last_observed_step = self.current_step();
         let mut last_progress_at = Instant::now();
         let mut attempts = 0_u32;
 
@@ -259,7 +305,7 @@ impl VdfStateReadonly {
                 return Err(WaitForStepError::Cancelled.into());
             }
 
-            let current_step = self.read().global_step;
+            let current_step = self.current_step();
 
             if current_step >= desired_step_number {
                 debug!(vdf.desired_step = desired_step_number, "VDF step available");
@@ -291,59 +337,140 @@ impl VdfStateReadonly {
     }
 }
 
-/// create VDF state using the latest block in db
+/// TEST-ONLY mutation handle. Gated behind `test` (in-crate) and the
+/// `test-utils` feature (so downstream crates' tests — e.g. `irys-p2p` — can
+/// enable it as a dev-dependency feature). It replaces the removed
+/// `into_inner_cloned` writable escape: it can push the step counter forward
+/// WITHOUT handing back the writable `Arc<RwLock<_>>`, so the read-only
+/// contract holds in production builds.
+#[cfg(any(test, feature = "test-utils"))]
+impl VdfStateReadonly {
+    /// Force the global step counter to `step` (lock-free). Mirrors the legacy
+    /// `into_inner_cloned().write().global_step = step` stub.
+    pub fn test_set_step(&self, step: u64) {
+        self.global_step.store(step, Ordering::Relaxed);
+    }
+}
+
+/// Narrow control surface for VDF mining enable/disable. Owns a clone of the
+/// single `Arc<AtomicBool>` (same allocation as `VdfState.is_vdf_mining_enabled`
+/// and the read handle).
+///
+/// Last-writer-wins semantics: the toggles are plain `Relaxed` stores with no
+/// compare-and-swap (see the chain-sync pause/restore in `chain_sync.rs`, which
+/// is deliberately preserved as last-writer-wins).
+#[derive(Debug, Clone)]
+pub struct VdfController {
+    is_vdf_mining_enabled: Arc<AtomicBool>,
+}
+
+impl VdfController {
+    pub fn new(flag: &Arc<AtomicBool>) -> Self {
+        Self {
+            is_vdf_mining_enabled: Arc::clone(flag),
+        }
+    }
+
+    pub fn start(&self) {
+        self.is_vdf_mining_enabled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop(&self) {
+        self.is_vdf_mining_enabled.store(false, Ordering::Relaxed);
+    }
+
+    /// Set the mining flag to an explicit value (used by the chain-sync
+    /// pause/restore and `IrysNodeCtx::vdf_state`).
+    pub fn set_enabled(&self, enabled: bool) {
+        self.is_vdf_mining_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.is_vdf_mining_enabled.load(Ordering::Relaxed)
+    }
+}
+
+/// One atomic snapshot of the VDF seed history needed to initialise [`VdfState`].
+///
+/// Contract: `ordered_seeds` is oldest→newest and contiguous over global steps
+/// `first_step ..= global_step`, with `first_step == global_step -
+/// ordered_seeds.len() + 1`. Genesis is step-anchored: a genesis-only chain
+/// (after `run_vdf_for_genesis_block`) yields `{ global_step: 1, first_step: 1,
+/// ordered_seeds: [genesis.steps[0]] }`.
+///
+/// Note: the production replay may return up to `capacity + 1` seeds — it can
+/// exhaust `capacity` within a height-1 block and then unconditionally prepend
+/// the genesis seed. This is the legacy behaviour and is preserved.
+#[derive(Debug, Clone)]
+pub struct VdfBootstrap {
+    pub global_step: u64,
+    pub first_step: u64,
+    pub ordered_seeds: VecDeque<Seed>,
+}
+
+/// Supplies the seed history used to bootstrap [`VdfState`] at startup. Inverts
+/// the former `irys-vdf -> irys-database` dependency: the DB/header replay lives
+/// in `irys-chain`.
+pub trait VdfSeedSource {
+    /// Build a bootstrap snapshot keeping at most `capacity` newest seeds
+    /// (plus the unconditional genesis anchor — see [`VdfBootstrap`]). Panics on
+    /// storage corruption, preserving the legacy `create_state`
+    /// fail-fast-at-startup behaviour.
+    fn vdf_bootstrap(&self, capacity: usize) -> VdfBootstrap;
+}
+
+/// create VDF state from a seed source (DB-backed in production).
 pub fn create_state(
-    block_index: BlockIndex,
-    db: DatabaseProvider,
+    seed_source: &dyn VdfSeedSource,
     is_vdf_mining_enabled: Arc<AtomicBool>,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
-
-    let block_hash = block_index
-        .get_latest_item()
-        .map(|item| item.block_hash)
-        .expect("To have at least genesis block");
-
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-    let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
-        .unwrap()
-        .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
-
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    let VdfBootstrap {
+        global_step,
+        first_step,
+        ordered_seeds,
+    } = seed_source.vdf_bootstrap(capacity);
+    // Enforce the VdfBootstrap contract in release builds too: a corrupt or buggy
+    // VdfSeedSource must fail fast at startup rather than silently initialize a
+    // non-contiguous or empty seed window (consensus-critical).
+    assert!(
+        !ordered_seeds.is_empty(),
+        "VdfBootstrap must contain at least one seed"
+    );
+    let seed_count =
+        u64::try_from(ordered_seeds.len()).expect("VdfBootstrap seed count must fit in u64");
+    // The legitimate maximum window is `capacity + 1` (the genesis-anchor edge
+    // case in the seed-replay walk); a larger deque from a buggy source would
+    // persist through `store_step`'s pop-one/push-one and corrupt consensus state.
+    assert!(
+        ordered_seeds.len() <= capacity.saturating_add(1),
+        "VdfBootstrap seed window exceeds capacity + genesis anchor"
+    );
+    let capacity_u64 = u64::try_from(capacity).expect("VDF capacity must fit in u64");
+    let expected_first_step = global_step
+        .checked_sub(seed_count.saturating_sub(1))
+        .expect("VdfBootstrap contains more seeds than global_step can anchor");
+    // One-based genesis contract: a valid window anchors at step 1 or later, so a
+    // step-zero bootstrap is a corrupt seed source, not a legitimate genesis.
+    assert!(expected_first_step >= 1, "VdfBootstrap one-based contract");
+    assert_eq!(
+        first_step, expected_first_step,
+        "VdfBootstrap contiguity contract"
+    );
 
     info!(
-        "Initializing vdf service from block's info in step number {}",
-        global_step_number
+        "Initializing vdf service from seed source at step number {}",
+        global_step
     );
 
     VdfState {
-        global_step: global_step_number,
-        global_step_from_the_latest_canonical_block: global_step_number,
-        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-        seeds,
+        global_step: Arc::new(AtomicU64::new(global_step)),
+        global_step_from_the_latest_canonical_block: global_step,
+        minimum_step_to_keep: global_step.saturating_sub(capacity_u64),
+        seeds: ordered_seeds,
         capacity,
-        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
+        is_vdf_mining_enabled,
     }
 }
 
@@ -566,12 +693,12 @@ pub mod test_helpers {
         let capacity = calc_capacity(config);
 
         let state = VdfState {
-            global_step: 0,
+            global_step: Arc::new(AtomicU64::new(0)),
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity,
             seeds: VecDeque::default(),
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
+            is_vdf_mining_enabled,
         };
         Arc::new(RwLock::new(state))
     }
@@ -632,7 +759,7 @@ mod tests {
         // Create VDF state WITHOUT the steps we're going to validate
         // This forces vdf_steps_are_valid to actually compute them
         let vdf_state = Arc::new(RwLock::new(VdfState {
-            global_step: 0, // Start at 0, not at num_steps
+            global_step: Arc::new(AtomicU64::new(0)), // Start at 0, not at num_steps
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity: 1000,
@@ -642,7 +769,7 @@ mod tests {
                 seeds.push_back(Seed(H256::from_low_u64_be(42)));
                 seeds
             },
-            is_vdf_mining_enabled: None,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }));
 
         // Create VDFLimiterInfo with our generated steps
@@ -729,12 +856,12 @@ mod tests {
     fn vdf_state_at(current_step: u64) -> VdfState {
         let capacity: usize = 64;
         VdfState {
-            global_step: current_step,
+            global_step: Arc::new(AtomicU64::new(current_step)),
             global_step_from_the_latest_canonical_block: current_step,
             minimum_step_to_keep: current_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
             capacity,
-            is_vdf_mining_enabled: None,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -782,14 +909,14 @@ mod tests {
             let local_step = 100_u64;
             let canonical = 10_000_u64;
             let mut state = VdfState {
-                global_step: local_step,
+                global_step: Arc::new(AtomicU64::new(local_step)),
                 global_step_from_the_latest_canonical_block: canonical,
                 minimum_step_to_keep: canonical.saturating_sub(capacity as u64),
                 seeds: (0..initial_seeds)
                     .map(|i| Seed(H256::from_low_u64_be(i as u64)))
                     .collect(),
                 capacity,
-                is_vdf_mining_enabled: None,
+                is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
             };
             let initial_len = state.seeds.len();
 
@@ -845,7 +972,8 @@ mod tests {
         let readonly = VdfStateReadonly::new(inner);
         let guard = readonly.read();
         assert_eq!(
-            guard.global_step, 42,
+            guard.current_step(),
+            42,
             "poison-recovery must surface the data the writer wrote before panicking"
         );
     }
@@ -900,7 +1028,11 @@ mod tests {
             tokio::spawn(async move {
                 for step in 101_u64..=110 {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    inner.write().unwrap().global_step = step;
+                    inner
+                        .write()
+                        .unwrap()
+                        .global_step
+                        .store(step, Ordering::Relaxed);
                 }
             })
         };
@@ -911,5 +1043,100 @@ mod tests {
 
         advancer.await.unwrap();
         assert!(result.is_ok(), "wait should succeed when state advances");
+    }
+
+    /// SSOT invariant: after N sequential `store_step` calls the owned atomic
+    /// counter equals the locked view, and the seed window is contiguous over
+    /// `[first ..= last]` with one seed per step.
+    #[test]
+    fn store_step_keeps_atomic_counter_and_seed_window_consistent() {
+        // capacity 64, start at step 0 with the genesis seed present (anchor).
+        let mut state = vdf_state_at(0);
+        state.seeds.push_back(Seed(H256::zero())); // step-0 seed
+
+        for step in 1..=50_u64 {
+            let returned = state.store_step(Seed(H256::from_low_u64_be(step)), step);
+            assert_eq!(returned, step, "sequential store advances by one");
+            // SSOT: the owned atomic equals the just-stored step.
+            assert_eq!(state.current_step(), step);
+        }
+
+        // Seed window is contiguous: first..=last maps 1:1 onto stored seeds.
+        let last = state.current_step();
+        let first = last - state.seeds.len() as u64 + 1;
+        let steps = state.get_steps(ii(first, last)).expect("contiguous window");
+        assert_eq!(steps.len(), state.seeds.len());
+        assert_eq!(last, 50);
+    }
+
+    /// Lock-freedom proven through the PUBLIC handle API: `current_step()` must
+    /// return while a writer holds the `RwLock` write guard. A bounded channel
+    /// timeout (not an unbounded `join`) fails the test if the call blocked.
+    #[test]
+    fn current_step_is_readable_through_handle_while_write_guard_held() {
+        let state = Arc::new(RwLock::new(vdf_state_at(5)));
+        let readonly = VdfStateReadonly::new(Arc::clone(&state));
+
+        let guard = state.write().unwrap(); // hold the writer
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = tx.send(readonly.current_step());
+        });
+
+        let observed = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("current_step() must not block on the held write guard");
+        assert_eq!(observed, 5);
+
+        drop(guard);
+        reader.join().unwrap();
+    }
+
+    /// The read handle exposes the step counter lock-free and reflects the
+    /// controller's mining toggles (same `Arc`, shared by handle).
+    #[test]
+    fn readonly_exposes_lockfree_step_and_controller_toggles_mining() {
+        let mining = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(RwLock::new(VdfState::new(64, 9, Arc::clone(&mining))));
+        let readonly = VdfStateReadonly::new(Arc::clone(&state));
+        assert_eq!(readonly.current_step(), 9);
+
+        // Controller and handle share the same mining Arc (same allocation).
+        let controller = VdfController::new(&mining);
+        assert!(!readonly.is_mining_enabled());
+        controller.start();
+        assert!(readonly.is_mining_enabled());
+        controller.stop();
+        assert!(!readonly.is_mining_enabled());
+    }
+
+    struct FakeSeedSource(VdfBootstrap);
+    impl VdfSeedSource for FakeSeedSource {
+        fn vdf_bootstrap(&self, _capacity: usize) -> VdfBootstrap {
+            self.0.clone()
+        }
+    }
+
+    /// `create_state` faithfully assembles a `VdfState` from a `VdfBootstrap`,
+    /// honouring the one-based contiguity contract.
+    #[test]
+    fn create_state_assembles_vdf_state_from_bootstrap() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let mining = Arc::new(AtomicBool::new(false));
+        // Contiguous steps 1..=5 (one-based): first_step == 5 - 5 + 1 == 1.
+        let seeds: VecDeque<Seed> = (1..=5).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        let source = FakeSeedSource(VdfBootstrap {
+            global_step: 5,
+            first_step: 1,
+            ordered_seeds: seeds.clone(),
+        });
+
+        let state = create_state(&source, Arc::clone(&mining), &config);
+
+        assert_eq!(state.current_step(), 5);
+        assert_eq!(state.canonical_step(), 5);
+        assert_eq!(state.seeds, seeds);
+        let (last, _) = state.get_last_step_and_seed();
+        assert_eq!(last, 5);
     }
 }

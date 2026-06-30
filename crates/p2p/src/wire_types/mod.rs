@@ -16,6 +16,13 @@
 //! Step 4 is enforced by the `all_wire_types_have_fixture_coverage` test,
 //! which parses every source file in this directory with `syn` and verifies
 //! each public type appears in the test sources.
+//!
+//! **Exception — shared stable protocol DTO.** `irys_types::VDFLimiterInfo` is
+//! used directly on the wire (no sovereign mirror). Its serde representation is
+//! a deliberately-shared, byte-stable protocol DTO; the former wire mirror was a
+//! field-for-field duplicate with identical serde. Byte identity is pinned by
+//! `vdf_limiter_info_golden_bytes` in `gossip_fixture_tests.rs`. Do not add
+//! consensus/storage derives (Compact/RLP/Arbitrary) to its serde shape.
 
 mod block;
 mod block_index;

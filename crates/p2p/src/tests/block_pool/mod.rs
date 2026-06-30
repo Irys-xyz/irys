@@ -21,7 +21,7 @@ use irys_types::{
     NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
     RethPeerInfo, SealedBlock,
 };
-use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::state::{VdfController, VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
@@ -118,8 +118,12 @@ impl MockedServices {
         let mempool_state = AtomicMempoolState::new(state);
         let mempool_stub = MempoolStub::new(tx, mempool_state);
 
-        let vdf_state_readonly =
-            VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
+            0,
+            0,
+            Arc::clone(&is_vdf_mining_enabled),
+        ))));
 
         let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
@@ -128,9 +132,7 @@ impl MockedServices {
                     Some(traced_step) => {
                         let (step, _parent_span) = traced_step.into_parts();
                         debug!("Received VDF step: {:?}", step);
-                        let state = vdf_state.into_inner_cloned();
-                        let mut lock = state.write().unwrap();
-                        lock.global_step = step.global_step_number;
+                        vdf_state.test_set_step(step.global_step_number);
                     }
                     None => {
                         debug!("VDF receiver channel closed");
@@ -155,7 +157,7 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
-            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
+            is_vdf_mining_enabled,
         }
     }
 }
@@ -326,7 +328,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        VdfController::new(&is_vdf_mining_enabled),
         tokio::runtime::Handle::current(),
     );
 
@@ -511,7 +513,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        VdfController::new(&is_vdf_mining_enabled),
         tokio::runtime::Handle::current(),
     );
 
@@ -779,7 +781,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        VdfController::new(&is_vdf_mining_enabled),
         tokio::runtime::Handle::current(),
     );
 

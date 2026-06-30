@@ -12,7 +12,7 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::{ValidationError, is_seed_data_valid},
+    block_validation::ValidationError,
     mempool_guard::MempoolReadGuard,
     metrics,
     services::ServiceSenders,
@@ -27,9 +27,8 @@ use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
     app_state::DatabaseProvider,
 };
-use irys_vdf::rayon;
 use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};
-use irys_vdf::vdf_utils::fast_forward_validated_steps;
+use irys_vdf::verify::is_seed_data_valid;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::{
     Arc, Mutex,
@@ -967,7 +966,7 @@ impl ValidationServiceInner {
             vdf.first_step_number = first_step_number,
             vdf.global_step_number = vdf_info.global_step_number,
             vdf.prev_output_step_number = prev_output_step_number,
-            vdf.local_step = self.vdf_state.read().global_step,
+            vdf.local_step = self.vdf_state.current_step(),
             "ensure_vdf_is_valid: entered"
         );
 
@@ -1035,13 +1034,7 @@ impl ValidationServiceInner {
             let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
             match tokio::task::spawn_blocking(move || {
-                ensure!(
-                    matches!(
-                        is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency),
-                        crate::block_tree_service::ValidationResult::Valid
-                    ),
-                    "Seed data is invalid"
-                );
+                is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency)?;
                 Ok::<(), eyre::Report>(())
             })
             .await
@@ -1134,13 +1127,9 @@ impl ValidationServiceInner {
                 vdf.batch_end_step = batch_end_step_number,
                 "ensure_vdf_is_valid: enqueueing validated VDF batch for fast-forward"
             );
-            fast_forward_validated_steps(
-                batch_start_step_number,
-                batch_steps,
-                &vdf_ff,
-                progress_timeout,
-            )
-            .await?;
+            vdf_ff
+                .send_validated_batch(batch_start_step_number, batch_steps, progress_timeout)
+                .await?;
         }
 
         record_vdf_task_progress(
@@ -1383,7 +1372,7 @@ mod tests {
             .num_threads(2)
             .build()
             .expect("thread pool");
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
+        let (tx, mut rx) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
         vdf_step_batch_is_valid(
@@ -1397,7 +1386,7 @@ mod tests {
         )
         .expect("valid prefix should be accepted");
 
-        fast_forward_validated_steps(1, &vdf_info.steps.0[..1], &tx, Duration::from_secs(1))
+        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1))
             .await
             .expect("validated prefix should fast-forward");
         let (ff_step, _span) = rx
