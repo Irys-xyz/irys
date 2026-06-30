@@ -61,9 +61,13 @@ fn replay_vdf_seeds(
         let prev = get_header(&block.previous_block_hash);
         let step_count =
             u64::try_from(block.vdf_limiter_info.steps.0.len()).expect("step count fits in u64");
+        let expected_step = prev
+            .vdf_limiter_info
+            .global_step_number
+            .checked_add(step_count)
+            .expect("VDF global step overflow during bootstrap contiguity check");
         assert_eq!(
-            prev.vdf_limiter_info.global_step_number + step_count,
-            block.vdf_limiter_info.global_step_number,
+            expected_step, block.vdf_limiter_info.global_step_number,
             "non-contiguous VDF seed history during bootstrap replay",
         );
 
