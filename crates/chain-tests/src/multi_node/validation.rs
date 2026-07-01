@@ -461,6 +461,11 @@ async fn spiky_heavy_ensure_block_validation_double_checks_anchors() -> eyre::Re
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
+            // Commitments now have their own (longer) anchor window; pin it to the
+            // same tight bound as data txs here so the genesis-anchored commitment
+            // in sub-case 2 is genuinely too old, exercising validation's
+            // commitment-anchor double-check.
+            consensus.mempool.commitment_anchor_expiry_depth = 3;
             consensus.mempool.ingress_proof_anchor_expiry_depth = 5;
             consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
         })
