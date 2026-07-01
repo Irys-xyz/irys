@@ -385,6 +385,22 @@ impl Config {
                 self.consensus.mempool.tx_anchor_expiry_depth,
                 self.consensus.block_tree_depth,
             );
+
+            // The ingress-proof anchor window must be at least the tx-anchor
+            // window. Prevalidation builds the ingress anchor set from the by-hash
+            // tx-anchor walk (which reaches `tx_anchor_expiry_depth` deep) extended
+            // by the finalized block index; a shorter ingress window than the tx
+            // window has no shipped use and would make the ingress set narrower
+            // than the by-hash walk it is derived from. Keep the ordering explicit.
+            // (Not capped above — ingress anchors past the reorg floor are resolved
+            // from the finalized index, which is safe.)
+            ensure!(
+                self.consensus.mempool.ingress_proof_anchor_expiry_depth
+                    >= u16::from(self.consensus.mempool.tx_anchor_expiry_depth),
+                "ingress_proof_anchor_expiry_depth ({}) must be >= tx_anchor_expiry_depth ({})",
+                self.consensus.mempool.ingress_proof_anchor_expiry_depth,
+                self.consensus.mempool.tx_anchor_expiry_depth,
+            );
         }
 
         // `number_of_ingress_proofs_from_assignees` MUST stay 0 in this codebase
