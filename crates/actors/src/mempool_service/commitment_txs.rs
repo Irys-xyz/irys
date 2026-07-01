@@ -121,11 +121,7 @@ impl Inner {
         }
 
         // Validate anchor (height is unused at this stage)
-        self.validate_tx_anchor(
-            commitment_tx,
-            self.config.consensus.mempool.commitment_anchor_expiry_depth as u64,
-        )
-        .await?;
+        self.validate_tx_anchor(commitment_tx).await?;
 
         Ok(())
     }
