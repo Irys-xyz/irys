@@ -1,6 +1,8 @@
 use crate::VdfStep;
 use irys_types::H256;
 use irys_types::Traced;
+use irys_types::block_production::Seed;
+use std::collections::VecDeque;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{Duration, timeout};
 
@@ -39,6 +41,51 @@ impl VdfFastForwardSender {
 pub fn fast_forward_channel() -> (VdfFastForwardSender, Receiver<Traced<VdfStep>>) {
     let (tx, rx) = tokio::sync::mpsc::channel(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
     (VdfFastForwardSender(tx), rx)
+}
+
+/// Bound for the inbound VDF re-anchor channel. Re-anchors fire only on a deep
+/// reorg that crosses a divergent reset boundary — a rare event — so a small
+/// bound suffices; a second request while one is queued is redundant.
+pub const VDF_REANCHOR_CHANNEL_CAPACITY: usize = 4;
+
+/// A request to heal the VDF seed buffer to canonical after a deep reorg,
+/// WITHOUT moving the step counter. Built by the block-tree gate (which holds the
+/// canonical chain) and applied by `run_vdf` under its write guard.
+#[derive(Debug, Clone)]
+pub struct ReanchorRequest {
+    /// Canonical seed values for `[c_step - canonical_seeds.len() + 1, c_step]`,
+    /// oldest first. These overwrite the poisoned buffer over that range.
+    pub canonical_seeds: VecDeque<Seed>,
+    /// The highest step for which a canonical seed is supplied (the canonical
+    /// tip). `run_vdf` recomputes the free-running tail `(c_step, live_step]`
+    /// locally from `canonical_seeds`' last value.
+    pub c_step: u64,
+    /// The canonical `next_seed` to fold at any reset boundary the recomputed
+    /// tail crosses. Folding the minority seed here would silently re-poison it.
+    pub next_seed: H256,
+}
+
+/// Sending half of the VDF re-anchor channel. Owned by `irys-vdf`; the block-tree
+/// gate holds the sender, `run_vdf` consumes the `Receiver`.
+#[derive(Debug, Clone)]
+pub struct VdfReanchorSender(Sender<ReanchorRequest>);
+
+impl VdfReanchorSender {
+    /// Non-blocking enqueue from the synchronous block-tree reorg handler (which
+    /// holds a std `RwLock` guard and cannot await). A full channel means a
+    /// re-anchor is already queued; dropping this one is safe (the queued one
+    /// heals). Returns `false` if it could not be enqueued.
+    #[must_use]
+    pub fn try_send(&self, request: ReanchorRequest) -> bool {
+        self.0.try_send(request).is_ok()
+    }
+}
+
+/// Create the bounded VDF re-anchor channel. The gate holds the
+/// [`VdfReanchorSender`]; `run_vdf` consumes the `Receiver`.
+pub fn reanchor_channel() -> (VdfReanchorSender, Receiver<ReanchorRequest>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(VDF_REANCHOR_CHANNEL_CAPACITY);
+    (VdfReanchorSender(tx), rx)
 }
 
 /// Replay a contiguous validated prefix of VDF steps into local state.

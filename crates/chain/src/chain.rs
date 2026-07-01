@@ -64,7 +64,7 @@ use irys_types::{
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
-    VdfStep,
+    ReanchorRequest, VdfStep,
     state::{AtomicVdfState, VdfController, VdfStateReadonly},
     vdf::run_vdf,
     vdf_sha,
@@ -1921,6 +1921,7 @@ impl IrysNode {
         let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,
+            receivers.vdf_reanchor,
             latest_block,
             initial_hash,
             global_step_number,
@@ -2153,6 +2154,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
+        vdf_reanchor_receiver: Receiver<ReanchorRequest>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
@@ -2224,6 +2226,7 @@ impl IrysNode {
                     initial_hash,
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
+                    vdf_reanchor_receiver,
                     MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     block_status_provider,

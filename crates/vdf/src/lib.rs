@@ -17,7 +17,10 @@ pub mod vdf;
 pub mod vdf_utils;
 pub mod verify;
 
-pub use vdf_utils::{VdfFastForwardSender, fast_forward_channel};
+pub use vdf_utils::{
+    ReanchorRequest, VdfFastForwardSender, VdfReanchorSender, fast_forward_channel,
+    reanchor_channel,
+};
 
 const SHA256_IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -344,6 +347,14 @@ pub struct VdfStep {
 
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
+
+    /// Signal that the VDF seed buffer was re-anchored in place after a deep
+    /// reorg (values rewritten, step counter unchanged — see
+    /// [`state::VdfState::reanchor_seeds`]). Miners must discard any recall-range
+    /// rotation derived from the pre-heal (poisoned) seeds and rebuild it from
+    /// the healed buffer; a value-only rewrite leaves the step *numbers*
+    /// consecutive, so the gap-driven reconstruction never triggers on its own.
+    fn broadcast_reanchored(&self);
 }
 
 /// Runs the VDF, starting with the testnet config's step count, calibrating the iterations between runs to get to ~1s/step - returning the value once `runs` runs are complete

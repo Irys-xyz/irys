@@ -146,6 +146,24 @@ impl PartitionMiningServiceInner {
         }
     }
 
+    /// React to an in-place VDF re-anchor after a deep reorg. The seed buffer's
+    /// VALUES were rewritten to canonical while the step numbers stayed the same
+    /// (see `VdfState::reanchor_seeds`), so the recall-range rotation cached in
+    /// `self.ranges` is now derived from poisoned seeds. Because the step numbers
+    /// remain consecutive, `get_recall_range`'s gap-driven reconstruction never
+    /// fires on its own — so reset the rotation to a fresh state here, forcing the
+    /// next seed to reconstruct it from the healed buffer. Mirrors the `ranges`
+    /// construction in [`PartitionMiningServiceInner::new`].
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn handle_reanchored(&mut self) {
+        self.ranges = Ranges::new(
+            num_recall_ranges_in_partition(&self.config.consensus)
+                .try_into()
+                .expect("Recall ranges number exceeds usize representation"),
+        )
+        .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig");
+    }
+
     #[tracing::instrument(level = "trace", skip_all, err)]
     fn get_recall_range(
         &mut self,
@@ -453,6 +471,9 @@ impl PartitionMiningService {
                             }
                             MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
                                 self.state.handle_partitions_expiration(list);
+                            }
+                            MiningBroadcastEvent::Reanchored => {
+                                self.state.handle_reanchored();
                             }
                         },
                         None => {

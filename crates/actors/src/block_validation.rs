@@ -3317,7 +3317,7 @@ pub async fn recall_recall_range_is_valid(
 /// holds the un-migrated canonical tail) and falling back to the database for
 /// older, migrated history. Used to rebuild a fork-local VDF step window from a
 /// block's own canonical ancestry.
-fn resolve_header_tree_or_db(
+pub(crate) fn resolve_header_tree_or_db(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     hash: &H256,
@@ -3336,7 +3336,7 @@ fn resolve_header_tree_or_db(
 /// must equal the block's tip step (`vdf_limiter_info.global_step_number`).
 /// Walks parent pointers via `resolve`; returns `None` if an ancestor covering
 /// the window is unavailable (→ soft `StepsUnavailable`, requeue).
-fn build_fork_local_step_window(
+pub(crate) fn build_fork_local_step_window(
     block: &IrysBlockHeader,
     want_start: u64,
     want_end: u64,
