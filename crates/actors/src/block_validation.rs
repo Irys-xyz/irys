@@ -5100,13 +5100,16 @@ pub async fn commitment_txs_are_valid(
     let duplicate_commitment = db
         .view_eyre(|read_tx| {
             for tx in commitment_txs {
-                let finalized_included = irys_database::canonical_commitment_included_height(
-                    read_tx,
-                    &tx.id(),
-                    finalized_floor,
-                )?
-                .is_some();
-                if prior_commitment_ids.contains(&tx.id()) || finalized_included {
+                // In-memory reorg-window check first; only pay the DB read on a
+                // miss.
+                if prior_commitment_ids.contains(&tx.id())
+                    || irys_database::canonical_commitment_included_height(
+                        read_tx,
+                        &tx.id(),
+                        finalized_floor,
+                    )?
+                    .is_some()
+                {
                     return Ok(Some(tx.id()));
                 }
             }
