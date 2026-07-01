@@ -295,7 +295,7 @@ pub async fn select_best_txs(
                 tx.signer = ?tx.signer(),
                 tx.commitment_type = ?tx.commitment_type(),
                 tx.anchor = ?tx.anchor(),
-                min_anchor_height = commitment_min_anchor_height,
+                commitment_min_anchor_height = commitment_min_anchor_height,
                 max_anchor_height = max_anchor_height,
                 "Not promoting commitment tx - anchor validation failed"
             );
