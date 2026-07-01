@@ -97,3 +97,54 @@ async fn heavy_commitment_survives_pruning_past_data_tx_window() -> eyre::Result
     node.stop().await;
     Ok(())
 }
+
+/// Block production must select commitments over the (longer) commitment
+/// anchor window, not the shorter data-tx window. `NodeConfig::testing()`:
+/// tx depth = 20, commitment depth = 100, block_migration_depth = 6. After
+/// mining 26 blocks past the anchor, the anchor (height 1) is older than the
+/// tx-derived min anchor height (26 - (20-6) = 12) but within the
+/// commitment-derived min anchor height (26 - (100-6) = 0, saturating), and
+/// has matured past block_migration_depth. A commitment selector still gated
+/// on the tx window would exclude it; gated on the commitment window it must
+/// be included.
+///
+/// This exercises the selector (`tx_selector::select_best_txs`) directly via
+/// `get_best_mempool_tx`, rather than through full block production +
+/// self-validation: block-level anchor validation (`block_discovery.rs`) is
+/// still gated on the tx window (a separate task) and would reject a produced
+/// block before this fix lands, which is not what this test is scoped to.
+#[test_log::test(tokio::test)]
+async fn heavy_block_production_selects_commitment_over_commitment_window() -> eyre::Result<()> {
+    initialize_tracing();
+    let mut config = NodeConfig::testing();
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&signer]);
+    let node = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("N", 10)
+        .await;
+
+    // Capture an old anchor, then mine well past the tx window (20) but stay
+    // within the commitment window (100).
+    let old_anchor = node.mine_block().await?.block_hash;
+    node.mine_blocks(25).await?;
+
+    let consensus = &node.node_ctx.config.consensus;
+    let mut stake_tx = CommitmentTransaction::new_stake(consensus, old_anchor);
+    signer.sign_commitment(&mut stake_tx)?;
+    node.ingest_commitment_tx(stake_tx.clone())
+        .await
+        .expect("commitment with old-but-in-window anchor should be accepted");
+
+    let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash();
+    let selected = node.get_best_mempool_tx(canonical_tip).await?;
+    assert!(
+        selected
+            .commitment_tx
+            .iter()
+            .any(|tx| tx.id() == stake_tx.id()),
+        "commitment with in-window (commitment-window) anchor must be selected for inclusion"
+    );
+
+    node.stop().await;
+    Ok(())
+}
