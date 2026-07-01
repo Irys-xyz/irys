@@ -251,6 +251,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         VE::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
         VE::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
         VE::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+        VE::CommitmentDedupLookupFailed(_) => "commitment_dedup_lookup_failed",
         VE::RecallRangeStepsUnavailable(_) => "recall_range_steps_unavailable",
         // PreValidation has a sub-classifier — only its SoftInternal inner
         // variants (`ParentNotInCache`) reach here. We delegate to the
