@@ -10,6 +10,14 @@ use std::collections::HashSet;
 /// reorged-out sibling. Callers use it for the reorg window (`walk_depth =
 /// block_tree_depth`) and cover finalized inclusions below the floor via
 /// `canonical_commitment_included_height`.
+///
+/// Fails closed: an in-window ancestor missing from BOTH the block tree and the
+/// DB is a local inconsistency (every ancestor of a validatable block was
+/// itself validated-and-stored when processed), so it `bail!`s rather than
+/// returning a partial set. A partial set would let a replay above the break
+/// point slip past both the by-hash set and the finalized lookup. Callers map
+/// the error to a SoftInternal-park path (don't accept or reject — retry). The
+/// clean stops (dropped below `min_height`, reached genesis) return normally.
 pub fn ancestor_commitment_tx_ids(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -28,7 +36,12 @@ pub fn ancestor_commitment_tx_ids(
             Some(h) => h.clone(),
             None => match db.view_eyre(|tx| block_header_by_hash(tx, &cursor, false))? {
                 Some(h) => h,
-                None => break, // unknown ancestor: stop (validation elsewhere rejects orphans)
+                None => eyre::bail!(
+                    "commitment dedup walk: ancestor {cursor} (within the reorg \
+                     window of block {} at height {block_height}) is missing from \
+                     both the block tree and the DB",
+                    block_under_validation.block_hash,
+                ),
             },
         };
         if header.height < min_height {
@@ -103,5 +116,26 @@ mod tests {
 
         let ids = ancestor_commitment_tx_ids(&block_tree, &db, &block1, 0).unwrap();
         assert!(ids.is_empty());
+    }
+
+    // An in-window ancestor missing from both the tree and the DB must fail
+    // loud rather than return a partial set (which could hide a replay).
+    #[test]
+    fn unknown_in_window_ancestor_errors() {
+        let genesis = signed_genesis();
+        // Child whose parent hash resolves nowhere: the tree holds only genesis
+        // and the DB is empty.
+        let mut block2 = child_with_commitments(&genesis, 2, vec![H256::random()]);
+        block2.previous_block_hash = H256::random();
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        let err = ancestor_commitment_tx_ids(&block_tree, &db, &block2, 100).unwrap_err();
+        assert!(
+            err.to_string().contains("missing from"),
+            "expected fail-closed error, got: {err}"
+        );
     }
 }
