@@ -457,23 +457,28 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
-        let min_tx_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
-        let min_ingress_proof_anchor_height =
-            block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
-        // Commitments accept older anchors than data txs (custody workflows need
-        // time to broadcast a signed commitment). Unlike the tx window, this may
-        // exceed `block_tree_depth`; below the reorg floor it is resolved from the
-        // finalized block index, exactly like the ingress-proof window.
+        // Per-item anchor windows: an item's anchor must resolve to a canonical
+        // block no older than its floor. Data txs get the shortest window;
+        // commitments a longer one (custody workflows need time to broadcast a
+        // signed commitment, and it may exceed `block_tree_depth`); ingress proofs
+        // their own (often longer) window.
+        let min_tx_anchor_height =
+            block_height.saturating_sub(mempool_config.tx_anchor_expiry_depth as u64);
         let min_commitment_anchor_height =
             block_height.saturating_sub(mempool_config.commitment_anchor_expiry_depth.into());
-        // The eager anchor map only needs to cover the reorg window branch-
-        // correctly (the by-hash walk + the NC-0042 index handoff). Below the
-        // reorg floor the chain is finalized, so an anchor there is resolved on
-        // demand via an MBH-verified lookup in `anchor_valid_for` — we do NOT
-        // pre-walk the whole (possibly very deep) ingress/commitment window on
-        // every block, which would be O(commitment_anchor_expiry_depth) per block.
+        let min_ingress_proof_anchor_height =
+            block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
+
+        // The eager anchor map (`valid_anchor_block_heights`, built below) only
+        // needs to cover the reorg window branch-correctly (by-hash walk + NC-0042
+        // index handoff). Below the reorg floor the chain is finalized, so an older
+        // anchor is resolved on demand in `anchor_valid_for` via an MBH-verified
+        // lookup — we never pre-walk the whole (possibly ~commitment window). Anchors
+        // reach the map down to `reorg_floor`; `map_floor` is the height below which
+        // the map ends and the fallback takes over (it equals `reorg_floor` in
+        // production, where `tx_anchor_expiry_depth <= block_tree_depth`).
         let reorg_floor = block_height.saturating_sub(config.consensus.block_tree_depth);
+        let map_floor = reorg_floor.min(min_tx_anchor_height);
 
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
@@ -488,59 +493,51 @@ impl BlockDiscoveryServiceInner {
         // commitment: commitment window). The by-hash walk populates the tx
         // window; the block-index pass below extends it down to `reorg_floor`.
         // Anchors older than the floor are finalized and resolved on demand.
+        // Walk this block's ancestry over the tx-anchor window, populating the
+        // branch-correct anchor map. This walk always runs: the map is needed by
+        // commitment and ingress anchors too, not just submit txs. Along the way,
+        // if the block carries submit txs, reject any already included in an
+        // ancestor (submit-ledger duplicate detection within the tx window).
         let mut valid_anchor_block_heights: HashMap<H256, u64> = HashMap::new();
         let bt_finished_height = {
-            // block for block_tree
             // explicit drop(block_tree) isn't good enough for the compiler
             let block_tree = block_tree_guard.read();
-            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-                while parent_block.height >= min_tx_anchor_height {
-                    // Check to see if any data txids appeared in prior blocks
+            while parent_block.height >= min_tx_anchor_height {
+                if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
                     let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
-
-                    // Compare each ledger type between current and parent blocks
                     if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
-                        // Check for intersection between current and parent txids for this ledger
                         for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {
                                 return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
                             }
                         }
                     }
-                    valid_anchor_block_heights.insert(parent_block.block_hash, parent_block.height);
-
-                    if parent_block.height == 0 {
-                        break;
-                    }
-
-                    // Continue the loop - get the next parent block from the block tree
-                    let previous_block_header = match block_tree
-                        .get_block(&parent_block.previous_block_hash)
-                    {
-                        Some(header) => header.clone(),
-                        None =>
-                        // fall back to the database
-                        {
-                            match db.view_eyre(|tx| {
-                                block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                            }) {
-                                Ok(Some(header)) => header,
-                                Ok(None) => {
-                                    return Err(BlockDiscoveryError::PreviousBlockNotFound {
-                                        previous_block_hash: parent_block.previous_block_hash,
-                                    });
-                                }
-                                Err(e) => {
-                                    return Err(BlockDiscoveryError::InternalError(
-                                        BlockDiscoveryInternalError::DatabaseError(e),
-                                    ));
-                                }
-                            }
-                        }
-                    };
-
-                    parent_block = previous_block_header; // Move instead of borrow
                 }
+                valid_anchor_block_heights.insert(parent_block.block_hash, parent_block.height);
+
+                if parent_block.height == 0 {
+                    break;
+                }
+
+                // Move to the next parent (block tree, falling back to the database).
+                parent_block = match block_tree.get_block(&parent_block.previous_block_hash) {
+                    Some(header) => header.clone(),
+                    None => match db.view_eyre(|tx| {
+                        block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                    }) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
+                            return Err(BlockDiscoveryError::PreviousBlockNotFound {
+                                previous_block_hash: parent_block.previous_block_hash,
+                            });
+                        }
+                        Err(e) => {
+                            return Err(BlockDiscoveryError::InternalError(
+                                BlockDiscoveryInternalError::DatabaseError(e),
+                            ));
+                        }
+                    },
+                };
             }
             parent_block.height
         };
@@ -632,7 +629,6 @@ impl BlockDiscoveryServiceInner {
         // at/above `map_floor` is a sibling-branch block and is rejected. This
         // resolves deep (finalized) anchors on demand instead of pre-walking the
         // whole (possibly ~commitment_anchor_expiry_depth) window every block.
-        let map_floor = reorg_floor.min(min_tx_anchor_height);
         let anchor_valid_for =
             |anchor: &H256, min_height: u64| -> Result<bool, BlockDiscoveryInternalError> {
                 if let Some(h) = valid_anchor_block_heights.get(anchor) {
@@ -663,15 +659,13 @@ impl BlockDiscoveryServiceInner {
             // tx_id was already included on THIS branch's ancestry (reorg window,
             // resolved by-hash) or in a finalized block below the reorg floor
             // (MBH-verified). The two ranges meet at the floor with no gap.
-            let block_tree_depth = config.consensus.block_tree_depth;
             let prior_commitment_ids = crate::commitment_dedup::ancestor_commitment_tx_ids(
                 &block_tree_guard,
                 &db,
                 new_block_header,
-                block_tree_depth,
+                config.consensus.block_tree_depth,
             )
             .map_err(BlockDiscoveryInternalError::DatabaseError)?;
-            let finalized_floor = block_height.saturating_sub(block_tree_depth);
             // Anchor validity (in-memory): commitments accept anchors over the
             // (longer) commitment window.
             for tx in commitment_txs.iter() {
@@ -691,7 +685,7 @@ impl BlockDiscoveryServiceInner {
                             irys_database::canonical_commitment_included_height(
                                 read_tx,
                                 &tx.id(),
-                                finalized_floor,
+                                reorg_floor,
                             )?
                             .is_some();
                         if prior_commitment_ids.contains(&tx.id()) || finalized_included {
