@@ -5086,20 +5086,26 @@ pub async fn commitment_txs_are_valid(
     )
     .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?;
     let finalized_floor = block.height.saturating_sub(block_tree_depth);
-    for tx in commitment_txs {
-        let finalized_included = db
-            .view_eyre(|read_tx| {
-                irys_database::canonical_commitment_included_height(
+    // Replay dedup: one read tx covers every finalized-inclusion lookup (a
+    // single MDBX txn instead of one per commitment).
+    let duplicate_commitment = db
+        .view_eyre(|read_tx| {
+            for tx in commitment_txs {
+                let finalized_included = irys_database::canonical_commitment_included_height(
                     read_tx,
                     &tx.id(),
                     finalized_floor,
-                )
-            })
-            .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?
-            .is_some();
-        if prior_commitment_ids.contains(&tx.id()) || finalized_included {
-            return Err(ValidationError::DuplicateCommitmentTransaction { tx_id: tx.id() });
-        }
+                )?
+                .is_some();
+                if prior_commitment_ids.contains(&tx.id()) || finalized_included {
+                    return Ok(Some(tx.id()));
+                }
+            }
+            Ok(None)
+        })
+        .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?;
+    if let Some(tx_id) = duplicate_commitment {
+        return Err(ValidationError::DuplicateCommitmentTransaction { tx_id });
     }
 
     // Regular block validation: ensure commitments align with snapshot state
