@@ -111,7 +111,7 @@ async fn heavy_commitment_replay_across_epoch_rejected() -> eyre::Result<()> {
     // Reuse the EXACT tx object (same tx_id / original anchor) so the durable
     // dedup can match it; the original anchor is still within
     // tx_anchor_expiry_depth.
-    let strat = ReplayStrategy {
+    let strategy = ReplayStrategy {
         dup: update.clone(),
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
@@ -119,7 +119,7 @@ async fn heavy_commitment_replay_across_epoch_rejected() -> eyre::Result<()> {
     };
 
     node.gossip_disable();
-    let (block, _stats, _payload) = strat
+    let (block, _stats, _payload) = strategy
         .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
         .await?
         .expect("block produced");
@@ -127,7 +127,7 @@ async fn heavy_commitment_replay_across_epoch_rejected() -> eyre::Result<()> {
 
     // Route through block_discovery (the code under test). Not the direct
     // `BlockPreValidated` path, which bypasses block_discovery entirely.
-    let result = strat
+    let result = strategy
         .inner()
         .block_discovery
         .handle_block(Arc::clone(&block), false)
@@ -187,7 +187,7 @@ async fn heavy_commitment_replay_rejected_in_full_validation() -> eyre::Result<(
     // Craft a non-epoch block that re-includes the already-finalized commitment
     // (exact tx object: same tx_id / original anchor, still within
     // tx_anchor_expiry_depth).
-    let strat = ReplayStrategy {
+    let strategy = ReplayStrategy {
         dup: update.clone(),
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
@@ -195,7 +195,7 @@ async fn heavy_commitment_replay_rejected_in_full_validation() -> eyre::Result<(
     };
 
     node.gossip_disable();
-    let (block, _stats, _payload) = strat
+    let (block, _stats, _payload) = strategy
         .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
         .await?
         .expect("block produced");

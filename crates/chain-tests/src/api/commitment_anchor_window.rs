@@ -269,7 +269,7 @@ async fn heavy_commitment_out_of_window_anchor_rejected() -> eyre::Result<()> {
     let mut stake_tx = CommitmentTransaction::new_stake(consensus, old_anchor);
     signer.sign_commitment(&mut stake_tx)?;
 
-    let strat = ForceCommitmentStrategy {
+    let strategy = ForceCommitmentStrategy {
         commitment: stake_tx.clone(),
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
@@ -277,13 +277,13 @@ async fn heavy_commitment_out_of_window_anchor_rejected() -> eyre::Result<()> {
     };
 
     node.gossip_disable();
-    let (block, _stats, _payload) = strat
+    let (block, _stats, _payload) = strategy
         .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
         .await?
         .expect("block produced");
     node.gossip_enable();
 
-    let result = strat
+    let result = strategy
         .inner()
         .block_discovery
         .handle_block(Arc::clone(&block), false)
@@ -295,6 +295,60 @@ async fn heavy_commitment_out_of_window_anchor_rejected() -> eyre::Result<()> {
             Err(BlockDiscoveryError::InvalidAnchor { anchor, .. }) if *anchor == old_anchor
         ),
         "commitment anchored past the commitment window must be rejected as InvalidAnchor, got {result:?}"
+    );
+
+    node.stop().await;
+    Ok(())
+}
+
+/// End-to-end: a commitment anchored beyond `tx_anchor_expiry_depth` but
+/// within `commitment_anchor_expiry_depth` is ingested, produced, and
+/// self-validated via the real `mine_block()` path (not a direct selector
+/// call). This proves the selector (B5) and block-level anchor validation
+/// (B6) agree: if either still gated on the shorter tx window, either the
+/// commitment would never be selected, or a produced block containing it
+/// would be rejected by the node's own validation and the canonical height
+/// would not advance.
+///
+/// Contrast with a same-age data tx: covered by
+/// `heavy_commitment_accepts_old_anchor_data_tx_rejects` above, which shows
+/// ingress rejection under the shorter tx window; not duplicated here.
+#[test_log::test(tokio::test)]
+async fn heavy_e2e_commitment_in_window_anchor_produces_and_validates() -> eyre::Result<()> {
+    initialize_tracing();
+    let mut config = NodeConfig::testing(); // tx depth 20, commitment depth 100, block_migration_depth 6, block_tree_depth 50
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&signer]);
+    let node = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("N", 10)
+        .await;
+
+    // Capture an old anchor (height 1), then mine past the tx window (20) but
+    // stay within the commitment window (100), and past block_migration_depth
+    // (6) so the anchor is matured.
+    let old_anchor = node.mine_block().await?.block_hash;
+    node.mine_blocks(25).await?;
+
+    let consensus = &node.node_ctx.config.consensus;
+    let mut stake_tx = CommitmentTransaction::new_stake(consensus, old_anchor);
+    signer.sign_commitment(&mut stake_tx)?;
+    node.ingest_commitment_tx(stake_tx.clone())
+        .await
+        .expect("commitment with old-but-in-window anchor should be accepted");
+
+    let height_before = node.get_canonical_chain_height().await;
+    node.mine_block().await?;
+    let height_after = node.get_canonical_chain_height().await;
+    assert_eq!(
+        height_after,
+        height_before + 1,
+        "the node must accept and canonicalize its own produced block"
+    );
+
+    let produced_block = node.get_block_by_height(height_after).await?;
+    assert!(
+        produced_block.commitment_tx_ids().contains(&stake_tx.id()),
+        "the produced, validated block must include the in-window commitment"
     );
 
     node.stop().await;
