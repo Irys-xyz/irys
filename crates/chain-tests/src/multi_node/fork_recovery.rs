@@ -926,6 +926,185 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
     Ok(())
 }
 
+/// Branch-safety regression guard for the durable commitment-replay dedup
+/// (by-hash ancestry walk within the reorg window + MBH-verified finalized DB
+/// lookup below the reorg floor).
+///
+/// A commitment whose ONLY prior inclusion was on a branch that gets reorged
+/// out was never actually applied on the canonical chain, so it must remain
+/// includable once the surviving branch mines a new block. If the dedup
+/// wrongly treated the orphaned-branch inclusion as a canonical one, this
+/// would be a liveness bug: the commitment would be permanently stuck,
+/// unable to ever land in a canonical block.
+///
+/// Two nodes fork from a common ancestor. node_b's fork (containing a stake +
+/// pledge commitment) is orphaned when node_c reveals a longer competing
+/// chain. The test asserts the orphaned commitments (a) return to mempool and
+/// (b) get re-included in a new canonical block on the surviving branch, i.e.
+/// `commitment_tx_ids()` of that block contains them — proving the dedup does
+/// not false-positive on reorged-out-only inclusions.
+#[test_log::test(tokio::test)]
+async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 5;
+    let seconds_to_wait = 15;
+
+    let block_migration_depth = num_blocks_in_epoch - 1;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+
+    let b_signer = genesis_config.new_random_signer();
+    let c_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
+
+    let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("NODE_A", seconds_to_wait)
+        .await;
+
+    let config_b = node_a.testing_peer_with_signer(&b_signer);
+    let config_c = node_a.testing_peer_with_signer(&c_signer);
+
+    let node_b = IrysNodeTest::new(config_b)
+        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
+        .await;
+    let node_c = IrysNodeTest::new(config_c)
+        .start_and_wait_for_packing("NODE_C", seconds_to_wait)
+        .await;
+
+    // Sync everyone to height 0 before diverging.
+    let current_height = node_a.get_canonical_chain_height().await;
+    assert_eq!(current_height, 0);
+    node_b
+        .wait_until_height(current_height, seconds_to_wait)
+        .await?;
+    node_c
+        .wait_until_height(current_height, seconds_to_wait)
+        .await?;
+
+    // Mine a common block so future txs anchor at height 1 on all nodes.
+    node_a.mine_block().await?;
+    node_a.wait_until_height(1, seconds_to_wait).await?;
+    let block_height_1 = node_a.get_block_by_height(1).await?;
+    node_b
+        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .await?;
+    node_c
+        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
+        .await?;
+
+    node_a.gossip_disable();
+    node_b.gossip_disable();
+    node_c.gossip_disable();
+
+    // node_b posts a stake + pledge commitment kept local to its own fork.
+    let anchor = node_a.get_anchor().await?;
+    let stake_tx = node_b
+        .post_stake_commitment_without_gossip(Some(anchor))
+        .await?;
+    let pledge_tx = node_b
+        .post_pledge_commitment_without_gossip(Some(anchor))
+        .await?;
+
+    // node_b mines the commitments into its own (soon-to-be-orphaned) branch.
+    let (b_block2, _b_block2_payload, _b_block2_txs) = node_b.mine_block_without_gossip().await?;
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
+    assert_eq!(
+        b_block2.system_ledgers.len(),
+        1,
+        "expect the stake commitment (and, if capacity allows, the pledge) to land on node_b's branch"
+    );
+
+    // node_c mines two blocks without these commitments, producing a longer
+    // competing chain than node_b's single block.
+    let (c_block2, _c_block2_payload, _c_block2_txs) = node_c.mine_block_without_gossip().await?;
+    node_c
+        .wait_until_height(c_block2.height, seconds_to_wait)
+        .await?;
+    let (c_block3, _c_block3_payload, _c_block3_txs) = node_c.mine_block_without_gossip().await?;
+    node_c
+        .wait_until_height(c_block3.height, seconds_to_wait)
+        .await?;
+
+    // Send node_c's longer chain directly to node_b. node_b adopts it (a
+    // longer chain wins), orphaning its own block 2 and returning the stake +
+    // pledge commitments to its mempool.
+    let reorg_future = node_b.wait_for_reorg(seconds_to_wait);
+    node_c
+        .send_full_block(
+            &node_b,
+            &c_block2,
+            _c_block2_payload.clone(),
+            _c_block2_txs.clone(),
+        )
+        .await?;
+    node_c
+        .send_full_block(
+            &node_b,
+            &c_block3,
+            _c_block3_payload.clone(),
+            _c_block3_txs.clone(),
+        )
+        .await?;
+    node_b.wait_for_block(&c_block2.block_hash, 10).await?;
+    node_b.wait_for_block(&c_block3.block_hash, 10).await?;
+
+    let reorg_event = reorg_future.await?;
+    let old_fork_hashes: Vec<_> = reorg_event
+        .old_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
+    let new_fork_hashes: Vec<_> = reorg_event
+        .new_fork
+        .iter()
+        .map(|b| b.header().block_hash)
+        .collect();
+    debug!(
+        "reorg on node_b: old_fork={:?} new_fork={:?}",
+        old_fork_hashes, new_fork_hashes
+    );
+    assert_eq!(
+        old_fork_hashes,
+        vec![b_block2.block_hash],
+        "node_b's own block 2 (carrying the commitments) must be the orphaned block"
+    );
+
+    // The orphaned commitments must return to node_b's mempool: their only
+    // prior inclusion was on the now-orphaned branch, so they were never
+    // actually applied on the canonical chain.
+    node_b
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id(), pledge_tx.id()], seconds_to_wait)
+        .await
+        .expect("reorged-out commitments must return to mempool, ready for re-inclusion");
+
+    // node_b mines on top of the surviving branch (node_c's chain); the
+    // dedup must NOT reject the commitments as duplicates, since they were
+    // never included on the canonical chain.
+    let (block4, _block4_payload, _block4_txs) = node_b.mine_block_without_gossip().await?;
+    node_b
+        .wait_until_height(block4.height, seconds_to_wait)
+        .await?;
+
+    let commitment_ids = block4.commitment_tx_ids();
+    assert!(
+        commitment_ids.contains(&stake_tx.id()),
+        "stake commitment reorged out of the orphaned branch must be re-includable on the \
+         surviving branch, not falsely rejected as a duplicate by the durable dedup; got {:?}",
+        commitment_ids
+    );
+    assert!(
+        commitment_ids.contains(&pledge_tx.id()),
+        "pledge commitment reorged out of the orphaned branch must be re-includable on the \
+         surviving branch, not falsely rejected as a duplicate by the durable dedup; got {:?}",
+        commitment_ids
+    );
+
+    tokio::join!(node_a.stop(), node_b.stop(), node_c.stop());
+    Ok(())
+}
+
 /// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
 ///   We need to verify that
 ///    - publish txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
