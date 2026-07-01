@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782925381818,
+  "lastUpdate": 1782928220881,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7711,6 +7711,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "distinct": true,
+          "id": "4c4e2ace5a0cccae976c2acb9e03b5a815649b67",
+          "message": "chore(consensus): set testnet aurora activation timestamp\n\nAurora hard-fork activation time (2026-02-03) for the testnet reset.",
+          "timestamp": "2026-07-01T17:29:57Z",
+          "tree_id": "cc6d8bd184583d8d1876a1081b89ccfa419b840d",
+          "url": "https://github.com/Irys-xyz/irys/commit/4c4e2ace5a0cccae976c2acb9e03b5a815649b67"
+        },
+        "date": 1782928218640,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012581,
+            "range": "± 0.000341",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126085,
+            "range": "± 0.002991",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.264975,
+            "range": "± 0.020267",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.098171,
+            "range": "± 0.395121",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077809,
+            "range": "± 0.001386",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 780.922511,
+            "range": "± 17.488956",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1012.553295,
+            "range": "± 43.192817",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120183,
+            "range": "± 0.001515",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1207.082805,
+            "range": "± 7.289197",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1577.828051,
+            "range": "± 13.319444",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034134,
+            "range": "± 0.001288",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 218.024346,
+            "range": "± 1.593837",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.622997,
+            "range": "± 2.234997",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
