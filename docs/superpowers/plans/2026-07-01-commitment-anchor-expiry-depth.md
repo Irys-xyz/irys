@@ -276,11 +276,11 @@ async fn heavy_commitment_replay_across_epoch_rejected() -> eyre::Result<()> {
     node.wait_until_height_confirmed(num_blocks_in_epoch as u64 * 2, 20).await?;
 
     // Craft a block that re-includes the already-included pledge.
-    let strat = ReplayStrategy {
+    let strategy = ReplayStrategy {
         dup: pledge.clone(),
         prod: ProductionStrategy { inner: node.node_ctx.block_producer_inner.clone() },
     };
-    let (block, _s, _p) = strat
+    let (block, _s, _p) = strategy
         .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
         .await?
         .expect("block produced");
