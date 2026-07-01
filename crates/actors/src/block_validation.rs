@@ -1022,6 +1022,18 @@ pub enum ValidationError {
     #[error("Parent EMA snapshot missing for block {block_hash}")]
     ParentEmaSnapshotMissing { block_hash: H256 },
 
+    /// A DB read backing the durable commitment-replay dedup failed
+    /// (ancestor tx_id collection or the finalized-inclusion lookup).
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`]: a transient local I/O fault
+    /// is not peer-attributable. The block's validity is unknown, so it parks
+    /// for retry rather than being discarded as invalid — a false reject here
+    /// would be a consensus/liveness hazard. A genuine duplicate is a separate
+    /// path and still reports [`Self::DuplicateCommitmentTransaction`].
+    #[error("Commitment replay dedup lookup failed: {0}")]
+    CommitmentDedupLookupFailed(String),
+
     /// Parent block not found in block tree at validation entry (looked up
     /// during seed-data validation, before the parent-wait stage).
     ///
@@ -1102,6 +1114,7 @@ impl ValidationError {
             Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
+            | Self::CommitmentDedupLookupFailed(_)
             | Self::ParentBlockMissing { .. } => ErrorClass::SoftInternal,
             // Local `ExecutionPayloadCache` tore down the wait receiver
             // (LRU eviction under sync load, or explicit cache removal).
@@ -1172,6 +1185,7 @@ impl ValidationError {
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
+            | Self::CommitmentDedupLookupFailed(_)
             | Self::RecallRangeStepsUnavailable(_) => "internal_error",
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
@@ -1404,6 +1418,32 @@ mod recall_range_error_tests {
         assert!(!err.is_node_fault());
         assert_eq!(err.metric_label(), "invalid");
     }
+
+    // A transient DB read fault backing the commitment-replay dedup is a
+    // LOCAL failure, not peer-attributable. It must park the block for retry
+    // (SoftInternal), never discard it as invalid (Consensus) — a false
+    // reject would be a liveness/consensus hazard. A genuine duplicate is a
+    // separate path and remains `DuplicateCommitmentTransaction` (Consensus).
+    #[test]
+    fn validation_error_commitment_dedup_lookup_failed_is_soft_internal() {
+        let err = ValidationError::CommitmentDedupLookupFailed("mdbx read".into());
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert!(err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "internal_error");
+        assert_eq!(err.metric_reason(), "commitment_dedup_lookup_failed");
+    }
+
+    #[test]
+    fn validation_error_duplicate_commitment_is_consensus() {
+        let err = ValidationError::DuplicateCommitmentTransaction {
+            tx_id: H256::zero(),
+        };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(!err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "invalid");
+    }
 }
 
 impl ValidationError {
@@ -1444,6 +1484,7 @@ impl ValidationError {
             Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
             Self::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
             Self::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+            Self::CommitmentDedupLookupFailed(_) => "commitment_dedup_lookup_failed",
         }
     }
 
@@ -5043,7 +5084,7 @@ pub async fn commitment_txs_are_valid(
         block,
         block_tree_depth,
     )
-    .map_err(|e| ValidationError::CommitmentOrderingFailed(e.to_string()))?;
+    .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?;
     let finalized_floor = block.height.saturating_sub(block_tree_depth);
     for tx in commitment_txs {
         let finalized_included = db
@@ -5054,7 +5095,7 @@ pub async fn commitment_txs_are_valid(
                     finalized_floor,
                 )
             })
-            .map_err(|e| ValidationError::CommitmentOrderingFailed(e.to_string()))?
+            .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?
             .is_some();
         if prior_commitment_ids.contains(&tx.id()) || finalized_included {
             return Err(ValidationError::DuplicateCommitmentTransaction { tx_id: tx.id() });
