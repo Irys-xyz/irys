@@ -56,3 +56,44 @@ async fn heavy_commitment_accepts_old_anchor_data_tx_rejects() -> eyre::Result<(
     node.stop().await;
     Ok(())
 }
+
+/// Mempool pruning (not just ingress) must also use the commitment window:
+/// once a commitment is accepted with an old-but-in-window anchor, later
+/// block confirmations must not prune it until its anchor age exceeds
+/// `commitment_anchor_expiry_depth`, even though the same anchor age would
+/// already exceed the (shorter) `tx_anchor_expiry_depth` used for data txs.
+/// `NodeConfig::testing()`: tx depth = 20, commitment depth = 100,
+/// block_migration_depth = 6 -> effective data expiry = 20+6+5 = 31,
+/// effective commitment expiry = 100+6+5 = 111. An anchor age of 40 is past
+/// the former but well within the latter.
+#[test_log::test(tokio::test)]
+async fn heavy_commitment_survives_pruning_past_data_tx_window() -> eyre::Result<()> {
+    initialize_tracing();
+    let mut config = NodeConfig::testing();
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&signer]);
+    let node = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("N", 10)
+        .await;
+
+    let old_anchor = node.mine_block().await?.block_hash;
+
+    let consensus = &node.node_ctx.config.consensus;
+    let mut stake_tx = CommitmentTransaction::new_stake(consensus, old_anchor);
+    signer.sign_commitment(&mut stake_tx)?;
+    node.ingest_commitment_tx(stake_tx.clone())
+        .await
+        .expect("commitment with old-but-in-window anchor should be accepted");
+
+    // Mine past the data-tx effective expiry (31) but stay within the
+    // commitment effective expiry (111). Each mined block confirms the
+    // previous one, which drives a `prune_pending_txs` cycle.
+    node.mine_blocks(40).await?;
+
+    node.wait_for_mempool_commitment_txs(vec![stake_tx.id()], 10)
+        .await
+        .expect("commitment must survive pruning within its longer window");
+
+    node.stop().await;
+    Ok(())
+}
