@@ -190,6 +190,13 @@ pub async fn select_best_txs(
     let max_anchor_height =
         current_height.saturating_sub(ctx.config.consensus.block_migration_depth as u64);
 
+    // Commitments use a longer expiry window than data txs; keep the same
+    // maturity upper bound (max_anchor_height).
+    let commitment_min_anchor_height = current_height.saturating_sub(
+        (ctx.config.consensus.mempool.commitment_anchor_expiry_depth as u64)
+            .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
+    );
+
     let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 
     info!(
@@ -279,7 +286,7 @@ pub async fn select_best_txs(
         if !crate::anchor_validation::validate_anchor_for_inclusion(
             ctx.block_tree,
             ctx.db,
-            min_anchor_height,
+            commitment_min_anchor_height,
             max_anchor_height,
             tx,
         )? {
@@ -288,7 +295,7 @@ pub async fn select_best_txs(
                 tx.signer = ?tx.signer(),
                 tx.commitment_type = ?tx.commitment_type(),
                 tx.anchor = ?tx.anchor(),
-                min_anchor_height = min_anchor_height,
+                min_anchor_height = commitment_min_anchor_height,
                 max_anchor_height = max_anchor_height,
                 "Not promoting commitment tx - anchor validation failed"
             );
