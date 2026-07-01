@@ -355,6 +355,37 @@ pub fn canonical_promoted_height<T: DbTx>(
     )
 }
 
+/// Returns the MBH-verified commitment inclusion height of `txid`, if any,
+/// capped at `max_height`.
+///
+/// `Some(h)` means: `IrysCommitmentTxMetadata` carries `included_height = h ≤
+/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical). Like the
+/// data-tx `canonical_submit_height`, the existence check is only
+/// branch-invariant BELOW the reorg floor — callers must pass `max_height ≤
+/// tip - block_tree_depth` and cover the reorg window by-hash separately.
+///
+/// `None` = tx unknown / no `included_height` / hint > `max_height` / hint not
+/// confirmed by MBH (stranded write from an orphaned block).
+pub fn canonical_commitment_included_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    let Some(metadata) = crate::db_index::get_commitment_tx_metadata(tx, txid)? else {
+        return Ok(None);
+    };
+    let Some(height) = metadata.included_height else {
+        return Ok(None);
+    };
+    if height > max_height {
+        return Ok(None);
+    }
+    if tx.get::<MigratedBlockHashes>(height)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(height))
+}
+
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
 pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
@@ -1229,6 +1260,49 @@ mod tests {
         assert!(
             db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))?,
             "peer should be gone after delete"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_commitment_included_height_requires_mbh() -> eyre::Result<()> {
+        use crate::tables::MigratedBlockHashes;
+        use crate::{canonical_commitment_included_height, set_commitment_tx_included_height};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let txid = H256::random();
+
+        // Write inclusion height 10, but no MBH row yet -> not canonical.
+        db.update(|tx| set_commitment_tx_included_height(tx, &txid, 10))??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None
+        );
+
+        // Add the MBH row at height 10 -> canonical.
+        db.update(|tx| tx.put::<MigratedBlockHashes>(10, H256::random()))??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            Some(10)
+        );
+
+        // max_height below the inclusion height -> filtered out.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 5))??,
+            None
+        );
+
+        // Unknown tx -> None.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &H256::random(), 100))??,
+            None
         );
         Ok(())
     }
