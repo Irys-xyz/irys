@@ -48,3 +48,25 @@ fn vdf_check_functions_are_centralised_in_irys_vdf() {
         "block_validation_task.rs must reach is_seed_data_valid via the irys_vdf::verify facade"
     );
 }
+
+/// Tier 1b guard: `validation_service.rs` deleted the buffer-based previous-step
+/// continuity check (`ensure!(stored_previous_step == vdf_info.prev_output)`),
+/// relying instead on the block-rooted `prev_output_is_valid` running inside the
+/// mandatory `prevalidate_block` pass. If a refactor moves or removes that call,
+/// the deletion would silently drop VDF lineage continuity — so pin it here.
+#[test]
+fn prevalidate_block_calls_prev_output_is_valid() {
+    const BLOCK_VALIDATION: &str = include_str!("../src/block_validation.rs");
+    let start = BLOCK_VALIDATION
+        .find("pub async fn prevalidate_block")
+        .expect("prevalidate_block must exist in block_validation.rs");
+    // Scope to the fn body: from just past its name to the next top-level `pub` item.
+    let rest = &BLOCK_VALIDATION[start + "pub async fn prevalidate_block".len()..];
+    let end = rest.find("\npub ").unwrap_or(rest.len());
+    assert!(
+        rest[..end].contains("prev_output_is_valid"),
+        "prevalidate_block must call prev_output_is_valid: Tier 1b removed the buffer-based \
+         previous-step continuity check in validation_service.rs and depends on this \
+         block-rooted check running in mandatory prevalidation."
+    );
+}

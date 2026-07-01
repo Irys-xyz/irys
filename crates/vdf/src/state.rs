@@ -175,6 +175,33 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
+
+    /// In-process re-anchor after a deep reorg: replace the seed buffer with the
+    /// canonical seed window `corrected` while leaving the step counter
+    /// **untouched**.
+    ///
+    /// A VDF step *number* is wall-clock paced and therefore fork-agnostic — two
+    /// competing forks sit at the same step number at the same instant and
+    /// diverge only in the seed *value* folded past a reset boundary. So healing
+    /// a buffer poisoned by a minority fork means rewriting the stored *values*,
+    /// never rewinding the counter (which would be observably non-monotonic to
+    /// the lock-free readers in `current_step`/`wait_for_step`) and never
+    /// re-allocating it (which would orphan every `VdfStateReadonly`).
+    ///
+    /// `get_steps` maps the deque onto `[current_step - len + 1, current_step]`,
+    /// so `corrected` must be the canonical seeds ending at the current step.
+    /// The caller (the VDF thread, under the write guard) builds `corrected`
+    /// from canonical ancestry and re-seeds its own loop hash from the new tip.
+    pub fn reanchor_seeds(&mut self, corrected: VecDeque<Seed>) {
+        assert!(
+            !corrected.is_empty(),
+            "reanchor_seeds requires a non-empty canonical window"
+        );
+        // Keep the retained-depth floor consistent with the (unchanged) counter
+        // so future `store_step`s trim against the same capacity window.
+        self.minimum_step_to_keep = self.current_step().saturating_sub(self.capacity as u64);
+        self.seeds = corrected;
+    }
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
@@ -540,25 +567,43 @@ pub fn vdf_step_batch_is_valid(
                 vdf.batch_end = batch_end_step_number,
                 "Validating VDF steps from VdfStepsReadGuard!"
             );
-            if steps.0.as_slice() != batch_steps {
-                let expected = H256List(batch_steps.to_vec());
-                warn_mismatches(&steps, &expected);
-                return Err(eyre!("VDF steps are invalid!"));
+            if steps.0.as_slice() == batch_steps {
+                // Fast path: the local buffer already covers this range and
+                // matches the block's claimed steps.
+                //
+                // `verify_last_step_checkpoints` is intentionally skipped here.
+                // Every block reaching the validation service has already
+                // passed through `prevalidate_block`
+                // (crates/actors/src/block_validation.rs), which
+                // unconditionally calls `last_step_checkpoints_is_valid`
+                // against the block's claimed `vdf_limiter_info`. That helper
+                // (crates/vdf/src/lib.rs) re-derives the SHA chain from the
+                // previous step's seed and rejects any mismatch — including the
+                // invariant that the last checkpoint equals the last step. So
+                // by the time we reach here, the block's `last_step_checkpoints`
+                // are already proven consistent with `steps`; repeating the
+                // check would just redo work the node already did. Static
+                // reviewers (CodeRabbit) flag the missing call repeatedly —
+                // leave this comment so they don't.
+                return Ok(());
             }
-            // `verify_last_step_checkpoints` is intentionally skipped on this
-            // fast path. Every block reaching the validation service has
-            // already passed through `prevalidate_block`
-            // (crates/actors/src/block_validation.rs), which unconditionally
-            // calls `last_step_checkpoints_is_valid` against the block's
-            // claimed `vdf_limiter_info`. That helper (crates/vdf/src/lib.rs)
-            // re-derives the SHA chain from the previous step's seed and
-            // rejects any mismatch — including the invariant that the last
-            // checkpoint equals the last step. So by the time we reach here,
-            // the block's `last_step_checkpoints` are already proven
-            // consistent with `steps`; repeating the check would just redo
-            // work the node already did. Static reviewers (CodeRabbit) flag
-            // the missing call repeatedly — leave this comment so they don't.
-            return Ok(());
+
+            // The local buffer covers the range but DISAGREES with the block's
+            // claimed steps. Do NOT reject on the buffer's authority: after a
+            // deep reorg across a VDF reset boundary, this node's buffer can
+            // hold minority-fork ("poisoned") steps while the block under
+            // validation carries the canonical steps. Fall through to the
+            // block-rooted recompute below, which re-derives the SHA chain from
+            // the block's own `prev_output`/`steps` and header reset seed —
+            // authoritative and independent of the local buffer. A forged block
+            // still fails there; an honest canonical block passes. (The
+            // in-process re-anchor then heals the buffer so this fast path
+            // resumes.)
+            tracing::debug!(
+                vdf.batch_start = batch_start_step_number,
+                vdf.batch_end = batch_end_step_number,
+                "Local VDF buffer disagrees with the block's claimed steps; recomputing from the block's own seed (buffer may be poisoned by a cross-boundary reorg)"
+            );
         }
         Err(err) => tracing::debug!(
             vdf.batch_start = batch_start_step_number,
@@ -947,6 +992,36 @@ mod tests {
         let mut state = vdf_state_at(current);
         let returned = state.store_step(Seed(H256::zero()), proposed);
         assert_eq!(returned, expected);
+    }
+
+    /// `reanchor_seeds` replaces the buffer with a canonical window, keeps the
+    /// step counter forward (no backward store), and re-maps `get_steps` onto
+    /// the corrected values.
+    #[test]
+    fn reanchor_seeds_replaces_buffer_and_keeps_counter() {
+        // Buffer at step 10 holding "poisoned" values for steps 1..=10.
+        let mut state = vdf_state_at(10);
+        state.seeds = (0..10)
+            .map(|i| Seed(H256::from_low_u64_be(1000 + i)))
+            .collect();
+        assert_eq!(state.current_step(), 10);
+
+        // Canonical window of the same length (steps 1..=10), different values.
+        let canonical: VecDeque<Seed> = (1..=10).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(canonical.clone());
+
+        // Counter is unchanged (forward, never rewound).
+        assert_eq!(state.current_step(), 10);
+        // Buffer now holds the canonical values.
+        assert_eq!(state.seeds, canonical);
+        // get_steps maps [current - len + 1, current] = [1, 10] onto them.
+        let steps = state.get_steps(ii(1, 10)).expect("range available");
+        let expected: Vec<H256> = (1..=10).map(H256::from_low_u64_be).collect();
+        assert_eq!(steps.0, expected);
+        // The tip seed is the canonical last value.
+        let (last_step, last_seed) = state.get_last_step_and_seed();
+        assert_eq!(last_step, 10);
+        assert_eq!(last_seed, Seed(H256::from_low_u64_be(10)));
     }
 
     /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,

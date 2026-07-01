@@ -10,8 +10,8 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::{
-    canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
-    tables::MigratedBlockHashes,
+    block_header_by_hash, canonical_promoted_height, canonical_submit_height,
+    db::IrysDatabaseExt as _, tables::MigratedBlockHashes,
 };
 use irys_domain::{
     BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -24,7 +24,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{Amount, calculate_perm_fee_from_config};
-use irys_types::{BlockHash, EvmBlockHash, LedgerChunkRange};
+use irys_types::{BlockHash, EvmBlockHash, H256List, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
@@ -3248,36 +3248,204 @@ impl RecallRangeError {
     }
 }
 
-/// Returns Ok if the vdf recall range in the block is valid
+/// Returns Ok if the vdf recall range in the block is valid.
+///
+/// After a deep reorg across a VDF reset boundary the local seed buffer can be
+/// "poisoned" — it holds the minority fork's steps for the post-boundary range
+/// while the canonical block under validation carries the correct ones. So on a
+/// buffer mismatch we do NOT reject on the buffer's authority: we rebuild the
+/// step window from the block's OWN canonical ancestry (block tree, DB fallback)
+/// and re-check, rejecting only if it still mismatches. A missing ancestor
+/// yields a soft `StepsUnavailable` (requeue), never a hard reject.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
 ) -> Result<(), RecallRangeError> {
-    let num_recall_ranges_in_partition =
-        irys_efficient_sampling::num_recall_ranges_in_partition(config);
-    let reset_step_number = irys_efficient_sampling::reset_step_number(
-        block.vdf_limiter_info.global_step_number,
-        config,
-    );
+    let global_step_number = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
     info!(
         "Validating recall ranges steps from: {} to: {}",
-        reset_step_number, block.vdf_limiter_info.global_step_number
+        reset_step_number, global_step_number
     );
+
+    let recall_offset =
+        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize;
+    let num_ranges = irys_efficient_sampling::num_recall_ranges_in_partition(config) as usize;
+
+    // Fast path: check the recall range against the local seed buffer.
     let steps = steps_guard
         .read()
-        .get_steps(ii(
-            reset_step_number,
-            block.vdf_limiter_info.global_step_number,
-        ))
+        .get_steps(ii(reset_step_number, global_step_number))
         .map_err(RecallRangeError::StepsUnavailable)?;
-    irys_efficient_sampling::recall_range_is_valid(
-        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
-        num_recall_ranges_in_partition as usize,
+
+    let Err(buffer_mismatch) = irys_efficient_sampling::recall_range_is_valid(
+        recall_offset,
+        num_ranges,
         &steps,
+        &block.poa.partition_hash,
+    ) else {
+        return Ok(());
+    };
+
+    // The buffer disagrees. Rebuild the window from the block's own canonical
+    // ancestry and re-check — the buffer may be poisoned by a cross-boundary
+    // reorg while this canonical block is correct.
+    let resolve = |hash: &H256| resolve_header_tree_or_db(block_tree_guard, db, hash);
+    let Some(fork_steps) =
+        build_fork_local_step_window(block, reset_step_number, global_step_number, resolve)
+    else {
+        // Couldn't rebuild the window (an ancestor is unavailable). Treat as a
+        // local gap → requeue, never a hard reject.
+        return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
+            "recall-range buffer mismatch and fork-local window unavailable: {buffer_mismatch}"
+        )));
+    };
+
+    irys_efficient_sampling::recall_range_is_valid(
+        recall_offset,
+        num_ranges,
+        &fork_steps,
         &block.poa.partition_hash,
     )
     .map_err(RecallRangeError::Mismatch)
+}
+
+/// Resolve a block header by hash, preferring the in-memory block tree (which
+/// holds the un-migrated canonical tail) and falling back to the database for
+/// older, migrated history. Used to rebuild a fork-local VDF step window from a
+/// block's own canonical ancestry.
+fn resolve_header_tree_or_db(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    hash: &H256,
+) -> Option<IrysBlockHeader> {
+    if let Some(header) = block_tree_guard.read().get_block(hash) {
+        return Some(header.clone());
+    }
+    db.view_eyre(|tx| block_header_by_hash(tx, hash, false))
+        .ok()
+        .flatten()
+}
+
+/// Rebuild the VDF step window `[want_start, want_end]` from a block's own
+/// canonical ancestry, so recall-range validation can re-check a canonical
+/// block whose steps disagree with a locally-poisoned seed buffer. `want_end`
+/// must equal the block's tip step (`vdf_limiter_info.global_step_number`).
+/// Walks parent pointers via `resolve`; returns `None` if an ancestor covering
+/// the window is unavailable (→ soft `StepsUnavailable`, requeue).
+fn build_fork_local_step_window(
+    block: &IrysBlockHeader,
+    want_start: u64,
+    want_end: u64,
+    resolve: impl Fn(&H256) -> Option<IrysBlockHeader>,
+) -> Option<H256List> {
+    if want_start > want_end {
+        return None;
+    }
+    let len = usize::try_from(want_end - want_start + 1).ok()?;
+    let mut result: Vec<H256> = vec![H256::zero(); len];
+
+    let mut header: IrysBlockHeader = block.clone();
+    loop {
+        let info = &header.vdf_limiter_info;
+        let h_first = info.first_step_number();
+        let h_last = info.global_step_number;
+
+        // The portion of [want_start, want_end] this header supplies.
+        let seg_start = want_start.max(h_first);
+        let seg_end = want_end.min(h_last);
+        if seg_start <= seg_end {
+            for step in seg_start..=seg_end {
+                let idx_in_header = usize::try_from(step - h_first).ok()?;
+                let idx_in_result = usize::try_from(step - want_start).ok()?;
+                result[idx_in_result] = *info.steps.0.get(idx_in_header)?;
+            }
+        }
+
+        if h_first <= want_start {
+            return Some(H256List(result));
+        }
+        if header.height == 0 {
+            // Reached genesis without covering the window.
+            return None;
+        }
+        let next_hash = header.previous_block_hash;
+        header = resolve(&next_hash)?;
+    }
+}
+
+#[cfg(test)]
+mod fork_local_window_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Build a header whose VDF info covers `[first_step, first_step + values.len() - 1]`
+    /// with the given step values, chained to `prev`. Step value == step number
+    /// keeps assertions readable.
+    fn vdf_header(
+        height: u64,
+        hash_id: u64,
+        prev: H256,
+        first_step: u64,
+        values: &[u64],
+    ) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.height = height;
+        h.block_hash = H256::from_low_u64_be(hash_id);
+        h.previous_block_hash = prev;
+        h.vdf_limiter_info.global_step_number = first_step + values.len() as u64 - 1;
+        h.vdf_limiter_info.steps =
+            H256List(values.iter().map(|v| H256::from_low_u64_be(*v)).collect());
+        h
+    }
+
+    fn expected(range: std::ops::RangeInclusive<u64>) -> Vec<H256> {
+        range.map(H256::from_low_u64_be).collect()
+    }
+
+    /// Chain: b1 steps[1..=4] <- b2 steps[5..=8] <- b3 steps[9..=12].
+    /// Returns the block under validation (b3) and a resolver map of its forebears.
+    fn three_block_chain() -> (IrysBlockHeader, HashMap<H256, IrysBlockHeader>) {
+        let b1 = vdf_header(1, 101, H256::from_low_u64_be(100), 1, &[1, 2, 3, 4]);
+        let b2 = vdf_header(2, 102, b1.block_hash, 5, &[5, 6, 7, 8]);
+        let b3 = vdf_header(3, 103, b2.block_hash, 9, &[9, 10, 11, 12]);
+        let mut ancestors = HashMap::new();
+        ancestors.insert(b1.block_hash, b1);
+        ancestors.insert(b2.block_hash, b2);
+        (b3, ancestors)
+    }
+
+    #[test]
+    fn window_within_single_block_needs_no_ancestor_walk() {
+        let (b3, ancestors) = three_block_chain();
+        // [9,12] lies entirely inside b3; the resolver is never consulted.
+        let out = build_fork_local_step_window(&b3, 9, 12, |h| ancestors.get(h).cloned())
+            .expect("window buildable");
+        assert_eq!(out.0, expected(9..=12));
+    }
+
+    #[test]
+    fn window_reconstructs_across_ancestors() {
+        let (b3, ancestors) = three_block_chain();
+        // [3,12] spans b1 (3,4), b2 (5..=8), b3 (9..=12) — the cross-boundary heal.
+        let out = build_fork_local_step_window(&b3, 3, 12, |h| ancestors.get(h).cloned())
+            .expect("window buildable across ancestry");
+        assert_eq!(out.0, expected(3..=12));
+    }
+
+    #[test]
+    fn missing_ancestor_yields_none() {
+        let (b3, _ancestors) = three_block_chain();
+        // A resolver that can't supply b2 cannot rebuild the deep window → soft requeue.
+        let out = build_fork_local_step_window(&b3, 3, 12, |_h| None);
+        assert!(
+            out.is_none(),
+            "an unavailable ancestor must yield None (soft StepsUnavailable), never a partial window"
+        );
+    }
 }
 
 pub fn get_recall_range(
