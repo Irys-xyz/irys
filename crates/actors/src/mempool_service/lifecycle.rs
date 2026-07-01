@@ -204,13 +204,18 @@ impl Inner {
                 }
             };
 
+            let data_tx_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32;
+            let commitment_tx_expiry_depth =
+                self.config.consensus.mempool.commitment_anchor_expiry_depth as u32;
+
             // Revalidate data txs — collect pruned txids grouped by data_root for cleanup
-            let expired_by_data_root =
-                state.revalidate_data_txs(|tx| self.should_prune_tx(current_height, tx));
+            let expired_by_data_root = state.revalidate_data_txs(|tx| {
+                self.should_prune_tx(current_height, tx, data_tx_expiry_depth)
+            });
 
             // Revalidate commitment txs — uses same prune + cache methods as ingress
             state.revalidate_commitment_txs(
-                |tx| self.should_prune_tx(current_height, tx),
+                |tx| self.should_prune_tx(current_height, tx, commitment_tx_expiry_depth),
                 |tx| commitment_snapshot.get_commitment_status(tx, &epoch_snapshot),
                 self.config.node_config.mempool.max_pending_pledge_items,
             );
@@ -304,7 +309,12 @@ impl Inner {
     /// swallows errors from get_anchor_height (but does log them)
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height
     ))]
-    pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
+    pub fn should_prune_tx(
+        &self,
+        current_height: u64,
+        tx: &impl IrysTransactionCommon,
+        anchor_expiry_depth: u32,
+    ) -> bool {
         let anchor_height = match crate::anchor_validation::get_anchor_height(
             &self.block_tree_read_guard,
             &self.irys_db,
@@ -322,9 +332,8 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
-            + self.config.consensus.block_migration_depth
-            + 5;
+        let effective_expiry_depth =
+            anchor_expiry_depth + self.config.consensus.block_migration_depth + 5;
 
         let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
 
@@ -364,8 +373,12 @@ impl Inner {
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
         let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        let data_tx_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32;
+        let commitment_tx_expiry_depth =
+            self.config.consensus.mempool.commitment_anchor_expiry_depth as u32;
+
         for tx in data_txs.values() {
-            if self.should_prune_tx(current_height, tx) {
+            if self.should_prune_tx(current_height, tx, data_tx_expiry_depth) {
                 expired_data.push((tx.id, tx.anchor));
                 expired_by_data_root
                     .entry(tx.data_root)
@@ -377,7 +390,7 @@ impl Inner {
         let mut expired_commits: Vec<(H256, H256)> = Vec::new();
         for txs in commitment_txs_by_addr.values() {
             for tx in txs {
-                if self.should_prune_tx(current_height, tx) {
+                if self.should_prune_tx(current_height, tx, commitment_tx_expiry_depth) {
                     expired_commits.push((tx.id(), tx.anchor()));
                 }
             }
