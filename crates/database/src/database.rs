@@ -355,17 +355,32 @@ pub fn canonical_promoted_height<T: DbTx>(
     )
 }
 
-/// Returns the MBH-verified commitment inclusion height of `txid`, if any,
+/// Returns the content-verified commitment inclusion height of `txid`, if any,
 /// capped at `max_height`.
 ///
 /// `Some(h)` means: `IrysCommitmentTxMetadata` carries `included_height = h ≤
-/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical). Like the
-/// data-tx `canonical_submit_height`, the existence check is only
-/// branch-invariant BELOW the reorg floor — callers must pass `max_height ≤
-/// tip - block_tree_depth` and cover the reorg window by-hash separately.
+/// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
+/// canonical block at `h` actually carries `txid` in its commitment ledger.
+///
+/// The final content check exists because the metadata row is written at
+/// tip-confirmation (depth 0), not at migration: an orphaned local tip can
+/// leave an `included_height` hint behind that no `ReorgEvent` ever clears if
+/// the node restarts before the orphan is processed (the tree is rebuilt from
+/// the block index, which forgets confirmed-but-unmigrated tips). Once ANY
+/// winning block later migrates at `h`, the MBH check alone reads that stranded
+/// hint as canonical truth. Requiring the canonical header to actually include
+/// the tx makes such stranded rows harmless — the invariant is that
+/// `Some(h)` proves canonical inclusion at `h`, not merely that a hint exists.
+/// Like the data-tx `canonical_submit_height`, this is only branch-invariant
+/// BELOW the reorg floor — callers must pass `max_height ≤ tip -
+/// block_tree_depth` and cover the reorg window by-hash separately.
 ///
 /// `None` = tx unknown / no `included_height` / hint > `max_height` / hint not
-/// confirmed by MBH (stranded write from an orphaned block).
+/// confirmed by MBH / canonical block at the hint does not include the tx
+/// (stranded write from an orphaned block).
+///
+/// Returns `Err` on cross-table inconsistency: MBH attests a canonical block at
+/// `h` but `IrysBlockHeaders` has no entry for that hash.
 pub fn canonical_commitment_included_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
@@ -380,7 +395,22 @@ pub fn canonical_commitment_included_height<T: DbTx>(
     if height > max_height {
         return Ok(None);
     }
-    if tx.get::<MigratedBlockHashes>(height)?.is_none() {
+    let Some(canonical_hash) = tx.get::<MigratedBlockHashes>(height)? else {
+        return Ok(None);
+    };
+    // MBH attested a canonical block at this height; a missing header means the
+    // two tables disagree.
+    let canonical_header = block_header_by_hash(tx, &canonical_hash, false)?.ok_or_else(|| {
+        eyre::eyre!(
+            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders has no entry for that hash",
+            height,
+            canonical_hash
+        )
+    })?;
+    // Content check: a stranded hint from an orphaned tip points at a canonical
+    // block that does not actually carry this commitment tx — treat it as no
+    // canonical inclusion.
+    if !canonical_header.commitment_tx_ids().contains(txid) {
         return Ok(None);
     }
     Ok(Some(height))
@@ -1264,6 +1294,21 @@ mod tests {
         Ok(())
     }
 
+    /// Builds a stored-able header at `height` whose commitment ledger carries
+    /// `commitment_tx_ids`.
+    fn header_with_commitments(height: u64, commitment_tx_ids: Vec<H256>) -> IrysBlockHeader {
+        use irys_types::{SystemLedger, SystemTransactionLedger};
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.block_hash = H256::random();
+        header.poa.chunk = Some(Default::default());
+        header.system_ledgers = vec![SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment as u32,
+            tx_ids: irys_types::H256List(commitment_tx_ids),
+        }];
+        header
+    }
+
     #[test]
     fn canonical_commitment_included_height_requires_mbh() -> eyre::Result<()> {
         use crate::tables::MigratedBlockHashes;
@@ -1286,8 +1331,35 @@ mod tests {
             None
         );
 
-        // Add the MBH row at height 10 -> canonical.
+        // MBH points at height 10 but no stored header for that hash -> the
+        // MBH/IrysBlockHeaders cross-table disagreement now fails loud.
         db.update(|tx| tx.put::<MigratedBlockHashes>(10, H256::random()))??;
+        assert!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))?
+                .is_err(),
+            "missing canonical header for the MBH hash must be a cross-table Err"
+        );
+
+        // MBH points at a real stored header that does NOT carry the txid ->
+        // stranded row, no canonical inclusion.
+        let other_block = header_with_commitments(10, vec![H256::random()]);
+        db.update(|tx| {
+            insert_block_header(tx, &other_block)?;
+            tx.put::<MigratedBlockHashes>(10, other_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None
+        );
+
+        // MBH points at a stored header that DOES carry the txid -> canonical.
+        let including_block = header_with_commitments(10, vec![txid]);
+        db.update(|tx| {
+            insert_block_header(tx, &including_block)?;
+            tx.put::<MigratedBlockHashes>(10, including_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
         assert_eq!(
             db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
             Some(10)
@@ -1303,6 +1375,43 @@ mod tests {
         assert_eq!(
             db.view(|tx| canonical_commitment_included_height(tx, &H256::random(), 100))??,
             None
+        );
+        Ok(())
+    }
+
+    /// A stranded metadata row (an orphaned tip left an `included_height` hint,
+    /// and a different winning block later migrated at that height) must NOT
+    /// read as canonical inclusion: the content check on the canonical header
+    /// makes such rows harmless.
+    #[test]
+    fn canonical_commitment_included_height_ignores_stranded_row() -> eyre::Result<()> {
+        use crate::tables::MigratedBlockHashes;
+        use crate::{canonical_commitment_included_height, set_commitment_tx_included_height};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let txid = H256::random();
+
+        // Stranded hint: the tx was confirmed at the orphaned tip at height 10,
+        // but the block that actually migrated there carries different txs.
+        let winning_block = header_with_commitments(10, vec![H256::random(), H256::random()]);
+        db.update(|tx| {
+            set_commitment_tx_included_height(tx, &txid, 10)?;
+            insert_block_header(tx, &winning_block)?;
+            tx.put::<MigratedBlockHashes>(10, winning_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None,
+            "stranded row must not be treated as canonical inclusion"
         );
         Ok(())
     }
