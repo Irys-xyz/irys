@@ -4989,6 +4989,15 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
+    // Nothing to dedup, order, or snapshot-simulate for a commitment-free block:
+    // the dedup walk + DB read and the snapshot loop below are all no-ops on an
+    // empty set (and the tail already returns Ok here). Skip the ancestor walk
+    // and the read txn so the overwhelmingly common commitment-free block never
+    // pays for them.
+    if commitment_txs.is_empty() {
+        return Ok(());
+    }
+
     // Durable replay protection. The per-block commitment snapshot resets at
     // every epoch boundary, so the `add_commitment` check below cannot see a
     // commitment included in a prior epoch. Reject any commitment whose tx_id
@@ -5055,10 +5064,6 @@ pub async fn commitment_txs_are_valid(
                 status,
             });
         }
-    }
-
-    if commitment_txs.is_empty() {
-        return Ok(());
     }
 
     // Sort to get expected order
