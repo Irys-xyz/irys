@@ -979,6 +979,15 @@ pub enum ValidationError {
         status: CommitmentSnapshotStatus,
     },
 
+    /// A commitment tx_id was already included in a canonical ancestor (reorg
+    /// window, resolved by-hash) or in a finalized block below the reorg floor
+    /// (MBH-verified). The per-block commitment snapshot resets at each epoch
+    /// boundary and cannot catch such a replay, so this is a durable,
+    /// DB-backed reject. Consensus rejection: the block is invalid and not
+    /// re-requestable.
+    #[error("Commitment {tx_id} is a replay of an already-included commitment")]
+    DuplicateCommitmentTransaction { tx_id: H256 },
+
     /// Unpledge commitment targets partition not owned by signer
     #[error(
         "Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}"
@@ -1116,6 +1125,7 @@ impl ValidationError {
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
             | Self::CommitmentSnapshotRejected { .. }
+            | Self::DuplicateCommitmentTransaction { .. }
             | Self::UnpledgePartitionNotOwned { .. }
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
@@ -1179,6 +1189,7 @@ impl ValidationError {
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
             | Self::CommitmentSnapshotRejected { .. }
+            | Self::DuplicateCommitmentTransaction { .. }
             | Self::UnpledgePartitionNotOwned { .. }
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
@@ -1419,6 +1430,7 @@ impl ValidationError {
             Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
             Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
             Self::CommitmentSnapshotRejected { .. } => "commitment_snapshot_rejected",
+            Self::DuplicateCommitmentTransaction { .. } => "duplicate_commitment_transaction",
             Self::UnpledgePartitionNotOwned { .. } => "unpledge_partition_not_owned",
             Self::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
             Self::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
@@ -4885,6 +4897,7 @@ pub async fn commitment_txs_are_valid(
     config: &Config,
     block: &IrysBlockHeader,
     block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
     commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
     // Validate commitment transaction versions against hardfork rules
@@ -5013,6 +5026,39 @@ pub async fn commitment_txs_are_valid(
 
         debug!("Epoch block commitment transaction validation successful");
         return Ok(());
+    }
+
+    // Durable replay protection. The per-block commitment snapshot resets at
+    // every epoch boundary, so the `add_commitment` check below cannot see a
+    // commitment included in a prior epoch. Reject any commitment whose tx_id
+    // was already included on THIS branch's ancestry (reorg window, resolved
+    // by-hash) or in a finalized block below the reorg floor (MBH-verified).
+    // The two ranges meet at the floor with no gap. This mirrors the
+    // prevalidation reject in block_discovery; full validation reaches here via
+    // `BlockPreValidated`, which bypasses prevalidation entirely.
+    let block_tree_depth = config.consensus.block_tree_depth;
+    let prior_commitment_ids = crate::commitment_dedup::ancestor_commitment_tx_ids(
+        block_tree_guard,
+        db,
+        block,
+        block_tree_depth,
+    )
+    .map_err(|e| ValidationError::CommitmentOrderingFailed(e.to_string()))?;
+    let finalized_floor = block.height.saturating_sub(block_tree_depth);
+    for tx in commitment_txs {
+        let finalized_included = db
+            .view_eyre(|read_tx| {
+                irys_database::canonical_commitment_included_height(
+                    read_tx,
+                    &tx.id(),
+                    finalized_floor,
+                )
+            })
+            .map_err(|e| ValidationError::CommitmentOrderingFailed(e.to_string()))?
+            .is_some();
+        if prior_commitment_ids.contains(&tx.id()) || finalized_included {
+            return Err(ValidationError::DuplicateCommitmentTransaction { tx_id: tx.id() });
+        }
     }
 
     // Regular block validation: ensure commitments align with snapshot state

@@ -960,6 +960,7 @@ impl BlockValidationTask {
                 config,
                 block,
                 &self.block_tree_guard,
+                &self.service_inner.db,
                 sealed_block_for_commitment
                     .transactions()
                     .get_ledger_system_txs(SystemLedger::Commitment),
