@@ -613,12 +613,40 @@ impl BlockDiscoveryServiceInner {
         // for commitments, only validate if we're not an epoch block
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
+            // Durable replay protection. The per-block commitment snapshot resets
+            // at every epoch boundary, so its "already included" check cannot see
+            // a commitment included in a prior epoch. Reject any commitment whose
+            // tx_id was already included on THIS branch's ancestry (reorg window,
+            // resolved by-hash) or in a finalized block below the reorg floor
+            // (MBH-verified). The two ranges meet at the floor with no gap.
+            let block_tree_depth = config.consensus.block_tree_depth;
+            let prior_commitment_ids = crate::commitment_dedup::ancestor_commitment_tx_ids(
+                &block_tree_guard,
+                &db,
+                new_block_header,
+                block_tree_depth,
+            )
+            .map_err(BlockDiscoveryInternalError::DatabaseError)?;
+            let finalized_floor = block_height.saturating_sub(block_tree_depth);
             for tx in commitment_txs.iter() {
                 if !valid_tx_anchor_blocks.contains(&tx.anchor()) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id() },
                         anchor: tx.anchor(),
                     });
+                }
+                let finalized_included = db
+                    .view_eyre(|read_tx| {
+                        irys_database::canonical_commitment_included_height(
+                            read_tx,
+                            &tx.id(),
+                            finalized_floor,
+                        )
+                    })
+                    .map_err(BlockDiscoveryInternalError::DatabaseError)?
+                    .is_some();
+                if prior_commitment_ids.contains(&tx.id()) || finalized_included {
+                    return Err(BlockDiscoveryError::DuplicateTransaction(tx.id()));
                 }
             }
         }
