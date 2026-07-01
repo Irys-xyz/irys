@@ -650,27 +650,37 @@ impl BlockDiscoveryServiceInner {
             )
             .map_err(BlockDiscoveryInternalError::DatabaseError)?;
             let finalized_floor = block_height.saturating_sub(block_tree_depth);
+            // Anchor validity (in-memory): commitments accept anchors over the
+            // (longer) commitment window.
             for tx in commitment_txs.iter() {
-                // commitments accept anchors over the (longer) commitment window
                 if !anchor_valid_for(&tx.anchor(), min_commitment_anchor_height) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id() },
                         anchor: tx.anchor(),
                     });
                 }
-                let finalized_included = db
-                    .view_eyre(|read_tx| {
-                        irys_database::canonical_commitment_included_height(
-                            read_tx,
-                            &tx.id(),
-                            finalized_floor,
-                        )
-                    })
-                    .map_err(BlockDiscoveryInternalError::DatabaseError)?
-                    .is_some();
-                if prior_commitment_ids.contains(&tx.id()) || finalized_included {
-                    return Err(BlockDiscoveryError::DuplicateTransaction(tx.id()));
-                }
+            }
+            // Replay dedup: one read tx covers every finalized-inclusion lookup
+            // (a single MDBX txn instead of one per commitment).
+            let duplicate_commitment = db
+                .view_eyre(|read_tx| {
+                    for tx in commitment_txs.iter() {
+                        let finalized_included =
+                            irys_database::canonical_commitment_included_height(
+                                read_tx,
+                                &tx.id(),
+                                finalized_floor,
+                            )?
+                            .is_some();
+                        if prior_commitment_ids.contains(&tx.id()) || finalized_included {
+                            return Ok(Some(tx.id()));
+                        }
+                    }
+                    Ok(None)
+                })
+                .map_err(BlockDiscoveryInternalError::DatabaseError)?;
+            if let Some(tx_id) = duplicate_commitment {
+                return Err(BlockDiscoveryError::DuplicateTransaction(tx_id));
             }
         }
 
