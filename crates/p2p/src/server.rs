@@ -1286,6 +1286,16 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
+        tracing::info!(
+            target = "handshake-node-info",
+            peer_id = %peer_id,
+            mining_address = %mining_addr,
+            gossip_addr = %peer_address.gossip,
+            peer_version = %version_request.version,
+            protocol_version = ?version_request.protocol_version,
+            "Peer handshake (v1)"
+        );
+
         let response = wire_types::HandshakeResponseV1 {
             version: irys_types::get_version().clone(),
             protocol_version: version_request.protocol_version,
@@ -1425,6 +1435,16 @@ where
             .and_then(|ua| parse_user_agent(&ua))
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
+
+        tracing::info!(
+            target = "handshake-node-info",
+            peer_id = %peer_id,
+            mining_address = %mining_addr,
+            gossip_addr = %peer_address.gossip,
+            peer_version = %version_request.version,
+            protocol_version = ?version_request.protocol_version,
+            "Peer handshake (v2)"
+        );
 
         let response = wire_types::HandshakeResponseV2 {
             version: irys_types::get_version().clone(),
