@@ -300,6 +300,7 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
         | VE::CommitmentTypeNotAllowed { .. }
         | VE::CommitmentOrderingFailed(_)
         | VE::CommitmentSnapshotRejected { .. }
+        | VE::DuplicateCommitmentTransaction { .. }
         | VE::UnpledgePartitionNotOwned { .. }
         | VE::EpochCommitmentMismatch { .. }
         | VE::EpochExtraCommitment { .. }
