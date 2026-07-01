@@ -989,31 +989,22 @@ impl ValidationServiceInner {
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
-        // Unreachable in practice: `wait_for_step` above only returns Ok once
-        // `global_step >= prev_output_step_number`, so the step is in the seed
-        // buffer. The buffer can in principle have trimmed past
-        // `prev_output_step_number` if a canonical-tip update advanced
-        // `minimum_step_to_keep` during the sub-millisecond window after
-        // `wait_for_step` returned — but the buffer's capacity is at minimum
-        // `max_allowed_vdf_fork_steps` (≥60k for production), so trimming
-        // requires ~60k steps of canonical advancement in that window. That
-        // doesn't happen.
+        // The previous-step continuity check that compared the local buffer's
+        // stored step against `vdf_info.prev_output` was removed here. On a node
+        // recovering from a network partition the local buffer can be poisoned —
+        // it folded a minority reset seed across a boundary — so comparing a
+        // canonical block's `prev_output` against the buffer yields a false
+        // rejection and wedges recovery at the validation gate. The real
+        // continuity invariant (`prev_output` equals the *parent block's*
+        // `output`) is enforced block-rootedly by `prev_output_is_valid` in
+        // mandatory prevalidation (crates/actors/src/block_validation.rs), and
+        // the step chain itself is re-derived from the block's own data by
+        // `vdf_step_batch_is_valid`. The buffer is no longer consulted as an
+        // authority for continuity.
         //
-        // If it ever does fire, the panic is intentional. We must not
-        // downgrade this to an `Invalid` result — see the never-mislabel
-        // rule documented at the `resume_unwind` site in the select loop
-        // and in design/docs/vdf-validation-stall-detection.md.
-        let stored_previous_step = self
-            .vdf_state
-            .get_step(prev_output_step_number)
-            .expect("to get the step, since we've just waited for it");
-
-        ensure!(
-            stored_previous_step == vdf_info.prev_output,
-            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
-            stored_previous_step,
-            vdf_info.prev_output,
-        );
+        // `wait_for_step` above is kept as the liveness/sync gate (and carries
+        // the never-mislabel stall detection); it gates on availability, not on
+        // step-value equality.
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = vdf_config.reset_frequency as u64;

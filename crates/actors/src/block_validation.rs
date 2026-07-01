@@ -10,8 +10,8 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
 use irys_database::{
-    canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
-    tables::MigratedBlockHashes,
+    block_header_by_hash, canonical_promoted_height, canonical_submit_height,
+    db::IrysDatabaseExt as _, tables::MigratedBlockHashes,
 };
 use irys_domain::{
     BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
@@ -28,8 +28,8 @@ use irys_types::{BlockHash, EvmBlockHash, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
-    SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
+    DataTransactionLedger, DifficultyAdjustmentConfig, H256, H256List, IrysAddress,
+    IrysBlockHeader, PoaData, SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -51,7 +51,7 @@ use reth_db::Database as _;
 use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -3259,36 +3259,253 @@ impl RecallRangeError {
     }
 }
 
-/// Returns Ok if the vdf recall range in the block is valid
+/// Returns Ok if the vdf recall range in the block is valid.
+///
+/// The recall range is normally validated against the node's local VDF step
+/// buffer (the fast path). On a node recovering from a network partition that
+/// buffer can be *poisoned* — it folded a minority reset seed across a VDF reset
+/// boundary while the node mined an isolated fork — so a canonical block's recall
+/// range legitimately disagrees with it. Treating that disagreement as a
+/// consensus fault would reject the canonical chain and wedge recovery at the
+/// validation gate.
+///
+/// So on a buffer *mismatch* (never on a buffer *miss*, which stays a
+/// soft-internal `StepsUnavailable` retry) the window
+/// `[reset_step_number, global_step_number]` is rebuilt from the block's own
+/// claimed steps and its canonical ancestors — resolved from the block tree, then
+/// the database — and re-checked. Every contributing header's steps were
+/// validated block-rootedly by `vdf_step_batch_is_valid` when that block was
+/// validated, so the reconstruction is canonical-rooted and buffer-independent. A
+/// genuinely forged block still fails the rebuilt check (`Mismatch`); an honest
+/// canonical block passes. If the window cannot be rebuilt (an ancestor is missing
+/// from both tree and DB) the failure is reported as `StepsUnavailable` (soft
+/// internal, retry) — it is never mislabeled as peer invalidity.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
 ) -> Result<(), RecallRangeError> {
     let num_recall_ranges_in_partition =
         irys_efficient_sampling::num_recall_ranges_in_partition(config);
-    let reset_step_number = irys_efficient_sampling::reset_step_number(
-        block.vdf_limiter_info.global_step_number,
-        config,
-    );
+    let global_step_number = block.vdf_limiter_info.global_step_number;
+    let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
     info!(
         "Validating recall ranges steps from: {} to: {}",
-        reset_step_number, block.vdf_limiter_info.global_step_number
+        reset_step_number, global_step_number
     );
-    let steps = steps_guard
+    let recall_range_index =
+        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize;
+
+    // Fast path: validate against the local VDF step buffer. `get_steps` returns
+    // owned data and the temporary read guard is released at the end of this
+    // statement, so no VDF lock is held across the fork-local walk below.
+    let buffer_steps = steps_guard
         .read()
-        .get_steps(ii(
-            reset_step_number,
-            block.vdf_limiter_info.global_step_number,
-        ))
-        .map_err(RecallRangeError::StepsUnavailable)?;
+        .get_steps(ii(reset_step_number, global_step_number));
+    match buffer_steps {
+        Ok(steps) => {
+            match irys_efficient_sampling::recall_range_is_valid(
+                recall_range_index,
+                num_recall_ranges_in_partition as usize,
+                &steps,
+                &block.poa.partition_hash,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(buffer_err) => {
+                    // The local buffer disagreed. It may be fork-poisoned; fall
+                    // through to the canonical-ancestry recompute before rejecting.
+                    debug!(
+                        custom.error = ?buffer_err,
+                        block.height = block.height,
+                        "recall range mismatched local VDF buffer; recomputing from canonical ancestry (buffer may be fork-poisoned)"
+                    );
+                }
+            }
+        }
+        // A plain buffer miss is a local-state condition (VDF hasn't caught up):
+        // soft-internal, retry later. Do not attempt the ancestry rebuild here.
+        Err(err) => return Err(RecallRangeError::StepsUnavailable(err)),
+    }
+
+    // Fork-local recompute: rebuild the window from the block's own canonical
+    // ancestry (tree, then DB), bypassing the poisoned buffer. A build failure is
+    // a local gap (soft-internal), never a peer-attributable mismatch.
+    let fork_local_steps = build_fork_local_step_window(block, reset_step_number, |hash| {
+        resolve_header_tree_or_db(hash, block_tree_guard, db)
+    })
+    .map_err(RecallRangeError::StepsUnavailable)?;
     irys_efficient_sampling::recall_range_is_valid(
-        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize,
+        recall_range_index,
         num_recall_ranges_in_partition as usize,
-        &steps,
+        &fork_local_steps,
         &block.poa.partition_hash,
     )
     .map_err(RecallRangeError::Mismatch)
+}
+
+/// Reconstruct the VDF step outputs over the inclusive window
+/// `[reset_step_number, global_step_number]` from `block`'s own claimed steps and
+/// its canonical ancestors, bypassing the (possibly fork-poisoned) local step
+/// buffer. `get_header` resolves an ancestor by hash (block tree first, then DB —
+/// injected so the walk is unit-testable without a database).
+///
+/// Every contributing header's steps were validated block-rootedly by
+/// `vdf_step_batch_is_valid` when that block was validated, so the reconstructed
+/// window is canonical-rooted and deterministic. The window spans at most one
+/// reset interval, which on some profiles (`reset_frequency` > `block_tree_depth`)
+/// can reach below the block-tree cache — hence the DB fallback in `get_header`.
+///
+/// Also reused by the block-tree partition-recovery gate to assemble the canonical seed
+/// window for an in-process VDF re-anchor (generalised: any `reset_step_number`, any
+/// `get_header` resolver), which is why it is `pub(crate)`.
+pub(crate) fn build_fork_local_step_window(
+    block: &IrysBlockHeader,
+    reset_step_number: u64,
+    mut get_header: impl FnMut(&BlockHash) -> eyre::Result<IrysBlockHeader>,
+) -> eyre::Result<H256List> {
+    let global_step_number = block.vdf_limiter_info.global_step_number;
+    let window_len = global_step_number
+        .checked_sub(reset_step_number)
+        .and_then(|d| d.checked_add(1))
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "recall-range window underflow: reset_step {reset_step_number} > global_step {global_step_number}"
+            )
+        })?;
+
+    let mut steps: VecDeque<H256> = VecDeque::with_capacity(window_len as usize);
+    let mut current = block.clone();
+    loop {
+        let info = &current.vdf_limiter_info;
+        let first = info.first_step_number();
+        // Prepend this header's steps that fall within the window, walking from
+        // the highest step down so the deque stays in ascending step order.
+        for (i, step) in info.steps.0.iter().enumerate().rev() {
+            let step_number = first + i as u64;
+            if step_number > global_step_number {
+                continue;
+            }
+            if step_number < reset_step_number {
+                break;
+            }
+            steps.push_front(*step);
+        }
+        if first <= reset_step_number {
+            break;
+        }
+        let parent_hash = current.previous_block_hash;
+        current = get_header(&parent_hash)?;
+    }
+
+    let collected = steps.len() as u64;
+    if collected != window_len {
+        return Err(eyre::eyre!(
+            "fork-local recall window incomplete: reconstructed {collected} steps, expected {window_len} for [{reset_step_number}, {global_step_number}]"
+        ));
+    }
+    Ok(H256List(steps.into_iter().collect()))
+}
+
+/// Resolve a block header by hash for the fork-local window walk: the in-memory
+/// block tree first (hot cache), then the database for ancestors migrated out of
+/// the tree window. The tree read guard is released before the DB transaction, so
+/// no lock is held across the database access.
+fn resolve_header_tree_or_db(
+    hash: &BlockHash,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<IrysBlockHeader> {
+    if let Some(header) = block_tree_guard.read().get_block(hash) {
+        return Ok(header.clone());
+    }
+    let tx = db.tx()?;
+    block_header_by_hash(&tx, hash, false)?.ok_or_else(|| {
+        eyre::eyre!(
+            "ancestor header {hash} not found in block tree or database (recall-range fork-local window)"
+        )
+    })
+}
+
+#[cfg(test)]
+mod fork_local_window_tests {
+    use super::build_fork_local_step_window;
+    use irys_types::{BlockHash, H256, H256List, IrysBlockHeader};
+    use std::collections::HashMap;
+
+    /// Header with `block_hash`, `previous_block_hash`, and contiguous VDF steps
+    /// ending at `global_step`. `steps[i]` is the output of step
+    /// `first_step_number() + i` (= `global_step - steps.len() + 1 + i`).
+    fn header(hash: u8, prev: u8, global_step: u64, steps: &[u8]) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::default();
+        h.block_hash = H256::repeat_byte(hash);
+        h.previous_block_hash = H256::repeat_byte(prev);
+        h.vdf_limiter_info.global_step_number = global_step;
+        h.vdf_limiter_info.steps = H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
+        h
+    }
+
+    /// A `get_header` closure backed by an in-memory map (stands in for the
+    /// tree-then-DB resolver), so the walk is exercised without a database.
+    fn lookup(headers: &[IrysBlockHeader]) -> impl Fn(&BlockHash) -> eyre::Result<IrysBlockHeader> {
+        let map: HashMap<BlockHash, IrysBlockHeader> =
+            headers.iter().map(|h| (h.block_hash, h.clone())).collect();
+        move |hash: &BlockHash| {
+            map.get(hash)
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("missing header {hash}"))
+        }
+    }
+
+    fn steps(range: std::ops::RangeInclusive<u8>) -> Vec<H256> {
+        range.map(H256::repeat_byte).collect()
+    }
+
+    #[test]
+    fn window_within_a_single_block_needs_no_ancestors() {
+        // Block holds steps 17..=20; window [17,20] is entirely in the block.
+        let block = header(0xB0, 0xA0, 20, &[17, 18, 19, 20]);
+        let got = build_fork_local_step_window(&block, 17, |_| {
+            panic!("ancestor lookup must not happen for a self-contained window")
+        })
+        .unwrap();
+        assert_eq!(got.0, steps(17..=20));
+    }
+
+    #[test]
+    fn window_spans_one_ancestor() {
+        // Block: 17..=20; parent A: 13..=16. Window [15,20] pulls 15,16 from A.
+        let block = header(0xB0, 0xA0, 20, &[17, 18, 19, 20]);
+        let parent = header(0xA0, 0x90, 16, &[13, 14, 15, 16]);
+        let got = build_fork_local_step_window(&block, 15, lookup(&[parent])).unwrap();
+        assert_eq!(got.0, steps(15..=20));
+    }
+
+    #[test]
+    fn window_spans_multiple_ancestors() {
+        let block = header(0xB0, 0xA0, 20, &[19, 20]);
+        let a = header(0xA0, 0x90, 18, &[17, 18]);
+        let b = header(0x90, 0x80, 16, &[13, 14, 15, 16]);
+        let got = build_fork_local_step_window(&block, 14, lookup(&[a, b])).unwrap();
+        assert_eq!(got.0, steps(14..=20));
+    }
+
+    #[test]
+    fn missing_ancestor_is_a_soft_error_not_a_panic() {
+        // The window needs an ancestor absent from both tree and DB.
+        let block = header(0xB0, 0xA0, 20, &[19, 20]);
+        let err = build_fork_local_step_window(&block, 10, lookup(&[])).unwrap_err();
+        assert!(err.to_string().contains("missing header"), "{err}");
+    }
+
+    #[test]
+    fn reset_step_above_global_step_is_a_guarded_error() {
+        let block = header(0xB0, 0xA0, 20, &[19, 20]);
+        let err = build_fork_local_step_window(&block, 21, |_| panic!("no walk on underflow"))
+            .unwrap_err();
+        assert!(err.to_string().contains("underflow"), "{err}");
+    }
 }
 
 pub fn get_recall_range(

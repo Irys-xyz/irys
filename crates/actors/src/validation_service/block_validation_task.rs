@@ -474,6 +474,8 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.config.consensus,
                 &self.service_inner.vdf_state,
+                &self.service_inner.block_tree_guard,
+                &self.service_inner.db,
             )
             .await;
             metrics::record_validation_stage_duration_ms(

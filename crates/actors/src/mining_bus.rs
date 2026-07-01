@@ -25,6 +25,11 @@ pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),
     Difficulty(BroadcastDifficultyUpdate),
     PartitionsExpiration(BroadcastPartitionsExpiration),
+    /// The VDF step buffer was re-anchored onto canonical steps in-process after a deep
+    /// partition-recovery reorg. Partition-mining must discard its efficient-sampling
+    /// rotation (built from the now-replaced seeds) and rebuild it from the corrected
+    /// buffer on the next seed.
+    Reanchored,
 }
 
 #[derive(Debug)]
@@ -103,6 +108,13 @@ impl MiningBus {
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
         debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
+    }
+
+    /// Notify subscribers that the VDF buffer was re-anchored onto canonical steps
+    /// (partition-recovery heal), so partition-mining rebuilds its recall-range rotation.
+    pub fn send_reanchored(&self) -> usize {
+        debug!("Broadcasting VDF re-anchor to mining subscribers");
+        self.send_event(Arc::new(MiningBroadcastEvent::Reanchored))
     }
 }
 

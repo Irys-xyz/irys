@@ -176,6 +176,38 @@ impl VdfState {
                 .collect::<Vec<H256>>(),
         ))
     }
+
+    /// Re-anchor the seed buffer onto a corrected (canonical) step sequence
+    /// WITHOUT moving the forward-only step counter. `corrected` must hold the
+    /// seeds for the contiguous window ending at the current step —
+    /// `[current_step - corrected.len() + 1, current_step]` — matching the mapping
+    /// in [`Self::get_steps`]. `global_step` is left untouched, so every lock-free
+    /// reader and every `VdfStateReadonly` keeps observing the same step number
+    /// while only the (write-lock-held) seed contents change.
+    ///
+    /// This is the in-process VDF re-anchor used after a deep partition recovery:
+    /// it replaces minority-reset-seed steps with canonical ones in place, with no
+    /// backward store (the counter never decreases) and no orphaned readers (the
+    /// same `Arc`s are retained).
+    pub fn reanchor_seeds(&mut self, corrected: VecDeque<Seed>) -> eyre::Result<()> {
+        let current = self.current_step();
+        let len = u64::try_from(corrected.len())?;
+        eyre::ensure!(len > 0, "reanchor: corrected seed buffer is empty");
+        eyre::ensure!(
+            len <= current + 1,
+            "reanchor: buffer length {len} exceeds the step history up to {current}"
+        );
+        eyre::ensure!(
+            len <= self.capacity as u64 + 1,
+            "reanchor: buffer length {len} exceeds capacity {}",
+            self.capacity
+        );
+        self.seeds = corrected;
+        // Trimming is governed by `current - minimum_step_to_keep` (see `store_step`);
+        // keep ~`capacity` of headroom, matching `set_canonical_step`'s convention.
+        self.minimum_step_to_keep = current.saturating_sub(self.capacity as u64);
+        Ok(())
+    }
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
@@ -530,25 +562,40 @@ pub fn vdf_step_batch_is_valid(
                 vdf.batch_end = batch_end_step_number,
                 "Validating VDF steps from VdfStepsReadGuard!"
             );
-            if steps.0.as_slice() != batch_steps {
-                let expected = H256List(batch_steps.to_vec());
-                warn_mismatches(&steps, &expected);
-                return Err(eyre!("VDF steps are invalid!"));
+            if steps.0.as_slice() == batch_steps {
+                // Fast path: the local buffer already holds these exact steps.
+                //
+                // `verify_last_step_checkpoints` is intentionally skipped on this
+                // fast path. Every block reaching the validation service has
+                // already passed through `prevalidate_block`
+                // (crates/actors/src/block_validation.rs), which unconditionally
+                // calls `last_step_checkpoints_is_valid` against the block's
+                // claimed `vdf_limiter_info`. That helper (crates/vdf/src/lib.rs)
+                // re-derives the SHA chain from the previous step's seed and
+                // rejects any mismatch — including the invariant that the last
+                // checkpoint equals the last step. So by the time we reach here,
+                // the block's `last_step_checkpoints` are already proven
+                // consistent with `steps`; repeating the check would just redo
+                // work the node already did. Static reviewers (CodeRabbit) flag
+                // the missing call repeatedly — leave this comment so they don't.
+                return Ok(());
             }
-            // `verify_last_step_checkpoints` is intentionally skipped on this
-            // fast path. Every block reaching the validation service has
-            // already passed through `prevalidate_block`
-            // (crates/actors/src/block_validation.rs), which unconditionally
-            // calls `last_step_checkpoints_is_valid` against the block's
-            // claimed `vdf_limiter_info`. That helper (crates/vdf/src/lib.rs)
-            // re-derives the SHA chain from the previous step's seed and
-            // rejects any mismatch — including the invariant that the last
-            // checkpoint equals the last step. So by the time we reach here,
-            // the block's `last_step_checkpoints` are already proven
-            // consistent with `steps`; repeating the check would just redo
-            // work the node already did. Static reviewers (CodeRabbit) flag
-            // the missing call repeatedly — leave this comment so they don't.
-            return Ok(());
+            // The local buffer disagrees with the block's claimed steps. This is
+            // NOT proof the block is invalid: a node that mined a competing fork
+            // across a VDF reset boundary holds a buffer poisoned with the
+            // minority reset seed, so its post-boundary steps legitimately differ
+            // from the canonical block's. Rather than treat the (possibly
+            // poisoned) local buffer as authoritative over a competing fork, fall
+            // through to the block-rooted recompute below, which re-derives the
+            // steps from the block's own `prev_output`/`seed` and still rejects a
+            // genuinely forged block. This only widens the recompute — already
+            // trusted for the absent-buffer case — to the present-but-mismatched
+            // case; it never accepts an invalid block.
+            tracing::debug!(
+                vdf.batch_start = batch_start_step_number,
+                vdf.batch_end = batch_end_step_number,
+                "Local VDF buffer disagrees with block steps; recomputing from block-rooted data (buffer may be fork-poisoned)"
+            );
         }
         Err(err) => tracing::debug!(
             vdf.batch_start = batch_start_step_number,
@@ -701,6 +748,32 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn reanchor_seeds_replaces_buffer_and_keeps_counter() {
+        let mut state = VdfState::new(64, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        // Store 10 "poisoned" steps (counter 0 -> 10).
+        for s in 1..=10_u64 {
+            state.store_step(Seed(H256::repeat_byte(0xAA)), s);
+        }
+        assert_eq!(state.current_step(), 10);
+
+        // Re-anchor the trailing 6 steps onto "canonical" seeds. The counter must
+        // NOT move — every lock-free reader keeps seeing step 10.
+        let corrected: VecDeque<Seed> = (0..6).map(|_| Seed(H256::repeat_byte(0xBB))).collect();
+        state.reanchor_seeds(corrected).unwrap();
+
+        assert_eq!(
+            state.current_step(),
+            10,
+            "re-anchor must not move the counter"
+        );
+        // The window maps to [current - len + 1, current] = [5, 10].
+        let steps = state.get_steps(ii(5, 10)).unwrap();
+        assert_eq!(steps.0, vec![H256::repeat_byte(0xBB); 6]);
+        // Steps below the new window are no longer available.
+        assert!(state.get_steps(ii(4, 10)).is_err());
+    }
 
     #[tokio::test]
     async fn test_mid_execution_cancellation() {

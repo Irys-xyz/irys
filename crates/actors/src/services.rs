@@ -16,7 +16,7 @@ use core::ops::Deref;
 use irys_domain::PeerEvent;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage, Traced};
-use irys_vdf::VdfStep;
+use irys_vdf::{ReanchorRequest, VdfStep};
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
@@ -85,6 +85,18 @@ impl ServiceSenders {
     ) {
         let _ = self.0.mining_bus.send_partitions_expiration(msg);
     }
+
+    /// Drive an in-process VDF re-anchor after a deep partition-recovery reorg:
+    /// hand the canonical seed window to the VDF thread (which fixes its buffer in
+    /// place) and broadcast `Reanchored` so partition-mining rebuilds its
+    /// efficient-sampling rotation from the corrected buffer. Best-effort: a closed
+    /// channel during shutdown is logged, not fatal.
+    pub fn request_vdf_reanchor(&self, request: ReanchorRequest) {
+        if let Err(e) = self.0.vdf_reanchor.send(request) {
+            tracing::warn!("failed to submit VDF re-anchor request to the VDF thread: {e}");
+        }
+        let _ = self.0.mining_bus.send_reanchored();
+    }
 }
 
 #[derive(Debug)]
@@ -94,6 +106,10 @@ pub struct ServiceReceivers {
     pub chunk_migration: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedReceiver<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Receiver<Traced<VdfStep>>,
+    /// Delivers in-process VDF re-anchor requests to the VDF thread after a deep
+    /// partition-recovery reorg. Unbounded so the block-tree gate never blocks while
+    /// holding its write guard; re-anchors are rare (one per deep recovery).
+    pub vdf_reanchor: UnboundedReceiver<ReanchorRequest>,
     pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
@@ -116,6 +132,9 @@ pub struct ServiceSendersInner {
     pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Sender<Traced<VdfStep>>,
+    /// See [`ServiceReceivers::vdf_reanchor`]. The block-tree partition-recovery gate
+    /// sends the canonical seed window here for the VDF thread to apply in place.
+    pub vdf_reanchor: UnboundedSender<ReanchorRequest>,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -144,6 +163,7 @@ impl ServiceSendersInner {
             unbounded_channel::<Traced<MempoolServiceMessage>>();
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) =
             channel::<Traced<VdfStep>>(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
+        let (vdf_reanchor_sender, vdf_reanchor_receiver) = unbounded_channel::<ReanchorRequest>();
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
         let (ds_sender, ds_receiver) = unbounded_channel::<Traced<DataSyncServiceMessage>>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
@@ -172,6 +192,7 @@ impl ServiceSendersInner {
             chunk_migration: chunk_migration_sender,
             mempool: mempool_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
+            vdf_reanchor: vdf_reanchor_sender,
             storage_modules: sm_sender,
             data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,
@@ -193,6 +214,7 @@ impl ServiceSendersInner {
             chunk_migration: chunk_migration_receiver,
             mempool: mempool_receiver,
             vdf_fast_forward: vdf_fast_forward_receiver,
+            vdf_reanchor: vdf_reanchor_receiver,
             storage_modules: sm_receiver,
             data_sync: ds_receiver,
             gossip_broadcast: gossip_broadcast_receiver,

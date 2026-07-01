@@ -64,7 +64,7 @@ use irys_types::{
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
-    VdfStep,
+    ReanchorRequest, VdfStep,
     state::{AtomicVdfState, VdfController, VdfStateReadonly},
     vdf::run_vdf,
     vdf_sha,
@@ -1482,7 +1482,7 @@ impl IrysNode {
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
-        CancellationToken,
+        CancellationToken, // vdf_exit_token
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1642,6 +1642,23 @@ impl IrysNode {
             service_senders.chunk_migration.clone(),
         );
 
+        // Construct VDF state before the block tree service so the read-only
+        // handle can be handed to the block-tree partition-recovery gate.
+        // `create_state` only *borrows* block_index/irys_db for the seed replay,
+        // so this does not move block_index (still consumed later by
+        // init_block_producer). The DB/header seed replay lives in irys-chain
+        // (DbVdfSeedSource); irys-vdf only sees the VdfSeedSource trait.
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
+        let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
+            &DbVdfSeedSource {
+                block_index: &block_index,
+                db: &irys_db,
+            },
+            Arc::clone(&is_vdf_mining_enabled),
+            &config,
+        )));
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
+
         // Start the block tree service
         let block_tree_lifecycle = Arc::new(BlockTreeLifecycleTimestamps::default());
         let block_tree_handle = BlockTreeService::spawn_service(
@@ -1652,6 +1669,7 @@ impl IrysNode {
             &service_senders,
             sync_state.clone(),
             block_migration_service,
+            vdf_state_readonly.clone(),
             block_tree_cache,
             block_tree_lifecycle.clone(),
             runtime_handle.clone(),
@@ -1778,19 +1796,9 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
-        // Spawn VDF service. The DB/header seed replay lives in irys-chain
-        // (DbVdfSeedSource); irys-vdf only sees the VdfSeedSource trait. Borrow
-        // block_index/irys_db here — block_index is moved later (init_block_producer).
-        let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
-            &DbVdfSeedSource {
-                block_index: &block_index,
-                db: &irys_db,
-            },
-            Arc::clone(&is_vdf_mining_enabled),
-            &config,
-        )));
-        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
+        // `is_vdf_mining_enabled`, `vdf_state`, and `vdf_state_readonly` are
+        // constructed earlier (before the block tree service) so the read-only
+        // handle can be passed to the partition-recovery gate.
         // Single controller over the shared mining flag (same Arc as VdfState).
         let vdf_controller = VdfController::new(&is_vdf_mining_enabled);
 
@@ -1921,6 +1929,7 @@ impl IrysNode {
         let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,
+            receivers.vdf_reanchor,
             latest_block,
             initial_hash,
             global_step_number,
@@ -2153,6 +2162,7 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
+        vdf_reanchor_receiver: UnboundedReceiver<ReanchorRequest>,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
@@ -2224,6 +2234,7 @@ impl IrysNode {
                     initial_hash,
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
+                    vdf_reanchor_receiver,
                     MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     block_status_provider,

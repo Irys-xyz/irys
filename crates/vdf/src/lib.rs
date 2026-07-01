@@ -340,6 +340,25 @@ pub struct VdfStep {
     pub global_step_number: u64,
 }
 
+/// Request to re-anchor the VDF step buffer onto canonical steps in-process after a
+/// deep partition-recovery reorg poisoned it. Sent from the block-tree
+/// partition-recovery gate to the VDF thread, which rewrites its seed buffer under the
+/// write lock while keeping the forward-only step counter (see
+/// [`state::VdfState::reanchor_seeds`]). No node restart, no consumer handle re-init.
+#[derive(Debug, Clone)]
+pub struct ReanchorRequest {
+    /// Canonical VDF step outputs for the contiguous window
+    /// `[canonical_step - canonical_window.len() + 1, canonical_step]`, oldest→newest.
+    /// They replace the (possibly minority-reset-seed-poisoned) local seeds over the
+    /// same steps.
+    pub canonical_window: std::collections::VecDeque<Seed>,
+    /// Canonical tip step `C` — the last global step `canonical_window` covers.
+    pub canonical_step: u64,
+    /// Canonical `next_seed`: the reset seed folded at reset boundaries beyond `C` —
+    /// both in the locally recomputed tail `(C, L]` and in subsequent stepping.
+    pub next_reset_seed: H256,
+}
+
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
 }

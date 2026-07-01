@@ -20,8 +20,9 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced,
+    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
+use irys_vdf::{ReanchorRequest, state::VdfStateReadonly};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -123,6 +124,10 @@ pub struct BlockTreeServiceInner {
     pub service_senders: ServiceSenders,
     /// Block migration orchestration and DB persistence
     block_migration_service: BlockMigrationService,
+    /// Read-only handle to the VDF step counter. The partition-recovery gate
+    /// reads the live step from it after a deep reorg to decide whether the local
+    /// buffer crossed a divergent reset boundary.
+    vdf_state: VdfStateReadonly,
     /// Chain sync state for diagnostics
     pub chain_sync_state: ChainSyncState,
     /// Bounded LRU of block_hashes recently discarded due to a soft-internal
@@ -312,6 +317,116 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
     }
 }
 
+/// Returns `true` when a deep partition recovery whose fork point (LCA) is at
+/// VDF step `lca_step` has poisoned the local VDF buffer, so the VDF thread must
+/// re-anchor it onto the canonical steps in place (see [`ReanchorRequest`]).
+///
+/// The buffer diverges from canonical only past the first reset boundary whose
+/// folded seed differs between the forks — the **second** boundary above the
+/// LCA. The first boundary above the LCA has its rotation block at or below the
+/// LCA (`boundary - reset_frequency <= lca_step`), so both forks fold the same
+/// seed there; divergence begins one boundary later. The one-step margin absorbs
+/// the gap between reading the free-running `live_step` and the true counter
+/// value, failing toward re-anchor (liveness) rather than toward staying poisoned.
+///
+/// `reset_frequency == 0` disables the gate (division guard; never true in a
+/// real config).
+fn partition_recovery_needs_reanchor(lca_step: u64, live_step: u64, reset_frequency: u64) -> bool {
+    if reset_frequency == 0 {
+        return false;
+    }
+    let first_divergent_boundary = (lca_step / reset_frequency)
+        .saturating_add(2)
+        .saturating_mul(reset_frequency);
+    live_step.saturating_add(1) >= first_divergent_boundary
+}
+
+/// Assemble the canonical VDF seed window `[lca_step + 1, canonical_step]` for an
+/// in-process re-anchor, walking the header chain from the new canonical tip down through
+/// the new divergent blocks via the shared [`crate::block_validation::build_fork_local_step_window`]
+/// walk. The resolver is backed by the (owned) new-fork blocks plus the LCA, so the build
+/// touches neither the block-tree cache lock nor the database.
+///
+/// Returns the window as `Seed`s (oldest→newest, ending at `canonical_step`). Any gap in
+/// the new-fork chain surfaces as an `Err`, so the caller skips the re-anchor rather than
+/// send a malformed window.
+fn build_reanchor_window(
+    new_tip: &IrysBlockHeader,
+    new_fork_blocks: &[Arc<SealedBlock>],
+    fork_block: &IrysBlockHeader,
+    lca_step: u64,
+) -> eyre::Result<std::collections::VecDeque<Seed>> {
+    let mut by_hash: std::collections::HashMap<BlockHash, IrysBlockHeader> = new_fork_blocks
+        .iter()
+        .map(|sb| {
+            let hdr = sb.header();
+            (hdr.block_hash, hdr.as_ref().clone())
+        })
+        .collect();
+    // The walk stops once a header's steps reach `lca_step + 1`; include the LCA anyway so
+    // a divergent block whose steps start exactly at the boundary still resolves.
+    by_hash.insert(fork_block.block_hash, fork_block.clone());
+
+    let window =
+        crate::block_validation::build_fork_local_step_window(new_tip, lca_step + 1, |hash| {
+            by_hash.get(hash).cloned().ok_or_else(|| {
+                eyre::eyre!("re-anchor: canonical ancestor {hash} missing from new fork blocks")
+            })
+        })?;
+    Ok(window.0.into_iter().map(Seed).collect())
+}
+
+#[cfg(test)]
+mod partition_recovery_gate_tests {
+    use super::partition_recovery_needs_reanchor;
+
+    // reset_frequency = 100 → reset boundaries at 100, 200, 300, ...
+    const RF: u64 = 100;
+
+    #[test]
+    fn does_not_restart_before_the_second_boundary_above_the_lca() {
+        // LCA=150: first boundary above is 200 (rotation block @100 ≤ 150 → shared
+        // seed), so crossing 200 does NOT poison. The first divergent boundary is
+        // 300. Below the one-step margin (live+1 < 300) → no restart.
+        assert!(!partition_recovery_needs_reanchor(150, 150, RF));
+        assert!(!partition_recovery_needs_reanchor(150, 200, RF)); // crossed only B1
+        assert!(!partition_recovery_needs_reanchor(150, 298, RF));
+    }
+
+    #[test]
+    fn restarts_at_the_second_boundary_including_the_one_step_margin() {
+        // first divergent boundary = 300; margin fires at live+1 >= 300.
+        assert!(partition_recovery_needs_reanchor(150, 299, RF)); // one step early
+        assert!(partition_recovery_needs_reanchor(150, 300, RF));
+        assert!(partition_recovery_needs_reanchor(150, 50_000, RF));
+    }
+
+    #[test]
+    fn lca_exactly_on_a_boundary() {
+        // LCA=200 (on a boundary): 200/100=2 → first divergent = (2+2)*100 = 400.
+        // The boundary at 300 has its rotation block @200 = the LCA → still shared.
+        assert!(!partition_recovery_needs_reanchor(200, 300, RF)); // B1-equivalent, shared
+        assert!(!partition_recovery_needs_reanchor(200, 398, RF));
+        assert!(partition_recovery_needs_reanchor(200, 399, RF)); // margin
+        assert!(partition_recovery_needs_reanchor(200, 400, RF));
+    }
+
+    #[test]
+    fn lca_below_the_first_boundary() {
+        // LCA=50: 50/100=0 → first divergent = (0+2)*100 = 200. Boundary 100 has
+        // its rotation block @0 ≤ 50 → shared; divergence begins at 200.
+        assert!(!partition_recovery_needs_reanchor(50, 100, RF)); // crossed only B1
+        assert!(!partition_recovery_needs_reanchor(50, 198, RF));
+        assert!(partition_recovery_needs_reanchor(50, 199, RF)); // margin
+        assert!(partition_recovery_needs_reanchor(50, 200, RF));
+    }
+
+    #[test]
+    fn reset_frequency_zero_disables_the_gate() {
+        assert!(!partition_recovery_needs_reanchor(1_000, 100_000, 0));
+    }
+}
+
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_tree")]
@@ -323,6 +438,7 @@ impl BlockTreeService {
         service_senders: &ServiceSenders,
         chain_sync_state: ChainSyncState,
         block_migration_service: BlockMigrationService,
+        vdf_state: VdfStateReadonly,
         cache: Arc<RwLock<BlockTree>>,
         lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
         runtime_handle: tokio::runtime::Handle,
@@ -342,6 +458,7 @@ impl BlockTreeService {
                     msg_rx: rx,
                     inner: BlockTreeServiceInner {
                         block_migration_service,
+                        vdf_state,
                         db,
                         cache,
                         miner_address,
@@ -1067,6 +1184,63 @@ impl BlockTreeServiceInner {
                         // proceeding with the new canonical chain.
                         self.block_migration_service
                             .recover_from_network_partition(fork_height)?;
+
+                        // Divergent-boundary gate: detect whether the local VDF
+                        // buffer is poisoned after a deep reorg. The buffer
+                        // diverges from canonical only past the first reset
+                        // boundary whose folded seed differs between the forks —
+                        // the SECOND boundary above the LCA. The first boundary's
+                        // rotation block sits at/below the LCA and folds a seed
+                        // both forks share, so crossing it does not poison.
+                        let lca_step = fork_block.vdf_limiter_info.global_step_number;
+                        let live_step = self.vdf_state.current_step();
+                        let reset_frequency = self.config.vdf.reset_frequency as u64;
+                        if partition_recovery_needs_reanchor(lca_step, live_step, reset_frequency) {
+                            // Re-anchor the poisoned VDF buffer onto canonical steps in
+                            // place: assemble the canonical seed window from the new fork
+                            // and hand it to the VDF thread, which fixes its buffer under
+                            // its own write lock (forward-only counter unchanged, no
+                            // restart). Partition-mining rebuilds its recall-range rotation
+                            // on the accompanying broadcast.
+                            let canonical_step = arc_block.vdf_limiter_info.global_step_number;
+                            match build_reanchor_window(
+                                arc_block.as_ref(),
+                                &new_fork_blocks,
+                                fork_block.as_ref(),
+                                lca_step,
+                            ) {
+                                Ok(canonical_window) => {
+                                    warn!(
+                                        lca_step,
+                                        live_step,
+                                        canonical_step,
+                                        window_len = canonical_window.len(),
+                                        "PARTITION RECOVERY: deep reorg crossed a divergent VDF reset boundary; triggering in-process VDF re-anchor",
+                                    );
+                                    self.service_senders.request_vdf_reanchor(ReanchorRequest {
+                                        canonical_window,
+                                        canonical_step,
+                                        next_reset_seed: arc_block.vdf_limiter_info.next_seed,
+                                    });
+                                }
+                                Err(e) => {
+                                    error!(
+                                        lca_step,
+                                        live_step,
+                                        canonical_step,
+                                        "PARTITION RECOVERY: could not assemble canonical VDF window for re-anchor; buffer left as-is (recall-range fork-local recompute still guards validation): {e:?}",
+                                    );
+                                }
+                            }
+                        } else {
+                            debug!(
+                                lca_step,
+                                live_step,
+                                reset_frequency,
+                                "PARTITION RECOVERY: deep reorg did not cross a divergent VDF reset \
+                                 boundary; no VDF re-anchor needed",
+                            );
+                        }
                     }
 
                     metrics::record_reorg();
@@ -1973,6 +2147,15 @@ mod tests {
                 config,
                 service_senders,
                 block_migration_service,
+                // Unused by this test (no reorg/gate path exercised); a minimal
+                // handle just satisfies the struct.
+                vdf_state: VdfStateReadonly::new(Arc::new(RwLock::new(
+                    irys_vdf::state::VdfState::new(
+                        0,
+                        0,
+                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    ),
+                ))),
                 chain_sync_state,
                 recent_soft_internal_discards: LruCache::new(
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),

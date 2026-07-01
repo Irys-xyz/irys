@@ -1,11 +1,15 @@
 use crate::metrics;
 use crate::state::AtomicVdfState;
-use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
+use crate::{
+    MiningBroadcaster, ReanchorRequest, VdfStep, apply_reset_seed, step_number_to_salt_number,
+    vdf_sha,
+};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
 use irys_types::{H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -59,6 +63,7 @@ pub fn run_vdf<B: BlockProvider>(
     current_vdf_hash: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: Receiver<Traced<VdfStep>>,
+    mut reanchor_receiver: UnboundedReceiver<ReanchorRequest>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
     block_provider: B,
@@ -110,6 +115,64 @@ pub fn run_vdf<B: BlockProvider>(
         if shutdown_token.is_cancelled() {
             tracing::info!("VDF loop: shutdown token cancelled, exiting");
             break;
+        }
+
+        // In-process VDF re-anchor (rare — one per deep partition-recovery reorg). The
+        // block-tree gate sends the canonical seed window here; we rewrite the poisoned
+        // buffer onto canonical steps in place, keeping the forward-only step counter so
+        // no VdfStateReadonly holder is orphaned and no restart is needed. Build the
+        // corrected buffer OUTSIDE the write lock (the tail recompute runs vdf_sha, up to
+        // ~1s/step at production difficulty), then hold the write lock only for the swap.
+        while let Ok(request) = reanchor_receiver.try_recv() {
+            let capacity = match vdf_state.read() {
+                Ok(guard) => guard.capacity,
+                Err(_) => {
+                    error!("VDF state read lock poisoned during re-anchor; exiting VDF thread");
+                    return;
+                }
+            };
+            let (corrected, resume_hash) = match build_reanchored_buffer(
+                config,
+                &request,
+                global_step_number,
+                capacity,
+            ) {
+                Ok(built) => built,
+                Err(e) => {
+                    error!(
+                        canonical_step = request.canonical_step,
+                        live_step = global_step_number,
+                        "VDF re-anchor request could not be applied; leaving buffer unchanged: {e:?}"
+                    );
+                    continue;
+                }
+            };
+            {
+                let mut guard = match vdf_state.write() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        error!(
+                            "VDF state write lock poisoned during re-anchor; exiting VDF thread"
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = guard.reanchor_seeds(corrected) {
+                    error!("VDF re-anchor failed to swap the buffer; leaving it unchanged: {e:?}");
+                    continue;
+                }
+            }
+            // Resume stepping from L on the canonical seed. `global_step_number` (the
+            // counter) is unchanged; only the seed contents and the loop's running
+            // `hash`/`next_reset_seed` move onto the canonical chain.
+            hash = resume_hash;
+            next_reset_seed = request.next_reset_seed;
+            canonical_global_step_number = canonical_global_step_number.max(request.canonical_step);
+            info!(
+                canonical_step = request.canonical_step,
+                live_step = global_step_number,
+                "VDF re-anchored onto canonical steps in-process (no restart)"
+            );
         }
 
         // check for VDF fast forward step
@@ -325,6 +388,92 @@ pub fn run_vdf<B: BlockProvider>(
     debug!(vdf.global_step_number = ?global_step_number, "VDF thread stopped");
 }
 
+/// Build the corrected VDF seed buffer for an in-process re-anchor, plus the running
+/// hash to resume stepping from.
+///
+/// Inputs: the canonical seed window `[cw_first, C]` (`request.canonical_window`, ending
+/// at `request.canonical_step`) and the live local tip `live_step` (`L`). Behaviour:
+/// - `L > C`: extend the window with a locally recomputed tail `(C, L]`, SHA-chaining
+///   forward from step `C`'s output and folding `request.next_reset_seed` at every reset
+///   boundary — exactly as `run_vdf` steps forward, so the tail matches what the loop
+///   would have produced on the canonical seed (#1457: the wrong seed here silently
+///   re-poisons, so it must be the canonical `next_seed`);
+/// - `C >= L`: truncate the window to end at `L` (drop canonical steps the forward-only
+///   counter has not reached);
+/// - then trim from the front so the buffer never exceeds `capacity + 1`
+///   (the [`crate::state::VdfState::reanchor_seeds`] contract).
+///
+/// Returns `(corrected, resume_hash)`. `corrected` maps 1:1 onto steps
+/// `[L - corrected.len() + 1, L]` (see `VdfState::get_steps`); `resume_hash` is the
+/// output of step `L` with the boundary reset folded — the seed the loop feeds into step
+/// `L + 1`, so stepping continues as if the loop had reached `L` on the canonical seed.
+fn build_reanchored_buffer(
+    config: &irys_types::VdfConfig,
+    request: &ReanchorRequest,
+    live_step: u64,
+    capacity: usize,
+) -> eyre::Result<(VecDeque<Seed>, H256)> {
+    let canonical_step = request.canonical_step;
+    let reset_frequency = config.reset_frequency as u64;
+
+    let mut corrected = request.canonical_window.clone();
+    eyre::ensure!(!corrected.is_empty(), "reanchor: canonical window is empty");
+
+    match live_step.cmp(&canonical_step) {
+        std::cmp::Ordering::Greater => {
+            // Recompute the local free-run tail (C, L] from step C's canonical output.
+            let mut running = corrected.back().expect("non-empty checked above").0;
+            let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+            for step in canonical_step..live_step {
+                // Fold the reset seed at `step` before deriving `step + 1`, mirroring
+                // `process_reset` at the bottom of the run_vdf loop.
+                let mut out =
+                    process_reset(step, running, reset_frequency, request.next_reset_seed);
+                let salt = U256::from(step_number_to_salt_number(config, step));
+                vdf_sha(
+                    salt,
+                    &mut out,
+                    config.num_checkpoints_in_vdf_step,
+                    config.num_iterations_per_checkpoint(),
+                    &mut checkpoints,
+                );
+                corrected.push_back(Seed(out));
+                running = out;
+            }
+        }
+        std::cmp::Ordering::Less => {
+            // Canonical ran ahead of the local counter: drop steps above L so the buffer
+            // ends exactly at L (the forward-only counter never moves).
+            for _ in 0..(canonical_step - live_step) {
+                corrected.pop_back();
+            }
+        }
+        std::cmp::Ordering::Equal => {}
+    }
+
+    eyre::ensure!(
+        !corrected.is_empty(),
+        "reanchor: corrected buffer empty after aligning to live step {live_step}"
+    );
+
+    // Honour the reanchor_seeds contract: at most capacity + 1 seeds. Trim the oldest
+    // (nearest the LCA, least likely to be needed by future recall-range validation).
+    while corrected.len() > capacity + 1 {
+        corrected.pop_front();
+    }
+
+    let output_l = corrected.back().expect("non-empty checked above").0;
+    // Seed the loop feeds into step L+1: output of L with the boundary reset folded.
+    let resume_hash = process_reset(
+        live_step,
+        output_l,
+        reset_frequency,
+        request.next_reset_seed,
+    );
+
+    Ok((corrected, resume_hash))
+}
+
 #[must_use]
 pub fn process_reset(
     global_step_number: u64,
@@ -397,7 +546,9 @@ fn store_step(
 mod tests {
     use super::*;
     use crate::state::test_helpers::mocked_vdf_service;
-    use crate::state::{CancelEnum, VdfController, VdfStateReadonly, vdf_steps_are_valid};
+    use crate::state::{
+        CancelEnum, VdfController, VdfStateReadonly, vdf_step_batch_is_valid, vdf_steps_are_valid,
+    };
     use crate::vdf_sha_verification;
     use irys_types::*;
     use nodit::interval::ii;
@@ -517,6 +668,7 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     broadcast_mining_service,
                     vdf_state.clone(),
                     MockBlockProvider(mock_header),
@@ -622,6 +774,7 @@ mod tests {
                     seed,
                     reset_seed,
                     ff_step_receiver,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     broadcast_mining_service,
                     vdf_state.clone(),
                     MockBlockProvider::new(),
@@ -721,6 +874,7 @@ mod tests {
                     current_seed,
                     reset_seed,
                     ff_step_receiver,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     MockMining,
                     vdf_state,
                     MockBlockProvider::new(),
@@ -788,6 +942,7 @@ mod tests {
                 H256::zero(),
                 H256::zero(),
                 ff_rx,
+                mpsc::unbounded_channel::<ReanchorRequest>().1,
                 MockMining,
                 vdf_state,
                 MockBlockProvider::new(),
@@ -857,6 +1012,7 @@ mod tests {
                     initial_seed,
                     reset_seed,
                     ff_rx,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     MockMining,
                     vdf_state,
                     MockBlockProvider(mock_header),
@@ -895,6 +1051,111 @@ mod tests {
             stored_step_1, expected_hash,
             "step 1 must derive from initial_seed, not from the rejected FF's bad seed"
         );
+    }
+
+    /// End-to-end wiring for the in-process re-anchor (P-A + P-C): a live `run_vdf`
+    /// thread drains a `ReanchorRequest` off the channel, rewrites its seed buffer onto
+    /// the supplied canonical window, and leaves the forward-only step counter untouched
+    /// — no restart. Deterministic: the loop is frozen at a stable step by disabling
+    /// mining (the re-anchor drain runs at the loop top, ahead of the mining-pause gate,
+    /// so a paused loop still applies it), then polled for convergence.
+    #[tokio::test]
+    async fn run_vdf_applies_reanchor_request_in_process() {
+        // reset_frequency high so [1, L] crosses no boundary: the test isolates the
+        // channel → drain → buffer-swap path (the tail recompute is unit-tested in
+        // `reanchor_buffer`), with C == L so no tail is recomputed here.
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 1_000;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        init_tracing();
+
+        let initial_seed = H256::repeat_byte(0x01);
+        let reset_seed = H256::repeat_byte(0x02);
+
+        let (_ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+        let (reanchor_tx, reanchor_rx) = mpsc::unbounded_channel::<ReanchorRequest>();
+        let vdf_state = mocked_vdf_service(&config);
+        let guard = VdfStateReadonly::new(vdf_state.clone());
+        enable_mining(&vdf_state);
+
+        // Canonical tip far ahead so the loop never parks at the boundary gate.
+        let mut mock_header = IrysBlockHeader::new_mock_header();
+        mock_header.vdf_limiter_info.global_step_number = 100_000;
+
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown = CancellationToken::new();
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let shutdown = shutdown.clone();
+            let vdf_state = vdf_state.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    0,
+                    initial_seed,
+                    reset_seed,
+                    ff_rx,
+                    reanchor_rx,
+                    MockMining,
+                    vdf_state,
+                    MockBlockProvider(mock_header),
+                    chain_sync_state,
+                    shutdown,
+                )
+            }
+        });
+
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        guard
+            .wait_for_step(10, Arc::clone(&cancel), Duration::from_secs(5))
+            .await
+            .expect("VDF should reach step 10");
+
+        // Freeze the loop at a stable step (mining disabled → no new steps, but the
+        // re-anchor channel is still drained each 200ms park cycle).
+        VdfController::new(&vdf_state.read().unwrap().mining_flag()).stop();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let live = guard.read().current_step();
+
+        // A distinct "canonical" window over [live-4, live]; C == live so it is applied
+        // verbatim (no tail recompute).
+        let canonical: VecDeque<Seed> = (0..5).map(|i| Seed(H256::repeat_byte(0xC0 + i))).collect();
+        let canonical_hashes: Vec<H256> = canonical.iter().map(|s| s.0).collect();
+        reanchor_tx
+            .send(ReanchorRequest {
+                canonical_window: canonical,
+                canonical_step: live,
+                next_reset_seed: reset_seed,
+            })
+            .expect("re-anchor channel open");
+
+        // The paused loop applies it within a couple of park cycles.
+        let mut converged = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Ok(steps) = guard.get_steps(ii(live - 4, live))
+                && steps.0 == canonical_hashes
+            {
+                converged = true;
+                break;
+            }
+        }
+        assert!(
+            converged,
+            "re-anchor request must replace the buffer window [{}, {}] with the canonical steps",
+            live - 4,
+            live
+        );
+        assert_eq!(
+            guard.read().current_step(),
+            live,
+            "the forward-only step counter must not move on re-anchor"
+        );
+
+        shutdown.cancel();
+        handle.join().unwrap();
     }
 
     mod boundary_gate {
@@ -1064,6 +1325,7 @@ mod tests {
                     initial_seed,
                     initial_seed,
                     ff_rx,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     MockMining,
                     vdf_state,
                     provider,
@@ -1155,6 +1417,7 @@ mod tests {
                     pre_boundary_seed,
                     pre_boundary_seed,
                     ff_rx,
+                    mpsc::unbounded_channel::<ReanchorRequest>().1,
                     MockMining,
                     vdf_state,
                     provider,
@@ -1295,6 +1558,64 @@ mod tests {
             accepted.is_ok(),
             "clean buffer (gate held until the seed was confirmed) must ACCEPT the canonical block: {accepted:?}"
         );
+
+        // --- The heal (Seam 1): the block-rooted recompute fall-through means a
+        //     poisoned buffer no longer WEDGES. A canonical block whose steps chain
+        //     from its own prev_output/seed is now ACCEPTED even though the local
+        //     buffer holds divergent (loser) steps for the same range, while a
+        //     forged block is still rejected. `vdf_step_batch_is_valid` is called
+        //     with checkpoint verification off: the step chain is the property under
+        //     test (last_step_checkpoints are proven separately in prevalidation),
+        //     so this synthetic block needs no precomputed checkpoints. ---
+        let winner_step_16 = clean_guard.get_steps(ii(16, 16)).expect("winner step 16").0[0];
+        let healed_block = VDFLimiterInfo {
+            global_step_number: 20,
+            prev_output: winner_step_16,
+            seed: winner_seed,
+            steps: clean_guard
+                .get_steps(ii(17, 20))
+                .expect("winner steps 17..=20"),
+            ..VDFLimiterInfo::default()
+        };
+        let healed = vdf_step_batch_is_valid(
+            &pool,
+            &healed_block,
+            &config.vdf,
+            &poisoned_guard,
+            0..healed_block.steps.len(),
+            false,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        );
+        assert!(
+            healed.is_ok(),
+            "Seam 1: poisoned buffer must ACCEPT a recompute-consistent canonical block (the heal): {healed:?}"
+        );
+
+        let mut forged_steps = clean_guard
+            .get_steps(ii(17, 20))
+            .expect("winner steps 17..=20");
+        let last = forged_steps.0.len() - 1;
+        forged_steps.0[last] = H256::repeat_byte(0xee);
+        let forged_block = VDFLimiterInfo {
+            global_step_number: 20,
+            prev_output: winner_step_16,
+            seed: winner_seed,
+            steps: forged_steps,
+            ..VDFLimiterInfo::default()
+        };
+        let forged = vdf_step_batch_is_valid(
+            &pool,
+            &forged_block,
+            &config.vdf,
+            &poisoned_guard,
+            0..forged_block.steps.len(),
+            false,
+            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
+        );
+        assert!(
+            forged.is_err(),
+            "Seam 1: recompute must still REJECT a forged block even with a poisoned buffer"
+        );
     }
 
     mod process_reset_props {
@@ -1331,6 +1652,162 @@ mod tests {
                 let result = process_reset(global_step, hash, reset_frequency, reset_seed);
                 prop_assert_eq!(result, hash);
             }
+        }
+    }
+
+    /// Unit tests for the in-process re-anchor buffer builder (P-C). They pin the
+    /// consensus-critical property that the recomputed tail `(C, L]` equals what
+    /// `run_vdf` would produce stepping forward from the canonical step `C` on the
+    /// canonical reset seed — #1457 finding #2: the wrong seed here silently re-poisons.
+    mod reanchor_buffer {
+        use super::super::{build_reanchored_buffer, process_reset};
+        use crate::{ReanchorRequest, step_number_to_salt_number, vdf_sha};
+        use irys_types::{Config, H256, NodeConfig, U256, VdfConfig, block_production::Seed};
+        use std::collections::VecDeque;
+
+        /// Ground-truth step outputs for steps `1..=count`, stepping exactly as
+        /// `run_vdf`: `salt(step - 1)` → `vdf_sha` → output of `step`, then
+        /// `process_reset(step)` folds the reset seed for the next step. `out[i]` is the
+        /// output of step `i + 1`.
+        fn gen_steps(config: &VdfConfig, seed0: H256, reset_seed: H256, count: u64) -> Vec<H256> {
+            let mut out = Vec::with_capacity(count as usize);
+            let mut hash = seed0;
+            let mut checkpoints = vec![H256::default(); config.num_checkpoints_in_vdf_step];
+            for step in 1..=count {
+                let salt = U256::from(step_number_to_salt_number(config, step - 1));
+                vdf_sha(
+                    salt,
+                    &mut hash,
+                    config.num_checkpoints_in_vdf_step,
+                    config.num_iterations_per_checkpoint(),
+                    &mut checkpoints,
+                );
+                out.push(hash);
+                hash = process_reset(step, hash, config.reset_frequency as u64, reset_seed);
+            }
+            out
+        }
+
+        fn test_config() -> Config {
+            let mut node_config = NodeConfig::testing();
+            node_config.consensus.get_mut().vdf.reset_frequency = 8;
+            node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+            Config::new_with_random_peer_id(node_config)
+        }
+
+        fn window(ground: &[H256], first_step: u64, last_step: u64) -> VecDeque<Seed> {
+            ground[(first_step - 1) as usize..last_step as usize]
+                .iter()
+                .map(|h| Seed(*h))
+                .collect()
+        }
+
+        fn as_hashes(buf: &VecDeque<Seed>) -> Vec<H256> {
+            buf.iter().map(|s| s.0).collect()
+        }
+
+        /// L > C: the tail `(C, L]` is recomputed and, together with the canonical
+        /// window, equals the canonical ground truth over `[window_first, L]` — crossing
+        /// a reset boundary (reset_frequency 8, so boundaries at 8/16/24) on the
+        /// canonical seed.
+        #[test]
+        fn recomputes_tail_matching_forward_stepping() {
+            let config = test_config();
+            let vdf = &config.vdf;
+            let reset_seed = H256::repeat_byte(0x22);
+            let (live_step, canonical_step, window_first) = (30_u64, 20_u64, 5_u64);
+
+            let ground = gen_steps(vdf, H256::repeat_byte(0x11), reset_seed, live_step);
+            let request = ReanchorRequest {
+                canonical_window: window(&ground, window_first, canonical_step),
+                canonical_step,
+                next_reset_seed: reset_seed,
+            };
+
+            let (corrected, resume_hash) =
+                build_reanchored_buffer(vdf, &request, live_step, 1024).unwrap();
+
+            assert_eq!(
+                as_hashes(&corrected),
+                ground[(window_first - 1) as usize..live_step as usize].to_vec(),
+                "corrected buffer must equal canonical ground truth over [window_first, L]"
+            );
+            let output_l = ground[(live_step - 1) as usize];
+            assert_eq!(
+                resume_hash,
+                process_reset(live_step, output_l, vdf.reset_frequency as u64, reset_seed),
+                "resume hash must be the output of L with the boundary reset folded"
+            );
+        }
+
+        /// C >= L: canonical ran ahead of the local counter; the window is truncated to
+        /// end exactly at L (forward-only counter honoured, no tail recompute).
+        #[test]
+        fn truncates_when_canonical_ahead_of_live() {
+            let config = test_config();
+            let vdf = &config.vdf;
+            let reset_seed = H256::repeat_byte(0x44);
+            let (canonical_step, live_step, window_first) = (25_u64, 18_u64, 4_u64);
+
+            let ground = gen_steps(vdf, H256::repeat_byte(0x33), reset_seed, canonical_step);
+            let request = ReanchorRequest {
+                canonical_window: window(&ground, window_first, canonical_step),
+                canonical_step,
+                next_reset_seed: reset_seed,
+            };
+
+            let (corrected, resume_hash) =
+                build_reanchored_buffer(vdf, &request, live_step, 1024).unwrap();
+
+            assert_eq!(
+                as_hashes(&corrected),
+                ground[(window_first - 1) as usize..live_step as usize].to_vec(),
+                "corrected buffer must be truncated to end at L"
+            );
+            let output_l = ground[(live_step - 1) as usize];
+            assert_eq!(
+                resume_hash,
+                process_reset(live_step, output_l, vdf.reset_frequency as u64, reset_seed)
+            );
+        }
+
+        /// The corrected buffer never exceeds `capacity + 1`: the oldest steps (nearest
+        /// the LCA) are trimmed and it still ends at L.
+        #[test]
+        fn clamps_to_capacity_plus_one() {
+            let config = test_config();
+            let vdf = &config.vdf;
+            let reset_seed = H256::repeat_byte(0x66);
+            let (live_step, canonical_step, capacity) = (40_u64, 40_u64, 10_usize);
+
+            let ground = gen_steps(vdf, H256::repeat_byte(0x55), reset_seed, canonical_step);
+            let request = ReanchorRequest {
+                canonical_window: window(&ground, 1, canonical_step),
+                canonical_step,
+                next_reset_seed: reset_seed,
+            };
+
+            let (corrected, _resume) =
+                build_reanchored_buffer(vdf, &request, live_step, capacity).unwrap();
+
+            assert_eq!(corrected.len(), capacity + 1, "must clamp to capacity + 1");
+            assert_eq!(
+                as_hashes(&corrected),
+                ground[(live_step as usize - capacity - 1)..live_step as usize].to_vec(),
+                "clamp keeps the newest capacity + 1 steps, ending at L"
+            );
+        }
+
+        /// An empty canonical window is rejected — there is nothing to anchor onto.
+        #[test]
+        fn rejects_empty_window() {
+            let config = test_config();
+            let request = ReanchorRequest {
+                canonical_window: VecDeque::new(),
+                canonical_step: 10,
+                next_reset_seed: H256::zero(),
+            };
+            assert!(build_reanchored_buffer(&config.vdf, &request, 12, 64).is_err());
         }
     }
 }
