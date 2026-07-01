@@ -361,6 +361,7 @@ impl Inner {
     pub async fn validate_tx_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
+        anchor_expiry_depth: u64,
     ) -> Result<u64, TxIngressError> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
@@ -394,8 +395,7 @@ impl Inner {
 
         // is this anchor too old?
 
-        let min_anchor_height = latest_height
-            .saturating_sub(self.config.consensus.mempool.tx_anchor_expiry_depth as u64);
+        let min_anchor_height = latest_height.saturating_sub(anchor_expiry_depth);
 
         let too_old = anchor_height < min_anchor_height;
 

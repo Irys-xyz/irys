@@ -1,6 +1,7 @@
 use irys_types::DataLedger;
 mod api;
 mod client;
+mod commitment_anchor_window;
 mod external_api;
 mod hardfork_tests;
 mod pricing_endpoint;
