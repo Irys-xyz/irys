@@ -100,10 +100,8 @@ Mempool ingress keeps its existing `is_known_commitment_in_db` check.
   - Branch-safety: a commitment included only on a reorged-out sibling within the reorg window is still includable on the surviving branch (no false-positive finalized rejection).
 - **Handshake:** old vs new `consensus_config_hash` mismatch behaves as expected (documented upgrade).
 
-## Open implementation detail
+## Resolved implementation detail (was open)
 
-The finalized (below-reorg-floor) lookup in Part 2 must be **branch-safe** and must not require walking the full window each validation. Candidate primitives:
-- `IrysCommitments` (permanent, keyed by tx_id) — but it is not pruned on reorg, so presence alone is not branch-safe within the reorg window (handled by the by-hash walk above; below the floor there is no fork, so presence is safe *if* we can confirm the inclusion is below the floor).
-- `IrysCommitmentTxMetadata.included_height` — carries inclusion height but is **cleared on reorg and on migration** (`db_index.rs::clear_commitment_tx_metadata`), so it is not durable post-migration.
+The finalized (below-reorg-floor) lookup in Part 2 must be branch-safe and must not require walking the full window each validation. **Resolved: no new table.** `persist_block` (`block_migration_service.rs:676-682`) already writes `IrysCommitmentTxMetadata.included_height` at migration, and that value is cleared *only* when the including block is orphaned (`persist_metadata`'s reorg phase) — which can only happen above the reorg floor. Below the floor the value is therefore reliable. So the finalized check reuses this existing field via a new helper `canonical_commitment_included_height(tx, txid, max_height)` that mirrors the data-tx `canonical_submit_height` (`database.rs:318`): return the height only if `included_height <= max_height` **and** `MigratedBlockHashes[height]` is present. Callers pass `max_height = block_height - block_tree_depth` and cover the reorg window separately with a by-hash Commitment-ledger ancestry walk — the same split the `canonical_metadata_height` docblock (`database.rs:250-269`) mandates for data txs.
 
-The plan must settle how to establish "included in a canonical block below the reorg floor" — likely a durable canonical `tx_id → included_height` index (not cleared on migration) or a block-index/`MigratedBlockHashes` cross-check analogous to `canonical_block_height_by_hash`. This is a bounded addition, not a new subsystem.
+(The earlier concern that the metadata is "cleared on migration" was incorrect — verified against `persist_block`, which writes both `insert_commitment_tx` and `batch_set_commitment_tx_included_height` and clears nothing.)
