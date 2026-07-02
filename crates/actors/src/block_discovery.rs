@@ -663,47 +663,19 @@ impl BlockDiscoveryServiceInner {
                     });
                 }
             }
-            // Durable replay protection. The per-block commitment snapshot resets
-            // at every epoch boundary, so its "already included" check cannot see
-            // a commitment included in a prior epoch. Reject any commitment whose
-            // tx_id was already included on THIS branch's ancestry (reorg window,
-            // resolved by-hash) or in a finalized block below the reorg floor
-            // (MBH-verified). The two ranges meet at the floor with no gap.
-            //
-            // A commitment-free block has nothing to dedup, so skip the ancestor
-            // walk and the read txn entirely (the common case).
-            if !commitment_txs.is_empty() {
-                let prior_commitment_ids = crate::commitment_dedup::ancestor_commitment_tx_ids(
-                    &block_tree_guard,
-                    &db,
-                    new_block_header,
-                    config.consensus.block_tree_depth,
-                )
-                .map_err(BlockDiscoveryInternalError::DatabaseError)?;
-                // Replay dedup: one read tx covers every finalized-inclusion lookup
-                // (a single MDBX txn instead of one per commitment).
-                let duplicate_commitment = db
-                    .view_eyre(|read_tx| {
-                        for tx in commitment_txs.iter() {
-                            // In-memory reorg-window check first; only pay the DB
-                            // read on a miss.
-                            if prior_commitment_ids.contains(&tx.id())
-                                || irys_database::canonical_commitment_included_height(
-                                    read_tx,
-                                    &tx.id(),
-                                    reorg_floor,
-                                )?
-                                .is_some()
-                            {
-                                return Ok(Some(tx.id()));
-                            }
-                        }
-                        Ok(None)
-                    })
-                    .map_err(BlockDiscoveryInternalError::DatabaseError)?;
-                if let Some(tx_id) = duplicate_commitment {
-                    return Err(BlockDiscoveryError::DuplicateTransaction(tx_id));
-                }
+            // Durable commitment replay protection — see
+            // `commitment_dedup::find_replayed_commitment` for why the snapshot
+            // check alone is insufficient and how the two ranges meet at the floor.
+            if let Some(tx_id) = crate::commitment_dedup::find_replayed_commitment(
+                &block_tree_guard,
+                &db,
+                new_block_header,
+                commitment_txs,
+                config.consensus.block_tree_depth,
+            )
+            .map_err(BlockDiscoveryInternalError::DatabaseError)?
+            {
+                return Err(BlockDiscoveryError::DuplicateTransaction(tx_id));
             }
         }
 
