@@ -197,6 +197,31 @@ pub fn canonical_block_height_by_hash<T: DbTx>(
     }
 }
 
+/// Returns the canonical block header at `height`, verified against
+/// [`MigratedBlockHashes`].
+///
+/// `Ok(None)` when no canonical block is recorded at `height` (MBH has no row).
+/// `Err` when MBH attests a canonical block at `height` but `IrysBlockHeaders`
+/// has no entry for that hash — the two tables disagree, a hard inconsistency.
+pub fn canonical_header_at_height<T: DbTx>(
+    tx: &T,
+    height: u64,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    let Some(canonical_hash) = tx.get::<MigratedBlockHashes>(height)? else {
+        return Ok(None);
+    };
+    // MBH attested a canonical block at this height; a missing header means the
+    // two tables disagree.
+    let header = block_header_by_hash(tx, &canonical_hash, false)?.ok_or_else(|| {
+        eyre::eyre!(
+            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders has no entry for that hash",
+            height,
+            canonical_hash
+        )
+    })?;
+    Ok(Some(header))
+}
+
 /// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
     Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
@@ -395,18 +420,9 @@ pub fn canonical_commitment_included_height<T: DbTx>(
     if height > max_height {
         return Ok(None);
     }
-    let Some(canonical_hash) = tx.get::<MigratedBlockHashes>(height)? else {
+    let Some(canonical_header) = canonical_header_at_height(tx, height)? else {
         return Ok(None);
     };
-    // MBH attested a canonical block at this height; a missing header means the
-    // two tables disagree.
-    let canonical_header = block_header_by_hash(tx, &canonical_hash, false)?.ok_or_else(|| {
-        eyre::eyre!(
-            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders has no entry for that hash",
-            height,
-            canonical_hash
-        )
-    })?;
     // Content check: a stranded hint from an orphaned tip points at a canonical
     // block that does not actually carry this commitment tx — treat it as no
     // canonical inclusion.
@@ -443,15 +459,9 @@ pub fn canonical_commitment_included_height<T: DbTx>(
 /// rather than silently skipping.
 pub fn backfill_genesis_commitment_included_height(db: &DatabaseProvider) -> eyre::Result<()> {
     db.update_eyre(|tx| {
-        let genesis_hash = tx.get::<MigratedBlockHashes>(0)?.ok_or_else(|| {
-            eyre::eyre!("genesis commitment backfill: MigratedBlockHashes has no row at height 0")
-        })?;
-        let genesis_header = block_header_by_hash(tx, &genesis_hash, false)?.ok_or_else(|| {
-            eyre::eyre!(
-                "genesis commitment backfill: MigratedBlockHashes[0] = {} but IrysBlockHeaders has no entry for that hash",
-                genesis_hash
-            )
-        })?;
+        let Some(genesis_header) = canonical_header_at_height(tx, 0)? else {
+            eyre::bail!("genesis commitment backfill: MigratedBlockHashes has no row at height 0")
+        };
         let commitment_ids = genesis_header.commitment_tx_ids();
         if !commitment_ids.is_empty() {
             crate::db_index::batch_set_commitment_tx_included_height(tx, commitment_ids.iter(), 0)?;
