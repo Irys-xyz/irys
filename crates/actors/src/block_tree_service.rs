@@ -1978,6 +1978,7 @@ mod tests {
                 block_index_guard.clone(),
                 None,
                 config.consensus.chunk_size,
+                config.consensus.epoch.num_blocks_in_epoch,
                 cache.clone(),
                 chunk_migration_sender,
             );

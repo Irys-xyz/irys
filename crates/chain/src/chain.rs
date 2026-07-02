@@ -1637,6 +1637,7 @@ impl IrysNode {
             block_index_guard.clone(),
             Some(supply_state.clone()),
             config.consensus.chunk_size,
+            config.consensus.epoch.num_blocks_in_epoch,
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
         );
