@@ -1,4 +1,5 @@
 pub mod anchor_validation;
+pub(crate) mod block_ancestry;
 pub mod block_discovery;
 pub mod block_migration_service;
 pub mod block_producer;
@@ -8,6 +9,7 @@ pub mod block_validation;
 pub mod cache_service;
 pub mod chunk_ingress_service;
 pub mod chunk_migration_service;
+pub mod commitment_dedup;
 pub mod commitment_refunds;
 pub mod data_sync_service;
 pub mod data_tx_validation;

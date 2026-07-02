@@ -1,6 +1,7 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
+    block_ancestry::walk_ancestors_tree_then_db,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
@@ -52,6 +53,7 @@ use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ops::ControlFlow,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -979,6 +981,15 @@ pub enum ValidationError {
         status: CommitmentSnapshotStatus,
     },
 
+    /// A commitment tx_id was already included in a canonical ancestor (reorg
+    /// window, resolved by-hash) or in a finalized block below the reorg floor
+    /// (MBH-verified). The per-block commitment snapshot resets at each epoch
+    /// boundary and cannot catch such a replay, so this is a durable,
+    /// DB-backed reject. Consensus rejection: the block is invalid and not
+    /// re-requestable.
+    #[error("Commitment {tx_id} is a replay of an already-included commitment")]
+    DuplicateCommitmentTransaction { tx_id: H256 },
+
     /// Unpledge commitment targets partition not owned by signer
     #[error(
         "Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}"
@@ -1012,6 +1023,18 @@ pub enum ValidationError {
     /// [`Self::ParentCommitmentSnapshotMissing`].
     #[error("Parent EMA snapshot missing for block {block_hash}")]
     ParentEmaSnapshotMissing { block_hash: H256 },
+
+    /// A DB read backing the durable commitment-replay dedup failed
+    /// (ancestor tx_id collection or the finalized-inclusion lookup).
+    ///
+    /// Classified as internal for the same reason as
+    /// [`Self::ParentCommitmentSnapshotMissing`]: a transient local I/O fault
+    /// is not peer-attributable. The block's validity is unknown, so it parks
+    /// for retry rather than being discarded as invalid — a false reject here
+    /// would be a consensus/liveness hazard. A genuine duplicate is a separate
+    /// path and still reports [`Self::DuplicateCommitmentTransaction`].
+    #[error("Commitment replay dedup lookup failed: {0}")]
+    CommitmentDedupLookupFailed(String),
 
     /// Parent block not found in block tree at validation entry (looked up
     /// during seed-data validation, before the parent-wait stage).
@@ -1093,6 +1116,7 @@ impl ValidationError {
             Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
+            | Self::CommitmentDedupLookupFailed(_)
             | Self::ParentBlockMissing { .. } => ErrorClass::SoftInternal,
             // Local `ExecutionPayloadCache` tore down the wait receiver
             // (LRU eviction under sync load, or explicit cache removal).
@@ -1116,6 +1140,7 @@ impl ValidationError {
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
             | Self::CommitmentSnapshotRejected { .. }
+            | Self::DuplicateCommitmentTransaction { .. }
             | Self::UnpledgePartitionNotOwned { .. }
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
@@ -1162,6 +1187,7 @@ impl ValidationError {
             | Self::ParentCommitmentSnapshotMissing { .. }
             | Self::ParentEpochSnapshotMissing { .. }
             | Self::ParentEmaSnapshotMissing { .. }
+            | Self::CommitmentDedupLookupFailed(_)
             | Self::RecallRangeStepsUnavailable(_) => "internal_error",
             // Per-variant snake_case tag — pre-validation may surface
             // node-fault, soft-internal, or peer-attributable rejections;
@@ -1179,6 +1205,7 @@ impl ValidationError {
             | Self::CommitmentTypeNotAllowed { .. }
             | Self::CommitmentOrderingFailed(_)
             | Self::CommitmentSnapshotRejected { .. }
+            | Self::DuplicateCommitmentTransaction { .. }
             | Self::UnpledgePartitionNotOwned { .. }
             | Self::EpochCommitmentMismatch { .. }
             | Self::EpochExtraCommitment { .. }
@@ -1393,6 +1420,32 @@ mod recall_range_error_tests {
         assert!(!err.is_node_fault());
         assert_eq!(err.metric_label(), "invalid");
     }
+
+    // A transient DB read fault backing the commitment-replay dedup is a
+    // LOCAL failure, not peer-attributable. It must park the block for retry
+    // (SoftInternal), never discard it as invalid (Consensus) — a false
+    // reject would be a liveness/consensus hazard. A genuine duplicate is a
+    // separate path and remains `DuplicateCommitmentTransaction` (Consensus).
+    #[test]
+    fn validation_error_commitment_dedup_lookup_failed_is_soft_internal() {
+        let err = ValidationError::CommitmentDedupLookupFailed("mdbx read".into());
+        assert_eq!(err.classify(), ErrorClass::SoftInternal);
+        assert!(err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "internal_error");
+        assert_eq!(err.metric_reason(), "commitment_dedup_lookup_failed");
+    }
+
+    #[test]
+    fn validation_error_duplicate_commitment_is_consensus() {
+        let err = ValidationError::DuplicateCommitmentTransaction {
+            tx_id: H256::zero(),
+        };
+        assert_eq!(err.classify(), ErrorClass::Consensus);
+        assert!(!err.is_internal_failure());
+        assert!(!err.is_node_fault());
+        assert_eq!(err.metric_label(), "invalid");
+    }
 }
 
 impl ValidationError {
@@ -1419,6 +1472,7 @@ impl ValidationError {
             Self::CommitmentTypeNotAllowed { .. } => "commitment_type_not_allowed",
             Self::CommitmentOrderingFailed(_) => "commitment_ordering_failed",
             Self::CommitmentSnapshotRejected { .. } => "commitment_snapshot_rejected",
+            Self::DuplicateCommitmentTransaction { .. } => "duplicate_commitment_transaction",
             Self::UnpledgePartitionNotOwned { .. } => "unpledge_partition_not_owned",
             Self::ParentCommitmentSnapshotMissing { .. } => "parent_commitment_snapshot_missing",
             Self::ParentEpochSnapshotMissing { .. } => "parent_epoch_snapshot_missing",
@@ -1432,6 +1486,7 @@ impl ValidationError {
             Self::ShadowTxNodeFault(_) => "shadow_tx_node_fault",
             Self::ExecutionPayloadCacheEvicted { .. } => "execution_payload_cache_evicted",
             Self::ParentEmaSnapshotMissing { .. } => "parent_ema_snapshot_missing",
+            Self::CommitmentDedupLookupFailed(_) => "commitment_dedup_lookup_failed",
         }
     }
 
@@ -4805,6 +4860,7 @@ pub async fn commitment_txs_are_valid(
     config: &Config,
     block: &IrysBlockHeader,
     block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
     commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
     // Validate commitment transaction versions against hardfork rules
@@ -4935,6 +4991,36 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
+    // Nothing to dedup, order, or snapshot-simulate for a commitment-free block:
+    // the dedup walk + DB read and the snapshot loop below are all no-ops on an
+    // empty set (and the tail already returns Ok here). Skip the ancestor walk
+    // and the read txn so the overwhelmingly common commitment-free block never
+    // pays for them.
+    if commitment_txs.is_empty() {
+        return Ok(());
+    }
+
+    // Durable commitment replay protection — see
+    // `commitment_dedup::find_replayed_commitment` for why the snapshot check
+    // below is insufficient and how the two ranges meet at the floor.
+    //
+    // Full validation is the authoritative consensus stage where every other
+    // commitment rule lives; the prevalidation copy in block_discovery exists
+    // only for early peer-attributable rejection and gossip hygiene (every block
+    // path — producer and p2p sync — runs prevalidation first). Both invoke this
+    // same shared mechanism, so the two checks cannot drift.
+    if let Some(tx_id) = crate::commitment_dedup::find_replayed_commitment(
+        block_tree_guard,
+        db,
+        block,
+        commitment_txs,
+        config.consensus.block_tree_depth,
+    )
+    .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?
+    {
+        return Err(ValidationError::DuplicateCommitmentTransaction { tx_id });
+    }
+
     // Regular block validation: ensure commitments align with snapshot state
     let mut simulated_snapshot = CommitmentSnapshot {
         commitments: parent_commitment_snapshot.commitments.clone(),
@@ -4962,10 +5048,6 @@ pub async fn commitment_txs_are_valid(
                 status,
             });
         }
-    }
-
-    if commitment_txs.is_empty() {
-        return Ok(());
     }
 
     // Sort to get expected order
@@ -6164,64 +6246,32 @@ async fn get_previous_tx_inclusions(
         .block_tree
         .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
-    let block_tree_guard = block_tree_guard.read();
 
     let walk_min_height = block_under_validation.height.saturating_sub(walk_depth);
 
-    let mut block = (
+    walk_ancestors_tree_then_db(
+        &block_tree_guard,
+        db,
         block_under_validation.block_hash,
-        block_under_validation.height,
-    );
-    while block.1 >= walk_min_height {
-        // Stop if we've reached the genesis block
-        if block.1 == 0 {
-            break;
-        }
-
-        let mut update_states = |header: &IrysBlockHeader| {
-            if header.block_hash == block_under_validation.block_hash {
-                // don't process the states for a block we're putting under full validation
-                return Ok(());
+        walk_min_height,
+        |header| {
+            if header.block_hash != block_under_validation.block_hash {
+                process_block_ledgers_with_states(
+                    &header.data_ledgers,
+                    header.block_hash,
+                    block_under_validation.block_hash,
+                    tx_ids,
+                )?;
             }
-            process_block_ledgers_with_states(
-                &header.data_ledgers,
-                header.block_hash,
-                block_under_validation.block_hash,
-                tx_ids,
-            )
-        };
-        // Move to the parent block and continue the traversal backwards
-        block = match block_tree_guard.get_block(&block.0) {
-            Some(header) => {
-                update_states(header)?;
-                (header.previous_block_hash, header.height.saturating_sub(1))
-            }
-            None => {
-                let header = db
-                    .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "db.view failed fetching parent block {}: {e}",
-                            &block.0
-                        ))
-                    })?
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "block_header_by_hash failed for {}: {e}",
-                            &block.0
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "parent block {} not found in database",
-                            &block.0
-                        ))
-                    })?;
-                update_states(&header)?;
-                (header.previous_block_hash, header.height.saturating_sub(1))
-            }
-        };
-    }
+            Ok(ControlFlow::Continue(()))
+        },
+    )
+    .map_err(|e| {
+        PreValidationError::BlockBoundsLookupError(format!(
+            "ancestor walk failed for block {}: {e}",
+            block_under_validation.block_hash
+        ))
+    })?;
 
     Ok(())
 }

@@ -457,10 +457,28 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
-        let min_tx_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+        // Per-item anchor windows: an item's anchor must resolve to a canonical
+        // block no older than its floor. Data txs get the shortest window;
+        // commitments a longer one (custody workflows need time to broadcast a
+        // signed commitment, and it may exceed `block_tree_depth`); ingress proofs
+        // their own (often longer) window.
+        let min_tx_anchor_height =
+            block_height.saturating_sub(mempool_config.tx_anchor_expiry_depth as u64);
+        let min_commitment_anchor_height =
+            block_height.saturating_sub(mempool_config.commitment_anchor_expiry_depth.into());
         let min_ingress_proof_anchor_height =
             block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
+
+        // The eager anchor map (`valid_anchor_block_heights`, built below) only
+        // needs to cover the reorg window branch-correctly (by-hash walk + NC-0042
+        // index handoff). Below the reorg floor the chain is finalized, so an older
+        // anchor is resolved on demand in `anchor_valid_for` via an MBH-verified
+        // lookup — we never pre-walk the whole (possibly ~commitment window). Anchors
+        // reach the map down to `reorg_floor`; `map_floor` is the height below which
+        // the map ends and the fallback takes over (it equals `reorg_floor` in
+        // production, where `tx_anchor_expiry_depth <= block_tree_depth`).
+        let reorg_floor = block_height.saturating_sub(config.consensus.block_tree_depth);
+        let map_floor = reorg_floor.min(min_tx_anchor_height);
 
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
@@ -469,92 +487,88 @@ impl BlockDiscoveryServiceInner {
         // by extracting out just the metadata we need (height, hash, data ledger tx ids)
         let mut parent_block = previous_block_header.clone();
 
-        // set of valid anchor block hashes for TRANSACTIONS
-        // computed from the block tree & database
-        // short vecs are probably faster than HashSet
-        let mut valid_tx_anchor_blocks = vec![];
+        // Map of valid anchor block hash -> height, computed from the block tree &
+        // database. Each item type range-checks the resolved height against its
+        // own minimum-anchor floor (submit: tx window; ingress: ingress window;
+        // commitment: commitment window). The by-hash walk populates the tx
+        // window; the block-index pass below extends it down to `reorg_floor`.
+        // Anchors older than the floor are finalized and resolved on demand.
+        // Walk this block's ancestry over the tx-anchor window, populating the
+        // branch-correct anchor map. This walk always runs: the map is needed by
+        // commitment and ingress anchors too, not just submit txs. Along the way,
+        // if the block carries submit txs, reject any already included in an
+        // ancestor (submit-ledger duplicate detection within the tx window).
+        // Sized for the reorg window plus a small margin (the walk covers the
+        // tx-anchor window, the index pass extends down to `reorg_floor`), to
+        // avoid rehash churn as anchors are inserted.
+        let mut valid_anchor_block_heights: HashMap<H256, u64> =
+            HashMap::with_capacity(config.consensus.block_tree_depth as usize + 8);
         let bt_finished_height = {
-            // block for block_tree
             // explicit drop(block_tree) isn't good enough for the compiler
             let block_tree = block_tree_guard.read();
-            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-                while parent_block.height >= min_tx_anchor_height {
-                    // Check to see if any data txids appeared in prior blocks
+            while parent_block.height >= min_tx_anchor_height {
+                if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
                     let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
-
-                    // Compare each ledger type between current and parent blocks
                     if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
-                        // Check for intersection between current and parent txids for this ledger
                         for txid in incoming_data_tx_ids {
                             if parent_txids.contains(txid) {
                                 return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
                             }
                         }
                     }
-                    valid_tx_anchor_blocks.push(parent_block.block_hash);
-
-                    if parent_block.height == 0 {
-                        break;
-                    }
-
-                    // Continue the loop - get the next parent block from the block tree
-                    let previous_block_header = match block_tree
-                        .get_block(&parent_block.previous_block_hash)
-                    {
-                        Some(header) => header.clone(),
-                        None =>
-                        // fall back to the database
-                        {
-                            match db.view_eyre(|tx| {
-                                block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                            }) {
-                                Ok(Some(header)) => header,
-                                Ok(None) => {
-                                    return Err(BlockDiscoveryError::PreviousBlockNotFound {
-                                        previous_block_hash: parent_block.previous_block_hash,
-                                    });
-                                }
-                                Err(e) => {
-                                    return Err(BlockDiscoveryError::InternalError(
-                                        BlockDiscoveryInternalError::DatabaseError(e),
-                                    ));
-                                }
-                            }
-                        }
-                    };
-
-                    parent_block = previous_block_header; // Move instead of borrow
                 }
+                valid_anchor_block_heights.insert(parent_block.block_hash, parent_block.height);
+
+                if parent_block.height == 0 {
+                    break;
+                }
+
+                // Move to the next parent (block tree, falling back to the database).
+                parent_block = match block_tree.get_block(&parent_block.previous_block_hash) {
+                    Some(header) => header.clone(),
+                    None => match db.view_eyre(|tx| {
+                        block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                    }) {
+                        Ok(Some(header)) => header,
+                        Ok(None) => {
+                            return Err(BlockDiscoveryError::PreviousBlockNotFound {
+                                previous_block_hash: parent_block.previous_block_hash,
+                            });
+                        }
+                        Err(e) => {
+                            return Err(BlockDiscoveryError::InternalError(
+                                BlockDiscoveryInternalError::DatabaseError(e),
+                            ));
+                        }
+                    },
+                };
             }
             parent_block.height
         };
 
-        let mut valid_ingress_anchor_blocks = valid_tx_anchor_blocks.clone();
-
-        // get any remaining valid_ingress_anchor_block hashes from the block index
+        // get any remaining valid anchor block hashes from the block index
         // we do not need the full block headers, so we use the block index
         {
             // NC-0042: the deepest by-hash ancestor we reached above
             // (`parent_block`, at `bt_finished_height`) is on THIS block's chain.
-            // Push its hash BY-HASH — it sits ABOVE the index handoff below, so it
+            // Insert its hash BY-HASH — it sits ABOVE the index handoff below, so it
             // must NOT be taken from the (reorg-mutable) block index, which is only
             // branch-invariant below the reorg floor. Everything strictly deeper is
             // read from the index, anchored to this by-hash boundary by the handoff
             // check at `last_bt_safe_parent_height`: a matching hash there makes the
             // whole linear index suffix branch-correct (or the assertion fires). This
-            // preserves the inclusive `[min_ingress_proof_anchor_height,
-            // bt_finished_height]` anchor window (matching the mempool) while
-            // resolving the boundary branch-correctly instead of from the local
-            // canonical index.
-            if bt_finished_height >= min_ingress_proof_anchor_height {
-                valid_ingress_anchor_blocks.push(parent_block.block_hash);
+            // covers the reorg window `[reorg_floor, bt_finished_height]`
+            // branch-correctly; anchors older than the floor are resolved on demand
+            // (finalized) rather than pre-walked here.
+            if bt_finished_height >= reorg_floor {
+                valid_anchor_block_heights.insert(parent_block.block_hash, bt_finished_height);
             }
 
-            // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
-            let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
+            // how many blocks do we need the block index to get to `reorg_floor`?
+            let remaining = bt_finished_height.saturating_sub(reorg_floor);
             debug!(
                 target = "preval-anchor",
-                "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}",
+                "reorg_floor {reorg_floor} (ingress {min_ingress_proof_anchor_height} commitment {min_commitment_anchor_height}) block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}",
                 &new_block_header.height,
                 &new_block_header.block_hash
             );
@@ -567,13 +581,16 @@ impl BlockDiscoveryServiceInner {
             // EXCLUSIVE of `bt_finished_height`: that boundary is supplied by-hash
             // above (the index entry there is above the handoff and unverified). The
             // top of this range is `last_bt_safe_parent_height`, where the handoff
-            // check ties the index to the by-hash chain.
-            for height in min_ingress_proof_anchor_height..bt_finished_height {
+            // check ties the index to the by-hash chain. The lower bound is the
+            // reorg floor — the eager map only needs branch-correct coverage of the
+            // reorg window; anchors below the floor are finalized and resolved on
+            // demand in `anchor_valid_for`.
+            for height in reorg_floor..bt_finished_height {
                 // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
                 let block_index_item =
                     block_index
                         .get_item(height)
-                        .unwrap_or_else(|| panic!("Internal critical assertion failed: Unable to get entry for height {height} from block index\nDEBUG: min ingress proof anchor height {min_ingress_proof_anchor_height} validating block: height {}, hash {} - block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash));
+                        .unwrap_or_else(|| panic!("Internal critical assertion failed: Unable to get entry for height {height} from block index\nDEBUG: reorg_floor {reorg_floor} validating block: height {}, hash {} - block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash));
 
                 if last_bt_safe_parent_height.is_some_and(|s| s == height)
                     && block_index_item.block_hash != parent_block.previous_block_hash
@@ -587,12 +604,12 @@ impl BlockDiscoveryServiceInner {
                         &block_index_item.block_hash
                     )
                 }
-                valid_ingress_anchor_blocks.push(block_index_item.block_hash);
+                valid_anchor_block_heights.insert(block_index_item.block_hash, height);
             }
         }
         trace!(
-            "Valid ingress proof anchors for {}: {:?}",
-            &new_block_header.block_hash, &valid_ingress_anchor_blocks
+            "Valid anchor blocks for {}: {:?}",
+            &new_block_header.block_hash, &valid_anchor_block_heights
         );
 
         // validate anchors for submit, publish, commitments, and ingress proofs
@@ -600,9 +617,42 @@ impl BlockDiscoveryServiceInner {
         // all txs (commitment, data) use the same anchor
         // ingress proofs have a different, oftentimes longer, anchor
 
-        // check anchors for submit ledger
+        // The eager map covers the reorg window branch-correctly down to
+        // `map_floor`. An anchor found there is valid iff it is no older than the
+        // item's window floor. An anchor NOT in the map is only valid if it
+        // resolves (MBH-verified) to a height strictly below `map_floor` that is
+        // still within the item's window. That MBH lookup is branch-correct without
+        // a by-hash walk: `validate_reorg_within_cache_window` forbids any
+        // node-retained validatable fork from diverging more than `block_tree_depth`
+        // below the tip, so at any height below `reorg_floor` the block-under-
+        // validation's ancestor is necessarily the node-canonical block there —
+        // hence `MBH[h] == anchor` implies the anchor is on THIS block's ancestry.
+        // (`map_floor` may itself sit slightly above the node's own finality floor
+        // during sync; the cache-window bound, not `map_floor`'s position, is what
+        // makes the below-`map_floor` region unforkable.) A not-in-map anchor
+        // at/above `map_floor` is a sibling-branch block and is rejected. This
+        // resolves deep (finalized) anchors on demand instead of pre-walking the
+        // whole (possibly ~commitment_anchor_expiry_depth) window every block.
+        // One read txn shared across every on-demand anchor resolution below.
+        // Not-in-map is the EXPECTED case for commitment anchors (their window
+        // can exceed `block_tree_depth`), so a fresh txn per miss would open a new
+        // MDBX read transaction on the hot path for the common case.
+        let ro_tx = db
+            .tx()
+            .map_err(|e| BlockDiscoveryInternalError::DatabaseError(e.into()))?;
+        let anchor_valid_for =
+            |anchor: &H256, min_height: u64| -> Result<bool, BlockDiscoveryInternalError> {
+                if let Some(h) = valid_anchor_block_heights.get(anchor) {
+                    return Ok(*h >= min_height);
+                }
+                let resolved = irys_database::canonical_block_height_by_hash(&ro_tx, anchor)
+                    .map_err(BlockDiscoveryInternalError::DatabaseError)?;
+                Ok(resolved.is_some_and(|h| h >= min_height && h < map_floor))
+            };
+
+        // check anchors for submit ledger (bounded by the tx anchor window)
         for tx in submit_txs.iter() {
-            if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+            if !anchor_valid_for(&tx.anchor, min_tx_anchor_height)? {
                 return Err(BlockDiscoveryError::InvalidAnchor {
                     item_type: AnchorItemType::DataTransaction { tx_id: tx.id },
                     anchor: tx.anchor,
@@ -613,13 +663,29 @@ impl BlockDiscoveryServiceInner {
         // for commitments, only validate if we're not an epoch block
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
+            // Anchor validity (in-memory): commitments accept anchors over the
+            // (longer) commitment window.
             for tx in commitment_txs.iter() {
-                if !valid_tx_anchor_blocks.contains(&tx.anchor()) {
+                if !anchor_valid_for(&tx.anchor(), min_commitment_anchor_height)? {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id() },
                         anchor: tx.anchor(),
                     });
                 }
+            }
+            // Durable commitment replay protection — see
+            // `commitment_dedup::find_replayed_commitment` for why the snapshot
+            // check alone is insufficient and how the two ranges meet at the floor.
+            if let Some(tx_id) = crate::commitment_dedup::find_replayed_commitment(
+                &block_tree_guard,
+                &db,
+                new_block_header,
+                commitment_txs,
+                config.consensus.block_tree_depth,
+            )
+            .map_err(BlockDiscoveryInternalError::DatabaseError)?
+            {
+                return Err(BlockDiscoveryError::DuplicateTransaction(tx_id));
             }
         }
 
@@ -628,12 +694,12 @@ impl BlockDiscoveryServiceInner {
             let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
                 BlockDiscoveryError::BlockValidationError(PreValidationError::IngressProofsMissing)
             })?;
-            // Validate the anchors
+            // Validate the anchors (bounded by the ingress-proof window)
             for proof in tx_proofs.iter() {
-                if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                if !anchor_valid_for(&proof.anchor, min_ingress_proof_anchor_height)? {
                     info!(
-                        "valid ingress anchor blocks: {:?},  bt_finished_height {} min_ingress_proof_anchor_height {} anchor {}, ID {}",
-                        &valid_ingress_anchor_blocks,
+                        "valid anchor blocks: {:?},  bt_finished_height {} min_ingress_proof_anchor_height {} anchor {}, ID {}",
+                        &valid_anchor_block_heights,
                         &bt_finished_height,
                         &min_ingress_proof_anchor_height,
                         &proof.anchor,

@@ -392,10 +392,11 @@ impl Inner {
             }
         };
 
-        // is this anchor too old?
-
-        let min_anchor_height = latest_height
-            .saturating_sub(self.config.consensus.mempool.tx_anchor_expiry_depth as u64);
+        // is this anchor too old? The applicable window depends on the tx kind
+        // (data vs commitment) — the tx itself reports it, so no call site can
+        // pass the wrong depth.
+        let anchor_expiry_depth = tx.anchor_expiry_depth(&self.config.consensus);
+        let min_anchor_height = latest_height.saturating_sub(anchor_expiry_depth);
 
         let too_old = anchor_height < min_anchor_height;
 

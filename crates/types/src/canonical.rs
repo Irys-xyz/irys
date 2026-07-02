@@ -772,6 +772,7 @@ mod tests {
         assert!(v.get("mempool").is_some());
         assert!(v["mempool"].get("maxDataTxsPerBlock").is_some());
         assert!(v["mempool"].get("txAnchorExpiryDepth").is_some());
+        assert!(v["mempool"].get("commitmentAnchorExpiryDepth").is_some());
     }
 
     #[test]

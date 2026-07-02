@@ -718,7 +718,8 @@ async fn test_ingress_proof_anchor_edge_case(
     })?;
 
     // Now mine a block. If the bug exists, this will fail during block discovery
-    // because the edge_case_anchor_height is not in valid_ingress_anchor_blocks
+    // because the edge_case_anchor_height would be excluded from the set of valid
+    // ingress anchor blocks (the anchor-height map built in block_discovery)
 
     info!("Mining block at height {}...", current_height + 1);
     let mine_result = genesis_node.mine_block().await;

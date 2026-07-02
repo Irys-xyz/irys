@@ -322,11 +322,12 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
-            + self.config.consensus.block_migration_depth
-            + 5;
+        // Window depends on the tx kind (data vs commitment); the tx reports it.
+        let anchor_expiry_depth = tx.anchor_expiry_depth(&self.config.consensus);
+        let effective_expiry_depth =
+            anchor_expiry_depth + self.config.consensus.block_migration_depth as u64 + 5;
 
-        let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth as u64);
+        let resolved_expiry_depth = current_height.saturating_sub(effective_expiry_depth);
 
         let should_prune = anchor_height < resolved_expiry_depth;
         debug!(
@@ -364,6 +365,7 @@ impl Inner {
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
         let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));

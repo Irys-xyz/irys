@@ -5,6 +5,7 @@ mod cascade_ledger_shape;
 mod cascade_submit_expiry_promotion;
 mod cascade_term_balance;
 mod cascade_term_expiry;
+mod commitment_replay;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;
 mod ingress_proof_validation;

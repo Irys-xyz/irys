@@ -1,4 +1,6 @@
-use irys_types::{ConsensusConfig, IrysBlockHeader};
+use irys_types::{
+    ConsensusConfig, H256, H256List, IrysBlockHeader, SystemLedger, SystemTransactionLedger,
+};
 
 /// Extension trait for test-only signing helpers on `IrysBlockHeader`.
 pub trait IrysBlockHeaderTestExt {
@@ -31,5 +33,21 @@ impl IrysBlockHeaderTestExt for IrysBlockHeader {
 pub fn new_mock_signed_header() -> IrysBlockHeader {
     let mut header = IrysBlockHeader::new_mock_header();
     header.test_sign();
+    header
+}
+
+/// Builds an unsigned mock header at `height` whose commitment ledger carries
+/// `commitment_tx_ids` (empty is allowed). `block_hash` is randomized (mock
+/// headers default to zero, which would collide) and `poa.chunk` is defaulted.
+/// Callers that need a signed header layer `test_sign()` on top.
+pub fn mock_header_with_commitments(height: u64, commitment_tx_ids: Vec<H256>) -> IrysBlockHeader {
+    let mut header = IrysBlockHeader::new_mock_header();
+    header.height = height;
+    header.block_hash = H256::random();
+    header.poa.chunk = Some(Default::default());
+    header.system_ledgers = vec![SystemTransactionLedger {
+        ledger_id: SystemLedger::Commitment as u32,
+        tx_ids: H256List(commitment_tx_ids),
+    }];
     header
 }
