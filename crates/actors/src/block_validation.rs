@@ -4998,45 +4998,24 @@ pub async fn commitment_txs_are_valid(
         return Ok(());
     }
 
-    // Durable replay protection. The per-block commitment snapshot resets at
-    // every epoch boundary, so the `add_commitment` check below cannot see a
-    // commitment included in a prior epoch. Reject any commitment whose tx_id
-    // was already included on THIS branch's ancestry (reorg window, resolved
-    // by-hash) or in a finalized block below the reorg floor (MBH-verified).
-    // The two ranges meet at the floor with no gap. This mirrors the
-    // prevalidation reject in block_discovery; full validation reaches here via
-    // `BlockPreValidated`, which bypasses prevalidation entirely.
-    let block_tree_depth = config.consensus.block_tree_depth;
-    let prior_commitment_ids = crate::commitment_dedup::ancestor_commitment_tx_ids(
+    // Durable commitment replay protection — see
+    // `commitment_dedup::find_replayed_commitment` for why the snapshot check
+    // below is insufficient and how the two ranges meet at the floor.
+    //
+    // Full validation is the authoritative consensus stage where every other
+    // commitment rule lives; the prevalidation copy in block_discovery exists
+    // only for early peer-attributable rejection and gossip hygiene (every block
+    // path — producer and p2p sync — runs prevalidation first). Both invoke this
+    // same shared mechanism, so the two checks cannot drift.
+    if let Some(tx_id) = crate::commitment_dedup::find_replayed_commitment(
         block_tree_guard,
         db,
         block,
-        block_tree_depth,
+        commitment_txs,
+        config.consensus.block_tree_depth,
     )
-    .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?;
-    let finalized_floor = block.height.saturating_sub(block_tree_depth);
-    // Replay dedup: one read tx covers every finalized-inclusion lookup (a
-    // single MDBX txn instead of one per commitment).
-    let duplicate_commitment = db
-        .view_eyre(|read_tx| {
-            for tx in commitment_txs {
-                // In-memory reorg-window check first; only pay the DB read on a
-                // miss.
-                if prior_commitment_ids.contains(&tx.id())
-                    || irys_database::canonical_commitment_included_height(
-                        read_tx,
-                        &tx.id(),
-                        finalized_floor,
-                    )?
-                    .is_some()
-                {
-                    return Ok(Some(tx.id()));
-                }
-            }
-            Ok(None)
-        })
-        .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?;
-    if let Some(tx_id) = duplicate_commitment {
+    .map_err(|e| ValidationError::CommitmentDedupLookupFailed(e.to_string()))?
+    {
         return Err(ValidationError::DuplicateCommitmentTransaction { tx_id });
     }
 

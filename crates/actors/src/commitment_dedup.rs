@@ -1,15 +1,87 @@
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
+use irys_database::{
+    block_header_by_hash, canonical_commitment_included_height, db::IrysDatabaseExt as _,
+};
 use irys_domain::BlockTreeReadGuard;
-use irys_types::{DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::{CommitmentTransaction, DatabaseProvider, H256, IrysBlockHeader};
 use std::collections::HashSet;
+
+/// Returns the tx_id of the first commitment in `commitment_txs` that is a
+/// replay of one already canonically included, or `Ok(None)` if none are.
+///
+/// WHY this exists: the per-block commitment snapshot resets at every epoch
+/// boundary, so its "already included" check cannot see a commitment that was
+/// included in a PRIOR epoch. Without a durable check a miner could re-include
+/// the same commitment in a later epoch.
+///
+/// Two-range contract, meeting at `floor = height - block_tree_depth` with no
+/// gap:
+///   - Reorg window `[floor, height)`: resolved by-hash along THIS block's own
+///     ancestry (block tree, DB fallback), so a reorged-out sibling's inclusion
+///     never counts. See [`ancestor_commitment_tx_ids`].
+///   - Below `floor`: the chain is finalized, so a content-verified lookup
+///     ([`canonical_commitment_included_height`], capped at `floor`) is
+///     branch-invariant there.
+///
+/// The in-memory reorg-window set is checked before the DB lookup, so a
+/// commitment-free branch or an in-window hit never pays for a finalized read.
+/// Iteration order is preserved: the first replayed tx_id in `commitment_txs`
+/// is the one returned.
+///
+/// Fails closed (propagates `Err`) on any lookup inconsistency; callers map the
+/// error to a park/retry path rather than accepting or rejecting the block.
+pub fn find_replayed_commitment(
+    block_tree: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    block_under_validation: &IrysBlockHeader,
+    commitment_txs: &[CommitmentTransaction],
+    block_tree_depth: u64,
+) -> eyre::Result<Option<H256>> {
+    // A commitment-free block has nothing to dedup: skip the ancestor walk and
+    // the read txn entirely (the common case).
+    if commitment_txs.is_empty() {
+        return Ok(None);
+    }
+
+    let prior_ids =
+        ancestor_commitment_tx_ids(block_tree, db, block_under_validation, block_tree_depth)?;
+    let floor = block_under_validation
+        .height
+        .saturating_sub(block_tree_depth);
+
+    // One read txn covers every finalized-inclusion lookup (a single MDBX txn
+    // instead of one per commitment). The walk's own DB descent (Phase 2 below)
+    // runs in a separate txn to keep `ancestor_commitment_tx_ids` self-contained
+    // and directly testable; merging the two would force threading a `tx` param
+    // through the walk, breaking that seam.
+    db.view_eyre(|read_tx| {
+        for tx in commitment_txs {
+            // In-memory reorg-window check first; only pay the DB read on a miss.
+            if prior_ids.contains(&tx.id())
+                || canonical_commitment_included_height(read_tx, &tx.id(), floor)?.is_some()
+            {
+                return Ok(Some(tx.id()));
+            }
+        }
+        Ok(None)
+    })
+}
 
 /// Commitment tx_ids included in `block_under_validation`'s ancestors within
 /// `[height - walk_depth, height)`, resolved by-hash (block tree, DB fallback).
 ///
 /// Branch-correct: only walks THIS block's own ancestry, so it never counts a
-/// reorged-out sibling. Callers use it for the reorg window (`walk_depth =
-/// block_tree_depth`) and cover finalized inclusions below the floor via
-/// `canonical_commitment_included_height`.
+/// reorged-out sibling.
+///
+/// Two-phase to avoid cloning full headers (up to ~`block_tree_depth` of them,
+/// each carrying a ~256KB PoA chunk) and to avoid holding the block-tree read
+/// guard across DB I/O. Soundness of the split: the block tree holds a
+/// contiguous recent window, so once the parent-walk falls out of the tree it
+/// never re-enters (a migrated block's ancestors are all migrated too).
+/// Therefore:
+///   - Phase 1 walks under ONE tree read guard, borrowing each header (no
+///     clone) while ancestors are in the tree, then drops the guard.
+///   - Phase 2 continues the descent in ONE DB read txn via
+///     `block_header_by_hash`.
 ///
 /// Fails closed: an in-window ancestor missing from BOTH the block tree and the
 /// DB is a local inconsistency (every ancestor of a validatable block was
@@ -18,7 +90,7 @@ use std::collections::HashSet;
 /// point slip past both the by-hash set and the finalized lookup. Callers map
 /// the error to a SoftInternal-park path (don't accept or reject — retry). The
 /// clean stops (dropped below `min_height`, reached genesis) return normally.
-pub fn ancestor_commitment_tx_ids(
+pub(crate) fn ancestor_commitment_tx_ids(
     block_tree: &BlockTreeReadGuard,
     db: &DatabaseProvider,
     block_under_validation: &IrysBlockHeader,
@@ -28,31 +100,52 @@ pub fn ancestor_commitment_tx_ids(
     let block_height = block_under_validation.height;
     let min_height = block_height.saturating_sub(walk_depth);
 
-    let guard = block_tree.read();
+    // Phase 1: walk parents while they are in the block tree, borrowing each
+    // header (no clone). Yields the first cursor that misses the tree, or `None`
+    // if the walk finished (dropped below `min_height` or reached genesis).
     let mut cursor = block_under_validation.previous_block_hash;
-    // Walk parents until we drop below min_height or hit genesis.
-    loop {
-        let header = match guard.get_block(&cursor) {
-            Some(h) => h.clone(),
-            None => match db.view_eyre(|tx| block_header_by_hash(tx, &cursor, false))? {
-                Some(h) => h,
-                None => eyre::bail!(
-                    "commitment dedup walk: ancestor {cursor} (within the reorg \
-                     window of block {} at height {block_height}) is missing from \
-                     both the block tree and the DB",
-                    block_under_validation.block_hash,
-                ),
-            },
-        };
-        if header.height < min_height {
-            break;
+    let db_cursor = {
+        let guard = block_tree.read();
+        loop {
+            let Some(header) = guard.get_block(&cursor) else {
+                break Some(cursor);
+            };
+            if header.height < min_height {
+                break None;
+            }
+            ids.extend(header.commitment_tx_ids().iter().copied());
+            if header.height == 0 {
+                break None;
+            }
+            cursor = header.previous_block_hash;
         }
-        ids.extend(header.commitment_tx_ids().iter().copied());
-        if header.height == 0 {
-            break;
-        }
-        cursor = header.previous_block_hash;
+    };
+
+    // Phase 2: the walk left the tree — finish the descent in ONE DB read txn.
+    if let Some(mut cursor) = db_cursor {
+        db.view_eyre(|tx| {
+            loop {
+                let Some(header) = block_header_by_hash(tx, &cursor, false)? else {
+                    eyre::bail!(
+                        "commitment dedup walk: ancestor {cursor} (within the reorg \
+                         window of block {} at height {block_height}) is missing from \
+                         both the block tree and the DB",
+                        block_under_validation.block_hash,
+                    );
+                };
+                if header.height < min_height {
+                    break;
+                }
+                ids.extend(header.commitment_tx_ids().iter().copied());
+                if header.height == 0 {
+                    break;
+                }
+                cursor = header.previous_block_hash;
+            }
+            Ok(())
+        })?;
     }
+
     Ok(ids)
 }
 
