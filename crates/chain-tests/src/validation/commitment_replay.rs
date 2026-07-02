@@ -30,6 +30,7 @@ use irys_actors::{
     block_producer::{BlockProdStrategy, MempoolTxsBundle},
     block_validation::ValidationError,
 };
+use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{CommitmentTransaction, IrysAddress, NodeConfig, irys::IrysSigner};
 use std::sync::Arc;
 
@@ -210,6 +211,49 @@ async fn heavy_commitment_replay_rejected_in_full_validation() -> eyre::Result<(
         |e| matches!(e, ValidationError::DuplicateCommitmentTransaction { tx_id } if *tx_id == update.id()),
         "full validation must reject the re-included finalized commitment as a duplicate",
     );
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Genesis first-includes its commitments but never flows through the
+/// confirm/migration metadata writers, so no dedup row is written for it at
+/// init. The startup backfill must fill that gap: after a node boots, the
+/// finalized-inclusion lookup the dedup consults
+/// (`canonical_commitment_included_height`) must resolve every genesis
+/// commitment to height 0 (also exercising its content check against the real
+/// genesis header). Without the row, once genesis passes the reorg floor a
+/// replayed genesis commitment slips past the dedup entirely — the
+/// finalized-lookup half is the only path that can catch it there.
+///
+/// This asserts the seam directly rather than replaying a genesis commitment in
+/// a crafted block: the block_discovery prevalidation path rejects a genesis
+/// commitment on its ancient chained anchor (`H256::default()`-rooted) before
+/// the dedup runs, and the full-validation path would require re-executing a
+/// genesis Stake shadow tx — both orthogonal to the metadata gap this fix
+/// closes.
+#[test_log::test(tokio::test)]
+async fn genesis_commitments_resolve_to_included_height_zero_after_boot() -> eyre::Result<()> {
+    let config = NodeConfig::testing();
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    let genesis = node.get_block_by_height_from_index(0, false)?;
+    let genesis_commitment_ids = genesis.commitment_tx_ids().to_vec();
+    assert!(
+        !genesis_commitment_ids.is_empty(),
+        "genesis must carry commitment txs for this regression to be meaningful"
+    );
+
+    for id in &genesis_commitment_ids {
+        let resolved = node.node_ctx.db.view_eyre(|tx| {
+            irys_database::canonical_commitment_included_height(tx, id, u64::MAX)
+        })?;
+        assert_eq!(
+            resolved,
+            Some(0),
+            "genesis commitment {id} must resolve to included_height 0 after boot"
+        );
+    }
 
     node.stop().await;
     Ok(())

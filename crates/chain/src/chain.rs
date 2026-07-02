@@ -804,6 +804,15 @@ impl IrysNode {
             )?;
         }
 
+        // Genesis first-includes its commitments but, as the block-index head, never
+        // flows through the confirm/migration metadata writers, so no commitment
+        // dedup row is ever written for it. Backfill it here — the single seam that
+        // runs on both fresh init (genesis just persisted above) and restart (genesis
+        // already in the db) — so already-initialized nodes converge on upgrade
+        // restart. The dedup's finalized lookup needs this row once genesis passes
+        // the reorg floor.
+        irys_database::backfill_genesis_commitment_included_height(&irys_db)?;
+
         #[cfg(feature = "nvidia")]
         {
             use irys_packing::cuda_config::{CUDAConfig, NvidiaGpuConfig};

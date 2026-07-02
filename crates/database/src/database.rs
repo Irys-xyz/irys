@@ -416,6 +416,50 @@ pub fn canonical_commitment_included_height<T: DbTx>(
     Ok(Some(height))
 }
 
+/// Writes `included_height = 0` for every commitment tx in the genesis block.
+///
+/// The commitment replay-dedup's finalized lookup
+/// ([`canonical_commitment_included_height`]) keys on
+/// `IrysCommitmentTxMetadata.included_height`, which is written for ordinary
+/// blocks at confirm/migration by `BlockMigrationService`. Genesis
+/// first-includes its commitments but is the block-index head, so it never
+/// flows through the confirm/migration metadata writers and no row is ever
+/// written for its commitment tx ids. Once genesis falls below the reorg floor
+/// (`tip - block_tree_depth`), that finalized lookup is the ONLY dedup path
+/// that can see a replayed genesis commitment — the by-hash ancestry walk only
+/// covers the reorg window — so the row must exist for the dedup to be sound.
+///
+/// The write is unconditional and trivially idempotent (same value every boot):
+/// a genesis commitment tx's only canonical inclusion IS genesis, so
+/// `included_height = 0` is always correct; any pre-existing different value
+/// would itself be a stray row this corrects. Running it at every boot (not
+/// only at fresh genesis init) makes already-initialized data dirs converge on
+/// upgrade restart — init-only would leave existing nodes without the row while
+/// fresh nodes have it, yielding node-divergent replay verdicts.
+///
+/// Genesis must already be persisted before this runs. A missing
+/// `MigratedBlockHashes[0]` or missing genesis header is therefore a hard
+/// invariant violation and returns `Err` (fail loud, node refuses to start)
+/// rather than silently skipping.
+pub fn backfill_genesis_commitment_included_height(db: &DatabaseProvider) -> eyre::Result<()> {
+    db.update_eyre(|tx| {
+        let genesis_hash = tx.get::<MigratedBlockHashes>(0)?.ok_or_else(|| {
+            eyre::eyre!("genesis commitment backfill: MigratedBlockHashes has no row at height 0")
+        })?;
+        let genesis_header = block_header_by_hash(tx, &genesis_hash, false)?.ok_or_else(|| {
+            eyre::eyre!(
+                "genesis commitment backfill: MigratedBlockHashes[0] = {} but IrysBlockHeaders has no entry for that hash",
+                genesis_hash
+            )
+        })?;
+        let commitment_ids = genesis_header.commitment_tx_ids();
+        if !commitment_ids.is_empty() {
+            crate::db_index::batch_set_commitment_tx_included_height(tx, commitment_ids.iter(), 0)?;
+        }
+        Ok(())
+    })
+}
+
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
 pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
@@ -1412,6 +1456,98 @@ mod tests {
             db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
             None,
             "stranded row must not be treated as canonical inclusion"
+        );
+        Ok(())
+    }
+
+    /// Genesis first-includes its commitments but never flows through the
+    /// confirm/migration metadata writers, so no dedup row is written for it at
+    /// init. The startup backfill must write `included_height = 0` for each
+    /// genesis commitment so the finalized lookup resolves them once genesis
+    /// passes the reorg floor — and must be idempotent across boots.
+    #[test]
+    fn backfill_genesis_commitment_included_height_is_idempotent() -> eyre::Result<()> {
+        use crate::backfill_genesis_commitment_included_height;
+        use crate::canonical_commitment_included_height;
+        use crate::tables::MigratedBlockHashes;
+        use irys_types::DatabaseProvider;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::Arc;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        // Persist genesis the way `persist_genesis_block_and_commitments` does:
+        // header at height 0 carrying its commitment ledger, plus MBH[0].
+        let c0 = H256::random();
+        let c1 = H256::random();
+        let genesis = header_with_commitments(0, vec![c0, c1]);
+        db.update(|tx| {
+            insert_block_header(tx, &genesis)?;
+            tx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+
+        // No dedup row exists before the backfill — this is the gap the fix closes.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &c0, u64::MAX))??,
+            None,
+            "no genesis commitment row before backfill"
+        );
+
+        backfill_genesis_commitment_included_height(&db)?;
+
+        // Each genesis commitment now resolves to height 0 (also exercises the
+        // content check against the genesis header).
+        for id in [c0, c1] {
+            assert_eq!(
+                db.view(|tx| canonical_commitment_included_height(tx, &id, u64::MAX))??,
+                Some(0),
+                "genesis commitment must resolve to included_height 0 after backfill"
+            );
+        }
+
+        // Second boot writes the same value — trivially idempotent.
+        backfill_genesis_commitment_included_height(&db)?;
+        for id in [c0, c1] {
+            assert_eq!(
+                db.view(|tx| canonical_commitment_included_height(tx, &id, u64::MAX))??,
+                Some(0),
+                "backfill must be idempotent across boots"
+            );
+        }
+        Ok(())
+    }
+
+    /// A missing `MigratedBlockHashes[0]` at backfill time is a hard invariant
+    /// violation (genesis must be persisted first) and must fail loud rather
+    /// than silently skip.
+    #[test]
+    fn backfill_genesis_commitment_included_height_fails_without_mbh() -> eyre::Result<()> {
+        use crate::backfill_genesis_commitment_included_height;
+        use irys_types::DatabaseProvider;
+        use std::sync::Arc;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        assert!(
+            backfill_genesis_commitment_included_height(&db).is_err(),
+            "missing MigratedBlockHashes[0] must fail loud"
         );
         Ok(())
     }
