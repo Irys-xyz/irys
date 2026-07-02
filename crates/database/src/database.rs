@@ -1351,16 +1351,7 @@ mod tests {
     /// Builds a stored-able header at `height` whose commitment ledger carries
     /// `commitment_tx_ids`.
     fn header_with_commitments(height: u64, commitment_tx_ids: Vec<H256>) -> IrysBlockHeader {
-        use irys_types::{SystemLedger, SystemTransactionLedger};
-        let mut header = IrysBlockHeader::new_mock_header();
-        header.height = height;
-        header.block_hash = H256::random();
-        header.poa.chunk = Some(Default::default());
-        header.system_ledgers = vec![SystemTransactionLedger {
-            ledger_id: SystemLedger::Commitment as u32,
-            tx_ids: irys_types::H256List(commitment_tx_ids),
-        }];
-        header
+        irys_testing_utils::mock_header_with_commitments(height, commitment_tx_ids)
     }
 
     #[test]
