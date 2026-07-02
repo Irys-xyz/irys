@@ -6,10 +6,13 @@ use irys_database::{
 };
 use irys_domain::{BlockTree, BlockTreeReadGuard};
 use irys_testing_utils::IrysBlockHeaderTestExt as _;
-use irys_types::{ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader};
+use irys_types::{
+    CommitmentTransaction, ConsensusConfig, DatabaseProvider, H256, IrysBlockHeader,
+    irys::IrysSigner,
+};
 use reth_db::mdbx::DatabaseArguments;
 
-use super::get_anchor_height;
+use super::{get_anchor_height, validate_anchor_for_inclusion};
 
 fn signed_genesis() -> IrysBlockHeader {
     let mut header = IrysBlockHeader::new_mock_header();
@@ -154,4 +157,39 @@ fn orphan_block_in_db_returns_height_when_canonical_false() {
 
     let result = get_anchor_height(&block_tree, &db, orphan_hash, false).unwrap();
     assert_eq!(result, Some(5));
+}
+
+fn signed_commitment_tx(anchor: H256) -> CommitmentTransaction {
+    let config = ConsensusConfig::testing();
+    let mut tx = CommitmentTransaction::new_stake(&config, anchor);
+    let signer = IrysSigner::random_signer(&config);
+    signer.sign_commitment(&mut tx).unwrap();
+    tx
+}
+
+#[test]
+fn unresolvable_anchor_is_skipped_not_errored() {
+    let genesis = signed_genesis();
+    let block_tree = test_block_tree(&genesis);
+    let (_tmp, db) = test_db();
+
+    let tx = signed_commitment_tx(H256::random());
+
+    let result = validate_anchor_for_inclusion(&block_tree, &db, 0, u64::MAX, &tx).unwrap();
+    assert!(
+        !result,
+        "an anchor that can't be resolved to a canonical block must be skipped, not errored"
+    );
+}
+
+#[test]
+fn canonical_anchor_is_includable() {
+    let genesis = signed_genesis();
+    let block_tree = test_block_tree(&genesis);
+    let (_tmp, db) = test_db();
+
+    let tx = signed_commitment_tx(genesis.block_hash());
+
+    let result = validate_anchor_for_inclusion(&block_tree, &db, 0, u64::MAX, &tx).unwrap();
+    assert!(result, "genesis anchor within range must be includable");
 }

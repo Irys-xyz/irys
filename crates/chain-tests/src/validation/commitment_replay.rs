@@ -65,6 +65,35 @@ impl BlockProdStrategy for ReplayStrategy {
     }
 }
 
+/// Evil producer that lists the SAME commitment twice within one block's
+/// commitment ledger, bypassing the normal mempool selection (which would
+/// never select a tx twice).
+struct DuplicateWithinBlockStrategy {
+    prod: ProductionStrategy,
+    dup: CommitmentTransaction,
+}
+
+#[async_trait::async_trait]
+impl BlockProdStrategy for DuplicateWithinBlockStrategy {
+    fn inner(&self) -> &BlockProducerInner {
+        &self.prod.inner
+    }
+
+    async fn get_mempool_txs(
+        &self,
+        prev_block_header: &irys_types::IrysBlockHeader,
+        block_timestamp: irys_types::UnixTimestampMs,
+    ) -> Result<MempoolTxsBundle, irys_actors::tx_selector::TxSelectorError> {
+        let mut bundle = self
+            .prod
+            .get_mempool_txs(prev_block_header, block_timestamp)
+            .await?;
+        bundle.commitment_txs = vec![self.dup.clone(), self.dup.clone()];
+        bundle.commitment_txs_to_bill = vec![self.dup.clone(), self.dup.clone()];
+        Ok(bundle)
+    }
+}
+
 /// A finalized commitment re-included in a fresh non-epoch block AFTER an epoch
 /// boundary must be rejected by block_discovery prevalidation as a replay, even
 /// though the post-epoch commitment snapshot has no local record of it and would
@@ -211,6 +240,76 @@ async fn heavy_commitment_replay_rejected_in_full_validation() -> eyre::Result<(
         |e| matches!(e, ValidationError::DuplicateCommitmentTransaction { tx_id } if *tx_id == update.id()),
         "full validation must reject the re-included finalized commitment as a duplicate",
     );
+
+    node.stop().await;
+    Ok(())
+}
+
+/// `CommitmentSnapshot::add_commitment` is deliberately idempotent for
+/// Stake/Pledge (a commitment may legitimately be first-included exactly
+/// once, and the snapshot cannot tell "already pending from this same block"
+/// apart from "already pending from a prior one"). So a producer that lists
+/// the SAME commitment twice in one block's commitment ledger would otherwise
+/// pass the snapshot check twice. `find_replayed_commitment`'s within-block
+/// duplicate check (crates/actors/src/commitment_dedup.rs) is the layer
+/// designed to catch this; unit tests there exercise it directly.
+///
+/// This test hits a DIFFERENT, earlier backstop first: `BlockTransactions`'s
+/// header/body reconciliation (crates/types/src/block.rs) builds its
+/// tx_id -> tx map from the body by id, so a duplicated tx collapses to one
+/// map entry, and matching the header's system ledger (which still lists the
+/// id twice) against it fails with "missing tx" on the second occurrence.
+/// Block production therefore never produces a block at all — an
+/// irrecoverable error aborts it before `find_replayed_commitment` is ever
+/// reached. This is documented here rather than dropped, since it shows the
+/// attack has no route to a real block even before the dedup layer runs.
+#[test_log::test(tokio::test)]
+async fn heavy_same_block_duplicate_commitment_rejected() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
+    let mut config = NodeConfig::testing();
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let node = IrysNodeTest::new_genesis(config)
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // A fresh stake commitment, posted to the mempool but never mined into any
+    // block: the duplicate must be caught purely within the block under
+    // validation, not via the durable finalized-inclusion lookup.
+    let dup = node.post_stake_commitment_with_signer(&signer).await?;
+    node.wait_for_mempool_commitment_txs(vec![dup.id()], seconds_to_wait)
+        .await?;
+
+    let strategy = DuplicateWithinBlockStrategy {
+        dup: dup.clone(),
+        prod: ProductionStrategy {
+            inner: node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    node.gossip_disable();
+    let production_result = strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
+        .await;
+    node.gossip_enable();
+
+    match production_result {
+        Err(irys_actors::block_producer::BlockProductionError::Irrecoverable { source }) => {
+            assert!(
+                source.to_string().contains("system ledger missing tx"),
+                "expected a header/body reconciliation failure on the duplicated commitment, got: {source}"
+            );
+        }
+        Err(other) => panic!(
+            "expected an Irrecoverable header/body reconciliation error, got a different \
+             BlockProductionError: {other}"
+        ),
+        Ok(_) => panic!(
+            "expected block production to fail on the same-block duplicate before a block is produced"
+        ),
+    }
 
     node.stop().await;
     Ok(())

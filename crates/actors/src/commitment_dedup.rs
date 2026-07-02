@@ -6,12 +6,20 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 /// Returns the tx_id of the first commitment in `commitment_txs` that is a
-/// replay of one already canonically included, or `Ok(None)` if none are.
+/// replay of one already canonically included, or of an earlier commitment in
+/// this same slice, or `Ok(None)` if none are.
 ///
 /// WHY this exists: the per-block commitment snapshot resets at every epoch
 /// boundary, so its "already included" check cannot see a commitment that was
 /// included in a PRIOR epoch. Without a durable check a miner could re-include
 /// the same commitment in a later epoch.
+///
+/// It also covers the degenerate case of a commitment listed twice within the
+/// block under validation itself: `CommitmentSnapshot::add_commitment` is
+/// deliberately idempotent for Stake/Pledge (a commitment may legitimately be
+/// first-included exactly once, and the snapshot has no way to tell "already
+/// pending from this same block" apart from "already pending from a prior
+/// one"), so the snapshot alone cannot reject a same-block duplicate.
 ///
 /// Two-range contract, meeting at `floor = height - block_tree_depth` with no
 /// gap:
@@ -53,10 +61,14 @@ pub fn find_replayed_commitment(
     // runs in a separate txn to keep `ancestor_commitment_tx_ids` self-contained
     // and directly testable; merging the two would force threading a `tx` param
     // through the walk, breaking that seam.
+    let mut seen: HashSet<H256> = HashSet::with_capacity(commitment_txs.len());
     db.view_eyre(|read_tx| {
         for tx in commitment_txs {
-            // In-memory reorg-window check first; only pay the DB read on a miss.
-            if prior_ids.contains(&tx.id())
+            // Within-block duplicate first: cheapest check, and it must not
+            // depend on any DB or ancestry state. Then the in-memory
+            // reorg-window check; only pay the DB read on a miss on both.
+            if !seen.insert(tx.id())
+                || prior_ids.contains(&tx.id())
                 || canonical_commitment_included_height(read_tx, &tx.id(), floor)?.is_some()
             {
                 return Ok(Some(tx.id()));
@@ -192,5 +204,50 @@ mod tests {
             err.to_string().contains("missing from"),
             "expected fail-closed error, got: {err}"
         );
+    }
+
+    fn signed_commitment() -> CommitmentTransaction {
+        let config = ConsensusConfig::testing();
+        let mut tx = CommitmentTransaction::new_stake(&config, H256::random());
+        irys_types::irys::IrysSigner::random_signer(&config)
+            .sign_commitment(&mut tx)
+            .unwrap();
+        tx
+    }
+
+    // `CommitmentSnapshot::add_commitment` is idempotent for Stake/Pledge, so
+    // the snapshot alone cannot reject a commitment listed twice in the same
+    // block under validation. The dedup must catch this itself.
+    #[test]
+    fn same_block_duplicate_commitment_is_replay() {
+        let genesis = signed_genesis();
+        let block1 = child_with_commitments(&genesis, 1, vec![]);
+        let tx = signed_commitment();
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        let result =
+            find_replayed_commitment(&block_tree, &db, &block1, &[tx.clone(), tx.clone()], 100)
+                .unwrap();
+        assert_eq!(result, Some(tx.id()));
+    }
+
+    #[test]
+    fn distinct_commitments_not_flagged() {
+        let genesis = signed_genesis();
+        let block1 = child_with_commitments(&genesis, 1, vec![]);
+        let tx_a = signed_commitment();
+        let tx_b = signed_commitment();
+        assert_ne!(tx_a.id(), tx_b.id());
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        let result =
+            find_replayed_commitment(&block_tree, &db, &block1, &[tx_a, tx_b], 100).unwrap();
+        assert_eq!(result, None);
     }
 }
