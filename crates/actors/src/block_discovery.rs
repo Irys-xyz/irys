@@ -498,7 +498,11 @@ impl BlockDiscoveryServiceInner {
         // commitment and ingress anchors too, not just submit txs. Along the way,
         // if the block carries submit txs, reject any already included in an
         // ancestor (submit-ledger duplicate detection within the tx window).
-        let mut valid_anchor_block_heights: HashMap<H256, u64> = HashMap::new();
+        // Sized for the reorg window plus a small margin (the walk covers the
+        // tx-anchor window, the index pass extends down to `reorg_floor`), to
+        // avoid rehash churn as anchors are inserted.
+        let mut valid_anchor_block_heights: HashMap<H256, u64> =
+            HashMap::with_capacity(config.consensus.block_tree_depth as usize + 8);
         let bt_finished_height = {
             // explicit drop(block_tree) isn't good enough for the compiler
             let block_tree = block_tree_guard.read();
@@ -629,13 +633,19 @@ impl BlockDiscoveryServiceInner {
         // at/above `map_floor` is a sibling-branch block and is rejected. This
         // resolves deep (finalized) anchors on demand instead of pre-walking the
         // whole (possibly ~commitment_anchor_expiry_depth) window every block.
+        // One read txn shared across every on-demand anchor resolution below.
+        // Not-in-map is the EXPECTED case for commitment anchors (their window
+        // can exceed `block_tree_depth`), so a fresh txn per miss would open a new
+        // MDBX read transaction on the hot path for the common case.
+        let ro_tx = db
+            .tx()
+            .map_err(|e| BlockDiscoveryInternalError::DatabaseError(e.into()))?;
         let anchor_valid_for =
             |anchor: &H256, min_height: u64| -> Result<bool, BlockDiscoveryInternalError> {
                 if let Some(h) = valid_anchor_block_heights.get(anchor) {
                     return Ok(*h >= min_height);
                 }
-                let resolved = db
-                    .view_eyre(|tx| irys_database::canonical_block_height_by_hash(tx, anchor))
+                let resolved = irys_database::canonical_block_height_by_hash(&ro_tx, anchor)
                     .map_err(BlockDiscoveryInternalError::DatabaseError)?;
                 Ok(resolved.is_some_and(|h| h >= min_height && h < map_floor))
             };
