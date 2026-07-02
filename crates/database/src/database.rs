@@ -2154,6 +2154,66 @@ mod tests {
                  it's not visible to the validator's parent_height window"
             );
         }
+        /// Band-cap invariant that the promotion-prevalidation fallback in
+        /// `data_txs_are_valid` relies on: a fully-canonical, content-valid row
+        /// at a height inside the reorg-mutable band `(reorg_floor, parent]` is
+        /// returned when queried up to `parent_height` but excluded when the
+        /// query is capped at `reorg_floor`.  The Searching{Publish} fallback
+        /// now caps at `reorg_floor` precisely so a node-local band row (which
+        /// describes this node's chain, not the candidate's branch) cannot
+        /// decide validity and fork the network.
+        #[test]
+        fn band_height_row_excluded_below_reorg_floor() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            // Candidate at height 100 with block_tree_depth = 8 -> reorg_floor 92.
+            // The row sits at 95, inside the reorg-mutable band (92, 99].
+            let band_height = 95_u64;
+            let parent_height = 99_u64;
+            let reorg_floor = 92_u64;
+            let block_hash = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, band_height)?;
+                insert_canonical_block(
+                    tx,
+                    band_height,
+                    block_hash,
+                    DataLedger::Submit,
+                    vec![tx_id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let at_parent = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            assert_eq!(
+                at_parent,
+                Some(band_height),
+                "the old parent-height cap WOULD consult the band row (the fork vector)"
+            );
+
+            let at_floor = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, reorg_floor))
+                .unwrap();
+            assert_eq!(
+                at_floor, None,
+                "capping at the reorg floor must exclude the band-height row"
+            );
+        }
     }
 
     /// Direct tests for the `update_data_root_block_set` /

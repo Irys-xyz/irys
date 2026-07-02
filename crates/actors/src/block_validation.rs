@@ -5584,46 +5584,52 @@ pub async fn data_txs_are_valid(
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
-                        // Prior Submit/promotion was deeper than the by-hash
-                        // inclusion walk above — which now covers the full reorg
-                        // window (max(tx_anchor_expiry_depth, block_tree_depth)).
-                        // So any inclusion reaching this fallback is BELOW the
-                        // reorg floor: finalized, hence branch-invariant, so the
-                        // canonical-height getters in `irys_database`
-                        // (metadata hint + `MigratedBlockHashes`) resolve it
-                        // identically on every node/branch. (Before the walk was
-                        // widened, this arm could run inside the reorg-mutable
-                        // `(tip - block_tree_depth, tip - block_migration_depth]`
-                        // band and fork — widening the walk to the reorg window is
-                        // exactly what makes this fallback safe; see the
-                        // `get_previous_tx_inclusions` docblock.) As a further
-                        // guard, both getters content-verify the hint against the
-                        // canonical block at the returned height, so a stranded
-                        // metadata row not backed by that block's ledger — e.g. a
-                        // legacy row from an orphaned tip written at depth-0
-                        // confirmation before canonical metadata became
-                        // migration-only, possibly surviving a restart-interrupted
-                        // reorg — cannot yield a false `PublishTxMissingPriorSubmit`
-                        // or `PublishTxAlreadyIncluded`.
+                        // The by-hash inclusion walk above covers the full reorg
+                        // window (max(tx_anchor_expiry_depth, block_tree_depth))
+                        // on THIS candidate's own branch. Any prior Submit or
+                        // promotion on the candidate's branch is therefore already
+                        // resolved by the walk; a tx reaching this fallback has no
+                        // such inclusion within the reorg window of its branch.
+                        //
+                        // The canonical-height getters answer from node-LOCAL
+                        // state (metadata hint + `MigratedBlockHashes`), which is
+                        // only branch-invariant BELOW the reorg floor. In the
+                        // reorg-mutable band `(tip - block_tree_depth, tip -
+                        // block_migration_depth]` a node-local row describes this
+                        // node's own chain, not the candidate's branch — trusting
+                        // it there lets nodes that saw a sibling-branch inclusion
+                        // decide validity differently from nodes that did not,
+                        // which forks the network. So we cap the fallback at the
+                        // reorg floor (`block.height - block_tree_depth`): the walk
+                        // owns the reorg window by hash, and only finalized rows —
+                        // where MBH is branch-invariant — reach the fallback. This
+                        // cap is what makes "any row consulted here is finalized"
+                        // true; it does not follow from the walk width alone.
                         //
                         // `canonical_submit_height` is sufficient evidence of
                         // prior Submit: the structural pre-pass guarantees
                         // `tx.ledger_id == Publish`, and term ledgers reject
-                        // `ledger_id == Publish`, so the only term ledger that
-                        // could have produced an `included_height` is Submit. An
-                        // MDBX I/O failure is a local fault surfaced as
+                        // `ledger_id == Publish`, so the only ledger that could
+                        // have produced an `included_height` is Submit. The
+                        // lookup's content check further requires the finalized
+                        // block to actually carry the tx in Submit, so a stranded
+                        // row reads as "no prior Submit" (Ok(None)) rather than a
+                        // false accept. An MDBX I/O failure or a missing header for a
+                        // canonical MBH row is a local fault surfaced as
                         // `BlockBoundsLookupError` (classified `NodeFault`, so the
                         // caller aborts rather than peer-attributing the DB error).
                         //
                         // The `canonical_promoted_height` rejection below is
                         // defense-in-depth: a prior promotion within the reorg
                         // window is already surfaced as `Found` by the walk, so
-                        // only a finalized prior promotion reaches here — where MBH
-                        // is branch-invariant.
-                        let parent_height = block.height.saturating_sub(1);
+                        // only a finalized, content-verified prior promotion
+                        // reaches here.
+                        let reorg_floor = block
+                            .height
+                            .saturating_sub(config.consensus.block_tree_depth);
 
                         let submit_lookup =
-                            canonical_submit_height(&ro_tx, &tx.id, parent_height).map_err(|e| {
+                            canonical_submit_height(&ro_tx, &tx.id, reorg_floor).map_err(|e| {
                                 error!(
                                     "canonical_submit_height DB error for tx {}: {}",
                                     &tx.id, &e
@@ -5641,7 +5647,7 @@ pub async fn data_txs_are_valid(
                         }
 
                         let promoted_lookup =
-                            canonical_promoted_height(&ro_tx, &tx.id, parent_height).map_err(
+                            canonical_promoted_height(&ro_tx, &tx.id, reorg_floor).map_err(
                                 |e| {
                                     error!(
                                         "canonical_promoted_height DB error for tx {}: {}",
@@ -5654,12 +5660,13 @@ pub async fn data_txs_are_valid(
                                 },
                             )?;
                         if let Some(promoted_height) = promoted_lookup {
-                            // `canonical_promoted_height` already attested
-                            // `MBH[promoted_height] = Some` inside this
-                            // snapshot; a missing row on re-read would mean
-                            // MDBX returned a different value for the same
-                            // key within one read tx — cross-table
-                            // corruption, surfaced as NodeFault.
+                            // `canonical_promoted_height` already loaded the header
+                            // MBH names at `promoted_height` and content-verified
+                            // the Publish inclusion inside this snapshot; re-read
+                            // MBH only to name the offending block in the reject.
+                            // A missing row on re-read would mean MDBX returned a
+                            // different value for the same key within one read tx —
+                            // cross-table corruption, surfaced as NodeFault.
                             let promoted_block_hash = ro_tx
                                 .get::<MigratedBlockHashes>(promoted_height)
                                 .map_err(|e| {
@@ -5684,8 +5691,8 @@ pub async fn data_txs_are_valid(
 
                         warn!(
                             tx.id = %tx.id,
-                            parent_height,
-                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index"
+                            reorg_floor,
+                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index below the reorg floor"
                         );
                     }
                     DataLedger::Submit => {
@@ -6309,8 +6316,11 @@ pub(crate) fn prior_inclusion_walk_depth(config: &Config) -> u64 {
 ///    index/MBH shortcut (the `Searching { ledger_current: Publish }` arm in
 ///    `data_txs_are_valid`) is only branch-invariant BELOW the reorg floor, which
 ///    deep reorgs moved from `block_migration_depth` to `block_tree_depth`.
-///    Walking the full reorg window guarantees that fallback is reached only for
-///    *finalized* inclusions, where node-canonical == every branch.
+///    Walking the full reorg window resolves every in-window inclusion on the
+///    candidate's own branch by-hash; the fallback then caps its by-height
+///    lookups at the reorg floor so a node-local row inside the reorg-mutable
+///    band can never decide validity. Together the two cover [0, block.height)
+///    with no gap: finalized heights by-height, the reorg window by-hash.
 ///
 /// (Config invariant `tx_anchor_expiry_depth ≤ block_tree_depth` makes #2 the
 /// binding term in production; `max(...)` keeps the walk correct for test configs
