@@ -759,34 +759,46 @@ async fn test_prevalidation_rejects_too_many_commitment_txs() -> Result<()> {
 /// `PublishTxAlreadyIncluded` — never fires because the prior Publish is
 /// past the scan window.  Without a `promoted_height` check in the fallback,
 /// the canonical-DB lookup would accept the tx (warns + continues) and the
-/// peer would succeed in re-publishing.  The fix is to inspect the
-/// metadata's `promoted_height` and reject when set to a migrated height
-/// ≤ parent_height.
+/// peer would succeed in re-publishing.  The fix is to reject when the
+/// canonical lookup content-verifies a prior promotion below the walk
+/// window.
 ///
-/// **Test driver:** force the in-window walk to be empty by overriding
-/// `tx_anchor_expiry_depth = 0`, then construct a Publish-ledger block whose
-/// tx already has both `included_height` and `promoted_height` set in
-/// `IrysDataTxMetadata` (with matching `MigratedBlockHashes` rows).  Expect
-/// `Err(PublishTxAlreadyIncluded { tx_id, block_hash })` matching the
-/// pre-populated promoted block hash.
+/// **Test driver:** mine to height 3, then validate a sibling candidate at
+/// height 3 (parent = the real block 2) under an override of
+/// `tx_anchor_expiry_depth = 0` and `block_tree_depth = 1`.  The by-hash
+/// walk (depth `max(0, 1) = 1`) then covers exactly the real, tx-free block
+/// 2 on the candidate's own branch, so the tx stays `Searching` and the
+/// canonical-DB fallback owns the heights below the window.  The canonical
+/// prior is a fabricated finalized block at height 1 — stored as a real
+/// header carrying the tx in both Submit and Publish, and pointed at by
+/// `MigratedBlockHashes[1]` — so both canonical lookups content-verify
+/// against it.  Expect `Err(PublishTxAlreadyIncluded { tx_id, block_hash })`
+/// naming the fabricated promoted block.
 #[tokio::test]
 async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result<()> {
     use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::tables::MigratedBlockHashes;
     use irys_database::{
-        insert_tx_header, set_data_tx_included_height, set_data_tx_promoted_height,
+        insert_block_header, insert_tx_header, set_data_tx_included_height,
+        set_data_tx_promoted_height,
     };
-    use irys_types::H256List;
+    use irys_types::{BlockBody, H256List};
+    use reth_db::transaction::DbTxMut as _;
 
     let ctx = PrevalidationTestContext::new().await?;
 
-    // `PrevalidationTestContext` lands `ctx.block` at height 1 (parent =
-    // genesis at height 0), so the bad block we'll build below has
-    // `parent_height = 0`.  Both `included_height` and `promoted_height`
-    // must be ≤ 0 for the fallback to consider the tx "already canonical";
-    // we collapse both onto the height-0 canonical row.
+    // Extend the chain so a content-verified canonical prior can sit BELOW
+    // the by-hash walk window.  `ctx.block` was produced without broadcast
+    // and never lands on-chain, so the tip is still genesis; mine three real
+    // blocks to put the tip at height 3.  With the walk-depth override below
+    // (`max(tx_anchor_expiry_depth = 0, block_tree_depth = 1) = 1`) the walk
+    // for a height-3 candidate covers exactly the real, tx-free block 2,
+    // leaving height 1 to the canonical-DB fallback.
+    ctx.node.mine_blocks(3).await?;
+    let real_tip = ctx.node.get_block_by_height(3).await?;
 
     // A Publish-ledger tx that will impersonate "already canonically
-    // promoted" via the pre-populated metadata below.
+    // promoted" via the fabricated finalized prior seeded below.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
     tx.data_root = H256::from_low_u64_be(0x517A_1EBA_DD15);
     tx.data_size = 0;
@@ -797,36 +809,38 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         .sign(&ctx.config.signer())
         .expect("Failed to sign test transaction");
 
-    // Pre-populate canonical metadata: tx was Submit-included AND
-    // Publish-promoted at height 0 (same-block promotion).  Because the
-    // canonical helpers now content-verify the hint against the canonical
-    // block at the height, genesis (which carries no data txs) can't back
-    // this fixture; supply a synthetic canonical block at height 0 that
-    // carries the tx in BOTH ledgers and repoint `MigratedBlockHashes[0]`.
-    let prior_submit_height = 0_u64;
-    let prior_publish_height = 0_u64;
-    let prior_block_hash = crate::utils::plant_canonical_block(
-        &ctx.node.node_ctx.db,
-        0,
-        vec![
-            (DataLedger::Submit, vec![tx.id]),
-            (DataLedger::Publish, vec![tx.id]),
-        ],
-    )?;
+    // Fabricated finalized prior at height 1, NOT on the candidate's
+    // ancestry: a real header carrying the tx in BOTH Submit and Publish
+    // (same-block promotion), pointed at by `MigratedBlockHashes[1]`.
+    // `canonical_submit_height` / `canonical_promoted_height` load the block
+    // MBH names at the hinted height and content-verify ledger membership,
+    // so the header must genuinely carry the tx — a bare metadata hint would
+    // read as a stranded row and resolve to None.  (At tip height 3 with
+    // testing `block_migration_depth = 6` no post-genesis block has
+    // migrated, so the MBH[1] write collides with nothing.)  Below the walk
+    // window this MBH-keyed, content-verified row IS the canonical answer —
+    // exactly the regime the fallback is designed for.
+    let prior_height = 1_u64;
+    let mut prior_block = IrysBlockHeader::new_mock_header();
+    prior_block.height = prior_height;
+    prior_block.block_hash = H256::random();
+    prior_block.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx.id]);
+    prior_block.data_ledgers[DataLedger::Publish].tx_ids = H256List(vec![tx.id]);
+    let promoted_block_hash = prior_block.block_hash;
+
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
         insert_tx_header(db_tx, &tx)?;
-        set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
-        set_data_tx_promoted_height(db_tx, &tx.id, prior_publish_height)?;
+        set_data_tx_included_height(db_tx, &tx.id, prior_height)?;
+        set_data_tx_promoted_height(db_tx, &tx.id, prior_height)?;
+        insert_block_header(db_tx, &prior_block)?;
+        db_tx.put::<MigratedBlockHashes>(prior_height, promoted_block_hash)?;
         Ok(())
     })?;
 
-    // Build a block whose Publish ledger re-includes `tx`.  Mirror the
-    // pattern from `test_prevalidation_rejects_submit_targeted_tx`: keep
-    // ctx.block as the structural baseline and swap the data ledgers.
-    let mut body = ctx.block.to_block_body();
-    body.data_transactions = vec![tx.clone()];
-
-    let mut header = (**ctx.block.header()).clone();
+    // Build a sibling candidate at height 3 (parent = the real block 2)
+    // whose Publish ledger re-includes `tx`: clone the real height-3 header
+    // as the structural baseline and swap the data ledgers.
+    let mut header = real_tip.clone();
     let publish_ledger = header
         .data_ledgers
         .iter_mut()
@@ -841,7 +855,11 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
     submit_ledger.tx_ids = H256List(Vec::new());
 
     ctx.config.signer().sign_block_header(&mut header)?;
-    body.block_hash = header.block_hash;
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![tx.clone()],
+        commitment_transactions: Vec::new(),
+    };
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
     {
@@ -875,11 +893,15 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         }
     });
 
-    // `tx_anchor_expiry_depth = 0` collapses the in-window walk to zero
-    // blocks, forcing every Publish-ledger tx to take the canonical-DB
-    // fallback path that this regression exists to cover.
+    // Walk-depth override: `max(tx_anchor_expiry_depth = 0, block_tree_depth
+    // = 1) = 1`, so the by-hash walk for the height-3 candidate covers
+    // exactly the real, tx-free block 2 on its own branch — the tx stays
+    // `Searching` and the canonical-DB fallback (which owns the heights
+    // below the walk window, where the fabricated prior at height 1 lives)
+    // is the path this regression exists to cover.
     let mut consensus = ctx.config.consensus_config();
     consensus.mempool.tx_anchor_expiry_depth = 0;
+    consensus.block_tree_depth = 1;
     let mut node_config = ctx.config.clone();
     node_config.consensus = ConsensusOptions::Custom(consensus);
     let config_override = Config::new_with_random_peer_id(node_config);
@@ -914,8 +936,8 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         Err(PreValidationError::PublishTxAlreadyIncluded { tx_id, block_hash }) => {
             assert_eq!(tx_id, tx.id, "rejection must name the doubly-published tx");
             assert_eq!(
-                block_hash, prior_block_hash,
-                "rejection must surface the canonical promoted-block hash from MigratedBlockHashes (the planted height-0 block)"
+                block_hash, promoted_block_hash,
+                "rejection must surface the canonical promoted-block hash from MigratedBlockHashes (= the fabricated height-1 prior in this fixture)"
             );
         }
         other => panic!(
@@ -940,17 +962,20 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
 /// falls through to warn-and-accept the current Publish as a legitimate
 /// first promotion.
 ///
-/// **Harness scope.** `PrevalidationTestContext` lands `parent_height = 0`,
-/// and `MigratedBlockHashes[0]` is populated by node init — so the exact
-/// "stranded within validator's window" geometry from the production fault
-/// (MBH disagreement at a height ≤ parent_height) cannot be reproduced
-/// here without reaching for a deeper chain.  That branch is covered
-/// directly at the helper boundary by
-/// `database::canonical_height_tests::promoted_height_returns_none_when_mbh_disagrees`.
-/// This test exercises the same end-to-end fall-through via the orthogonal
-/// `promoted_height > max_height` rejection: both branches surface
-/// `canonical_promoted_height = None` to the validator, so the downstream
-/// behaviour is shared.
+/// **Harness scope.** The fixture mines to height 3 and validates a sibling
+/// candidate at height 3 under a walk-depth override
+/// (`max(tx_anchor_expiry_depth = 0, block_tree_depth = 1) = 1`), so the
+/// by-hash walk covers exactly the real, tx-free block 2 and the tx stays
+/// `Searching`.  The prior Submit is a fabricated finalized block at height
+/// 1 (below the walk window, content-verified via `MigratedBlockHashes[1]`)
+/// so the fallback's Submit gate passes; the stranded `promoted_height = 3`
+/// exceeds the fallback's height cap, so the hint is stripped by the
+/// `max_height` check before MBH is even consulted.  The exact "MBH
+/// disagreement" strip branch from the production fault is covered directly
+/// at the helper boundary by
+/// `database::canonical_height_tests::promoted_height_returns_none_when_mbh_disagrees`;
+/// both branches surface `canonical_promoted_height = None` to the
+/// validator, so the downstream behaviour is shared.
 ///
 /// **What this asserts.** That the validator does NOT regress to any of:
 /// `BlockBoundsLookupError` (pre-fix panic-then-restart),
@@ -965,15 +990,26 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
 #[test_log::test(tokio::test)]
 async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped() -> Result<()> {
     use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::tables::MigratedBlockHashes;
     use irys_database::{
-        insert_tx_header, set_data_tx_included_height, set_data_tx_promoted_height,
+        insert_block_header, insert_tx_header, set_data_tx_included_height,
+        set_data_tx_promoted_height,
     };
-    use irys_types::H256List;
+    use irys_types::{BlockBody, H256List};
+    use reth_db::transaction::DbTxMut as _;
 
     let ctx = PrevalidationTestContext::new().await?;
 
+    // Same geometry as the sibling regression test: extend the chain (the
+    // context's unbroadcast block never lands on-chain, so mine three real
+    // blocks to reach height 3) so a content-verified prior Submit can sit
+    // BELOW the by-hash walk window (which, under the override below, covers
+    // exactly the real block 2 for a height-3 candidate).
+    ctx.node.mine_blocks(3).await?;
+    let real_tip = ctx.node.get_block_by_height(3).await?;
+
     // A Publish-ledger tx whose `IrysDataTxMetadata` will carry a
-    // `promoted_height` the canonical helper cannot confirm via MBH.
+    // `promoted_height` the canonical helper must strip.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
     tx.data_root = H256::from_low_u64_be(0xDEAD_BEEF_C0DE);
     tx.data_size = 0;
@@ -984,36 +1020,35 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         .sign(&ctx.config.signer())
         .expect("Failed to sign test transaction");
 
-    // Canonical Submit at height 0 — supply a synthetic canonical block that
-    // carries the tx in its Submit ledger and repoint `MigratedBlockHashes[0]`,
-    // so `canonical_submit_height` (now content-verified) attests it and control
-    // flow reaches the promoted-height check. Stranded `promoted_height = 1` is
-    // stripped by the canonical helper (parent_height = 0, so
-    // `promoted_height > max_height` triggers the strip — orthogonal to the
-    // MBH-None-within-window strip but produces the same stripped metadata).
-    let prior_submit_height = 0_u64;
-    let stranded_promote_height = 1_u64;
-    let _prior_block_hash = crate::utils::plant_canonical_block(
-        &ctx.node.node_ctx.db,
-        0,
-        vec![
-            (DataLedger::Submit, vec![tx.id]),
-            (DataLedger::Publish, vec![]),
-        ],
-    )?;
+    // Canonical prior Submit: a fabricated finalized block at height 1
+    // (below the walk window) carrying the tx in its Submit ledger ONLY,
+    // pointed at by `MigratedBlockHashes[1]`, so `canonical_submit_height`
+    // content-verifies it and the fallback's Submit gate passes.  The
+    // stranded `promoted_height = 3` exceeds the fallback's height cap, so
+    // the canonical helper strips it via the `max_height` check (before MBH
+    // is even consulted — orthogonal to the MBH-None strip but producing
+    // the same stripped metadata).
+    let prior_submit_height = 1_u64;
+    let stranded_promote_height = 3_u64;
+    let mut prior_block = IrysBlockHeader::new_mock_header();
+    prior_block.height = prior_submit_height;
+    prior_block.block_hash = H256::random();
+    prior_block.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx.id]);
+    let prior_block_hash = prior_block.block_hash;
+
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
         insert_tx_header(db_tx, &tx)?;
         set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
         set_data_tx_promoted_height(db_tx, &tx.id, stranded_promote_height)?;
+        insert_block_header(db_tx, &prior_block)?;
+        db_tx.put::<MigratedBlockHashes>(prior_submit_height, prior_block_hash)?;
         Ok(())
     })?;
 
-    // Same block shape as the sibling regression test: re-include the tx
-    // on the Publish ledger of a sibling-of-ctx.block at height 1.
-    let mut body = ctx.block.to_block_body();
-    body.data_transactions = vec![tx.clone()];
-
-    let mut header = (**ctx.block.header()).clone();
+    // Same block shape as the sibling regression test: re-include the tx on
+    // the Publish ledger of a sibling candidate at height 3 (parent = the
+    // real block 2).
+    let mut header = real_tip.clone();
     let publish_ledger = header
         .data_ledgers
         .iter_mut()
@@ -1028,7 +1063,11 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
     submit_ledger.tx_ids = H256List(Vec::new());
 
     ctx.config.signer().sign_block_header(&mut header)?;
-    body.block_hash = header.block_hash;
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![tx.clone()],
+        commitment_transactions: Vec::new(),
+    };
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
     {
@@ -1062,10 +1101,14 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         }
     });
 
-    // Force the validator to take the canonical-DB fallback path that
-    // this regression exercises.
+    // Walk-depth override: `max(tx_anchor_expiry_depth = 0, block_tree_depth
+    // = 1) = 1`, so the by-hash walk for the height-3 candidate covers
+    // exactly the real, tx-free block 2 — the tx stays `Searching` and the
+    // validator takes the canonical-DB fallback path this regression
+    // exercises.
     let mut consensus = ctx.config.consensus_config();
     consensus.mempool.tx_anchor_expiry_depth = 0;
+    consensus.block_tree_depth = 1;
     let mut node_config = ctx.config.clone();
     node_config.consensus = ConsensusOptions::Custom(consensus);
     let config_override = Config::new_with_random_peer_id(node_config);
@@ -1118,15 +1161,15 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         Err(PreValidationError::PublishTxMissingPriorSubmit { tx_id }) => {
             // This is the Submit branch of the same fallback arm under
             // test — not "downstream".  Firing here means
-            // `canonical_submit_height` failed to attest the
-            // genesis-height Submit row (`MBH[0]` is populated by node
-            // init), so control flow never reached the promoted-height
-            // strip the test is actually exercising.
+            // `canonical_submit_height` failed to content-verify the
+            // fabricated height-1 Submit block seeded via `MBH[1]`, so
+            // control flow never reached the promoted-height strip the
+            // test is actually exercising.
             panic!(
                 "regression: validator rejected as PublishTxMissingPriorSubmit \
                  (tx={tx_id}) — canonical_submit_height must attest the \
-                 genesis-height Submit row (MBH[0]) so control flow reaches \
-                 the promoted-height check this test exercises"
+                 fabricated height-1 Submit row (MBH[1]) so control flow \
+                 reaches the promoted-height check this test exercises"
             );
         }
         Err(downstream) => {
