@@ -1356,7 +1356,7 @@ mod tests {
             .num_threads(2)
             .build()
             .expect("thread pool");
-        let (tx, mut rx) = irys_vdf::fast_forward_channel();
+        let (tx, mut rx, _gen) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
         vdf_step_batch_is_valid(

@@ -450,7 +450,9 @@ impl BlockTreeService {
 ///
 /// `reset_frequency` must be non-zero (the caller guards this).
 fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
-    (lca_step / reset_frequency + 2) * reset_frequency
+    (lca_step / reset_frequency)
+        .saturating_add(2)
+        .saturating_mul(reset_frequency)
 }
 
 impl BlockTreeServiceInner {
@@ -1335,7 +1337,7 @@ impl BlockTreeServiceInner {
         // Only reorgs past the migration depth can leave the buffer poisoned:
         // shallower ones stay inside the confirmed window, where the VDF loop's
         // reset-boundary gate already held it to canonical seeds.
-        if reorg.old_fork.len() as u32 <= self.config.consensus.block_migration_depth {
+        if reorg.old_fork.len() <= self.config.consensus.block_migration_depth as usize {
             return;
         }
 
@@ -1346,10 +1348,20 @@ impl BlockTreeServiceInner {
         let c_step = canonical_tip.vdf_limiter_info.global_step_number;
         let lca_step = reorg.fork_parent.vdf_limiter_info.global_step_number;
 
+        // The local VDF followed the OLD (minority) fork, so its buffer is poisoned
+        // once EITHER the canonical tip or the rolled-back fork crossed the first
+        // divergent boundary. Gate on the higher of the two: BlockTreeServiceInner
+        // has no live VDF step to read, and the old-fork tip is a lower bound on how
+        // far the local VDF ran past the fork point.
+        let old_fork_tip_step = reorg.old_fork.last().map_or(c_step, |block| {
+            block.header().vdf_limiter_info.global_step_number
+        });
+        let crossing_step = c_step.max(old_fork_tip_step);
+
         // Below the first divergent boundary the forks share every rotation block,
         // so the buffers already agree and no heal is needed.
         let first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency);
-        if c_step < first_divergent_boundary {
+        if crossing_step < first_divergent_boundary {
             return;
         }
 
@@ -2071,6 +2083,9 @@ mod tests {
     struct DiscardHarness {
         inner: BlockTreeServiceInner,
         block_state_rx: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+        /// Retained VDF re-anchor receiver so the gate tests can observe a queued
+        /// `ReanchorRequest`; unused by the discard/recovery tests.
+        vdf_reanchor_rx: tokio::sync::mpsc::Receiver<ReanchorRequest>,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -2082,6 +2097,12 @@ mod tests {
 
     impl DiscardHarness {
         fn new() -> Self {
+            Self::new_with_config(|_| {})
+        }
+
+        /// Like [`Self::new`] but lets the caller tweak the `NodeConfig` (e.g. the
+        /// VDF reset frequency) before the inner service is built.
+        fn new_with_config(configure: impl FnOnce(&mut irys_types::NodeConfig)) -> Self {
             use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
@@ -2110,13 +2131,14 @@ mod tests {
             )));
 
             let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
-            // Subscribe BEFORE the discard path runs so the broadcast event
-            // is observable. The receivers struct is dropped — we only need
-            // the broadcast receiver.
+            // Subscribe BEFORE the discard path runs so the broadcast event is
+            // observable. Retain the VDF re-anchor receiver so gate tests can
+            // observe a queued request; the rest of `service_rx` drops here.
             let block_state_rx = service_senders.subscribe_block_state_updates();
-            drop(service_rx);
+            let vdf_reanchor_rx = service_rx.vdf_reanchor;
 
-            let node_config = NodeConfig::testing();
+            let mut node_config = NodeConfig::testing();
+            configure(&mut node_config);
             let miner_address = node_config.miner_address();
             let config = irys_types::Config::new_with_random_peer_id(node_config);
 
@@ -2155,6 +2177,7 @@ mod tests {
             Self {
                 inner,
                 block_state_rx,
+                vdf_reanchor_rx,
                 genesis_hash,
                 _tempdir: tmp,
             }
@@ -2213,6 +2236,125 @@ mod tests {
             }
             out
         }
+    }
+
+    /// `n` throwaway sealed blocks for a synthetic `ReorgEvent.old_fork` — only
+    /// its length is read by the re-anchor gate (deep-reorg guard).
+    fn sealed_fork(n: usize) -> Vec<Arc<SealedBlock>> {
+        (0..n)
+            .map(|i| {
+                let mut hdr = IrysBlockHeader::new_mock_header();
+                hdr.height = i as u64 + 1;
+                Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(hdr),
+                    BlockTransactions::default(),
+                ))
+            })
+            .collect()
+    }
+
+    /// A canonical tip header carrying its own VDF steps `[1..=c_step]` (value ==
+    /// step number), so the gate's window build resolves entirely from this header
+    /// with no ancestry walk. Returns the tip and the expected window values.
+    fn canonical_tip(c_step: u64, next_seed: H256) -> (IrysBlockHeader, Vec<H256>) {
+        let steps: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
+        let mut tip = IrysBlockHeader::new_mock_header();
+        tip.vdf_limiter_info.global_step_number = c_step;
+        tip.vdf_limiter_info.steps = H256List(steps.clone());
+        tip.vdf_limiter_info.next_seed = next_seed;
+        (tip, steps)
+    }
+
+    /// A synthetic `ReorgEvent` with the LCA at `lca_step` and an `old_fork` of
+    /// the given depth. Only the fields the gate reads are meaningful.
+    fn reorg_from(lca_step: u64, old_fork_len: usize, new_tip: H256) -> ReorgEvent {
+        let mut fork_parent = IrysBlockHeader::new_mock_header();
+        fork_parent.vdf_limiter_info.global_step_number = lca_step;
+        ReorgEvent {
+            old_fork: Arc::new(sealed_fork(old_fork_len)),
+            new_fork: Arc::new(vec![]),
+            fork_parent: Arc::new(fork_parent),
+            new_tip,
+            timestamp: std::time::UNIX_EPOCH,
+            db: None,
+        }
+    }
+
+    /// A deep reorg (old fork deeper than `block_migration_depth`) whose canonical
+    /// tip has crossed the first divergent reset boundary must queue a
+    /// `ReanchorRequest` carrying the canonical `[floor, c_step]` window, `c_step`,
+    /// and the tip's `next_seed`. Drives the gate method directly — the call site
+    /// in `on_block_validation_finished` is a thin `if let Some(reorg) { .. }`
+    /// wrapper around it.
+    #[test]
+    fn deep_reorg_across_divergent_boundary_queues_reanchor() {
+        // reset_frequency 4; block_migration_depth defaults to 1 in testing.
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let next_seed = H256::repeat_byte(0x99);
+        let (tip, steps) = canonical_tip(20, next_seed);
+        // first_divergent_boundary(lca=5, rf=4) = 12; c_step 20 >= 12 → crossed.
+        let reorg = reorg_from(5, 2, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        let req = h
+            .vdf_reanchor_rx
+            .try_recv()
+            .expect("a deep cross-boundary reorg must queue a ReanchorRequest");
+        assert_eq!(req.c_step, 20);
+        assert_eq!(req.next_seed, next_seed);
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(
+            sent, steps,
+            "the gate must ship the canonical [floor, c_step] window from the tip's ancestry"
+        );
+    }
+
+    /// A reorg no deeper than `block_migration_depth` stays inside the confirmed
+    /// window (the buffer already matches canonical there) → no re-anchor.
+    #[test]
+    fn shallow_reorg_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        // old_fork depth 1 == block_migration_depth(1) → not a deep reorg.
+        let reorg = reorg_from(5, 1, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.try_recv().is_err(),
+            "a shallow reorg must not queue a re-anchor"
+        );
+    }
+
+    /// A deep reorg whose canonical tip has not reached the first divergent
+    /// boundary leaves the forks sharing every rotation block → no re-anchor.
+    #[test]
+    fn deep_reorg_below_divergent_boundary_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 100;
+        });
+        // first_divergent_boundary(lca=5, rf=100) = 200; c_step 20 < 200 → not crossed.
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.try_recv().is_err(),
+            "a reorg below the first divergent boundary must not queue a re-anchor"
+        );
     }
 
     /// SoftInternal discard path must record (block_hash, reason) into the

@@ -343,6 +343,12 @@ pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) ->
 pub struct VdfStep {
     pub step: H256,
     pub global_step_number: u64,
+    /// The re-anchor generation this step was validated under (stamped by
+    /// [`vdf_utils::VdfFastForwardSender`]). `run_vdf` drops a step whose
+    /// generation is older than the buffer's current one: it predates an
+    /// in-place re-anchor and must not replay onto the healed buffer. `0` for
+    /// steps produced before any re-anchor.
+    pub generation: u64,
 }
 
 pub trait MiningBroadcaster {

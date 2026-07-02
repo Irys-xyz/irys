@@ -1491,6 +1491,22 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
+    // Check VDF step-number continuity: the block's first step must immediately
+    // follow the parent's last step. `prev_output_is_valid` above proves only the
+    // VALUE (block.prev_output == parent.output), not the step NUMBER — without it,
+    // the batch verifier would seed the block's first step from `prev_output` at the
+    // block's own claimed salt, accepting a block that skipped intervening VDF steps
+    // and so defeating the sequential-work guarantee. Header-rooted, so it stays
+    // poison-safe: it never consults the local seed buffer.
+    let claimed_prev_step = block.vdf_limiter_info.first_step_number().saturating_sub(1);
+    let parent_step = previous_block.vdf_limiter_info.global_step_number;
+    if claimed_prev_step != parent_step {
+        return Err(PreValidationError::VDFCheckpointsInvalid(format!(
+            "VDF step discontinuity: block first step {} does not follow parent global step {parent_step}",
+            claimed_prev_step + 1
+        )));
+    }
+
     // Check block height continuity
     height_is_valid(block, previous_block)?;
     debug!(
@@ -3325,9 +3341,21 @@ pub(crate) fn resolve_header_tree_or_db(
     if let Some(header) = block_tree_guard.read().get_block(hash) {
         return Some(header.clone());
     }
-    db.view_eyre(|tx| block_header_by_hash(tx, hash, false))
-        .ok()
-        .flatten()
+    match db.view_eyre(|tx| block_header_by_hash(tx, hash, false)) {
+        Ok(header) => header,
+        Err(e) => {
+            // A DB read FAILURE is not a genuinely absent ancestor. Callers treat
+            // `None` as "unavailable → soft requeue", which is the right safe
+            // behaviour either way, but log the underlying error so a real MDBX/I-O
+            // fault is diagnosable instead of silently swallowed.
+            tracing::warn!(
+                block.hash = %hash,
+                error = ?e,
+                "VDF ancestry resolve: DB read failed; treating ancestor as unavailable"
+            );
+            None
+        }
+    }
 }
 
 /// Rebuild the VDF step window `[want_start, want_end]` from a block's own

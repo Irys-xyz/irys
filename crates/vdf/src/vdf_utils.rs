@@ -3,6 +3,8 @@ use irys_types::H256;
 use irys_types::Traced;
 use irys_types::block_production::Seed;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{Duration, timeout};
 
@@ -19,28 +21,56 @@ pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 /// type makes the raw `Sender` (which carries no such invariant) unreachable
 /// outside this crate.
 #[derive(Debug, Clone)]
-pub struct VdfFastForwardSender(Sender<Traced<VdfStep>>);
+pub struct VdfFastForwardSender {
+    sender: Sender<Traced<VdfStep>>,
+    /// Shared re-anchor generation, read at send time and stamped onto each step
+    /// so `run_vdf` drops steps that predate an in-place re-anchor (they were
+    /// validated against a since-healed buffer and must not replay onto it).
+    generation: Arc<AtomicU64>,
+}
 
 impl VdfFastForwardSender {
     /// Replay a contiguous batch of VDF steps into local state. The steps must
     /// already be validated, or explicitly trusted by the sync path. Delegates to
     /// [`fast_forward_validated_steps`] (same tracing span and fail-stop
-    /// semantics).
+    /// semantics), stamping each step with the current re-anchor generation.
     pub async fn send_validated_batch(
         &self,
         start_step_number: u64,
         steps: &[H256],
         send_timeout: Duration,
     ) -> eyre::Result<()> {
-        fast_forward_validated_steps(start_step_number, steps, &self.0, send_timeout).await
+        let generation = self.generation.load(Ordering::Relaxed);
+        fast_forward_validated_steps(
+            start_step_number,
+            steps,
+            &self.sender,
+            generation,
+            send_timeout,
+        )
+        .await
     }
 }
 
-/// Create the bounded VDF fast-forward channel. The hub holds the
-/// [`VdfFastForwardSender`]; `run_vdf` consumes the `Receiver`.
-pub fn fast_forward_channel() -> (VdfFastForwardSender, Receiver<Traced<VdfStep>>) {
+/// Create the bounded VDF fast-forward channel. Returns the sender, the receiver
+/// (consumed by `run_vdf`), and the shared re-anchor generation counter: the
+/// sender stamps it onto each step and `run_vdf` bumps it on every applied
+/// re-anchor, so steps in flight across a heal are dropped rather than replayed.
+pub fn fast_forward_channel() -> (
+    VdfFastForwardSender,
+    Receiver<Traced<VdfStep>>,
+    Arc<AtomicU64>,
+) {
     let (tx, rx) = tokio::sync::mpsc::channel(VDF_FAST_FORWARD_CHANNEL_CAPACITY);
-    (VdfFastForwardSender(tx), rx)
+    let generation = Arc::new(AtomicU64::new(0));
+    (
+        VdfFastForwardSender {
+            sender: tx,
+            generation: Arc::clone(&generation),
+        },
+        rx,
+        generation,
+    )
 }
 
 /// Bound for the inbound VDF re-anchor channel. Re-anchors fire only on a deep
@@ -94,6 +124,7 @@ pub(crate) async fn fast_forward_validated_steps(
     start_step_number: u64,
     steps: &[H256],
     vdf_fast_forward_sender: &Sender<Traced<VdfStep>>,
+    generation: u64,
     send_timeout: Duration,
 ) -> eyre::Result<()> {
     let end_step_number = start_step_number + steps.len().saturating_sub(1) as u64;
@@ -108,6 +139,7 @@ pub(crate) async fn fast_forward_validated_steps(
             vdf_fast_forward_sender.send(Traced::new(VdfStep {
                 step: *hash,
                 global_step_number: start_step_number + i as u64,
+                generation,
             })),
         )
         .await
@@ -165,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_delivers_validated_steps() {
-        let (sender, mut rx) = fast_forward_channel();
+        let (sender, mut rx, _gen) = fast_forward_channel();
         let steps = [H256::from_low_u64_be(1), H256::from_low_u64_be(2)];
         sender
             .send_validated_batch(10, &steps, Duration::from_secs(1))
@@ -186,7 +218,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "channel closed")]
     async fn send_panics_when_receiver_dropped() {
-        let (sender, rx) = fast_forward_channel();
+        let (sender, rx, _gen) = fast_forward_channel();
         drop(rx);
         sender
             .send_validated_batch(1, &[H256::zero()], Duration::from_millis(50))
@@ -201,7 +233,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "remained full")]
     async fn send_panics_on_timeout_when_channel_full() {
-        let (sender, _rx) = fast_forward_channel();
+        let (sender, _rx, _gen) = fast_forward_channel();
         let steps = vec![H256::zero(); VDF_FAST_FORWARD_CHANNEL_CAPACITY + 1];
         sender
             .send_validated_batch(1, &steps, Duration::from_millis(50))
