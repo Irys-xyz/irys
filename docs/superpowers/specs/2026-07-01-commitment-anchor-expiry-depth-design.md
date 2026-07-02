@@ -11,7 +11,7 @@ This is a **consensus rule change**: it changes which blocks are valid (commitme
 
 ## Background: current behavior
 
-Today data txs and commitment txs share one field: `MempoolConsensusConfig::tx_anchor_expiry_depth` (u8; mainnet 20 ≈ 4 min, testing 50). Ingress proofs already have their own, longer window (`ingress_proof_anchor_expiry_depth`, u16, 200), so a per-item-type window is an established pattern.
+Today data txs and commitment txs share one field: `MempoolConsensusConfig::tx_anchor_expiry_depth` (u8; mainnet 20 ≈ 4 min, testing 20). Ingress proofs already have their own, longer window (`ingress_proof_anchor_expiry_depth`, u16, 200), so a per-item-type window is an established pattern.
 
 The shared depth gates commitment txs at four consensus-relevant sites:
 

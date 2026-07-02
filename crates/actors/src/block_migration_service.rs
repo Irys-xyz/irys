@@ -161,6 +161,47 @@ impl BlockMigrationService {
         height != 0 && height.is_multiple_of(self.num_blocks_in_epoch)
     }
 
+    /// Writes the commitment replay-dedup metadata (`included_height = header
+    /// height`) for every commitment in `header`.
+    ///
+    /// Guarded by the invariant shared with [`clear_commitment_inclusions`]:
+    /// only blocks that first-INCLUDE a commitment own its dedup metadata. A
+    /// non-genesis epoch block merely re-lists (applies) the epoch's commitments
+    /// as a rollup — writing `included_height = h_epoch` would overwrite the
+    /// commitment's true inclusion height, so it is skipped. Genesis (height 0)
+    /// genuinely first-includes its commitments and is NOT skipped. A
+    /// commitment-free block is a no-op.
+    fn persist_commitment_inclusions(
+        &self,
+        tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+        header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let commitment_ids = header.commitment_tx_ids();
+        if commitment_ids.is_empty() || self.is_non_genesis_epoch_block(header.height) {
+            return Ok(());
+        }
+        irys_database::batch_set_commitment_tx_included_height(tx, commitment_ids, header.height)?;
+        Ok(())
+    }
+
+    /// Clears the commitment replay-dedup metadata for every commitment in
+    /// `header` (re-org orphan handling). Guarded identically to
+    /// [`persist_commitment_inclusions`] — see its docs for the epoch/genesis
+    /// invariant: orphaning a non-genesis epoch block must not delete the dedup
+    /// row of a commitment whose true (non-epoch) inclusion is still canonical.
+    fn clear_commitment_inclusions(
+        &self,
+        tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+        header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let commitment_ids = header.commitment_tx_ids();
+        if commitment_ids.is_empty() || self.is_non_genesis_epoch_block(header.height) {
+            return Ok(());
+        }
+        irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
+        Ok(())
+    }
+
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
         self.storage_modules_guard = Some(guard);
     }
@@ -288,7 +329,6 @@ impl BlockMigrationService {
             for block in blocks_to_clear {
                 let header = block.header();
                 let orphan_block_hash = header.block_hash;
-                let commitment_ids = header.commitment_tx_ids();
 
                 for dl in &header.data_ledgers {
                     let tx_ids = &dl.tx_ids.0;
@@ -302,13 +342,7 @@ impl BlockMigrationService {
                         irys_database::batch_clear_data_tx_included_height(tx, tx_ids)?;
                     }
                 }
-                // Skip commitment metadata for non-genesis epoch blocks: they
-                // only APPLY commitments, so orphaning one must not delete the
-                // dedup row of a commitment whose true (non-epoch) inclusion
-                // remains canonical below the fork point.
-                if !commitment_ids.is_empty() && !self.is_non_genesis_epoch_block(header.height) {
-                    irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
-                }
+                self.clear_commitment_inclusions(tx, header)?;
 
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                     irys_database::remove_data_root_block_set_entry(
@@ -334,23 +368,11 @@ impl BlockMigrationService {
             // the same outer loop.
             for block in blocks_to_confirm {
                 let header = block.header();
-                let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
                 let block_hash = header.block_hash;
 
                 write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
-                // Skip commitment metadata for non-genesis epoch blocks: writing
-                // `included_height = h_epoch` would overwrite the true inclusion
-                // height of a commitment that was first included in an earlier
-                // (non-epoch) block. `included_height` must always name the
-                // inclusion block, not the epoch block that applied it.
-                if !commitment_ids.is_empty() && !self.is_non_genesis_epoch_block(height) {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        commitment_ids,
-                        height,
-                    )?;
-                }
+                self.persist_commitment_inclusions(tx, header)?;
 
                 // Phase 3: append `block_hash` to each Submit-tx's CDR.block_set.
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
@@ -668,7 +690,6 @@ impl BlockMigrationService {
         let transactions = sealed_block.transactions();
 
         let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
-        let commitment_tx_ids = header.commitment_tx_ids();
         let block_height = header.height;
 
         let migrated_block = (**header).clone();
@@ -701,18 +722,9 @@ impl BlockMigrationService {
 
             write_data_ledger_metadata(tx, &header.data_ledgers, block_height)?;
 
-            // Skip commitment `included_height` for non-genesis epoch blocks
-            // (they apply, not include) — mirrors the `persist_metadata` skip so
-            // migration never re-points the dedup row at the epoch block.
             // `insert_commitment_tx` above (IrysCommitments) is unconditional and
-            // untouched.
-            if !commitment_tx_ids.is_empty() && !self.is_non_genesis_epoch_block(block_height) {
-                irys_database::batch_set_commitment_tx_included_height(
-                    tx,
-                    commitment_tx_ids,
-                    block_height,
-                )?;
-            }
+            // untouched; this only owns the replay-dedup `included_height` row.
+            self.persist_commitment_inclusions(tx, header)?;
 
             irys_database::insert_block_header(tx, &migrated_block)?;
 

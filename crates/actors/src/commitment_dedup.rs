@@ -153,14 +153,12 @@ pub(crate) fn ancestor_commitment_tx_ids(
 mod tests {
     use super::*;
     use irys_domain::BlockTree;
-    use irys_testing_utils::IrysBlockHeaderTestExt as _;
-    use irys_types::{ConsensusConfig, SystemLedger, SystemTransactionLedger};
+    use irys_testing_utils::{IrysBlockHeaderTestExt as _, mock_header_with_commitments};
+    use irys_types::ConsensusConfig;
     use std::sync::{Arc, RwLock};
 
     fn signed_genesis() -> IrysBlockHeader {
-        let mut header = IrysBlockHeader::new_mock_header();
-        header.height = 0;
-        header.poa.chunk = Some(Default::default());
+        let mut header = mock_header_with_commitments(0, vec![]);
         header.test_sign();
         header
     }
@@ -170,14 +168,8 @@ mod tests {
         height: u64,
         commitment_tx_ids: Vec<H256>,
     ) -> IrysBlockHeader {
-        let mut header = IrysBlockHeader::new_mock_header();
-        header.height = height;
+        let mut header = mock_header_with_commitments(height, commitment_tx_ids);
         header.previous_block_hash = parent.block_hash;
-        header.poa.chunk = Some(Default::default());
-        header.system_ledgers = vec![SystemTransactionLedger {
-            ledger_id: SystemLedger::Commitment as u32,
-            tx_ids: irys_types::H256List(commitment_tx_ids),
-        }];
         header.test_sign();
         header
     }
