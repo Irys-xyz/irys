@@ -969,6 +969,10 @@ pub(crate) fn resolve_promoted_on_branch(
     // reorg floor, where MBH (and thus `canonical_promoted_height`) is
     // branch-invariant. Cap strictly below the window so a reorg-mutable height
     // can never be trusted here — the walk already covered that band by hash.
+    // (The validator's sibling fallback in `data_txs_are_valid` caps the same
+    // way — strictly below its own walk window, not just at the reorg floor.
+    // Keep the two cap forms in sync when the walk depth or reorg ceiling
+    // changes.)
     if !remaining.is_empty() {
         let max_height = walk_min_height.saturating_sub(1);
         db.view_eyre(|tx| {

@@ -296,8 +296,8 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// branch — mirroring `canonical_commitment_included_height`.  Current callers:
 ///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
 ///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
-///     only falls back to these helpers for inclusions older than
-///     `tx_anchor_expiry_depth`.
+///     only falls back to these helpers for inclusions strictly below its
+///     inclusion-history walk window (which spans at least the reorg window).
 ///   - the NC-0042 expiry fast path
 ///     (`ledger_expiry::resolve_submit_inclusion`) relies on the config
 ///     invariant that a ledger slot's lifetime exceeds `block_tree_depth`
@@ -2157,11 +2157,15 @@ mod tests {
         /// Band-cap invariant that the promotion-prevalidation fallback in
         /// `data_txs_are_valid` relies on: a fully-canonical, content-valid row
         /// at a height inside the reorg-mutable band `(reorg_floor, parent]` is
-        /// returned when queried up to `parent_height` but excluded when the
-        /// query is capped at `reorg_floor`.  The Searching{Publish} fallback
-        /// now caps at `reorg_floor` precisely so a node-local band row (which
-        /// describes this node's chain, not the candidate's branch) cannot
-        /// decide validity and fork the network.
+        /// returned when queried up to `parent_height` but excluded once the
+        /// query is capped at or below `reorg_floor`.  The Searching{Publish}
+        /// fallback now caps strictly *below* its inclusion-history walk
+        /// window — in production config that walk bottoms out at the reorg
+        /// floor, so the fallback's actual cap sits one height below it — so a
+        /// node-local band row (which describes this node's chain, not the
+        /// candidate's branch) cannot decide validity and fork the network.
+        /// Any cap `<= reorg_floor`, including the validator's stricter one,
+        /// excludes the band row exercised below.
         #[test]
         fn band_height_row_excluded_below_reorg_floor() {
             let path = irys_testing_utils::utils::TempDirBuilder::new().build();

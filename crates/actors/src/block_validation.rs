@@ -5599,12 +5599,17 @@ pub async fn data_txs_are_valid(
                         // node's own chain, not the candidate's branch — trusting
                         // it there lets nodes that saw a sibling-branch inclusion
                         // decide validity differently from nodes that did not,
-                        // which forks the network. So we cap the fallback at the
-                        // reorg floor (`block.height - block_tree_depth`): the walk
-                        // owns the reorg window by hash, and only finalized rows —
-                        // where MBH is branch-invariant — reach the fallback. This
-                        // cap is what makes "any row consulted here is finalized"
-                        // true; it does not follow from the walk width alone.
+                        // which forks the network. So we cap the fallback strictly
+                        // BELOW the by-hash walk window (`block.height -
+                        // prior_inclusion_walk_depth(config) - 1`): the fallback
+                        // never consults a height the walk already owns, and since
+                        // this arm is reached only in `Searching` state — the walk
+                        // found no inclusion on the candidate's branch anywhere in
+                        // the window — every row the fallback can still see sits
+                        // outside the window and is therefore finalized and
+                        // branch-invariant. This is what makes "any row consulted
+                        // here is finalized" true; it does not follow from the
+                        // walk width alone.
                         //
                         // `canonical_submit_height` is sufficient evidence of
                         // prior Submit: the structural pre-pass guarantees
@@ -5624,12 +5629,18 @@ pub async fn data_txs_are_valid(
                         // window is already surfaced as `Found` by the walk, so
                         // only a finalized, content-verified prior promotion
                         // reaches here.
-                        let reorg_floor = block
+                        //
+                        // Sibling: `ledger_expiry::resolve_promoted_on_branch` caps
+                        // its finalized fallback the same way — strictly below its
+                        // own by-hash walk window. Keep the two cap forms in sync
+                        // if the walk depth or reorg ceiling changes.
+                        let fallback_cap = block
                             .height
-                            .saturating_sub(config.consensus.block_tree_depth);
+                            .saturating_sub(prior_inclusion_walk_depth(config))
+                            .saturating_sub(1);
 
                         let submit_lookup =
-                            canonical_submit_height(&ro_tx, &tx.id, reorg_floor).map_err(|e| {
+                            canonical_submit_height(&ro_tx, &tx.id, fallback_cap).map_err(|e| {
                                 error!(
                                     "canonical_submit_height DB error for tx {}: {}",
                                     &tx.id, &e
@@ -5647,7 +5658,7 @@ pub async fn data_txs_are_valid(
                         }
 
                         let promoted_lookup =
-                            canonical_promoted_height(&ro_tx, &tx.id, reorg_floor).map_err(
+                            canonical_promoted_height(&ro_tx, &tx.id, fallback_cap).map_err(
                                 |e| {
                                     error!(
                                         "canonical_promoted_height DB error for tx {}: {}",
@@ -5691,8 +5702,8 @@ pub async fn data_txs_are_valid(
 
                         warn!(
                             tx.id = %tx.id,
-                            reorg_floor,
-                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index below the reorg floor"
+                            fallback_cap,
+                            "submit inclusion outside inclusion-history walk window; resolved via canonical DB index below the inclusion-history walk window"
                         );
                     }
                     DataLedger::Submit => {
@@ -6318,9 +6329,9 @@ pub(crate) fn prior_inclusion_walk_depth(config: &Config) -> u64 {
 ///    deep reorgs moved from `block_migration_depth` to `block_tree_depth`.
 ///    Walking the full reorg window resolves every in-window inclusion on the
 ///    candidate's own branch by-hash; the fallback then caps its by-height
-///    lookups at the reorg floor so a node-local row inside the reorg-mutable
-///    band can never decide validity. Together the two cover [0, block.height)
-///    with no gap: finalized heights by-height, the reorg window by-hash.
+///    lookups strictly below the walk window (`block.height - walk_depth -
+///    1`), so the two paths cover `[0, block.height)` with no gap and no
+///    shared height: finalized heights by-height, the walk window by-hash.
 ///
 /// (Config invariant `tx_anchor_expiry_depth ≤ block_tree_depth` makes #2 the
 /// binding term in production; `max(...)` keeps the walk correct for test configs
