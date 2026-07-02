@@ -1501,7 +1501,7 @@ mod run_mode_tests {
     }
 
     /// The runtime `VdfConfig` merge must carry `core_pinning` through from the
-    /// node source struct — it was previously dropped (read separately in chain.rs).
+    /// node source struct.
     #[rstest]
     #[case(CorePinning::Disabled)]
     #[case(CorePinning::Auto)]

@@ -245,8 +245,7 @@ pub struct VdfStateReadonly {
 impl VdfStateReadonly {
     /// Creates a read handle, capturing the owned step counter and mining flag
     /// (same allocations) once at construction so the lock-free accessors never
-    /// re-take the `RwLock`. No longer `const`: it reads the lock once here.
-    /// Handles lock poisoning the same way `read()` does.
+    /// re-take the `RwLock`. Handles lock poisoning the same way `read()` does.
     pub fn new(state: AtomicVdfState) -> Self {
         let (global_step, is_vdf_mining_enabled) = {
             let guard = state
@@ -378,8 +377,7 @@ impl VdfStateReadonly {
 /// contract holds in production builds.
 #[cfg(any(test, feature = "test-utils"))]
 impl VdfStateReadonly {
-    /// Force the global step counter to `step` (lock-free). Mirrors the legacy
-    /// `into_inner_cloned().write().global_step = step` stub.
+    /// Force the global step counter to `step` (lock-free).
     pub fn test_set_step(&self, step: u64) {
         self.global_step.store(step, Ordering::Relaxed);
     }
@@ -470,6 +468,14 @@ pub fn create_state(
     assert!(
         !ordered_seeds.is_empty(),
         "VdfBootstrap must contain at least one seed"
+    );
+    // The replay may exceed `capacity` by exactly the genesis anchor (see
+    // [`VdfBootstrap`]); anything beyond that is a broken seed source.
+    assert!(
+        ordered_seeds.len() <= capacity + 1,
+        "VdfBootstrap seed count {} exceeds capacity + genesis anchor ({})",
+        ordered_seeds.len(),
+        capacity + 1
     );
     let seed_count =
         u64::try_from(ordered_seeds.len()).expect("VdfBootstrap seed count must fit in u64");

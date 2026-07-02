@@ -8,6 +8,7 @@ pub(crate) mod mempool_tests;
 pub(crate) mod partition_recovery;
 pub(crate) mod partition_recovery_epoch_boundary;
 pub(crate) mod partition_recovery_multi_epoch;
+pub(crate) mod partition_recovery_reanchor;
 pub(crate) mod peer_discovery;
 pub(crate) mod peer_mining;
 pub(crate) mod reth_restart;

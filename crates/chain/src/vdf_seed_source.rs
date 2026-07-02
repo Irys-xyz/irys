@@ -24,9 +24,16 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
             .map(|item| item.block_hash)
             .expect("To have at least genesis block");
 
-        let tx = self.db.tx().unwrap();
+        let tx = self
+            .db
+            .tx()
+            .expect("to open a read transaction for the VDF seed bootstrap");
         replay_vdf_seeds(block_hash, capacity, |hash| {
-            block_header_by_hash(&tx, hash, false).unwrap().unwrap()
+            block_header_by_hash(&tx, hash, false)
+                .expect("database error reading a block header during the VDF seed replay")
+                .unwrap_or_else(|| {
+                    panic!("block header {hash} referenced by the chain is missing from the database (VDF seed replay)")
+                })
         })
     }
 }

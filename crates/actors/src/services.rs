@@ -87,15 +87,15 @@ impl ServiceSenders {
     }
 
     /// Drive an in-process VDF re-anchor after a deep partition-recovery reorg:
-    /// hand the canonical seed window to the VDF thread (which fixes its buffer in
-    /// place) and broadcast `Reanchored` so partition-mining rebuilds its
-    /// efficient-sampling rotation from the corrected buffer. Best-effort: a closed
-    /// channel during shutdown is logged, not fatal.
+    /// hand the canonical seed window to the VDF thread, which fixes its buffer in
+    /// place and then broadcasts `Reanchored` itself — strictly after the swap — so
+    /// partition-mining rebuilds its efficient-sampling rotation from the corrected
+    /// buffer, never the poisoned one. Best-effort: a closed channel during shutdown
+    /// is logged, not fatal.
     pub fn request_vdf_reanchor(&self, request: ReanchorRequest) {
         if let Err(e) = self.0.vdf_reanchor.send(request) {
             tracing::warn!("failed to submit VDF re-anchor request to the VDF thread: {e}");
         }
-        let _ = self.0.mining_bus.send_reanchored();
     }
 }
 

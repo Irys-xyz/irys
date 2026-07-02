@@ -994,11 +994,15 @@ impl ValidationServiceInner {
         // recovering from a network partition the local buffer can be poisoned —
         // it folded a minority reset seed across a boundary — so comparing a
         // canonical block's `prev_output` against the buffer yields a false
-        // rejection and wedges recovery at the validation gate. The real
-        // continuity invariant (`prev_output` equals the *parent block's*
-        // `output`) is enforced block-rootedly by `prev_output_is_valid` in
-        // mandatory prevalidation (crates/actors/src/block_validation.rs), and
-        // the step chain itself is re-derived from the block's own data by
+        // rejection and wedges recovery at the validation gate. Both halves of
+        // the continuity invariant are instead enforced block-rootedly in
+        // mandatory prevalidation (crates/actors/src/block_validation.rs):
+        // `prev_output_is_valid` anchors the VALUE (`prev_output` equals the
+        // parent block's `output`) and `vdf_step_continuity_is_valid` anchors
+        // the NUMBERING (`global_step_number` equals the parent's plus
+        // `steps.len()` — without it, the buffer check's removal would let a
+        // block inflate its step number past the work chained from the parent).
+        // The step chain itself is re-derived from the block's own data by
         // `vdf_step_batch_is_valid`. The buffer is no longer consulted as an
         // authority for continuity.
         //

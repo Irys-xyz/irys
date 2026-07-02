@@ -247,6 +247,14 @@ pub enum PreValidationError {
         "vdf_limiter.prev_output ({got}) does not match previous blocks vdf_limiter.output ({expected})"
     )]
     VDFPreviousOutputMismatch { got: H256, expected: H256 },
+    #[error(
+        "vdf_limiter step numbering is not contiguous with the parent: global_step_number {global_step} carrying {step_count} steps must satisfy parent global_step_number {parent_global_step} + steps"
+    )]
+    VDFStepContinuityBroken {
+        global_step: u64,
+        step_count: u64,
+        parent_global_step: u64,
+    },
     #[error("Invalid block height (expected {expected} got {got})")]
     HeightInvalid { expected: u64, got: u64 },
     #[error("Invalid last_epoch_hash - expected {expected} got {got}")]
@@ -621,7 +629,8 @@ impl PreValidationError {
             | Self::UnexpectedCommitmentTransactions
             | Self::UnstakedIngressProofSigner { .. }
             | Self::VDFCheckpointsInvalid(_)
-            | Self::VDFPreviousOutputMismatch { .. } => ErrorClass::Consensus,
+            | Self::VDFPreviousOutputMismatch { .. }
+            | Self::VDFStepContinuityBroken { .. } => ErrorClass::Consensus,
         }
     }
 
@@ -686,6 +695,7 @@ impl PreValidationError {
             Self::InternalTaskJoin(_) => "internal_task_join",
             Self::VDFCheckpointsInvalid(_) => "vdf_checkpoints_invalid",
             Self::VDFPreviousOutputMismatch { .. } => "vdf_prev_output_mismatch",
+            Self::VDFStepContinuityBroken { .. } => "vdf_step_continuity_broken",
             Self::HeightInvalid { .. } => "height_invalid",
             Self::LastEpochHashMismatch { .. } => "last_epoch_hash_mismatch",
             Self::PublishTxMissingPriorSubmit { .. } => "publish_tx_missing_prior_submit",
@@ -1486,6 +1496,15 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
+    // Check VDF step-number continuity with the parent (the numbering half of the
+    // chain anchor; prev_output_is_valid above is the value half)
+    vdf_step_continuity_is_valid(block, previous_block)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "vdf_step_continuity_is_valid",
+    );
+
     // Check block height continuity
     height_is_valid(block, previous_block)?;
     debug!(
@@ -1985,6 +2004,35 @@ pub fn prev_output_is_valid(
         Err(PreValidationError::VDFPreviousOutputMismatch {
             got: block.vdf_limiter_info.prev_output,
             expected: previous_block.vdf_limiter_info.output,
+        })
+    }
+}
+
+/// The block's VDF step *numbering* must be contiguous with its parent: the steps list
+/// covers exactly `(parent.global_step_number, block.global_step_number]`, i.e.
+/// `global_step_number == parent.global_step_number + steps.len()` with at least one
+/// step. Together with [`prev_output_is_valid`] (which anchors the step *values* to the
+/// parent's output) this pins both halves of the VDF chain block-rootedly — no local
+/// buffer is consulted, so a fork-poisoned buffer cannot cause a false rejection here.
+///
+/// Without this check a block could inflate `global_step_number` past the work actually
+/// chained from the parent (the step recompute derives its salts from the block's own
+/// claimed numbers), manipulating the VDF clock that reset boundaries, recall-range
+/// windows and validators' step-waits are all derived from.
+pub fn vdf_step_continuity_is_valid(
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
+) -> Result<(), PreValidationError> {
+    let global_step = block.vdf_limiter_info.global_step_number;
+    let step_count = block.vdf_limiter_info.steps.len() as u64;
+    let parent_global_step = previous_block.vdf_limiter_info.global_step_number;
+    if step_count > 0 && parent_global_step.checked_add(step_count) == Some(global_step) {
+        Ok(())
+    } else {
+        Err(PreValidationError::VDFStepContinuityBroken {
+            global_step,
+            step_count,
+            parent_global_step,
         })
     }
 }
@@ -7598,6 +7646,102 @@ mod tests {
         } else {
             panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
         }
+    }
+
+    // `prev_output_is_valid` is the block-rooted anchor of the VDF hash chain: it ties a
+    // block's `prev_output` to its parent's `output`, so the seed continuity the reset-seed
+    // confirmation gate relies upon cannot be forged by a block that lies about its parent.
+    #[test]
+    fn prev_output_validates_match() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.vdf_limiter_info.output = H256::repeat_byte(0xAB);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.prev_output = prev.vdf_limiter_info.output;
+
+        assert!(
+            prev_output_is_valid(&block, &prev).is_ok(),
+            "expected block.prev_output to match parent's vdf output"
+        );
+    }
+
+    #[test]
+    fn prev_output_detects_mismatch() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.vdf_limiter_info.output = H256::repeat_byte(0xAB);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.prev_output = H256::repeat_byte(0xCD);
+
+        if let Err(PreValidationError::VDFPreviousOutputMismatch { got, expected }) =
+            prev_output_is_valid(&block, &prev)
+        {
+            assert_eq!(expected, prev.vdf_limiter_info.output);
+            assert_eq!(got, block.vdf_limiter_info.prev_output);
+        } else {
+            panic!("expected PreValidationError::VDFPreviousOutputMismatch");
+        }
+    }
+
+    // `vdf_step_continuity_is_valid` is the numbering half of the VDF chain anchor
+    // (`prev_output_is_valid` above is the value half): the steps list must cover
+    // exactly `(parent.global_step_number, block.global_step_number]`, so a block
+    // cannot inflate its step number past the work chained from the parent.
+    #[test]
+    fn vdf_step_continuity_validates_contiguous_numbering() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.vdf_limiter_info.global_step_number = 10;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.global_step_number = 13;
+        block.vdf_limiter_info.steps = H256List(vec![H256::zero(); 3]);
+
+        assert!(
+            vdf_step_continuity_is_valid(&block, &prev).is_ok(),
+            "3 steps ending at 13 are contiguous with a parent at 10"
+        );
+    }
+
+    #[test]
+    fn vdf_step_continuity_rejects_inflated_step_number() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.vdf_limiter_info.global_step_number = 10;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        // Claims step 100 while carrying only 3 steps: numbers 11..=97 were never
+        // computed — the clock-inflation shape the check exists to reject.
+        block.vdf_limiter_info.global_step_number = 100;
+        block.vdf_limiter_info.steps = H256List(vec![H256::zero(); 3]);
+
+        if let Err(PreValidationError::VDFStepContinuityBroken {
+            global_step,
+            step_count,
+            parent_global_step,
+        }) = vdf_step_continuity_is_valid(&block, &prev)
+        {
+            assert_eq!(global_step, 100);
+            assert_eq!(step_count, 3);
+            assert_eq!(parent_global_step, 10);
+        } else {
+            panic!("expected PreValidationError::VDFStepContinuityBroken");
+        }
+    }
+
+    #[test]
+    fn vdf_step_continuity_rejects_empty_steps() {
+        let mut prev = IrysBlockHeader::new_mock_header();
+        prev.vdf_limiter_info.global_step_number = 10;
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        // Zero steps with an unmoved counter: numerically "contiguous", but every
+        // block must carry at least one step (`first_step_number` contract).
+        block.vdf_limiter_info.global_step_number = 10;
+        block.vdf_limiter_info.steps = H256List(Vec::new());
+
+        assert!(
+            vdf_step_continuity_is_valid(&block, &prev).is_err(),
+            "a block must carry at least one VDF step"
+        );
     }
 
     /// Integration check for `get_assigned_ingress_proofs`: with a tx

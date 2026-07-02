@@ -354,13 +354,27 @@ pub struct ReanchorRequest {
     pub canonical_window: std::collections::VecDeque<Seed>,
     /// Canonical tip step `C` — the last global step `canonical_window` covers.
     pub canonical_step: u64,
-    /// Canonical `next_seed`: the reset seed folded at reset boundaries beyond `C` —
-    /// both in the locally recomputed tail `(C, L]` and in subsequent stepping.
+    /// Canonical tip's `seed`: the reset seed the chain folds at a boundary that falls
+    /// exactly on `C`. The tip block contains that boundary in its own step window, so
+    /// per `calculate_seeds` its rotation already consumed the schedule — verification
+    /// of the child block folds the child's `seed`, which it inherits from the tip.
+    pub canonical_seed: H256,
+    /// Canonical `next_seed`: the reset seed folded at the first reset boundary
+    /// strictly beyond `C` — both in the locally recomputed tail `(C, L]` and in
+    /// subsequent stepping. Boundaries beyond that first one are pinned by canonical
+    /// blocks that do not exist yet, so a tail spanning them is rejected rather than
+    /// guessed at (see `build_reanchored_buffer`).
     pub next_reset_seed: H256,
 }
 
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
+
+    /// The VDF thread re-anchored its seed buffer onto canonical steps in place
+    /// (deep partition-recovery heal). Emitted strictly AFTER the buffer swap, so
+    /// subscribers that rebuild derived state (partition-mining's recall-range
+    /// rotation) always read the corrected buffer, never the poisoned one.
+    fn broadcast_reanchored(&self);
 }
 
 /// Runs the VDF, starting with the testnet config's step count, calibrating the iterations between runs to get to ~1s/step - returning the value once `runs` runs are complete

@@ -1909,12 +1909,10 @@ impl IrysNode {
         let initial_hash = last_step_hash.0;
         irys_vdf::metrics::record_vdf_global_step(global_step_number);
 
-        // spawn packing controllers
         let packing_controller_handles =
             packing_service.spawn_packing_controllers(runtime_handle.clone());
 
-        // set up partition mining services (tokio). They read the live step
-        // counter through the VDF handle (current_step()), so no separate atomic.
+        // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
             &config,
             &storage_modules_guard,
@@ -1924,8 +1922,7 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        // set up the vdf thread. It reads the mining flag from vdf_state (the
-        // SSOT Arc), so no separate flag/atomic is threaded in.
+        // set up the vdf thread
         let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,

@@ -1200,8 +1200,9 @@ impl BlockTreeServiceInner {
                             // place: assemble the canonical seed window from the new fork
                             // and hand it to the VDF thread, which fixes its buffer under
                             // its own write lock (forward-only counter unchanged, no
-                            // restart). Partition-mining rebuilds its recall-range rotation
-                            // on the accompanying broadcast.
+                            // restart) and then broadcasts `Reanchored`, on which
+                            // partition-mining rebuilds its recall-range rotation from the
+                            // corrected buffer.
                             let canonical_step = arc_block.vdf_limiter_info.global_step_number;
                             match build_reanchor_window(
                                 arc_block.as_ref(),
@@ -1220,6 +1221,7 @@ impl BlockTreeServiceInner {
                                     self.service_senders.request_vdf_reanchor(ReanchorRequest {
                                         canonical_window,
                                         canonical_step,
+                                        canonical_seed: arc_block.vdf_limiter_info.seed,
                                         next_reset_seed: arc_block.vdf_limiter_info.next_seed,
                                     });
                                 }

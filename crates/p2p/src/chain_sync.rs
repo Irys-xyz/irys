@@ -117,12 +117,10 @@ impl Drop for VdfSyncPause {
     /// explicit `restore()` runs, reinstate the pre-sync mining state so mining
     /// is never left disabled. A normal `restore()` disarms this via `restored`.
     fn drop(&mut self) {
-        if self.restored {
-            return;
+        if !self.restored {
+            debug!("Sync task: VdfSyncPause dropped before restore; reinstating mining state");
+            self.restore();
         }
-        debug!("Sync task: VdfSyncPause dropped before restore; reinstating mining state");
-        self.vdf_controller
-            .set_enabled(self.was_mining_enabled_before_sync);
     }
 }
 
@@ -1998,9 +1996,8 @@ mod tests {
 
     /// The snapshot also wins when mining was DISABLED before sync: a concurrent
     /// `start()` during the sync window must be overwritten back to `false` on
-    /// restore. This is the path the unconditional `restore()` fixes — the
-    /// previous conditional version skipped the write when the snapshot was
-    /// `false`, letting the concurrent enable survive.
+    /// restore — `restore()` writes the snapshot unconditionally, including the
+    /// `false` case.
     #[test]
     fn sync_restore_overwrites_concurrent_enable_when_disabled_before_sync() {
         use std::sync::atomic::AtomicBool;

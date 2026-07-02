@@ -146,4 +146,8 @@ impl MiningBroadcaster for MiningBusBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64) {
         let _ = self.bus.send_seed(seed, checkpoints, global_step);
     }
+
+    fn broadcast_reanchored(&self) {
+        let _ = self.bus.send_reanchored();
+    }
 }
