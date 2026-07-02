@@ -1,9 +1,9 @@
-use irys_database::{
-    block_header_by_hash, canonical_commitment_included_height, db::IrysDatabaseExt as _,
-};
+use crate::block_ancestry::walk_ancestors_tree_then_db;
+use irys_database::{canonical_commitment_included_height, db::IrysDatabaseExt as _};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{CommitmentTransaction, DatabaseProvider, H256, IrysBlockHeader};
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 /// Returns the tx_id of the first commitment in `commitment_txs` that is a
 /// replay of one already canonically included, or `Ok(None)` if none are.
@@ -99,52 +99,22 @@ pub(crate) fn ancestor_commitment_tx_ids(
     let mut ids = HashSet::new();
     let block_height = block_under_validation.height;
     let min_height = block_height.saturating_sub(walk_depth);
-
-    // Phase 1: walk parents while they are in the block tree, borrowing each
-    // header (no clone). Yields the first cursor that misses the tree, or `None`
-    // if the walk finished (dropped below `min_height` or reached genesis).
-    let mut cursor = block_under_validation.previous_block_hash;
-    let db_cursor = {
-        let guard = block_tree.read();
-        loop {
-            let Some(header) = guard.get_block(&cursor) else {
-                break Some(cursor);
-            };
-            if header.height < min_height {
-                break None;
-            }
+    walk_ancestors_tree_then_db(
+        block_tree,
+        db,
+        block_under_validation.previous_block_hash,
+        min_height,
+        |header| {
             ids.extend(header.commitment_tx_ids().iter().copied());
-            if header.height == 0 {
-                break None;
-            }
-            cursor = header.previous_block_hash;
-        }
-    };
-
-    // Phase 2: the walk left the tree — finish the descent in ONE DB read txn.
-    if let Some(mut cursor) = db_cursor {
-        db.view_eyre(|tx| {
-            loop {
-                let Some(header) = block_header_by_hash(tx, &cursor, false)? else {
-                    eyre::bail!(
-                        "commitment dedup walk: ancestor {cursor} (within the reorg \
-                         window of block {} at height {block_height}) is missing from \
-                         both the block tree and the DB",
-                        block_under_validation.block_hash,
-                    );
-                };
-                if header.height < min_height {
-                    break;
-                }
-                ids.extend(header.commitment_tx_ids().iter().copied());
-                if header.height == 0 {
-                    break;
-                }
-                cursor = header.previous_block_hash;
-            }
-            Ok(())
-        })?;
-    }
+            Ok(ControlFlow::Continue(()))
+        },
+    )
+    .map_err(|err| {
+        eyre::eyre!(
+            "commitment dedup walk for block {} at height {block_height} failed: {err}",
+            block_under_validation.block_hash
+        )
+    })?;
 
     Ok(ids)
 }
