@@ -1,6 +1,7 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
+    block_ancestry::walk_ancestors_tree_then_db,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
@@ -52,6 +53,7 @@ use reth_db::transaction::DbTx as _;
 use reth_ethereum_primitives::Block;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ops::ControlFlow,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -6244,64 +6246,32 @@ async fn get_previous_tx_inclusions(
         .block_tree
         .send_traced(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
-    let block_tree_guard = block_tree_guard.read();
 
     let walk_min_height = block_under_validation.height.saturating_sub(walk_depth);
 
-    let mut block = (
+    walk_ancestors_tree_then_db(
+        &block_tree_guard,
+        db,
         block_under_validation.block_hash,
-        block_under_validation.height,
-    );
-    while block.1 >= walk_min_height {
-        // Stop if we've reached the genesis block
-        if block.1 == 0 {
-            break;
-        }
-
-        let mut update_states = |header: &IrysBlockHeader| {
-            if header.block_hash == block_under_validation.block_hash {
-                // don't process the states for a block we're putting under full validation
-                return Ok(());
+        walk_min_height,
+        |header| {
+            if header.block_hash != block_under_validation.block_hash {
+                process_block_ledgers_with_states(
+                    &header.data_ledgers,
+                    header.block_hash,
+                    block_under_validation.block_hash,
+                    tx_ids,
+                )?;
             }
-            process_block_ledgers_with_states(
-                &header.data_ledgers,
-                header.block_hash,
-                block_under_validation.block_hash,
-                tx_ids,
-            )
-        };
-        // Move to the parent block and continue the traversal backwards
-        block = match block_tree_guard.get_block(&block.0) {
-            Some(header) => {
-                update_states(header)?;
-                (header.previous_block_hash, header.height.saturating_sub(1))
-            }
-            None => {
-                let header = db
-                    .view(|tx| irys_database::block_header_by_hash(tx, &block.0, false))
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "db.view failed fetching parent block {}: {e}",
-                            &block.0
-                        ))
-                    })?
-                    .map_err(|e| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "block_header_by_hash failed for {}: {e}",
-                            &block.0
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        PreValidationError::BlockBoundsLookupError(format!(
-                            "parent block {} not found in database",
-                            &block.0
-                        ))
-                    })?;
-                update_states(&header)?;
-                (header.previous_block_hash, header.height.saturating_sub(1))
-            }
-        };
-    }
+            Ok(ControlFlow::Continue(()))
+        },
+    )
+    .map_err(|e| {
+        PreValidationError::BlockBoundsLookupError(format!(
+            "ancestor walk failed for block {}: {e}",
+            block_under_validation.block_hash
+        ))
+    })?;
 
     Ok(())
 }

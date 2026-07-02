@@ -57,15 +57,16 @@
 //! 5. **Fetch Transaction Data**: Retrieve full transaction details
 //! 6. **Calculate Fees**: Distribute fees proportionally among miners who stored the data
 
+use crate::block_ancestry::{block_header_from_tree_then_db, walk_ancestors_tree_then_db};
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{OptionExt as _, eyre};
 use irys_database::{
-    block_header_by_hash, canonical_promoted_height, canonical_submit_height,
-    db::IrysDatabaseExt as _, reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
+    canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
+    reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
 };
-use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard, EpochSnapshot};
+use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, U256,
@@ -73,6 +74,7 @@ use irys_types::{
 };
 use nodit::{InclusiveInterval as _, interval::ii};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 /// Calculates the aggregated fees owed to miners when data ledgers expire.
@@ -926,46 +928,37 @@ fn resolve_promoted_on_branch(
     let mut remaining: BTreeSet<IrysTransactionId> = candidate_txids.iter().copied().collect();
     let mut promoted: BTreeSet<IrysTransactionId> = BTreeSet::new();
 
-    // Primary path: by-hash parent walk over the reorg window. `height` is
-    // tracked explicitly (ancestry is contiguous: each parent is height-1) so the
-    // loop only ever attempts to resolve ancestors that are *within* the window —
-    // an in-window ancestor missing from BOTH the tree and the DB is a local
-    // inconsistency and fails loud (classified NodeFault upstream), never a silent
+    // Primary path: by-hash parent walk over the reorg window. An in-window
+    // ancestor missing from BOTH the tree and the DB is a local inconsistency
+    // and fails loud (classified NodeFault upstream), never a silent
     // under-suppression that could diverge from a healthy node.
-    {
-        let tree = block_tree_guard.read();
-        let mut cursor = parent_block_hash;
-        let mut height = block_height.saturating_sub(1); // parent height
-        while !remaining.is_empty() && height >= walk_min_height {
-            // Resolve the ancestor header by hash (tree first, DB fallback). An
-            // in-window ancestor missing from BOTH is a local inconsistency → fail
-            // loud (NodeFault upstream), never a silent under-suppression.
-            let header = block_header_from_tree_then_db(&tree, db, &cursor)?.ok_or_else(|| {
-                eyre!(
-                    "expiry promotion walk: ancestor {cursor} at height {height} \
-                     (within the reorg window) is missing from both the block tree \
-                     and the DB"
-                )
-            })?;
-            debug_assert_eq!(
-                header.height, height,
-                "expiry promotion walk descended onto a non-contiguous ancestor"
-            );
+    walk_ancestors_tree_then_db(
+        block_tree_guard,
+        db,
+        parent_block_hash,
+        walk_min_height,
+        |header| {
             remaining.retain(|txid| {
-                if block_includes_ledger_tx(&header, DataLedger::Publish, txid) {
+                if block_includes_ledger_tx(header, DataLedger::Publish, txid) {
                     promoted.insert(*txid);
                     false
                 } else {
                     true
                 }
             });
-            if height == 0 {
-                break; // genesis has no parent
-            }
-            cursor = header.previous_block_hash;
-            height -= 1;
-        }
-    }
+            Ok(if remaining.is_empty() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
+        },
+    )
+    .map_err(|err| {
+        eyre!(
+            "expiry promotion walk from parent {parent_block_hash} below height \
+             {block_height} failed: {err}"
+        )
+    })?;
 
     // Finalized fallback: a promotion older than the walked window is below the
     // reorg floor, where MBH (and thus `canonical_promoted_height`) is
@@ -1161,23 +1154,6 @@ fn submit_tx_start_offset(
         offset = offset.saturating_add(data_size.div_ceil(chunk_size));
     }
     None
-}
-
-/// Resolve a block header BY HASH against an **already-held** tree read guard,
-/// falling back to the DB for headers evicted from the retained tree window. The
-/// single home for the "tree-first, DB-fallback, by-hash" resolution the
-/// fork-ancestry walks share — takes the held `&BlockTree` so a caller can hold the
-/// guard across an entire walk (no per-step re-lock). `None` ⇒ the hash is in
-/// neither the tree nor the DB.
-fn block_header_from_tree_then_db(
-    tree: &BlockTree,
-    db: &DatabaseProvider,
-    hash: &H256,
-) -> eyre::Result<Option<IrysBlockHeader>> {
-    if let Some(header) = tree.get_block(hash) {
-        return Ok(Some(header.clone()));
-    }
-    db.view_eyre(|tx| block_header_by_hash(tx, hash, false))
 }
 
 /// Fetches a block header from the block tree or database, acquiring the read guard
