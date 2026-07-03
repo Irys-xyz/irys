@@ -1191,3 +1191,214 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
     ctx.stop().await;
     Ok(())
 }
+
+/// Pins the EXCLUSION side of the `Searching { Publish }` fallback cap in
+/// `data_txs_are_valid`.
+///
+/// The two sibling fixtures above pin the INCLUSION side: a content-verified
+/// canonical row strictly below the cap is trusted. Neither would fail if the
+/// cap regressed to a looser bound (`parent_height`, or the reorg floor
+/// `block.height - block_tree_depth`) — both fixtures seed their fabricated
+/// prior far enough below the window that a looser cap still admits it. This
+/// test seeds the fabricated prior INSIDE the walk window instead, so a
+/// loosened cap would wrongly admit it.
+///
+/// The by-hash walk owns its window by hash on the candidate's own branch — a
+/// content-verified node-local row at an in-window height describes THIS
+/// node's chain, not necessarily the candidate's branch. The fallback cap
+/// (`block.height - prior_inclusion_walk_depth(config) - 1`) is the only
+/// thing keeping such a row out of consideration. This test fails if the cap
+/// is ever loosened to `parent_height` or the reorg floor.
+///
+/// **Test driver:** same scaffolding as
+/// `test_prevalidation_rejects_doubly_published_tx_via_fallback` — mine to
+/// height 3, validate a sibling candidate at height 3 (parent = the real
+/// block 2) under `tx_anchor_expiry_depth = 0` / `block_tree_depth = 1`, so
+/// the by-hash walk (depth 1) covers exactly the real block 2 on the
+/// candidate's branch. The fabricated canonical prior here sits at height
+/// **2** — inside that walk window — carrying the tx in both Submit and
+/// Publish (metadata `included_height = promoted_height = 2`), and
+/// `MigratedBlockHashes[2]` is repointed at it (overwriting the real block-2
+/// row if one exists; at tip height 3 with testing `block_migration_depth =
+/// 6` nothing has migrated yet, so nothing is actually clobbered). The real
+/// block 2 on the candidate's ancestry does not carry the tx, so the walk
+/// still leaves the tx `Searching`.
+///
+/// The fallback cap is `3 - 1 - 1 = 1`, strictly below height 2, so
+/// `canonical_submit_height` rejects the height-2 hint before ever reading
+/// `MigratedBlockHashes[2]` and returns `None` → `PublishTxMissingPriorSubmit`.
+/// A cap of `parent_height` (2) or the old `reorg_floor` (`3 - 1 = 2`) would
+/// instead admit the fabricated row, content-verify it via the (now
+/// overwritten) MBH entry, and reject with `PublishTxAlreadyIncluded` naming
+/// the fabricated block — a node-history-dependent outcome that forks the
+/// network. That panic arm below is this test's falsifiability check.
+#[tokio::test]
+async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() -> Result<()> {
+    use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::tables::MigratedBlockHashes;
+    use irys_database::{
+        insert_block_header, insert_tx_header, set_data_tx_included_height,
+        set_data_tx_promoted_height,
+    };
+    use irys_types::{BlockBody, H256List};
+    use reth_db::transaction::DbTxMut as _;
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    // Same geometry as the sibling regression tests: mine three real blocks
+    // so the by-hash walk (depth 1 under the override below) covers exactly
+    // the real, tx-free block 2 for a height-3 candidate.
+    ctx.node.mine_blocks(3).await?;
+    let real_tip = ctx.node.get_block_by_height(3).await?;
+
+    // A Publish-ledger tx that will impersonate "already canonically
+    // included/promoted" via the fabricated in-window prior seeded below.
+    let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
+    tx.data_root = H256::from_low_u64_be(0x1_1DE_1DE_5EED);
+    tx.data_size = 0;
+    tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
+    tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
+    tx.ledger_id = DataLedger::Publish as u32;
+    let tx = tx
+        .sign(&ctx.config.signer())
+        .expect("Failed to sign test transaction");
+
+    // Fabricated canonical prior at height 2 — INSIDE the by-hash walk
+    // window, not on the candidate's ancestry: a real header carrying the tx
+    // in BOTH Submit and Publish, pointed at by `MigratedBlockHashes[2]`
+    // (overwriting the real block-2 row, which is fine at this tip height
+    // since nothing has migrated yet). This is a node-local, content-verified
+    // row describing this node's chain — not the candidate's branch — and
+    // only the fallback cap keeps it from being trusted.
+    let seeded_height = 2_u64;
+    let mut prior_block = IrysBlockHeader::new_mock_header();
+    prior_block.height = seeded_height;
+    prior_block.block_hash = H256::random();
+    prior_block.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx.id]);
+    prior_block.data_ledgers[DataLedger::Publish].tx_ids = H256List(vec![tx.id]);
+    let seeded_block_hash = prior_block.block_hash;
+
+    ctx.node.node_ctx.db.update_eyre(|db_tx| {
+        insert_tx_header(db_tx, &tx)?;
+        set_data_tx_included_height(db_tx, &tx.id, seeded_height)?;
+        set_data_tx_promoted_height(db_tx, &tx.id, seeded_height)?;
+        insert_block_header(db_tx, &prior_block)?;
+        db_tx.put::<MigratedBlockHashes>(seeded_height, seeded_block_hash)?;
+        Ok(())
+    })?;
+
+    // Build a sibling candidate at height 3 (parent = the real block 2)
+    // whose Publish ledger re-includes `tx`: clone the real height-3 header
+    // as the structural baseline and swap the data ledgers.
+    let mut header = real_tip.clone();
+    let publish_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    publish_ledger.tx_ids = H256List(vec![tx.id]);
+    let submit_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    submit_ledger.tx_ids = H256List(Vec::new());
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![tx.clone()],
+        commitment_transactions: Vec::new(),
+    };
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    {
+        let mut tree = ctx.node.node_ctx.block_tree_guard.write();
+        let parent_hash = bad_block.header().previous_block_hash;
+        let commitment_snapshot = tree
+            .get_commitment_snapshot(&parent_hash)
+            .expect("parent commitment snapshot");
+        let epoch_snapshot = tree
+            .get_epoch_snapshot(&parent_hash)
+            .expect("parent epoch snapshot");
+        let ema_snapshot = tree
+            .get_ema_snapshot(&parent_hash)
+            .expect("parent ema snapshot");
+        tree.add_block(
+            &bad_block,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+        )?;
+    }
+
+    let (service_senders, mut service_receivers) = build_test_service_senders();
+    let block_tree_guard = ctx.node.node_ctx.block_tree_guard.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = service_receivers.block_tree.recv().await {
+            let BlockTreeServiceMessage::GetBlockTreeReadGuard { response } = msg.inner else {
+                continue;
+            };
+            let _ = response.send(block_tree_guard.clone());
+        }
+    });
+
+    // Walk-depth override: `max(tx_anchor_expiry_depth = 0, block_tree_depth
+    // = 1) = 1`, so the by-hash walk for the height-3 candidate covers
+    // exactly the real, tx-free block 2 on its own branch — the tx stays
+    // `Searching` and the canonical-DB fallback (capped at `3 - 1 - 1 = 1`,
+    // strictly below the seeded height 2) is the path under test.
+    let mut consensus = ctx.config.consensus_config();
+    consensus.mempool.tx_anchor_expiry_depth = 0;
+    consensus.block_tree_depth = 1;
+    let mut node_config = ctx.config.clone();
+    node_config.consensus = ConsensusOptions::Custom(consensus);
+    let config_override = Config::new_with_random_peer_id(node_config);
+
+    let (parent_epoch_snapshot, parent_ema_snapshot) = {
+        let tree = ctx.node.node_ctx.block_tree_guard.read();
+        let parent_hash = bad_block.header().previous_block_hash;
+        (
+            tree.get_epoch_snapshot(&parent_hash)
+                .expect("parent epoch snapshot"),
+            tree.get_ema_snapshot(&parent_hash)
+                .expect("parent ema snapshot"),
+        )
+    };
+
+    let result = irys_actors::block_validation::data_txs_are_valid(
+        &config_override,
+        &service_senders,
+        bad_block.header(),
+        &ctx.node.node_ctx.db,
+        &ctx.node.node_ctx.block_tree_guard,
+        bad_block.transactions(),
+        parent_epoch_snapshot,
+        parent_ema_snapshot,
+    )
+    .await;
+
+    match result {
+        Err(PreValidationError::PublishTxMissingPriorSubmit { tx_id }) => {
+            assert_eq!(tx_id, tx.id, "rejection must name the tx under test");
+        }
+        Err(PreValidationError::PublishTxAlreadyIncluded { tx_id, block_hash }) => {
+            panic!(
+                "regression: the fallback trusted a content-verified node-local \
+                 row INSIDE the by-hash walk window (tx={tx_id}, block={block_hash}) \
+                 — this is the fork vector the fallback cap exists to close: a \
+                 row at this height describes only this node's chain, not \
+                 necessarily the candidate's branch, so it must never decide \
+                 validity"
+            );
+        }
+        other => panic!(
+            "expected PublishTxMissingPriorSubmit (fallback cap excludes the \
+             in-window seeded height), got {:?}",
+            other
+        ),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
