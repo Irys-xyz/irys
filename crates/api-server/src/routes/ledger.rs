@@ -1,8 +1,13 @@
 use crate::ApiState;
 use crate::error::ApiError;
 use actix_web::web::{Data, Json, Path};
+use awc::http::StatusCode;
+use irys_actors::block_tree_service;
+use irys_database::{database, db::IrysDatabaseExt as _};
+use irys_domain::BlockBounds;
 use irys_types::{
-    DataLedger, H256, IrysAddress, partition::PartitionAssignment, serialization::string_u64,
+    DataLedger, DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader,
+    LedgerChunkOffset, partition::PartitionAssignment, serialization::string_u64,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -272,6 +277,341 @@ pub async fn get_current_epoch(
     }))
 }
 
+// === Ledger offset → transaction attribution ===
+
+/// Response for the `/ledger/{ledger_id}/offset/{ledger_offset}/tx` endpoints.
+///
+/// Attributes a canonical ledger chunk offset to the data transaction that
+/// owns it, using the block index and canonical block headers — chain
+/// attribution, not local storage availability.
+///
+/// `blockEndOffset` and `txEndOffset` are exclusive upper bounds.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerOffsetTxResponse {
+    pub ledger_id: u32,
+    pub ledger: DataLedger,
+    #[serde(with = "string_u64")]
+    pub ledger_offset: u64,
+    pub slot_index: u64,
+    pub slot_offset: u64,
+    pub block_height: u64,
+    pub block_hash: H256,
+    /// First chunk offset the block appended to the ledger (inclusive)
+    #[serde(with = "string_u64")]
+    pub block_start_offset: u64,
+    /// One past the last chunk offset the block appended (exclusive)
+    #[serde(with = "string_u64")]
+    pub block_end_offset: u64,
+    pub tx_id: H256,
+    pub data_root: H256,
+    /// Position of the tx within the block's tx list for this ledger
+    pub tx_offset: usize,
+    #[serde(with = "string_u64")]
+    pub tx_start_offset: u64,
+    /// One past the tx's last chunk offset (exclusive)
+    #[serde(with = "string_u64")]
+    pub tx_end_offset: u64,
+    pub chunks_in_tx: u64,
+}
+
+#[derive(Deserialize)]
+pub struct LedgerOffsetPath {
+    ledger_id: u32,
+    ledger_offset: u64,
+}
+
+pub async fn get_tx_by_ledger_offset(
+    state: Data<ApiState>,
+    path: Path<LedgerOffsetPath>,
+) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
+    let ledger = parse_ledger_id(path.ledger_id)?;
+    Ok(Json(resolve_tx_by_ledger_offset(
+        &state,
+        ledger,
+        path.ledger_offset,
+    )?))
+}
+
+#[derive(Deserialize)]
+pub struct SlotOffsetPath {
+    ledger_id: u32,
+    slot_index: u64,
+    slot_offset: u64,
+}
+
+pub async fn get_tx_by_slot_offset(
+    state: Data<ApiState>,
+    path: Path<SlotOffsetPath>,
+) -> Result<Json<LedgerOffsetTxResponse>, ApiError> {
+    let ledger = parse_ledger_id(path.ledger_id)?;
+    let ledger_offset = slot_to_ledger_offset(
+        path.slot_index,
+        path.slot_offset,
+        state.config.consensus.num_chunks_in_partition,
+    )
+    .map_err(|msg| ApiError::CustomWithStatus(msg, StatusCode::BAD_REQUEST))?;
+    Ok(Json(resolve_tx_by_ledger_offset(
+        &state,
+        ledger,
+        ledger_offset,
+    )?))
+}
+
+fn parse_ledger_id(ledger_id: u32) -> Result<DataLedger, ApiError> {
+    DataLedger::try_from(ledger_id).map_err(|_| {
+        (
+            format!("Invalid ledger id: {ledger_id}"),
+            StatusCode::BAD_REQUEST,
+        )
+            .into()
+    })
+}
+
+fn internal(msg: impl Into<String>) -> ApiError {
+    ApiError::CustomWithStatus(msg.into(), StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Converts a slot-relative offset into an absolute ledger offset. Every data
+/// ledger's slots span `num_chunks_in_partition` chunks — the partitions
+/// within a slot are replicas, so the replication factor does not change the
+/// slot's data range.
+fn slot_to_ledger_offset(
+    slot_index: u64,
+    slot_offset: u64,
+    num_chunks_in_partition: u64,
+) -> Result<u64, String> {
+    if slot_offset >= num_chunks_in_partition {
+        return Err(format!(
+            "Slot offset {slot_offset} must be less than the number of chunks in a partition ({num_chunks_in_partition})"
+        ));
+    }
+    slot_index
+        .checked_mul(num_chunks_in_partition)
+        .and_then(|base| base.checked_add(slot_offset))
+        .ok_or_else(|| format!("Slot index {slot_index} exceeds the ledger offset space"))
+}
+
+/// Resolves a canonical ledger chunk offset to the data transaction that owns
+/// it. Works for any [`DataLedger`], including the Cascade term ledgers
+/// (OneYear/ThirtyDay): a ledger with no block-index entries yet simply has a
+/// frontier of 0, so every offset 404s until data lands in it.
+fn resolve_tx_by_ledger_offset(
+    state: &ApiState,
+    ledger: DataLedger,
+    ledger_offset: u64,
+) -> Result<LedgerOffsetTxResponse, ApiError> {
+    let consensus = &state.config.consensus;
+    let block_index = state.block_index.read();
+
+    // Distinguish "offset not (yet) allocated" (404) from index/header
+    // inconsistencies (500) up front by checking the latest indexed total for
+    // this ledger. A ledger absent from the latest index item (e.g. a Cascade
+    // term ledger before activation) has a frontier of 0.
+    let anchor_height = block_index.latest_height();
+    let anchor_item = block_index.get_item(anchor_height).ok_or_else(|| {
+        ApiError::CustomWithStatus("Block index is empty".into(), StatusCode::NOT_FOUND)
+    })?;
+    let frontier = anchor_item
+        .ledgers
+        .iter()
+        .find(|l| l.ledger == ledger)
+        .map(|l| l.total_chunks)
+        .unwrap_or(0);
+    if ledger_offset >= frontier {
+        return Err((
+            format!(
+                "Offset {ledger_offset} is beyond the {ledger:?} ledger frontier ({frontier} chunks)"
+            ),
+            StatusCode::NOT_FOUND,
+        )
+            .into());
+    }
+
+    // Anchor the search on the same height as the frontier check so both
+    // reads observe the same index state even if the index advances (or gets
+    // truncated by a reorg) in between.
+    let bounds = block_index
+        .get_block_bounds_at_height(
+            ledger,
+            LedgerChunkOffset::from(ledger_offset),
+            anchor_height,
+        )
+        .map_err(|e| internal(format!("Block index lookup failed: {e}")))?;
+
+    let index_item = block_index.get_item(bounds.height).ok_or_else(|| {
+        internal(format!(
+            "Missing block index item at height {}",
+            bounds.height
+        ))
+    })?;
+
+    // Indexed blocks are migrated, and migration persists the block header and
+    // its tx headers atomically with the index entry, so the DB lookup below
+    // cannot race migration; the tree is only consulted as a fast path.
+    let block = block_tree_service::get_block_header(
+        &state.block_tree,
+        &state.db,
+        index_item.block_hash,
+        false,
+    )
+    .map_err(|e| internal(format!("Failed to load block header: {e}")))?
+    .ok_or_else(|| {
+        internal(format!(
+            "Block {} at height {} is in the block index but its header was not found",
+            index_item.block_hash, bounds.height
+        ))
+    })?;
+
+    let ledger_entry =
+        validate_block_against_index(&bounds, index_item.block_hash, &block).map_err(internal)?;
+
+    let attribution = attribute_tx_at_offset(
+        bounds.height,
+        (bounds.start_chunk_offset, bounds.end_chunk_offset),
+        &ledger_entry.tx_ids.0,
+        consensus.chunk_size,
+        ledger_offset,
+        |tx_id| {
+            state
+                .db
+                .view_eyre(|tx| database::tx_header_by_txid(tx, tx_id))
+        },
+    )
+    .map_err(|e| internal(e.to_string()))?;
+
+    let num_chunks_in_partition = consensus.num_chunks_in_partition;
+    Ok(LedgerOffsetTxResponse {
+        ledger_id: ledger.get_id(),
+        ledger,
+        ledger_offset,
+        slot_index: ledger_offset / num_chunks_in_partition,
+        slot_offset: ledger_offset % num_chunks_in_partition,
+        block_height: bounds.height,
+        block_hash: index_item.block_hash,
+        block_start_offset: bounds.start_chunk_offset,
+        block_end_offset: bounds.end_chunk_offset,
+        tx_id: attribution.header.id,
+        data_root: attribution.header.data_root,
+        tx_offset: attribution.tx_index,
+        tx_start_offset: attribution.tx_start_offset,
+        tx_end_offset: attribution.tx_end_offset,
+        chunks_in_tx: attribution.chunks_in_tx,
+    })
+}
+
+/// Cross-checks the block header loaded for `bounds.height` against the block
+/// index item that attributed the offset to it. Any divergence is a
+/// server-side consistency violation (mapped to 500 by the caller).
+fn validate_block_against_index<'a>(
+    bounds: &BlockBounds,
+    index_block_hash: H256,
+    block: &'a IrysBlockHeader,
+) -> Result<&'a DataTransactionLedger, String> {
+    if block.block_hash != index_block_hash {
+        return Err(format!(
+            "Block index has hash {index_block_hash} at height {} but the loaded header hashes to {}",
+            bounds.height, block.block_hash
+        ));
+    }
+    if block.height != bounds.height {
+        return Err(format!(
+            "Block {index_block_hash} is indexed at height {} but its header says height {}",
+            bounds.height, block.height
+        ));
+    }
+    let ledger_entry = block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == bounds.ledger)
+        .ok_or_else(|| {
+            format!(
+                "Block index attributes {:?} ledger chunks to block {index_block_hash} at height {} but the block has no such ledger entry",
+                bounds.ledger, bounds.height
+            )
+        })?;
+    if ledger_entry.tx_root != bounds.tx_root {
+        return Err(format!(
+            "tx_root mismatch for {:?} ledger at height {}: block index has {} but block header has {}",
+            bounds.ledger, bounds.height, bounds.tx_root, ledger_entry.tx_root
+        ));
+    }
+    Ok(ledger_entry)
+}
+
+/// A transaction located within a block's appended chunk range.
+#[derive(Debug)]
+struct TxAttribution {
+    tx_index: usize,
+    header: DataTransactionHeader,
+    tx_start_offset: u64,
+    tx_end_offset: u64,
+    chunks_in_tx: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AttributionError {
+    #[error("Failed to load tx header {tx_id}: {err}")]
+    TxLookup { tx_id: H256, err: String },
+    #[error("Tx {tx_id} is listed in the block at height {height} but its header is missing")]
+    MissingTxHeader { tx_id: H256, height: u64 },
+    #[error(
+        "Block at height {height} introduced chunk range [{block_start}, {block_end}) but its txs only cover [{block_start}, {cursor}), leaving offset {ledger_offset} unattributed"
+    )]
+    RangeNotCovered {
+        height: u64,
+        block_start: u64,
+        block_end: u64,
+        cursor: u64,
+        ledger_offset: u64,
+    },
+}
+
+/// Walks a block's ledger txs in order, assigning each the chunk range
+/// `[cursor, cursor + ceil(data_size / chunk_size))` starting from the block's
+/// first appended offset — mirroring how `BlockIndex::push_block` accumulates
+/// `total_chunks` — and returns the tx whose range contains `ledger_offset`.
+fn attribute_tx_at_offset(
+    height: u64,
+    (block_start, block_end): (u64, u64),
+    tx_ids: &[H256],
+    chunk_size: u64,
+    ledger_offset: u64,
+    mut load_tx_header: impl FnMut(&H256) -> eyre::Result<Option<DataTransactionHeader>>,
+) -> Result<TxAttribution, AttributionError> {
+    let mut cursor = block_start;
+    for (tx_index, tx_id) in tx_ids.iter().enumerate() {
+        let header = load_tx_header(tx_id)
+            .map_err(|e| AttributionError::TxLookup {
+                tx_id: *tx_id,
+                err: e.to_string(),
+            })?
+            .ok_or(AttributionError::MissingTxHeader {
+                tx_id: *tx_id,
+                height,
+            })?;
+        let chunks_in_tx = header.data_size.div_ceil(chunk_size);
+        let tx_end_offset = cursor.saturating_add(chunks_in_tx);
+        if (cursor..tx_end_offset).contains(&ledger_offset) {
+            return Ok(TxAttribution {
+                tx_index,
+                header,
+                tx_start_offset: cursor,
+                tx_end_offset,
+                chunks_in_tx,
+            });
+        }
+        cursor = tx_end_offset;
+    }
+    Err(AttributionError::RangeNotCovered {
+        height,
+        block_start,
+        block_end,
+        cursor,
+        ledger_offset,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +705,252 @@ mod tests {
             count_assignments_by_ledger_type(miner, &assignments, DataLedger::Submit).unwrap(),
             1
         );
+    }
+
+    // === Ledger offset → transaction attribution ===
+
+    const CHUNK_SIZE: u64 = 32;
+
+    fn data_tx(seed: u8, data_size: u64) -> DataTransactionHeader {
+        let mut header = DataTransactionHeader::default();
+        header.id = H256::from([seed; 32]);
+        header.data_root = H256::from([seed.wrapping_add(100); 32]);
+        header.data_size = data_size;
+        header
+    }
+
+    fn tx_ids(headers: &[DataTransactionHeader]) -> Vec<H256> {
+        headers.iter().map(|h| h.id).collect()
+    }
+
+    fn lookup(
+        headers: &[DataTransactionHeader],
+    ) -> impl FnMut(&H256) -> eyre::Result<Option<DataTransactionHeader>> + '_ {
+        move |tx_id| Ok(headers.iter().find(|h| h.id == *tx_id).cloned())
+    }
+
+    #[test]
+    fn attribute_single_tx_single_chunk() {
+        let txs = vec![data_tx(1, CHUNK_SIZE)];
+        let found =
+            attribute_tx_at_offset(7, (5, 6), &tx_ids(&txs), CHUNK_SIZE, 5, lookup(&txs)).unwrap();
+        assert_eq!(found.tx_index, 0);
+        assert_eq!(found.header.id, txs[0].id);
+        assert_eq!(found.tx_start_offset, 5);
+        assert_eq!(found.tx_end_offset, 6);
+        assert_eq!(found.chunks_in_tx, 1);
+    }
+
+    #[rstest]
+    #[case::first_chunk(10)]
+    #[case::middle_chunk(11)]
+    #[case::last_chunk(12)]
+    fn attribute_single_tx_multiple_chunks(#[case] offset: u64) {
+        // 65 bytes → 3 chunks (partial last chunk rounds up)
+        let txs = vec![data_tx(1, 2 * CHUNK_SIZE + 1)];
+        let found =
+            attribute_tx_at_offset(3, (10, 13), &tx_ids(&txs), CHUNK_SIZE, offset, lookup(&txs))
+                .unwrap();
+        assert_eq!(found.tx_index, 0);
+        assert_eq!(found.tx_start_offset, 10);
+        assert_eq!(found.tx_end_offset, 13);
+        assert_eq!(found.chunks_in_tx, 3);
+    }
+
+    #[rstest]
+    #[case::first_tx_first_chunk(100, 0, 100, 102)]
+    #[case::first_tx_last_chunk(101, 0, 100, 102)]
+    #[case::boundary_second_tx_first_chunk(102, 1, 102, 105)]
+    #[case::second_tx_last_chunk(104, 1, 102, 105)]
+    #[case::third_tx(105, 2, 105, 106)]
+    fn attribute_multiple_txs_in_block(
+        #[case] offset: u64,
+        #[case] expected_index: usize,
+        #[case] expected_start: u64,
+        #[case] expected_end: u64,
+    ) {
+        // tx0: 2 chunks [100, 102), tx1: 3 chunks [102, 105), tx2: 1 chunk [105, 106)
+        let txs = vec![
+            data_tx(1, 2 * CHUNK_SIZE),
+            data_tx(2, 3 * CHUNK_SIZE),
+            data_tx(3, 1),
+        ];
+        let found = attribute_tx_at_offset(
+            9,
+            (100, 106),
+            &tx_ids(&txs),
+            CHUNK_SIZE,
+            offset,
+            lookup(&txs),
+        )
+        .unwrap();
+        assert_eq!(found.tx_index, expected_index);
+        assert_eq!(found.header.id, txs[expected_index].id);
+        assert_eq!(found.tx_start_offset, expected_start);
+        assert_eq!(found.tx_end_offset, expected_end);
+    }
+
+    #[test]
+    fn attribute_zero_size_tx_owns_no_chunks() {
+        let txs = vec![data_tx(1, 0), data_tx(2, CHUNK_SIZE)];
+        let found =
+            attribute_tx_at_offset(4, (50, 51), &tx_ids(&txs), CHUNK_SIZE, 50, lookup(&txs))
+                .unwrap();
+        assert_eq!(found.tx_index, 1);
+        assert_eq!(found.header.id, txs[1].id);
+    }
+
+    #[test]
+    fn attribute_missing_tx_header() {
+        let txs = vec![data_tx(1, CHUNK_SIZE)];
+        let missing_id = H256::from([9; 32]);
+        let result = attribute_tx_at_offset(4, (0, 1), &[missing_id], CHUNK_SIZE, 0, lookup(&txs));
+        assert!(matches!(
+            result,
+            Err(AttributionError::MissingTxHeader { tx_id, height: 4 }) if tx_id == missing_id
+        ));
+    }
+
+    #[test]
+    fn attribute_tx_lookup_error() {
+        let result = attribute_tx_at_offset(4, (0, 1), &[H256::zero()], CHUNK_SIZE, 0, |_| {
+            Err(eyre::eyre!("db exploded"))
+        });
+        assert!(matches!(result, Err(AttributionError::TxLookup { .. })));
+    }
+
+    #[test]
+    fn attribute_offset_not_covered_by_txs() {
+        // Block claims [0, 3) but its single tx only covers [0, 2)
+        let txs = vec![data_tx(1, 2 * CHUNK_SIZE)];
+        let result = attribute_tx_at_offset(4, (0, 3), &tx_ids(&txs), CHUNK_SIZE, 2, lookup(&txs));
+        assert!(matches!(
+            result,
+            Err(AttributionError::RangeNotCovered {
+                cursor: 2,
+                ledger_offset: 2,
+                ..
+            })
+        ));
+    }
+
+    fn bounds_and_block(ledger: DataLedger) -> (BlockBounds, H256, irys_types::IrysBlockHeader) {
+        let tx_root = H256::from([7; 32]);
+        let block_hash = H256::from([8; 32]);
+        let mut block = irys_types::IrysBlockHeader::new_mock_header();
+        block.height = 42;
+        block.block_hash = block_hash;
+        block.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: ledger.get_id(),
+            tx_root,
+            ..Default::default()
+        }];
+        let bounds = BlockBounds {
+            height: 42,
+            ledger,
+            start_chunk_offset: 10,
+            end_chunk_offset: 20,
+            tx_root,
+        };
+        (bounds, block_hash, block)
+    }
+
+    #[test]
+    fn validate_block_against_index_ok() {
+        let (bounds, block_hash, block) = bounds_and_block(DataLedger::Submit);
+        let entry = validate_block_against_index(&bounds, block_hash, &block).unwrap();
+        assert_eq!(entry.tx_root, bounds.tx_root);
+    }
+
+    #[test]
+    fn validate_block_against_index_hash_mismatch() {
+        let (bounds, _, block) = bounds_and_block(DataLedger::Submit);
+        let err = validate_block_against_index(&bounds, H256::from([9; 32]), &block).unwrap_err();
+        assert!(err.contains("hash"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_block_against_index_height_mismatch() {
+        let (bounds, block_hash, mut block) = bounds_and_block(DataLedger::Submit);
+        block.height = 43;
+        let err = validate_block_against_index(&bounds, block_hash, &block).unwrap_err();
+        assert!(err.contains("height 43"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_block_against_index_missing_ledger_entry() {
+        // A pre-Cascade block has no OneYear entry; the index claiming it
+        // introduced OneYear chunks is a consistency violation.
+        let (mut bounds, block_hash, block) = bounds_and_block(DataLedger::Submit);
+        bounds.ledger = DataLedger::OneYear;
+        let err = validate_block_against_index(&bounds, block_hash, &block).unwrap_err();
+        assert!(
+            err.contains("no such ledger entry"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_block_against_index_tx_root_mismatch() {
+        let (mut bounds, block_hash, block) = bounds_and_block(DataLedger::Submit);
+        bounds.tx_root = H256::from([13; 32]);
+        let err = validate_block_against_index(&bounds, block_hash, &block).unwrap_err();
+        assert!(err.contains("tx_root mismatch"), "unexpected error: {err}");
+    }
+
+    #[rstest]
+    #[case::slot_zero_start(0, 0, 100, Ok(0))]
+    #[case::slot_zero_end(0, 99, 100, Ok(99))]
+    #[case::slot_one_start(1, 0, 100, Ok(100))]
+    #[case::mid_slot(3, 29, 100, Ok(329))]
+    #[case::offset_at_partition_size(0, 100, 100, Err(()))]
+    #[case::offset_past_partition_size(2, 101, 100, Err(()))]
+    #[case::overflow(u64::MAX, 0, 100, Err(()))]
+    fn slot_to_ledger_offset_cases(
+        #[case] slot_index: u64,
+        #[case] slot_offset: u64,
+        #[case] num_chunks: u64,
+        #[case] expected: Result<u64, ()>,
+    ) {
+        let result = slot_to_ledger_offset(slot_index, slot_offset, num_chunks);
+        match expected {
+            Ok(offset) => assert_eq!(result.unwrap(), offset),
+            Err(()) => assert!(result.is_err()),
+        }
+    }
+
+    #[test]
+    fn ledger_offset_response_serialization_contract() {
+        let response = LedgerOffsetTxResponse {
+            ledger_id: 1,
+            ledger: DataLedger::Submit,
+            ledger_offset: 129,
+            slot_index: 0,
+            slot_offset: 129,
+            block_height: 157_860,
+            block_hash: H256::from([1; 32]),
+            block_start_offset: 127,
+            block_end_offset: 130,
+            tx_id: H256::from([2; 32]),
+            data_root: H256::from([3; 32]),
+            tx_offset: 2,
+            tx_start_offset: 127,
+            tx_end_offset: 130,
+            chunks_in_tx: 3,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        // u64 chunk offsets serialize as strings; heights/counts as numbers
+        assert_eq!(json["ledgerId"], 1);
+        assert_eq!(json["ledger"], "Submit");
+        assert_eq!(json["ledgerOffset"], "129");
+        assert_eq!(json["slotIndex"], 0);
+        assert_eq!(json["slotOffset"], 129);
+        assert_eq!(json["blockHeight"], 157_860);
+        assert_eq!(json["blockStartOffset"], "127");
+        assert_eq!(json["blockEndOffset"], "130");
+        assert_eq!(json["txOffset"], 2);
+        assert_eq!(json["txStartOffset"], "127");
+        assert_eq!(json["txEndOffset"], "130");
+        assert_eq!(json["chunksInTx"], 3);
     }
 }

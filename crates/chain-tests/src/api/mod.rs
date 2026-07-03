@@ -3,6 +3,7 @@ mod api;
 mod client;
 mod external_api;
 mod hardfork_tests;
+mod ledger_offset_endpoint;
 mod pricing_endpoint;
 mod supply_endpoint;
 mod tx;

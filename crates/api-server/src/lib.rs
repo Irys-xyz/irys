@@ -164,6 +164,14 @@ pub fn routes() -> impl HttpServiceFactory {
             "/ledger/{miner_address}/assignments",
             web::get().to(ledger::get_all_assignments),
         )
+        .route(
+            "/ledger/{ledger_id}/offset/{ledger_offset}/tx",
+            web::get().to(ledger::get_tx_by_ledger_offset),
+        )
+        .route(
+            "/ledger/{ledger_id}/slot/{slot_index}/offset/{slot_offset}/tx",
+            web::get().to(ledger::get_tx_by_slot_offset),
+        )
         // Epoch endpoints
         .route("/epoch/current", web::get().to(ledger::get_current_epoch))
         // Storage endpoints
