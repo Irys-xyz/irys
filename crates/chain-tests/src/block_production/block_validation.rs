@@ -1254,7 +1254,7 @@ async fn test_prevalidation_ignores_content_verified_row_inside_walk_window() ->
     // A Publish-ledger tx that will impersonate "already canonically
     // included/promoted" via the fabricated in-window prior seeded below.
     let mut tx = DataTransactionHeader::new(&ctx.config.consensus_config());
-    tx.data_root = H256::from_low_u64_be(0x1_1DE_1DE_5EED);
+    tx.data_root = H256::from_low_u64_be(0x011D_E1DE_5EED);
     tx.data_size = 0;
     tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
     tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
