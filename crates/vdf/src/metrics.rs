@@ -58,10 +58,18 @@ mod tests {
                             metric.description(),
                             "Whether VDF mining is enabled (1=yes, 0=no)"
                         );
-                        assert!(matches!(
-                            metric.data(),
-                            AggregatedMetrics::U64(MetricData::Gauge(_))
-                        ));
+                        // Type AND value: record_vdf_mining_enabled(true) must
+                        // land as a u64 gauge data point of 1.
+                        match metric.data() {
+                            AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+                                let point = gauge
+                                    .data_points()
+                                    .next()
+                                    .expect("one recorded gauge data point");
+                                assert_eq!(point.value(), 1, "true must record as gauge value 1");
+                            }
+                            _ => panic!("irys.vdf.mining_enabled must be a u64 gauge"),
+                        }
                     }
                 }
             }

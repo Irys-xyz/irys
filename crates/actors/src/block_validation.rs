@@ -3268,17 +3268,33 @@ impl RecallRangeError {
 ///
 /// After a deep reorg across a VDF reset boundary the local seed buffer can be
 /// "poisoned" — it holds the minority fork's steps for the post-boundary range
-/// while the canonical block under validation carries the correct ones. So on a
-/// buffer mismatch we do NOT reject on the buffer's authority: we rebuild the
-/// step window from the block's OWN canonical ancestry (block tree, DB fallback)
-/// and re-check, rejecting only if it still mismatches. A missing ancestor
-/// yields a soft `StepsUnavailable` (requeue), never a hard reject.
+/// while the canonical block under validation carries the correct ones. The
+/// buffer is therefore never authoritative against a block: on a buffer
+/// MISMATCH we rebuild the step window from the block's OWN canonical ancestry
+/// (block tree, DB fallback) and re-check, rejecting only if it still
+/// mismatches; and while a re-anchor is pending (`buffer_suspect`) the buffer
+/// is not consulted at all — a poisoned buffer could otherwise falsely ACCEPT
+/// a block whose recall offset was crafted against this node's minority
+/// window. A missing ancestor yields a soft `StepsUnavailable` (requeue),
+/// never a hard reject.
+///
+/// The buffer fast path stays for the healthy case because the recall window
+/// is `[reset_step, block_step]` on the recall-range grid
+/// (`num_recall_ranges_in_partition`, ~189k steps on mainnet): rebuilding it
+/// from ancestry for every block is not viable, so the walk is reserved for
+/// suspect windows and buffer mismatches.
+///
+/// Residual (accepted): a block crafted against this node's poisoned window
+/// can still fast-path in the gap before the reorg gate marks the buffer
+/// suspect. It costs the attacker a fully valid mined block and yields one
+/// transient orphan on one node; see `claude/2026-07-03-001` finding F1.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
     steps_guard: &VdfStateReadonly,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
+    buffer_suspect: bool,
 ) -> Result<(), RecallRangeError> {
     let global_step_number = block.vdf_limiter_info.global_step_number;
     let reset_step_number = irys_efficient_sampling::reset_step_number(global_step_number, config);
@@ -3290,6 +3306,36 @@ pub async fn recall_recall_range_is_valid(
     let recall_offset =
         (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize;
     let num_ranges = irys_efficient_sampling::num_recall_ranges_in_partition(config) as usize;
+
+    // Authoritative re-check from the block's own canonical ancestry, used
+    // whenever the buffer cannot be trusted (suspect window or mismatch).
+    let fork_local_check = |cause: String| -> Result<(), RecallRangeError> {
+        let resolve = |hash: &H256| resolve_header_tree_or_db(block_tree_guard, db, hash);
+        let Some(fork_steps) =
+            build_fork_local_step_window(block, reset_step_number, global_step_number, resolve)
+        else {
+            // Couldn't rebuild the window (an ancestor is unavailable). Treat
+            // as a local gap → requeue, never a hard reject.
+            return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
+                "fork-local step window unavailable ({cause})"
+            )));
+        };
+        irys_efficient_sampling::recall_range_is_valid(
+            recall_offset,
+            num_ranges,
+            &fork_steps,
+            &block.poa.partition_hash,
+        )
+        .map_err(RecallRangeError::Mismatch)
+    };
+
+    if buffer_suspect {
+        info!(
+            block.hash = %block.block_hash,
+            "Recall-range validation: seed buffer suspect (re-anchor pending); using fork-local window"
+        );
+        return fork_local_check("buffer suspect: re-anchor pending".into());
+    }
 
     // Fast path: check the recall range against the local seed buffer.
     let steps = steps_guard
@@ -3306,27 +3352,10 @@ pub async fn recall_recall_range_is_valid(
         return Ok(());
     };
 
-    // The buffer disagrees. Rebuild the window from the block's own canonical
-    // ancestry and re-check — the buffer may be poisoned by a cross-boundary
-    // reorg while this canonical block is correct.
-    let resolve = |hash: &H256| resolve_header_tree_or_db(block_tree_guard, db, hash);
-    let Some(fork_steps) =
-        build_fork_local_step_window(block, reset_step_number, global_step_number, resolve)
-    else {
-        // Couldn't rebuild the window (an ancestor is unavailable). Treat as a
-        // local gap → requeue, never a hard reject.
-        return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
-            "recall-range buffer mismatch and fork-local window unavailable: {buffer_mismatch}"
-        )));
-    };
-
-    irys_efficient_sampling::recall_range_is_valid(
-        recall_offset,
-        num_ranges,
-        &fork_steps,
-        &block.poa.partition_hash,
-    )
-    .map_err(RecallRangeError::Mismatch)
+    // The buffer disagrees. Re-check from the block's own canonical ancestry —
+    // the buffer may be poisoned by a cross-boundary reorg while this canonical
+    // block is correct.
+    fork_local_check(format!("buffer mismatch: {buffer_mismatch}"))
 }
 
 /// Resolve a block header by hash, preferring the in-memory block tree (which
@@ -3402,6 +3431,21 @@ pub(crate) fn build_fork_local_step_window(
         }
         let next_hash = header.previous_block_hash;
         header = resolve(&next_hash)?;
+        // Step continuity across the parent link: the parent's last step must
+        // immediately precede this header's first (h_first >= 2 here — the
+        // `h_first <= want_start` return above already handled want_start >= 1).
+        // A gap would leave zeroed slots in `result` and silently mis-map the
+        // window — for the re-anchor path that window becomes the healed
+        // buffer, so fail soft instead.
+        if header.vdf_limiter_info.global_step_number != h_first - 1 {
+            tracing::warn!(
+                block.hash = %next_hash,
+                parent_last_step = header.vdf_limiter_info.global_step_number,
+                child_first_step = h_first,
+                "fork-local VDF window: non-contiguous ancestry; treating window as unavailable"
+            );
+            return None;
+        }
     }
 }
 
@@ -3472,6 +3516,214 @@ mod fork_local_window_tests {
         assert!(
             out.is_none(),
             "an unavailable ancestor must yield None (soft StepsUnavailable), never a partial window"
+        );
+    }
+
+    /// A gapped ancestry — a parent whose last step does not immediately
+    /// precede its child's first — must yield `None` (soft requeue), never a
+    /// window with silently zeroed slots.
+    #[test]
+    fn gapped_ancestry_yields_none() {
+        // b1 covers [1..=4]; b2 claims [7..=8] (steps 5,6 missing); b3 covers
+        // [9..=12]. The b3→b2 link is contiguous, the b2→b1 link is not.
+        let b1 = vdf_header(1, 101, H256::from_low_u64_be(100), 1, &[1, 2, 3, 4]);
+        let b2 = vdf_header(2, 102, b1.block_hash, 7, &[7, 8]);
+        let b3 = vdf_header(3, 103, b2.block_hash, 9, &[9, 10, 11, 12]);
+        let mut ancestors = HashMap::new();
+        ancestors.insert(b1.block_hash, b1);
+        ancestors.insert(b2.block_hash, b2);
+
+        let out = build_fork_local_step_window(&b3, 3, 12, |h| ancestors.get(h).cloned());
+        assert!(
+            out.is_none(),
+            "non-contiguous ancestry must yield None, not a mis-mapped window"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_range_buffer_authority_tests {
+    use super::*;
+    use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+    use irys_domain::BlockTree;
+    use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
+    use irys_types::block_production::Seed;
+    use irys_vdf::state::VdfState;
+    use reth_db::mdbx::DatabaseArguments;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool;
+
+    /// Everything `recall_recall_range_is_valid` needs, with a block whose own
+    /// steps cover the full recall window (so the fork-local walk never has to
+    /// resolve an ancestor) and a seed buffer holding DIFFERENT values whose
+    /// derived recall offset provably differs from the fork-local one.
+    struct RecallFixture {
+        config: ConsensusConfig,
+        block: IrysBlockHeader,
+        steps_guard: VdfStateReadonly,
+        block_tree_guard: BlockTreeReadGuard,
+        db: DatabaseProvider,
+        fork_offset: usize,
+        buffer_offset: usize,
+        chunks_per_range: u64,
+        _tempdir: irys_testing_utils::tempfile::TempDir,
+    }
+
+    fn fixture() -> RecallFixture {
+        // Small recall grid: 10 chunks / 2 per range = 5 ranges, so the window
+        // for a step-3 block is [reset_step(3)=1, 3].
+        let mut config = ConsensusConfig::testing();
+        config.num_chunks_in_partition = 10;
+        config.num_chunks_in_recall_range = 2;
+        let chunks_per_range = config.num_chunks_in_recall_range;
+        let num_ranges = irys_efficient_sampling::num_recall_ranges_in_partition(&config) as usize;
+
+        let partition_hash = H256::repeat_byte(0x77);
+        let fork_values: Vec<H256> = (1..=3).map(H256::from_low_u64_be).collect();
+        let fork_offset = irys_efficient_sampling::get_recall_range(
+            num_ranges,
+            &H256List(fork_values.clone()),
+            &partition_hash,
+        )
+        .expect("fork window offset");
+
+        // Buffer values with a provably DIFFERENT derived offset (walk the
+        // fixture byte until the offsets diverge — deterministic).
+        let mut byte = 0xB0_u8;
+        let (buffer_values, buffer_offset) = loop {
+            let vals: Vec<H256> = (0..3_u8).map(|i| H256::repeat_byte(byte + i)).collect();
+            let off = irys_efficient_sampling::get_recall_range(
+                num_ranges,
+                &H256List(vals.clone()),
+                &partition_hash,
+            )
+            .expect("buffer window offset");
+            if off != fork_offset {
+                break (vals, off);
+            }
+            byte += 1;
+        };
+
+        // Block at step 3 carrying its own full window [1, 3].
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.global_step_number = 3;
+        block.vdf_limiter_info.steps = H256List(fork_values);
+        block.poa.partition_hash = partition_hash;
+
+        // Poisoned-shaped buffer: same step numbers, different values.
+        let mut state = VdfState::new(64, 3, Arc::new(AtomicBool::new(false)));
+        state.seeds = buffer_values.into_iter().map(Seed).collect::<VecDeque<_>>();
+        let steps_guard = VdfStateReadonly::new(Arc::new(std::sync::RwLock::new(state)));
+
+        // Real (empty-beyond-genesis) tree + DB: the self-contained block never
+        // consults them; the ancestry-miss test relies on them resolving nothing.
+        let tmp = TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            tmp.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().expect("irys_testing db args"),
+        )
+        .expect("open temp MDBX env");
+        let db = DatabaseProvider(Arc::new(db_env));
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.test_sign();
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(std::sync::RwLock::new(
+            BlockTree::new(&genesis, config.clone()),
+        )));
+
+        RecallFixture {
+            config,
+            block,
+            steps_guard,
+            block_tree_guard,
+            db,
+            fork_offset,
+            buffer_offset,
+            chunks_per_range,
+            _tempdir: tmp,
+        }
+    }
+
+    impl RecallFixture {
+        fn offset_in_chunks(&self, range_offset: usize) -> u32 {
+            u32::try_from(range_offset as u64 * self.chunks_per_range).expect("small fixture")
+        }
+
+        async fn run(&self, buffer_suspect: bool) -> Result<(), RecallRangeError> {
+            recall_recall_range_is_valid(
+                &self.block,
+                &self.config,
+                &self.steps_guard,
+                &self.block_tree_guard,
+                &self.db,
+                buffer_suspect,
+            )
+            .await
+        }
+    }
+
+    /// The F1 node-split vector: a block whose recall offset matches the
+    /// POISONED buffer (but not the block's own ancestry) must be REJECTED
+    /// while a re-anchor is pending — the fork-local window is authoritative,
+    /// the buffer is not consulted.
+    #[tokio::test]
+    async fn suspect_buffer_cannot_accept_a_buffer_matched_offset() {
+        let mut f = fixture();
+        f.block.poa.partition_chunk_offset = f.offset_in_chunks(f.buffer_offset);
+
+        let err = f
+            .run(true)
+            .await
+            .expect_err("a buffer-matched offset must fail against the fork-local window");
+        assert!(
+            matches!(err, RecallRangeError::Mismatch(_)),
+            "fork-local disagreement is a consensus mismatch, got: {err:?}"
+        );
+
+        // Documented residual (accepted, see the fn doc + review F1): outside
+        // the suspect window the buffer fast path would accept the same block.
+        // Pinned here so any change to that trade-off is a conscious one.
+        f.run(false)
+            .await
+            .expect("outside the suspect window the buffer fast path accepts");
+    }
+
+    /// The false-reject heal (pre-existing behaviour, re-pinned): a canonical
+    /// block whose offset matches its OWN ancestry but not the poisoned buffer
+    /// must pass via the fork-local recheck.
+    #[tokio::test]
+    async fn buffer_mismatch_falls_back_to_fork_window_and_accepts() {
+        let mut f = fixture();
+        f.block.poa.partition_chunk_offset = f.offset_in_chunks(f.fork_offset);
+
+        f.run(false)
+            .await
+            .expect("a fork-window-valid block must pass despite the poisoned buffer");
+        // And with the buffer suspect the same block passes directly.
+        f.run(true)
+            .await
+            .expect("a fork-window-valid block must pass in the suspect window too");
+    }
+
+    /// Suspect window + a block that does NOT carry its full window and whose
+    /// ancestry is unavailable → soft `StepsUnavailable` (requeue), never a
+    /// hard reject.
+    #[tokio::test]
+    async fn suspect_with_unavailable_ancestry_is_soft() {
+        let mut f = fixture();
+        // Only the last step is embedded: first_step = 3, window starts at 1,
+        // and the parent hash resolves nowhere in the empty tree/DB.
+        f.block.vdf_limiter_info.steps = H256List(vec![f.block.vdf_limiter_info.steps.0[2]]);
+        f.block.poa.partition_chunk_offset = f.offset_in_chunks(f.fork_offset);
+
+        let err = f
+            .run(true)
+            .await
+            .expect_err("an unavailable window must not validate");
+        assert!(
+            matches!(err, RecallRangeError::StepsUnavailable(_)),
+            "unavailable ancestry is a soft local gap, got: {err:?}"
         );
     }
 }

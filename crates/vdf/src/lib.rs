@@ -18,8 +18,8 @@ pub mod vdf_utils;
 pub mod verify;
 
 pub use vdf_utils::{
-    ReanchorRequest, VdfFastForwardSender, VdfReanchorSender, fast_forward_channel,
-    reanchor_channel,
+    ReanchorReceiver, ReanchorRequest, ReanchorSignals, VdfFastForwardSender,
+    VdfReanchorGenerationChanged, VdfReanchorSender, fast_forward_channel, reanchor_channel,
 };
 
 const SHA256_IV: [u32; 8] = [

@@ -64,7 +64,7 @@ use irys_types::{
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
-    ReanchorRequest, VdfStep,
+    ReanchorReceiver, ReanchorSignals, VdfStep,
     state::{AtomicVdfState, VdfController, VdfStateReadonly},
     vdf::run_vdf,
     vdf_sha,
@@ -1906,7 +1906,7 @@ impl IrysNode {
             packing_service.spawn_packing_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio). They read the live step
-        // counter through the VDF handle (current_step()), so no separate atomic.
+        // counter through the VDF handle (current_step()).
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
             &config,
             &storage_modules_guard,
@@ -1917,12 +1917,12 @@ impl IrysNode {
         );
 
         // set up the vdf thread. It reads the mining flag from vdf_state (the
-        // SSOT Arc), so no separate flag/atomic is threaded in.
+        // SSOT Arc).
         let vdf_exit_token = Self::init_vdf_thread(
             &config,
             receivers.vdf_fast_forward,
             receivers.vdf_reanchor,
-            service_senders.vdf_ff_generation.clone(),
+            service_senders.vdf_reanchor_signals.clone(),
             latest_block,
             initial_hash,
             global_step_number,
@@ -2155,8 +2155,8 @@ impl IrysNode {
     fn init_vdf_thread(
         config: &Config,
         vdf_fast_forward_receiver: Receiver<Traced<VdfStep>>,
-        vdf_reanchor_receiver: Receiver<ReanchorRequest>,
-        ff_generation: Arc<std::sync::atomic::AtomicU64>,
+        vdf_reanchor_receiver: ReanchorReceiver,
+        reanchor_signals: ReanchorSignals,
         latest_block: Arc<IrysBlockHeader>,
         initial_hash: H256,
         global_step_number: u64,
@@ -2229,7 +2229,7 @@ impl IrysNode {
                     next_canonical_vdf_seed,
                     vdf_fast_forward_receiver,
                     vdf_reanchor_receiver,
-                    ff_generation,
+                    reanchor_signals,
                     MiningBusBroadcaster::from(mining_bus.clone()),
                     vdf_state.clone(),
                     block_status_provider,

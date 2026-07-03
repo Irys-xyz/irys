@@ -477,6 +477,12 @@ impl BlockValidationTask {
                 &self.service_inner.vdf_state,
                 &self.service_inner.block_tree_guard,
                 &self.service_inner.db,
+                // While a re-anchor is pending the buffer is not authoritative
+                // in either direction; force the fork-local window.
+                self.service_inner
+                    .service_senders
+                    .vdf_reanchor_signals
+                    .is_buffer_suspect(),
             )
             .await;
             metrics::record_validation_stage_duration_ms(

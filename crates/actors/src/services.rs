@@ -17,8 +17,8 @@ use irys_domain::PeerEvent;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage, Traced};
 use irys_vdf::{
-    ReanchorRequest, VdfFastForwardSender, VdfReanchorSender, VdfStep, fast_forward_channel,
-    reanchor_channel,
+    ReanchorReceiver, ReanchorSignals, VdfFastForwardSender, VdfReanchorSender, VdfStep,
+    fast_forward_channel, reanchor_channel,
 };
 use std::sync::Arc;
 use tokio::sync::{
@@ -95,7 +95,7 @@ pub struct ServiceReceivers {
     pub chunk_migration: UnboundedReceiver<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedReceiver<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Receiver<Traced<VdfStep>>,
-    pub vdf_reanchor: Receiver<ReanchorRequest>,
+    pub vdf_reanchor: ReanchorReceiver,
     pub storage_modules: UnboundedReceiver<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedReceiver<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedReceiver<Traced<GossipBroadcastMessageV2>>,
@@ -119,10 +119,12 @@ pub struct ServiceSendersInner {
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: VdfFastForwardSender,
     pub vdf_reanchor: VdfReanchorSender,
-    /// Shared re-anchor generation for the fast-forward channel (see
-    /// [`irys_vdf::fast_forward_channel`]); `run_vdf` bumps it on each heal so
-    /// stamped steps in flight across a heal are dropped, not replayed.
-    pub vdf_ff_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Shared re-anchor signals (heal generation + buffer-suspect flag, see
+    /// [`irys_vdf::ReanchorSignals`]): `run_vdf` bumps the generation on each
+    /// applied heal so stamped steps in flight across it are dropped, and the
+    /// block-tree gate marks the buffer suspect so recall-range validation
+    /// stops trusting it until the heal lands.
+    pub vdf_reanchor_signals: ReanchorSignals,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,
     pub gossip_broadcast: UnboundedSender<Traced<GossipBroadcastMessageV2>>,
@@ -149,7 +151,7 @@ impl ServiceSendersInner {
             unbounded_channel::<Traced<ChunkMigrationServiceMessage>>();
         let (mempool_sender, mempool_receiver) =
             unbounded_channel::<Traced<MempoolServiceMessage>>();
-        let (vdf_fast_forward_sender, vdf_fast_forward_receiver, vdf_ff_generation) =
+        let (vdf_fast_forward_sender, vdf_fast_forward_receiver, vdf_reanchor_signals) =
             fast_forward_channel();
         let (vdf_reanchor_sender, vdf_reanchor_receiver) = reanchor_channel();
         let (sm_sender, sm_receiver) = unbounded_channel::<Traced<StorageModuleServiceMessage>>();
@@ -181,7 +183,7 @@ impl ServiceSendersInner {
             mempool: mempool_sender,
             vdf_fast_forward: vdf_fast_forward_sender,
             vdf_reanchor: vdf_reanchor_sender,
-            vdf_ff_generation,
+            vdf_reanchor_signals,
             storage_modules: sm_sender,
             data_sync: ds_sender,
             gossip_broadcast: gossip_broadcast_sender,

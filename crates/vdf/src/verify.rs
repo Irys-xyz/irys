@@ -5,11 +5,6 @@
 //! return `eyre::Result<()>`; the actor validation layer maps the result back to
 //! its own `ValidationResult` / `PreValidationError` types at the call sites,
 //! preserving the exact error variant, message, and metric label.
-//!
-//! The `is_seed_data_valid` tracing span's target moves with the function, from
-//! `irys_actors::block_validation` to `irys_vdf::verify`. This is intentional:
-//! the check now lives here, and the span is a trace-level diagnostic rather than
-//! part of the preserved OTEL metric surface.
 
 use irys_types::IrysBlockHeader;
 

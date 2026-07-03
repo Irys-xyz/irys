@@ -690,15 +690,23 @@ async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> 
         "genesis must converge to the canonical tip after the boundary-crossing reorg"
     );
 
-    // The heal is observable: genesis mines a block the peer accepts as canonical,
+    // The heal is observable: genesis mines a block the peer ADOPTS AS CANONICAL,
     // which requires genesis's post-reorg VDF buffer to produce valid recall ranges
-    // again (a poisoned buffer would yield a block the peer rejects).
+    // again (a poisoned buffer would yield a block the peer rejects). Waiting for
+    // the header alone would only prove presence in the peer's block tree, so
+    // assert canonical adoption: the peer's canonical chain advances to the new
+    // height AND resolves to the same block hash.
     genesis.node_ctx.start_mining()?;
     genesis.mine_block().await?;
     let next = genesis.get_block_by_height(peer_height + 1).await?;
-    peer.wait_for_block(&next.block_hash, seconds_to_wait)
+    peer.wait_until_height(peer_height + 1, seconds_to_wait)
         .await?;
-    info!("genesis mined a canonical block after re-anchor; peer accepted it");
+    let peer_next = peer.get_block_by_height(peer_height + 1).await?;
+    assert_eq!(
+        peer_next.block_hash, next.block_hash,
+        "the peer must adopt the healed miner's block as canonical, not merely hold its header"
+    );
+    info!("genesis mined a canonical block after re-anchor; peer adopted it as canonical");
 
     Ok(())
 }

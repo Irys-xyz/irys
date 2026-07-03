@@ -63,10 +63,13 @@ fn prevalidate_block_calls_prev_output_is_valid() {
     // Scope to the fn body: from just past its name to the next top-level `pub` item.
     let rest = &BLOCK_VALIDATION[start + "pub async fn prevalidate_block".len()..];
     let end = rest.find("\npub ").unwrap_or(rest.len());
+    // Match the CALL shape (facade path + opening paren), not the bare symbol:
+    // comments inside prevalidate_block mention `prev_output_is_valid` by name,
+    // so a bare-substring guard would still pass after the call was deleted.
     assert!(
-        rest[..end].contains("prev_output_is_valid"),
-        "prevalidate_block must call prev_output_is_valid: Tier 1b removed the buffer-based \
-         previous-step continuity check in validation_service.rs and depends on this \
-         block-rooted check running in mandatory prevalidation."
+        rest[..end].contains("verify::prev_output_is_valid("),
+        "prevalidate_block must call verify::prev_output_is_valid: Tier 1b removed the \
+         buffer-based previous-step continuity check in validation_service.rs and depends on \
+         this block-rooted check running in mandatory prevalidation."
     );
 }

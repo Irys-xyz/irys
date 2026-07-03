@@ -57,6 +57,16 @@ pub struct PartitionMiningServiceInner {
     steps_guard: VdfStateReadonly,
 }
 
+/// Fresh recall-range rotation state sized for the partition.
+fn fresh_ranges(config: &irys_types::ConsensusConfig) -> Ranges {
+    Ranges::new(
+        num_recall_ranges_in_partition(config)
+            .try_into()
+            .expect("Recall ranges number exceeds usize representation"),
+    )
+    .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig")
+}
+
 impl PartitionMiningServiceInner {
     pub fn new(
         config: &Config,
@@ -72,12 +82,7 @@ impl PartitionMiningServiceInner {
             storage_module,
             should_mine: start_mining,
             difficulty: initial_difficulty,
-            ranges: Ranges::new(
-                num_recall_ranges_in_partition(&config.consensus)
-                    .try_into()
-                    .expect("Recall ranges number exceeds usize representation"),
-            )
-            .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig"),
+            ranges: fresh_ranges(&config.consensus),
             steps_guard,
         }
     }
@@ -152,16 +157,10 @@ impl PartitionMiningServiceInner {
     /// `self.ranges` is now derived from poisoned seeds. Because the step numbers
     /// remain consecutive, `get_recall_range`'s gap-driven reconstruction never
     /// fires on its own — so reset the rotation to a fresh state here, forcing the
-    /// next seed to reconstruct it from the healed buffer. Mirrors the `ranges`
-    /// construction in [`PartitionMiningServiceInner::new`].
+    /// next seed to reconstruct it from the healed buffer.
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_reanchored(&mut self) {
-        self.ranges = Ranges::new(
-            num_recall_ranges_in_partition(&self.config.consensus)
-                .try_into()
-                .expect("Recall ranges number exceeds usize representation"),
-        )
-        .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig");
+        self.ranges = fresh_ranges(&self.config.consensus);
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

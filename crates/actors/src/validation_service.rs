@@ -960,6 +960,14 @@ impl ValidationServiceInner {
         let prev_output_step_number = first_step_number.saturating_sub(1);
         let progress_timeout = Duration::from_secs(vdf_config.progress_timeout_secs);
         let validation_batch_size = self.clamped_validation_batch_size();
+        // Capture the re-anchor generation BEFORE any validation work. Every
+        // fast-forwarded batch below is stamped with this captured value; if an
+        // in-place heal lands mid-validation, the send observes the newer
+        // generation and aborts with `VdfReanchorGenerationChanged`, routing the
+        // whole task to the requeue lane — steps validated against the pre-heal
+        // buffer can never replay onto the healed one.
+        let vdf_ff = self.service_senders.vdf_fast_forward.clone();
+        let captured_generation = vdf_ff.current_generation();
 
         info!(
             vdf.first_step_number = first_step_number,
@@ -1038,7 +1046,6 @@ impl ValidationServiceInner {
 
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
         // each validated prefix immediately.
-        let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
         for (batch_index, batch_steps) in vdf_info.steps.0.chunks(validation_batch_size).enumerate()
         {
@@ -1112,7 +1119,12 @@ impl ValidationServiceInner {
                 "ensure_vdf_is_valid: enqueueing validated VDF batch for fast-forward"
             );
             vdf_ff
-                .send_validated_batch(batch_start_step_number, batch_steps, progress_timeout)
+                .send_validated_batch(
+                    batch_start_step_number,
+                    batch_steps,
+                    progress_timeout,
+                    captured_generation,
+                )
                 .await?;
         }
 
@@ -1356,7 +1368,7 @@ mod tests {
             .num_threads(2)
             .build()
             .expect("thread pool");
-        let (tx, mut rx, _gen) = irys_vdf::fast_forward_channel();
+        let (tx, mut rx, _signals) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
         vdf_step_batch_is_valid(
@@ -1370,7 +1382,8 @@ mod tests {
         )
         .expect("valid prefix should be accepted");
 
-        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1))
+        let captured = tx.current_generation();
+        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)
             .await
             .expect("validated prefix should fast-forward");
         let (ff_step, _span) = rx

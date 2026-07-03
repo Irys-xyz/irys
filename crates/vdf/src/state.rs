@@ -201,6 +201,12 @@ impl VdfState {
         // so future `store_step`s trim against the same capacity window.
         self.minimum_step_to_keep = self.current_step().saturating_sub(self.capacity as u64);
         self.seeds = corrected;
+        // Trim the oldest seeds down to capacity: the canonical window plus the
+        // recomputed free-running tail can exceed it, and `store_step`'s
+        // one-pop-per-push would otherwise preserve the excess indefinitely.
+        while self.seeds.len() > self.capacity {
+            self.seeds.pop_front();
+        }
     }
 }
 
@@ -239,8 +245,7 @@ pub struct VdfStateReadonly {
 impl VdfStateReadonly {
     /// Creates a read handle, capturing the owned step counter and mining flag
     /// (same allocations) once at construction so the lock-free accessors never
-    /// re-take the `RwLock`. No longer `const`: it reads the lock once here.
-    /// Handles lock poisoning the same way `read()` does.
+    /// re-take the `RwLock`. Handles lock poisoning the same way `read()` does.
     pub fn new(state: AtomicVdfState) -> Self {
         let (global_step, is_vdf_mining_enabled) = {
             let guard = state
@@ -1022,6 +1027,24 @@ mod tests {
         let (last_step, last_seed) = state.get_last_step_and_seed();
         assert_eq!(last_step, 10);
         assert_eq!(last_seed, Seed(H256::from_low_u64_be(10)));
+    }
+
+    /// A corrected window longer than `capacity` (canonical window + recomputed
+    /// tail) is trimmed to the NEWEST `capacity` seeds — `store_step`'s
+    /// one-pop-per-push would otherwise carry the excess forever.
+    #[test]
+    fn reanchor_seeds_trims_oldest_down_to_capacity() {
+        // vdf_state_at uses capacity 64; install a 70-seed window at step 70.
+        let mut state = vdf_state_at(70);
+        let corrected: VecDeque<Seed> = (1..=70).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(corrected);
+
+        assert_eq!(state.current_step(), 70);
+        assert_eq!(state.seeds.len(), 64, "trimmed to capacity");
+        // The retained seeds are the NEWEST 64: steps 7..=70.
+        let steps = state.get_steps(ii(7, 70)).expect("range available");
+        let expected: Vec<H256> = (7..=70).map(H256::from_low_u64_be).collect();
+        assert_eq!(steps.0, expected);
     }
 
     /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,

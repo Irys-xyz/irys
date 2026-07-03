@@ -1189,6 +1189,7 @@ impl BlockTreeServiceInner {
         }
 
         // Broadcast reorg event if applicable
+        let reorg_occurred = reorg_event.is_some();
         if let Some(reorg_event) = reorg_event {
             // A deep reorg can leave the local VDF seed buffer poisoned across a
             // reset boundary; ship the canonical seed window to the VDF thread to
@@ -1217,6 +1218,23 @@ impl BlockTreeServiceInner {
                 );
                 metrics::record_canonical_tip_height(arc_block.height);
                 self.lifecycle_timestamps.note_canonical_advance();
+
+                // Re-anchor retry: a queued heal the VDF thread SKIPPED (e.g.
+                // its tail would have crossed a second, unpinned reset
+                // boundary) leaves the buffer suspect with no reorg to re-fire
+                // the gate — re-anchor requests have no other source. Re-send a
+                // fresh request from every new canonical tip until a heal
+                // applies and clears the flag; the fresher `c_step` clears the
+                // skip condition. The reorg branch above already sent for this
+                // block, so skip the duplicate there.
+                if !reorg_occurred
+                    && self
+                        .service_senders
+                        .vdf_reanchor_signals
+                        .is_buffer_suspect()
+                {
+                    self.send_reanchor_request(&arc_block);
+                }
             }
 
             // Emit consensus events
@@ -1365,6 +1383,31 @@ impl BlockTreeServiceInner {
             return;
         }
 
+        info!(
+            c_step,
+            lca_step,
+            first_divergent_boundary,
+            "Deep reorg crossed a divergent VDF reset boundary; queuing a seed-buffer re-anchor"
+        );
+        // Mark the buffer suspect BEFORE publishing the request, so recall-range
+        // validation stops trusting the buffer no later than the heal. The flag
+        // stays set until `run_vdf` applies a heal — if it SKIPS this request
+        // (e.g. the tail would cross a second, unpinned boundary), the retry in
+        // `on_block_validation_finished` re-sends from every new canonical tip.
+        self.service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        self.send_reanchor_request(canonical_tip);
+    }
+
+    /// Build and publish a [`ReanchorRequest`] from `canonical_tip`. Split from
+    /// [`Self::maybe_reanchor_vdf_after_reorg`] so the buffer-suspect retry path
+    /// can re-send a FRESH request on each canonical advance without re-running
+    /// the reorg gating (the suspect flag already encodes that a qualifying
+    /// reorg happened and no heal has applied yet).
+    fn send_reanchor_request(&self, canonical_tip: &IrysBlockHeader) {
+        let c_step = canonical_tip.vdf_limiter_info.global_step_number;
+
         // Build the canonical seed window [c_step - capacity + 1, c_step] from the
         // canonical tip's own ancestry so the healed buffer keeps its full fork
         // depth. The walk must fall through to the DB below the in-memory tree — a
@@ -1387,19 +1430,17 @@ impl BlockTreeServiceInner {
         let request = ReanchorRequest {
             canonical_seeds,
             c_step,
+            seed: canonical_tip.vdf_limiter_info.seed,
             next_seed: canonical_tip.vdf_limiter_info.next_seed,
         };
         if self.service_senders.vdf_reanchor.try_send(request) {
-            info!(
-                c_step,
-                lca_step,
-                first_divergent_boundary,
-                "Deep reorg crossed a divergent VDF reset boundary; queued a seed-buffer re-anchor"
-            );
+            info!(c_step, "Queued a VDF seed-buffer re-anchor request");
         } else {
+            // Latest-value channel: publishing only fails when the receiver is
+            // gone, i.e. the VDF thread is not running (shutdown in progress).
             warn!(
                 c_step,
-                "VDF re-anchor channel full or closed; a heal is already queued"
+                "VDF re-anchor channel closed (VDF thread not running); heal not queued"
             );
         }
     }
@@ -2085,7 +2126,7 @@ mod tests {
         block_state_rx: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
         /// Retained VDF re-anchor receiver so the gate tests can observe a queued
         /// `ReanchorRequest`; unused by the discard/recovery tests.
-        vdf_reanchor_rx: tokio::sync::mpsc::Receiver<ReanchorRequest>,
+        vdf_reanchor_rx: irys_vdf::ReanchorReceiver,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -2283,8 +2324,9 @@ mod tests {
     /// A deep reorg (old fork deeper than `block_migration_depth`) whose canonical
     /// tip has crossed the first divergent reset boundary must queue a
     /// `ReanchorRequest` carrying the canonical `[floor, c_step]` window, `c_step`,
-    /// and the tip's `next_seed`. Drives the gate method directly — the call site
-    /// in `on_block_validation_finished` is a thin `if let Some(reorg) { .. }`
+    /// and the tip's `seed`/`next_seed` fold pair — and mark the buffer suspect.
+    /// Drives the gate method directly — the call site in
+    /// `on_block_validation_finished` is a thin `if let Some(reorg) { .. }`
     /// wrapper around it.
     #[test]
     fn deep_reorg_across_divergent_boundary_queues_reanchor() {
@@ -2304,14 +2346,26 @@ mod tests {
 
         let req = h
             .vdf_reanchor_rx
-            .try_recv()
+            .borrow_and_update()
+            .clone()
             .expect("a deep cross-boundary reorg must queue a ReanchorRequest");
         assert_eq!(req.c_step, 20);
+        assert_eq!(
+            req.seed, tip.vdf_limiter_info.seed,
+            "the request must carry the tip's `seed` (the boundary-tip fold value)"
+        );
         assert_eq!(req.next_seed, next_seed);
         let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
         assert_eq!(
             sent, steps,
             "the gate must ship the canonical [floor, c_step] window from the tip's ancestry"
+        );
+        assert!(
+            h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "queuing a re-anchor must mark the buffer suspect until the heal applies"
         );
     }
 
@@ -2331,8 +2385,15 @@ mod tests {
         h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
 
         assert!(
-            h.vdf_reanchor_rx.try_recv().is_err(),
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
             "a shallow reorg must not queue a re-anchor"
+        );
+        assert!(
+            !h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "a shallow reorg must not mark the buffer suspect"
         );
     }
 
@@ -2352,9 +2413,38 @@ mod tests {
         h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
 
         assert!(
-            h.vdf_reanchor_rx.try_recv().is_err(),
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
             "a reorg below the first divergent boundary must not queue a re-anchor"
         );
+    }
+
+    /// The buffer-suspect retry seam: `send_reanchor_request` publishes a fresh
+    /// request from a canonical tip WITHOUT re-running the reorg gating, so the
+    /// tip-advance retry in `on_block_validation_finished` can re-send after the
+    /// VDF thread skipped a heal. The freshest request wins on the latest-value
+    /// channel.
+    #[test]
+    fn send_reanchor_request_publishes_without_reorg_gating() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (older_tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let (fresh_tip, fresh_steps) = canonical_tip(21, H256::repeat_byte(0x98));
+
+        h.inner.send_reanchor_request(&older_tip);
+        h.inner.send_reanchor_request(&fresh_tip);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("the retry path must publish a request with no ReorgEvent");
+        assert_eq!(req.c_step, 21, "the freshest request wins");
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(sent, fresh_steps);
     }
 
     /// SoftInternal discard path must record (block_hash, reason) into the

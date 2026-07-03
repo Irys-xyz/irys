@@ -1981,6 +1981,28 @@ mod tests {
         );
     }
 
+    /// The panic/abort path: dropping the guard WITHOUT calling `restore()`
+    /// (a sync task that unwinds or is aborted) must still write the snapshot
+    /// back, so mining can never be left stuck disabled.
+    #[test]
+    fn sync_pause_drop_without_restore_still_restores_snapshot() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(true));
+        let controller = VdfController::new(&mining);
+
+        {
+            let _pause = VdfSyncPause::begin(controller.clone());
+            assert!(!controller.is_enabled(), "begin() disables mining");
+            // Guard dropped here without restore() — the abort path.
+        }
+
+        assert!(
+            controller.is_enabled(),
+            "Drop alone must restore the pre-sync snapshot"
+        );
+    }
+
     mod catch_up_task {
         use super::*;
         use crate::tests::util::data_handler_stub;

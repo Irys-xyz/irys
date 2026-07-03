@@ -1,12 +1,10 @@
 use crate::metrics;
 use crate::state::AtomicVdfState;
-use crate::vdf_utils::ReanchorRequest;
+use crate::vdf_utils::{ReanchorReceiver, ReanchorRequest, ReanchorSignals};
 use crate::{MiningBroadcaster, VdfStep, apply_reset_seed, step_number_to_salt_number, vdf_sha};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::{BlockProvider, CanonicalVdfSnapshot};
 use irys_types::{H256, H256List, IrysBlockHeader, Traced, U256, block_production::Seed};
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
@@ -62,8 +60,8 @@ pub fn run_vdf<B: BlockProvider>(
     current_vdf_hash: H256,
     initial_reset_seed: H256,
     mut fast_forward_receiver: Receiver<Traced<VdfStep>>,
-    mut reanchor_receiver: Receiver<ReanchorRequest>,
-    ff_generation: Arc<AtomicU64>,
+    mut reanchor_receiver: ReanchorReceiver,
+    reanchor_signals: ReanchorSignals,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
     block_provider: B,
@@ -121,13 +119,11 @@ pub fn run_vdf<B: BlockProvider>(
         // seeds to heal a buffer poisoned across a reset boundary. We rewrite the
         // buffer's VALUES in place and leave the counter forward (see
         // `VdfState::reanchor_seeds`), then continue stepping from the new tip.
-        if let Ok(mut request) = reanchor_receiver.try_recv() {
-            // Coalesce: if several deep reorgs queued requests, keep only the newest
-            // — each later request carries a fuller canonical window that supersedes
-            // the older ones.
-            while let Ok(newer) = reanchor_receiver.try_recv() {
-                request = newer;
-            }
+        // The watch channel holds only the newest request, so a burst of deep
+        // reorgs coalesces to the freshest canonical window by construction.
+        if reanchor_receiver.has_changed().unwrap_or(false)
+            && let Some(request) = reanchor_receiver.borrow_and_update().clone()
+        {
             match apply_reanchor(
                 request,
                 config,
@@ -139,13 +135,14 @@ pub fn run_vdf<B: BlockProvider>(
                     new_hash,
                     new_next_seed,
                 } => {
-                    // Bump the fast-forward generation. Any step stamped with an
-                    // older generation was validated against the pre-heal buffer and
-                    // is dropped by the check in the fast-forward loop below — a
-                    // precise barrier, not an indiscriminate drain: post-heal steps
+                    // Bump the fast-forward generation and clear the suspect
+                    // flag. Any step stamped with an older generation was
+                    // validated against the pre-heal buffer and is dropped by
+                    // the check in the fast-forward loop below — a precise
+                    // barrier, not an indiscriminate drain: post-heal steps
                     // (current generation) are still applied, so an in-flight
                     // validation waiting on its own steps is not stranded.
-                    ff_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    reanchor_signals.record_heal_applied();
                     hash = new_hash;
                     next_reset_seed = new_next_seed;
                     info!(
@@ -157,7 +154,9 @@ pub fn run_vdf<B: BlockProvider>(
                     // rebuild from the healed buffer.
                     broadcast_mining_service.broadcast_reanchored();
                 }
-                // Buffer untouched; no broadcast (miners keep their rotation).
+                // Buffer untouched; the suspect flag stays set, so the
+                // block-tree gate re-sends a fresh request from the next
+                // canonical tip (no broadcast — miners keep their rotation).
                 ReanchorOutcome::Skipped => {}
                 ReanchorOutcome::PoisonedLock => return,
             }
@@ -171,9 +170,7 @@ pub fn run_vdf<B: BlockProvider>(
             // validated against a buffer that has since been re-anchored in place,
             // so replaying it could re-poison the healed buffer. The sender re-emits
             // it under the current generation when the block requeues.
-            if proposed_ff_step.generation
-                < ff_generation.load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if proposed_ff_step.generation < reanchor_signals.generation() {
                 debug!(
                     vdf.ff_step = proposed_ff_step.global_step_number,
                     vdf.step_generation = proposed_ff_step.generation,
@@ -415,8 +412,10 @@ enum ReanchorOutcome {
     /// `hash` (the seed feeding `live_step + 1`) and `next_reset_seed`.
     Healed { new_hash: H256, new_next_seed: H256 },
     /// The request was not applied and the buffer is untouched (unusable window,
-    /// canonical tip ahead of the live step, or the tip sits on a reset boundary).
-    /// Validation's fork-local recompute keeps the node on canonical meanwhile.
+    /// canonical tip ahead of the live step, or the tail would cross a second,
+    /// unpinned reset boundary). Validation's fork-local recompute keeps the
+    /// node on canonical meanwhile, and the block-tree gate re-sends a fresh
+    /// request from every new canonical tip while the buffer stays suspect.
     Skipped,
     /// The state write lock was poisoned; the caller must exit the VDF thread.
     PoisonedLock,
@@ -428,15 +427,17 @@ enum ReanchorOutcome {
 /// install it via `VdfState::reanchor_seeds` — leaving the step counter forward
 /// at `live_step`.
 ///
-/// A tail boundary `B` in `(c_step, live_step]` correctly folds the canonical
-/// `next_seed`: `B`'s rotation block sits at `B - reset_frequency <= c_step`, so
-/// its seed is `next_seed` regardless of intervening free-running blocks. But when
-/// `c_step` is ITSELF a boundary, the seed folded at `c_step` (feeding `c_step + 1`)
-/// is the child block's reset seed (`tip.seed` per `calculate_seeds`), NOT the
-/// `next_seed` carried here — and its exact value also depends on the confirmation
-/// gate's park state. Rather than fold the wrong seed, [`Self::Skipped`] that case;
-/// Tier-1 validation tolerance keeps the node on canonical until a boundary-free
-/// re-anchor lands.
+/// Fold schedule for the recompute (each fold seed must be pinned by a canonical
+/// block at or before the tip):
+/// - at `c_step` itself, when it sits on a reset boundary: the tip's `seed`
+///   (the first post-tip block starts at `c_step + 1`, contains no boundary
+///   step, and so carries the tip's `seed` forward per `calculate_seeds`);
+/// - at the FIRST boundary strictly after `c_step`: the tip's `next_seed`
+///   (that boundary's rotation block sits at `B - reset_frequency <= c_step`);
+/// - at the SECOND boundary after `c_step`: no canonical block has pinned the
+///   fold seed yet (its rotation block lies strictly past the tip), so the
+///   request is [`ReanchorOutcome::Skipped`] rather than folded speculatively.
+///   The gate re-sends with a fresher `c_step` on the next canonical advance.
 #[must_use]
 fn apply_reanchor(
     request: ReanchorRequest,
@@ -448,6 +449,7 @@ fn apply_reanchor(
     let ReanchorRequest {
         mut canonical_seeds,
         c_step,
+        seed,
         next_seed,
     } = request;
     let reset_frequency = config.reset_frequency as u64;
@@ -468,22 +470,32 @@ fn apply_reanchor(
         );
         return ReanchorOutcome::Skipped;
     }
-    // Tip exactly on a reset boundary: the fold seed at `c_step` is not the
-    // `next_seed` carried here (see the fn doc), so skip rather than re-poison.
-    if reset_frequency != 0 && c_step.is_multiple_of(reset_frequency) {
-        warn!(
-            c_step,
-            live_step,
-            "VDF re-anchor tip sits on a reset boundary; skipping to avoid folding the wrong reset seed"
-        );
-        return ReanchorOutcome::Skipped;
+    // The tail may fold at most ONE boundary past the tip (see the fn doc). The
+    // second boundary after `c_step` is `(c_step / rf + 2) * rf` whether or not
+    // `c_step` sits on a boundary itself; reaching it means folding a seed no
+    // canonical block has pinned.
+    if reset_frequency != 0 {
+        let second_boundary_after_tip = (c_step / reset_frequency)
+            .saturating_add(2)
+            .saturating_mul(reset_frequency);
+        if live_step >= second_boundary_after_tip {
+            warn!(
+                c_step,
+                live_step,
+                second_boundary_after_tip,
+                "VDF re-anchor tail would cross a second, unpinned reset boundary; skipping until a fresher canonical tip arrives"
+            );
+            return ReanchorOutcome::Skipped;
+        }
     }
 
     // Recompute the free-running tail `(c_step, live_step]` exactly as the main
-    // loop would: salt(step-1) -> vdf_sha -> store the pre-reset value -> fold the
-    // canonical `next_seed` at any boundary. `running` tracks the seed fed into
-    // the NEXT step (post-reset), matching `hash` in the loop.
-    let mut running = process_reset(c_step, tip_seed, reset_frequency, next_seed);
+    // loop would: salt(step-1) -> vdf_sha -> store the pre-reset value -> fold at
+    // boundaries per the schedule in the fn doc. `running` tracks the seed fed
+    // into the NEXT step (post-reset), matching `hash` in the loop. When `c_step`
+    // sits on a boundary this first fold uses the tip's `seed`; off-boundary it
+    // is a no-op and the argument is ignored.
+    let mut running = process_reset(c_step, tip_seed, reset_frequency, seed);
     for step in (c_step + 1)..=live_step {
         let salt = U256::from(step_number_to_salt_number(config, step - 1));
         let mut step_seed = running;
@@ -558,8 +570,8 @@ fn store_step(
     };
 
     vdf_guard.set_canonical_step(canonical_global_step_number);
-    // VdfState now owns the single step counter; store_step publishes it
-    // under this write guard (no separate external atomic to mirror).
+    // VdfState owns the single step counter; store_step publishes it under
+    // this write guard.
     let global_step_number = vdf_guard.store_step(Seed(hash), new_global_step_number);
     Some(global_step_number)
 }
@@ -690,7 +702,7 @@ mod tests {
                     reset_seed,
                     ff_step_receiver,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     broadcast_mining_service,
                     vdf_state.clone(),
                     MockBlockProvider(mock_header),
@@ -797,7 +809,7 @@ mod tests {
                     reset_seed,
                     ff_step_receiver,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     broadcast_mining_service,
                     vdf_state.clone(),
                     MockBlockProvider::new(),
@@ -898,7 +910,7 @@ mod tests {
                     reset_seed,
                     ff_step_receiver,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     MockMining,
                     vdf_state,
                     MockBlockProvider::new(),
@@ -968,7 +980,7 @@ mod tests {
                 H256::zero(),
                 ff_rx,
                 crate::reanchor_channel().1,
-                Arc::new(AtomicU64::new(0)),
+                crate::vdf_utils::ReanchorSignals::new(),
                 MockMining,
                 vdf_state,
                 MockBlockProvider::new(),
@@ -999,7 +1011,8 @@ mod tests {
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
         // Current generation 1: one re-anchor has already been applied.
-        let ff_generation = Arc::new(AtomicU64::new(1));
+        let reanchor_signals = crate::vdf_utils::ReanchorSignals::new();
+        reanchor_signals.record_heal_applied();
         let (ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
 
         let stale_seed = H256::repeat_byte(0xAA);
@@ -1028,7 +1041,7 @@ mod tests {
         let handle = std::thread::spawn({
             let config = config.clone();
             let vdf_state = vdf_state.clone();
-            let ff_generation = Arc::clone(&ff_generation);
+            let reanchor_signals = reanchor_signals.clone();
             let chain_sync_state = chain_sync_state.clone();
             let shutdown_token = shutdown_token.clone();
             move || {
@@ -1039,7 +1052,7 @@ mod tests {
                     H256::zero(),
                     ff_rx,
                     crate::reanchor_channel().1,
-                    ff_generation,
+                    reanchor_signals,
                     MockMining,
                     vdf_state,
                     MockBlockProvider::new(),
@@ -1124,7 +1137,7 @@ mod tests {
                     reset_seed,
                     ff_rx,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     MockMining,
                     vdf_state,
                     MockBlockProvider(mock_header),
@@ -1333,7 +1346,7 @@ mod tests {
                     initial_seed,
                     ff_rx,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     MockMining,
                     vdf_state,
                     provider,
@@ -1426,7 +1439,7 @@ mod tests {
                     pre_boundary_seed,
                     ff_rx,
                     crate::reanchor_channel().1,
-                    Arc::new(AtomicU64::new(0)),
+                    crate::vdf_utils::ReanchorSignals::new(),
                     MockMining,
                     vdf_state,
                     provider,
@@ -1573,7 +1586,7 @@ mod tests {
         use super::super::{ReanchorOutcome, apply_reanchor, process_reset};
         use crate::state::{AtomicVdfState, VdfState};
         use crate::vdf_utils::ReanchorRequest;
-        use crate::{step_number_to_salt_number, vdf_sha};
+        use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha};
         use irys_types::{Config, H256, NodeConfig, U256, VdfConfig, block_production::Seed};
         use nodit::interval::ii;
         use std::collections::VecDeque;
@@ -1648,6 +1661,9 @@ mod tests {
             let request = ReanchorRequest {
                 canonical_seeds,
                 c_step,
+                // c_step = 8 is off-boundary (rf = 5), so the tip `seed` must be
+                // ignored: a distinct sentinel proves no fold consumes it.
+                seed: H256::repeat_byte(0x33),
                 next_seed,
             };
 
@@ -1692,21 +1708,97 @@ mod tests {
         }
 
         /// When the canonical tip `c_step` sits exactly on a reset boundary, the
-        /// seed folded at `c_step` is the child block's reset seed, not the
-        /// `next_seed` the request carries — so `apply_reanchor` must SKIP rather
-        /// than fold the wrong seed and re-poison. The buffer is left untouched.
+        /// fold at `c_step` (feeding `c_step + 1`) must use the request's `seed`
+        /// — the tip's own `seed`, which the first post-tip block carries per
+        /// `calculate_seeds` — NOT the `next_seed`. Distinct sentinel values for
+        /// the two seeds pin the schedule: folding the wrong one would produce a
+        /// different tail and fail the buffer equality below.
         #[test]
-        fn skips_when_tip_sits_on_reset_boundary() {
+        fn heals_when_tip_sits_on_reset_boundary_folding_tip_seed() {
             let mut node_config = NodeConfig::testing();
             node_config.consensus.get_mut().vdf.reset_frequency = 5;
             node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
             let config = Config::new_with_random_peer_id(node_config);
             let vdf = &config.vdf;
 
-            // c_step = 10 is a multiple of reset_frequency 5.
+            // c_step = 10 is a multiple of reset_frequency 5; live = 12 keeps the
+            // tail short of the second post-tip boundary (20), so it must heal.
             let c_step = 10_u64;
             let live_step = 12_u64;
+            let seed = H256::repeat_byte(0x44);
             let next_seed = H256::repeat_byte(0x22);
+
+            let capacity = 1_000_usize;
+            let mut state = VdfState::new(capacity, live_step, Arc::new(AtomicBool::new(false)));
+            state.seeds = vec![Seed(H256::repeat_byte(0xEE)); live_step as usize].into();
+            let vdf_state: AtomicVdfState = Arc::new(RwLock::new(state));
+
+            let window: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
+            let tip_seed = *window.last().expect("non-empty window");
+            let request = ReanchorRequest {
+                canonical_seeds: window.iter().copied().map(Seed).collect(),
+                c_step,
+                seed,
+                next_seed,
+            };
+
+            let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
+            let ReanchorOutcome::Healed {
+                new_hash,
+                new_next_seed,
+            } = apply_reanchor(request, vdf, &vdf_state, live_step, &mut checkpoints)
+            else {
+                panic!("a boundary tip with a one-boundary tail must heal, not skip");
+            };
+
+            // Expected tail, folding the tip `seed` at the boundary c_step and
+            // nothing thereafter (11 and 12 are off-boundary).
+            let mut expected = window;
+            let mut running = apply_reset_seed(tip_seed, seed);
+            for step in (c_step + 1)..=live_step {
+                let salt = U256::from(step_number_to_salt_number(vdf, step - 1));
+                let mut step_seed = running;
+                vdf_sha(
+                    salt,
+                    &mut step_seed,
+                    vdf.num_checkpoints_in_vdf_step,
+                    vdf.num_iterations_per_checkpoint(),
+                    &mut checkpoints,
+                );
+                expected.push(step_seed);
+                running = process_reset(step, step_seed, vdf.reset_frequency as u64, next_seed);
+            }
+
+            let guard = vdf_state.read().unwrap();
+            assert_eq!(guard.current_step(), live_step, "counter stays forward");
+            let stored = guard
+                .get_steps(ii(1, live_step))
+                .expect("buffer must cover [1, live]");
+            assert_eq!(
+                stored.0, expected,
+                "the healed tail must fold the tip `seed` at the boundary c_step"
+            );
+            assert_eq!(new_hash, running, "running hash must seed step live+1");
+            assert_eq!(new_next_seed, next_seed);
+        }
+
+        /// A tail that reaches the SECOND reset boundary past the canonical tip
+        /// must skip: that boundary's rotation block lies strictly past the tip,
+        /// so no canonical block has pinned its fold seed yet. Covers both an
+        /// off-boundary and an on-boundary tip. The buffer stays untouched (the
+        /// gate re-sends with a fresher tip on the next canonical advance).
+        #[rstest::rstest]
+        #[case::off_boundary_tip(8, 15)]
+        #[case::on_boundary_tip(10, 20)]
+        fn skips_when_tail_would_cross_second_boundary(
+            #[case] c_step: u64,
+            #[case] live_step: u64,
+        ) {
+            let mut node_config = NodeConfig::testing();
+            node_config.consensus.get_mut().vdf.reset_frequency = 5;
+            node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+            let config = Config::new_with_random_peer_id(node_config);
+            let vdf = &config.vdf;
 
             let capacity = 1_000_usize;
             let poison = Seed(H256::repeat_byte(0xEE));
@@ -1714,23 +1806,22 @@ mod tests {
             state.seeds = vec![poison.clone(); live_step as usize].into();
             let vdf_state: AtomicVdfState = Arc::new(RwLock::new(state));
 
-            let canonical_seeds: VecDeque<Seed> = (1..=c_step)
-                .map(|i| Seed(H256::from_low_u64_be(i)))
-                .collect();
             let request = ReanchorRequest {
-                canonical_seeds,
+                canonical_seeds: (1..=c_step)
+                    .map(|i| Seed(H256::from_low_u64_be(i)))
+                    .collect(),
                 c_step,
-                next_seed,
+                seed: H256::repeat_byte(0x44),
+                next_seed: H256::repeat_byte(0x22),
             };
 
             let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
             let outcome = apply_reanchor(request, vdf, &vdf_state, live_step, &mut checkpoints);
             assert!(
                 matches!(outcome, ReanchorOutcome::Skipped),
-                "a tip on a reset boundary must skip the re-anchor"
+                "a tail crossing a second, unpinned boundary must skip the re-anchor"
             );
 
-            // The buffer is untouched (still all poison).
             let guard = vdf_state.read().unwrap();
             assert!(
                 guard.seeds.iter().all(|s| *s == poison),
