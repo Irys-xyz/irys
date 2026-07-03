@@ -110,8 +110,7 @@ impl MiningBus {
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 
-    /// Notify subscribers that the VDF buffer was re-anchored onto canonical steps
-    /// (partition-recovery heal), so partition-mining rebuilds its recall-range rotation.
+    /// Broadcast [`MiningBroadcastEvent::Reanchored`] (see the variant's doc).
     pub fn send_reanchored(&self) -> usize {
         debug!("Broadcasting VDF re-anchor to mining subscribers");
         self.send_event(Arc::new(MiningBroadcastEvent::Reanchored))

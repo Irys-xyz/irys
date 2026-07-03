@@ -356,24 +356,100 @@ fn build_reanchor_window(
     fork_block: &IrysBlockHeader,
     lca_step: u64,
 ) -> eyre::Result<std::collections::VecDeque<Seed>> {
-    let mut by_hash: std::collections::HashMap<BlockHash, IrysBlockHeader> = new_fork_blocks
+    // Borrowed map: a header is cloned only when the walk actually resolves it,
+    // so fork blocks the window never reaches are not copied.
+    let mut by_hash: std::collections::HashMap<BlockHash, &IrysBlockHeader> = new_fork_blocks
         .iter()
         .map(|sb| {
-            let hdr = sb.header();
-            (hdr.block_hash, hdr.as_ref().clone())
+            let hdr = sb.header().as_ref();
+            (hdr.block_hash, hdr)
         })
         .collect();
     // The walk stops once a header's steps reach `lca_step + 1`; include the LCA anyway so
     // a divergent block whose steps start exactly at the boundary still resolves.
-    by_hash.insert(fork_block.block_hash, fork_block.clone());
+    by_hash.insert(fork_block.block_hash, fork_block);
 
     let window =
         crate::block_validation::build_fork_local_step_window(new_tip, lca_step + 1, |hash| {
-            by_hash.get(hash).cloned().ok_or_else(|| {
+            by_hash.get(hash).map(|hdr| (*hdr).clone()).ok_or_else(|| {
                 eyre::eyre!("re-anchor: canonical ancestor {hash} missing from new fork blocks")
             })
         })?;
     Ok(window.0.into_iter().map(Seed).collect())
+}
+
+#[cfg(test)]
+mod reanchor_window_tests {
+    use super::build_reanchor_window;
+    use irys_types::{BlockTransactions, H256, H256List, IrysBlockHeader, SealedBlock};
+    use std::sync::Arc;
+
+    /// Header with contiguous VDF steps ending at `global_step` (`steps[i]` is the
+    /// output of `global_step - steps.len() + 1 + i`), linked by `prev`.
+    fn header(hash: u8, prev: u8, global_step: u64, steps: &[u8]) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::default();
+        h.block_hash = H256::repeat_byte(hash);
+        h.previous_block_hash = H256::repeat_byte(prev);
+        h.vdf_limiter_info.global_step_number = global_step;
+        h.vdf_limiter_info.steps = H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
+        h
+    }
+
+    fn sealed(h: &IrysBlockHeader) -> Arc<SealedBlock> {
+        Arc::new(SealedBlock::new_unchecked(
+            Arc::new(h.clone()),
+            BlockTransactions::default(),
+        ))
+    }
+
+    /// The window covers `[lca_step + 1, canonical_step]` oldest→newest across the
+    /// fork blocks, resolved purely from the supplied blocks (no tree, no DB).
+    #[test]
+    fn window_spans_fork_blocks_oldest_to_newest() {
+        // LCA @ step 10; fork: B1 (steps 11, 12) <- B2 = tip (steps 13, 14).
+        let lca = header(0x00, 0xF0, 10, &[9, 10]);
+        let b1 = header(0x01, 0x00, 12, &[11, 12]);
+        let b2 = header(0x02, 0x01, 14, &[13, 14]);
+
+        let window = build_reanchor_window(&b2, &[sealed(&b1), sealed(&b2)], &lca, 10).unwrap();
+
+        let got: Vec<H256> = window.iter().map(|s| s.0).collect();
+        let expected: Vec<H256> = (11..=14_u8).map(H256::repeat_byte).collect();
+        assert_eq!(got, expected, "seeds must run oldest→newest over [11, 14]");
+    }
+
+    /// A fork block missing from the resolver set is an error (the caller skips
+    /// the re-anchor), never a truncated window.
+    #[test]
+    fn missing_intermediate_ancestor_is_an_error() {
+        let lca = header(0x00, 0xF0, 10, &[9, 10]);
+        // B1 (hash 0x01) deliberately absent from new_fork_blocks.
+        let b2 = header(0x02, 0x01, 14, &[13, 14]);
+
+        let err = build_reanchor_window(&b2, &[sealed(&b2)], &lca, 10).unwrap_err();
+        assert!(
+            err.to_string().contains("missing from new fork blocks"),
+            "{err}"
+        );
+    }
+
+    /// The LCA is inserted into the resolver set: a walk that reaches below the
+    /// earliest fork block resolves the LCA header (proven by failing with the
+    /// window-incomplete error, not the missing-ancestor error).
+    #[test]
+    fn lca_is_resolvable_by_the_walk() {
+        let lca = header(0x00, 0xF0, 10, &[9, 10]);
+        // B1 carries only step 12 (first_step 12 > 11), so the walk must fetch its
+        // parent — the LCA — to look for step 11, which the LCA (ending at 10)
+        // cannot supply either.
+        let b1 = header(0x01, 0x00, 12, &[12]);
+
+        let err = build_reanchor_window(&b1, &[sealed(&b1)], &lca, 10).unwrap_err();
+        assert!(
+            err.to_string().contains("incomplete"),
+            "the LCA must resolve (a missing-ancestor error would mean it did not): {err}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1230,7 +1306,7 @@ impl BlockTreeServiceInner {
                                         lca_step,
                                         live_step,
                                         canonical_step,
-                                        "PARTITION RECOVERY: could not assemble canonical VDF window for re-anchor; buffer left as-is (recall-range fork-local recompute still guards validation): {e:?}",
+                                        "PARTITION RECOVERY: could not assemble canonical VDF window for re-anchor; buffer stays poisoned until the next deep-reorg gate or a node restart (recall-range fork-local recompute still guards validation): {e:?}",
                                     );
                                 }
                             }
@@ -2151,13 +2227,11 @@ mod tests {
                 block_migration_service,
                 // Unused by this test (no reorg/gate path exercised); a minimal
                 // handle just satisfies the struct.
-                vdf_state: VdfStateReadonly::new(Arc::new(RwLock::new(
-                    irys_vdf::state::VdfState::new(
-                        0,
-                        0,
-                        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    ),
-                ))),
+                vdf_state: VdfStateReadonly::test_stub(
+                    0,
+                    0,
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ),
                 chain_sync_state,
                 recent_soft_internal_discards: LruCache::new(
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),

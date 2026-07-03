@@ -117,67 +117,19 @@ pub fn run_vdf<B: BlockProvider>(
             break;
         }
 
-        // In-process VDF re-anchor (rare — one per deep partition-recovery reorg). The
-        // block-tree gate sends the canonical seed window here; we rewrite the poisoned
-        // buffer onto canonical steps in place, keeping the forward-only step counter so
-        // no VdfStateReadonly holder is orphaned and no restart is needed. Build the
-        // corrected buffer OUTSIDE the write lock (the tail recompute runs vdf_sha, up to
-        // ~1s/step at production difficulty), then hold the write lock only for the swap.
-        while let Ok(request) = reanchor_receiver.try_recv() {
-            let capacity = match vdf_state.read() {
-                Ok(guard) => guard.capacity,
-                Err(_) => {
-                    error!("VDF state read lock poisoned during re-anchor; exiting VDF thread");
-                    return;
-                }
-            };
-            let (corrected, resume_hash) = match build_reanchored_buffer(
-                config,
-                &request,
-                global_step_number,
-                capacity,
-            ) {
-                Ok(built) => built,
-                Err(e) => {
-                    error!(
-                        canonical_step = request.canonical_step,
-                        live_step = global_step_number,
-                        "VDF re-anchor request could not be applied; leaving buffer unchanged: {e:?}"
-                    );
-                    continue;
-                }
-            };
-            {
-                let mut guard = match vdf_state.write() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        error!(
-                            "VDF state write lock poisoned during re-anchor; exiting VDF thread"
-                        );
-                        return;
-                    }
-                };
-                if let Err(e) = guard.reanchor_seeds(corrected) {
-                    error!("VDF re-anchor failed to swap the buffer; leaving it unchanged: {e:?}");
-                    continue;
-                }
-            }
-            // Resume stepping from L on the canonical seed. `global_step_number` (the
-            // counter) is unchanged; only the seed contents and the loop's running
-            // `hash`/`next_reset_seed` move onto the canonical chain.
-            hash = resume_hash;
-            next_reset_seed = request.next_reset_seed;
-            canonical_global_step_number = canonical_global_step_number.max(request.canonical_step);
-            // Notify subscribers only AFTER the swap: partition-mining rebuilds its
-            // recall-range rotation from the buffer on this event, so broadcasting any
-            // earlier would let it reconstruct from the still-poisoned seeds (and no
-            // second event would ever correct it).
-            broadcast_mining_service.broadcast_reanchored();
-            info!(
-                canonical_step = request.canonical_step,
-                live_step = global_step_number,
-                "VDF re-anchored onto canonical steps in-process (no restart)"
-            );
+        // In-process VDF re-anchor (rare — one per deep partition-recovery reorg).
+        if !drain_reanchor_requests(
+            config,
+            &mut reanchor_receiver,
+            &mut fast_forward_receiver,
+            &vdf_state,
+            global_step_number,
+            &mut hash,
+            &mut next_reset_seed,
+            &mut canonical_global_step_number,
+            &broadcast_mining_service,
+        ) {
+            return;
         }
 
         // check for VDF fast forward step
@@ -393,6 +345,99 @@ pub fn run_vdf<B: BlockProvider>(
     debug!(vdf.global_step_number = ?global_step_number, "VDF thread stopped");
 }
 
+/// Drain queued [`ReanchorRequest`]s: for each, rewrite the poisoned seed buffer onto
+/// canonical steps in place, keeping the forward-only step counter so no
+/// `VdfStateReadonly` holder is orphaned and no restart is needed. The corrected buffer
+/// is built OUTSIDE the write lock (the tail recompute runs `vdf_sha`, up to ~1 s/step
+/// at production difficulty); the write lock is held only for the swap.
+///
+/// After a successful swap the fast-forward channel is drained and DISCARDED: steps
+/// queued there were sent by validations of blocks that predate the re-anchor — a
+/// minority-fork step numbered `live + 1` would be contiguous with the corrected buffer
+/// and `store_step` would append it, silently re-poisoning the tail (the later canonical
+/// fast-forward for the same number then no-ops). Discarding is safe: local stepping
+/// regenerates the discarded steps from `resume_hash`, which now chains the canonical
+/// seed, and canonical blocks re-fast-forward on future validations.
+///
+/// A rejected request logs and leaves the buffer poisoned; there is no retry source
+/// until the next deep-reorg gate fires or the node restarts, so the log says so.
+///
+/// Returns `false` when the state lock is poisoned and the VDF thread must exit.
+fn drain_reanchor_requests(
+    config: &irys_types::VdfConfig,
+    reanchor_receiver: &mut UnboundedReceiver<ReanchorRequest>,
+    fast_forward_receiver: &mut Receiver<Traced<VdfStep>>,
+    vdf_state: &AtomicVdfState,
+    live_step: u64,
+    hash: &mut H256,
+    next_reset_seed: &mut H256,
+    canonical_global_step_number: &mut u64,
+    broadcast_mining_service: &impl MiningBroadcaster,
+) -> bool {
+    while let Ok(request) = reanchor_receiver.try_recv() {
+        let capacity = match vdf_state.read() {
+            Ok(guard) => guard.capacity,
+            Err(_) => {
+                error!("VDF state read lock poisoned during re-anchor; exiting VDF thread");
+                return false;
+            }
+        };
+        let (corrected, resume_hash) =
+            match build_reanchored_buffer(config, &request, live_step, capacity) {
+                Ok(built) => built,
+                Err(e) => {
+                    error!(
+                        canonical_step = request.canonical_step,
+                        live_step,
+                        "VDF re-anchor request could not be applied; buffer stays poisoned until \
+                         the next deep-reorg gate or a node restart: {e:?}"
+                    );
+                    continue;
+                }
+            };
+        {
+            let mut guard = match vdf_state.write() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    error!("VDF state write lock poisoned during re-anchor; exiting VDF thread");
+                    return false;
+                }
+            };
+            if let Err(e) = guard.reanchor_seeds(corrected) {
+                error!(
+                    "VDF re-anchor failed to swap the buffer; buffer stays poisoned until the \
+                     next deep-reorg gate or a node restart: {e:?}"
+                );
+                continue;
+            }
+        }
+        // Discard stale queued fast-forward steps (see the doc comment above): they
+        // predate the swap, and a contiguous minority value would re-poison the tail.
+        let mut discarded_ff_steps = 0_usize;
+        while fast_forward_receiver.try_recv().is_ok() {
+            discarded_ff_steps += 1;
+        }
+        // Resume stepping from L on the canonical seed. `live_step` (the counter) is
+        // unchanged; only the seed contents and the loop's running
+        // `hash`/`next_reset_seed` move onto the canonical chain.
+        *hash = resume_hash;
+        *next_reset_seed = request.next_reset_seed;
+        *canonical_global_step_number = (*canonical_global_step_number).max(request.canonical_step);
+        // Notify subscribers only AFTER the swap: partition-mining rebuilds its
+        // recall-range rotation from the buffer on this event, so broadcasting any
+        // earlier would let it reconstruct from the still-poisoned seeds (and no
+        // second event would ever correct it).
+        broadcast_mining_service.broadcast_reanchored();
+        info!(
+            canonical_step = request.canonical_step,
+            live_step,
+            discarded_ff_steps,
+            "VDF re-anchored onto canonical steps in-process (no restart)"
+        );
+    }
+    true
+}
+
 /// Build the corrected VDF seed buffer for an in-process re-anchor, plus the running
 /// hash to resume stepping from.
 ///
@@ -403,7 +448,9 @@ pub fn run_vdf<B: BlockProvider>(
 ///   boundary — exactly as validation re-derives those steps (#1457: the wrong seed
 ///   here silently re-poisons, so unknowable boundaries are rejected, not guessed);
 /// - `C >= L`: truncate the window to end at `L` (drop canonical steps the forward-only
-///   counter has not reached);
+///   counter has not reached) — rejected when any reset boundary lies in `(L, C]`, since
+///   its canonical fold seed is not carried by the request and resuming across it would
+///   fold the wrong seed;
 /// - then trim from the front so the buffer never exceeds `capacity + 1`
 ///   (the [`crate::state::VdfState::reanchor_seeds`] contract).
 ///
@@ -443,6 +490,16 @@ fn build_reanchored_buffer(
             request.next_reset_seed
         }
     };
+    // Fold guard for the (gate-unreachable) step-0 edge: `0 % reset_frequency == 0`,
+    // but no step-0 fold exists anywhere in the protocol — `run_vdf` and the
+    // validation recompute only ever fold at steps >= 1.
+    let fold_at = |step: u64, hash: H256| -> H256 {
+        if step == 0 {
+            hash
+        } else {
+            process_reset(step, hash, reset_frequency, seed_at(step))
+        }
+    };
 
     match live_step.cmp(&canonical_step) {
         std::cmp::Ordering::Greater => {
@@ -460,7 +517,7 @@ fn build_reanchored_buffer(
             for step in canonical_step..live_step {
                 // Fold the reset seed at `step` before deriving `step + 1`, mirroring
                 // `process_reset` at the bottom of the run_vdf loop.
-                let mut out = process_reset(step, running, reset_frequency, seed_at(step));
+                let mut out = fold_at(step, running);
                 let salt = U256::from(step_number_to_salt_number(config, step));
                 vdf_sha(
                     salt,
@@ -474,11 +531,25 @@ fn build_reanchored_buffer(
             }
         }
         std::cmp::Ordering::Less => {
+            // A boundary strictly inside (L, C] was folded canonically with a seed this
+            // request cannot name (only a boundary exactly at C carries `canonical_seed`,
+            // and truncation removes C): after resuming, the loop would fold
+            // `next_reset_seed` there — the wrong seed for a non-final boundary — and
+            // silently re-poison the tail. Reject rather than guess.
+            eyre::ensure!(
+                canonical_step / reset_frequency == live_step / reset_frequency,
+                "reanchor: truncation window ({live_step}, {canonical_step}] contains a reset boundary whose canonical fold seed is not carried by the request"
+            );
             // Canonical ran ahead of the local counter: drop steps above L so the buffer
-            // ends exactly at L (the forward-only counter never moves).
-            for _ in 0..(canonical_step - live_step) {
-                corrected.pop_back();
-            }
+            // ends exactly at L (the forward-only counter never moves). The bucket
+            // equality above bounds the delta below `reset_frequency`.
+            let drop_count = usize::try_from(canonical_step - live_step)
+                .expect("truncation delta is below reset_frequency");
+            eyre::ensure!(
+                drop_count < corrected.len(),
+                "reanchor: live step {live_step} predates the canonical window"
+            );
+            corrected.truncate(corrected.len() - drop_count);
             // The resume fold at L would need the seed of the canonical block whose
             // window contains L — not carried by the request. Reject rather than guess.
             eyre::ensure!(
@@ -502,7 +573,7 @@ fn build_reanchored_buffer(
 
     let output_l = corrected.back().expect("non-empty checked above").0;
     // Seed the loop feeds into step L+1: output of L with the boundary reset folded.
-    let resume_hash = process_reset(live_step, output_l, reset_frequency, seed_at(live_step));
+    let resume_hash = fold_at(live_step, output_l);
 
     Ok((corrected, resume_hash))
 }
@@ -1250,6 +1321,83 @@ mod tests {
         handle.join().unwrap();
     }
 
+    /// CR-4 regression: fast-forward steps queued BEFORE a re-anchor were sent by
+    /// validations that predate the swap — a minority-fork step numbered `L + 1`
+    /// is contiguous with the corrected buffer and `store_step` would append it,
+    /// silently re-poisoning the tail. The drain must discard the queued FF
+    /// backlog after a successful swap. Deterministic: `drain_reanchor_requests`
+    /// is called directly with both channels pre-loaded.
+    #[test]
+    fn drain_reanchor_discards_queued_fast_forward_steps() {
+        let mut node_config = NodeConfig::testing();
+        // High reset_frequency: C == L and no boundary near, so no tail recompute
+        // and no folds — the test isolates the discard barrier.
+        node_config.consensus.get_mut().vdf.reset_frequency = 1_000;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Buffer at live step 10 holding 10 "poisoned" seeds.
+        let mut state =
+            crate::state::VdfState::new(64, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        for s in 1..=10_u64 {
+            state.store_step(Seed(H256::repeat_byte(0xAA)), s);
+        }
+        let vdf_state: AtomicVdfState = Arc::new(std::sync::RwLock::new(state));
+
+        let (reanchor_tx, mut reanchor_rx) = mpsc::unbounded_channel::<ReanchorRequest>();
+        let (ff_tx, mut ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // Stale minority fast-forward step L + 1, queued before the re-anchor.
+        ff_tx
+            .try_send(Traced::new(VdfStep {
+                step: H256::repeat_byte(0xEE),
+                global_step_number: 11,
+            }))
+            .unwrap();
+
+        let canonical: VecDeque<Seed> = (0..5).map(|_| Seed(H256::repeat_byte(0xBB))).collect();
+        reanchor_tx
+            .send(ReanchorRequest {
+                canonical_window: canonical,
+                canonical_step: 10,
+                canonical_seed: H256::repeat_byte(0x01),
+                next_reset_seed: H256::repeat_byte(0x02),
+            })
+            .unwrap();
+
+        let mut hash = H256::repeat_byte(0xAA);
+        let mut next_reset_seed = H256::zero();
+        let mut canonical_watermark = 0_u64;
+        let keep_running = drain_reanchor_requests(
+            &config.vdf,
+            &mut reanchor_rx,
+            &mut ff_rx,
+            &vdf_state,
+            10,
+            &mut hash,
+            &mut next_reset_seed,
+            &mut canonical_watermark,
+            &MockMining,
+        );
+        assert!(keep_running);
+
+        // The queued stale step was discarded, so run_vdf's subsequent FF drain has
+        // nothing minority-valued to append onto the corrected buffer.
+        assert!(
+            ff_rx.try_recv().is_err(),
+            "queued fast-forward backlog must be discarded after the swap"
+        );
+        let guard = vdf_state.read().unwrap();
+        assert_eq!(guard.current_step(), 10, "counter must be untouched");
+        let window = guard.get_steps(ii(6, 10)).unwrap();
+        assert_eq!(
+            window.0,
+            vec![H256::repeat_byte(0xBB); 5],
+            "buffer tail must hold the canonical window"
+        );
+        assert_eq!(next_reset_seed, H256::repeat_byte(0x02));
+        assert_eq!(canonical_watermark, 10);
+    }
+
     mod boundary_gate {
         use super::super::is_reset_boundary_blocked;
         use proptest::prelude::*;
@@ -1854,7 +2002,9 @@ mod tests {
             let config = test_config();
             let vdf = &config.vdf;
             let reset_seed = H256::repeat_byte(0x44);
-            let (canonical_step, live_step, window_first) = (25_u64, 18_u64, 4_u64);
+            // No reset boundary in (18, 23] (rf = 8: 16 < 18, 24 > 23), so the
+            // truncation is admissible.
+            let (canonical_step, live_step, window_first) = (23_u64, 18_u64, 4_u64);
 
             let ground = gen_steps(vdf, H256::repeat_byte(0x33), reset_seed, canonical_step);
             let request = ReanchorRequest {
@@ -1876,6 +2026,34 @@ mod tests {
             assert_eq!(
                 resume_hash,
                 process_reset(live_step, output_l, vdf.reset_frequency as u64, reset_seed)
+            );
+        }
+
+        /// A reset boundary strictly inside the truncated range `(L, C]` was folded
+        /// canonically with a seed the request does not carry (it is neither the
+        /// boundary at `C` nor the first boundary past `C`): resuming across it would
+        /// fold `next_reset_seed` — the wrong seed — and silently re-poison the tail.
+        /// Rejected, mirroring the tail-recompute's reject-not-guess rule.
+        #[test]
+        fn rejects_truncation_spanning_interior_boundary() {
+            let config = test_config();
+            let vdf = &config.vdf;
+            let reset_seed = H256::repeat_byte(0x45);
+            // Boundary 24 lies strictly inside (18, 25] (rf = 8).
+            let (canonical_step, live_step) = (25_u64, 18_u64);
+
+            let ground = gen_steps(vdf, H256::repeat_byte(0x34), reset_seed, canonical_step);
+            let request = ReanchorRequest {
+                canonical_window: window(&ground, 4, canonical_step),
+                canonical_step,
+                canonical_seed: reset_seed,
+                next_reset_seed: reset_seed,
+            };
+
+            let err = build_reanchored_buffer(vdf, &request, live_step, 1024).unwrap_err();
+            assert!(
+                err.to_string().contains("contains a reset boundary"),
+                "{err}"
             );
         }
 
@@ -2021,13 +2199,14 @@ mod tests {
 
         /// Truncation ending exactly on a boundary is rejected: the resume fold at L
         /// needs the seed of the canonical block containing L, which the request does
-        /// not carry.
+        /// not carry. L = 24 and C = 25 share a bucket (rf = 8), so this passes the
+        /// interior-boundary check and exercises the L-on-boundary rejection itself.
         #[test]
         fn rejects_truncation_ending_on_boundary() {
             let config = test_config();
             let vdf = &config.vdf;
             let reset_seed = H256::repeat_byte(0x52);
-            let (canonical_step, live_step) = (25_u64, 16_u64); // L is a boundary (rf = 8)
+            let (canonical_step, live_step) = (25_u64, 24_u64); // L is a boundary (rf = 8)
 
             let ground = gen_steps(vdf, H256::repeat_byte(0x51), reset_seed, canonical_step);
             let request = ReanchorRequest {

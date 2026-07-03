@@ -132,8 +132,7 @@ pub struct ServiceSendersInner {
     pub chunk_migration: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     pub mempool: UnboundedSender<Traced<MempoolServiceMessage>>,
     pub vdf_fast_forward: Sender<Traced<VdfStep>>,
-    /// See [`ServiceReceivers::vdf_reanchor`]. The block-tree partition-recovery gate
-    /// sends the canonical seed window here for the VDF thread to apply in place.
+    /// See [`ServiceReceivers::vdf_reanchor`].
     pub vdf_reanchor: UnboundedSender<ReanchorRequest>,
     pub storage_modules: UnboundedSender<Traced<StorageModuleServiceMessage>>,
     pub data_sync: UnboundedSender<Traced<DataSyncServiceMessage>>,

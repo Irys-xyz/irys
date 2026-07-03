@@ -112,6 +112,17 @@ impl Ranges {
             .retain(|k, _| *k > last_step_to_keep);
     }
 
+    /// Full reset for a VDF re-anchor: rebuild the rotation, drop the whole
+    /// per-step recall cache (its entries were derived from the now-replaced
+    /// seeds — `reinitialize` alone retains the newest ones), and rewind
+    /// `last_step_num` so the next query reconstructs from the corrected
+    /// buffer instead of taking the consecutive-step fast path.
+    pub fn reset_after_reanchor(&mut self) {
+        self.reinitialize();
+        self.last_recall_ranges.clear();
+        self.last_step_num = 0;
+    }
+
     pub fn new(num_recall_ranges_in_partition: usize) -> Result<Self> {
         if num_recall_ranges_in_partition == 0 {
             return Err(eyre::eyre!(
@@ -254,6 +265,36 @@ mod tests {
         }
 
         assert_eq!(num_recall_ranges, ranges.last_range_pos + 1);
+    }
+
+    /// A VDF re-anchor replaces the seeds every cached recall range was derived
+    /// from, so `reset_after_reanchor` must drop the WHOLE per-step cache (plain
+    /// `reinitialize` retains the newest `NUMBER_OF_KEPT_LAST_STEPS` entries)
+    /// and rewind `last_step_num` so the next query reconstructs.
+    #[test]
+    fn reset_after_reanchor_drops_cache_and_rewinds_step() {
+        let partition_hash = H256::random();
+        let seed = H256::random();
+        let mut ranges = Ranges::new(100).unwrap();
+        for step in 1..=5_u64 {
+            ranges
+                .get_recall_range(step, &seed, &partition_hash)
+                .unwrap();
+        }
+        assert!(!ranges.last_recall_ranges.is_empty());
+        assert_eq!(ranges.last_step_num, 5);
+
+        ranges.reset_after_reanchor();
+
+        assert!(
+            ranges.last_recall_ranges.is_empty(),
+            "poisoned-era cache entries must not survive a re-anchor"
+        );
+        assert_eq!(ranges.last_step_num, 0);
+        assert_eq!(
+            ranges.last_range_pos,
+            ranges.num_recall_ranges_in_partition - 1
+        );
     }
 
     #[test]

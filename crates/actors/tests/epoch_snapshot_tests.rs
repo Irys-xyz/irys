@@ -22,9 +22,9 @@ use irys_types::{
     ConsensusConfig, ConsensusOptions, EpochConfig, PartitionChunkOffset, partition_chunk_offset_ie,
 };
 use irys_types::{H256List, NodeConfig};
-use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::state::VdfStateReadonly;
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::{sync::atomic::AtomicBool, time::Duration};
 use tracing::{debug, error};
 
@@ -523,11 +523,7 @@ async fn partition_expiration_and_repacking_test() {
         }
     });
 
-    let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
-        10,
-        0,
-        Arc::new(AtomicBool::new(false)),
-    ))));
+    let vdf_steps_guard = VdfStateReadonly::test_stub(10, 0, Arc::new(AtomicBool::new(false)));
 
     let mut mining_service_handles = Vec::new();
     let mut mining_service_controllers = Vec::new();

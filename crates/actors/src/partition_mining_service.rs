@@ -147,19 +147,19 @@ impl PartitionMiningServiceInner {
     }
 
     /// React to an in-process VDF re-anchor (deep partition-recovery heal): the seed
-    /// buffer was rewritten onto canonical steps, so the efficient-sampling rotation —
-    /// built incrementally from the now-replaced (poisoned) seeds — is stale. Discard it
-    /// and force a full rebuild by resetting `last_step_num` to 0, so the next
-    /// `get_recall_range` takes the reconstruct path against the corrected buffer instead
-    /// of the "next consecutive step" fast path (which would reuse the stale rotation).
+    /// buffer was rewritten onto canonical steps, so the efficient-sampling rotation and
+    /// per-step recall cache — both derived from the now-replaced (poisoned) seeds — are
+    /// stale. `reset_after_reanchor` discards both and rewinds `last_step_num`, so the
+    /// next `get_recall_range` takes the reconstruct path against the corrected buffer
+    /// instead of the "next consecutive step" fast path (which would reuse the stale
+    /// rotation).
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_reanchor(&mut self) {
         debug!(
             storage_module.id = %self.storage_module.id,
             "VDF re-anchored; resetting efficient-sampling rotation to rebuild from the corrected buffer"
         );
-        self.ranges.reinitialize();
-        self.ranges.last_step_num = 0;
+        self.ranges.reset_after_reanchor();
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

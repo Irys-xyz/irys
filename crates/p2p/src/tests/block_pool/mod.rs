@@ -21,7 +21,7 @@ use irys_types::{
     NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
     RethPeerInfo, SealedBlock,
 };
-use irys_vdf::state::{VdfController, VdfState, VdfStateReadonly};
+use irys_vdf::state::{VdfController, VdfStateReadonly};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
@@ -119,11 +119,10 @@ impl MockedServices {
         let mempool_stub = MempoolStub::new(tx, mempool_state);
 
         let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
-        let vdf_state_readonly = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
-            0,
-            0,
-            Arc::clone(&is_vdf_mining_enabled),
-        ))));
+        // Shared flag: the sync-service VdfController built later toggles the
+        // same allocation this stub's state watches.
+        let vdf_state_readonly =
+            VdfStateReadonly::test_stub(0, 0, Arc::clone(&is_vdf_mining_enabled));
 
         let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {

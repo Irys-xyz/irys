@@ -56,6 +56,9 @@ irys-config = { workspace = true, features = ["test-utils"] }
 irys-database = { workspace = true, features = ["test-utils"] }
 irys-api-client = { workspace = true, features = ["test-utils"] }
 irys-domain = { workspace = true, features = ["test-utils"] }
+# Enables the sealed VDF-state test handles (VdfStateReadonly::test_stub) for
+# actors tests.
+irys-vdf = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
 rstest.workspace = true
 proptest.workspace = true

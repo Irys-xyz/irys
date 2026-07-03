@@ -185,6 +185,15 @@ impl VdfState {
     /// reader and every `VdfStateReadonly` keeps observing the same step number
     /// while only the (write-lock-held) seed contents change.
     ///
+    /// The window is SPLICED over the tail, not swapped in wholesale: existing
+    /// seeds below the window are retained. They are shared pre-divergence
+    /// history — both forks fold identical seeds until the first divergent reset
+    /// boundary above the LCA, and the re-anchor window always starts at
+    /// `lca + 1` (trimmed only by `capacity`, which is at least the maximum
+    /// admissible fork span) — and recall-range validation and mining
+    /// reconstruction still need up to `capacity` steps of it. Dropping the
+    /// prefix would stall both for a full sampling rotation.
+    ///
     /// This is the in-process VDF re-anchor used after a deep partition recovery:
     /// it replaces minority-reset-seed steps with canonical ones in place, with no
     /// backward store (the counter never decreases) and no orphaned readers (the
@@ -202,7 +211,18 @@ impl VdfState {
             "reanchor: buffer length {len} exceeds capacity {}",
             self.capacity
         );
-        self.seeds = corrected;
+        if self.seeds.len() > corrected.len() {
+            // Both deques end at `current`, so the first `seeds.len() -
+            // corrected.len()` existing seeds sit strictly below the corrected
+            // window: keep that shared prefix and splice the window over the
+            // tail. The result length equals the previous one, so the buffer
+            // stays within its standing size invariant.
+            let keep_prefix = self.seeds.len() - corrected.len();
+            self.seeds.truncate(keep_prefix);
+            self.seeds.extend(corrected);
+        } else {
+            self.seeds = corrected;
+        }
         // Trimming is governed by `current - minimum_step_to_keep` (see `store_step`);
         // keep ~`capacity` of headroom, matching `set_canonical_step`'s convention.
         self.minimum_step_to_keep = current.saturating_sub(self.capacity as u64);
@@ -381,6 +401,24 @@ impl VdfStateReadonly {
     pub fn test_set_step(&self, step: u64) {
         self.global_step.store(step, Ordering::Relaxed);
     }
+
+    /// Test stub: a read handle over a fresh `VdfState` with the given capacity,
+    /// step, and mining flag. Replaces the
+    /// `VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(..))))`
+    /// boilerplate repeated across downstream test suites, so the construction
+    /// tracks `VdfState::new` signature changes in one place. Pass a shared flag
+    /// `Arc` when the test also drives a `VdfController` over the same flag.
+    pub fn test_stub(
+        capacity: usize,
+        global_step: u64,
+        is_vdf_mining_enabled: Arc<AtomicBool>,
+    ) -> Self {
+        Self::new(Arc::new(RwLock::new(VdfState::new(
+            capacity,
+            global_step,
+            is_vdf_mining_enabled,
+        ))))
+    }
 }
 
 /// Narrow control surface for VDF mining enable/disable. Owns a clone of the
@@ -410,8 +448,7 @@ impl VdfController {
         self.is_vdf_mining_enabled.store(false, Ordering::Relaxed);
     }
 
-    /// Set the mining flag to an explicit value (used by the chain-sync
-    /// pause/restore and `IrysNodeCtx::vdf_state`).
+    /// Set the mining flag to an explicit value.
     pub fn set_enabled(&self, enabled: bool) {
         self.is_vdf_mining_enabled.store(enabled, Ordering::Relaxed);
     }
@@ -756,9 +793,10 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn reanchor_seeds_replaces_buffer_and_keeps_counter() {
+    fn reanchor_seeds_splices_window_and_keeps_counter_and_prefix() {
         let mut state = VdfState::new(64, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        // Store 10 "poisoned" steps (counter 0 -> 10).
+        // Store 10 steps (counter 0 -> 10); the first 4 are shared pre-divergence
+        // history, the trailing 6 are the "poisoned" range a re-anchor corrects.
         for s in 1..=10_u64 {
             state.store_step(Seed(H256::repeat_byte(0xAA)), s);
         }
@@ -777,8 +815,59 @@ mod tests {
         // The window maps to [current - len + 1, current] = [5, 10].
         let steps = state.get_steps(ii(5, 10)).unwrap();
         assert_eq!(steps.0, vec![H256::repeat_byte(0xBB); 6]);
-        // Steps below the new window are no longer available.
-        assert!(state.get_steps(ii(4, 10)).is_err());
+        // The shared prefix below the window MUST survive the splice (CX-1):
+        // recall-range validation and mining reconstruction still read it.
+        let full = state.get_steps(ii(1, 10)).unwrap();
+        assert_eq!(
+            full.0[..4],
+            vec![H256::repeat_byte(0xAA); 4][..],
+            "pre-window seeds must be retained, not discarded"
+        );
+        assert_eq!(full.0[4..], vec![H256::repeat_byte(0xBB); 6][..]);
+    }
+
+    /// CX-1 regression at buffer scale: after a re-anchor whose window covers only
+    /// the fork tail, `get_steps` must still serve a deep pre-LCA range — a
+    /// wholesale swap would return "Unavailable requested range" here and stall
+    /// recall-range validation and mining for a whole sampling rotation.
+    #[test]
+    fn reanchor_seeds_keeps_deep_history_available() {
+        let mut state = VdfState::new(256, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        for s in 1..=100_u64 {
+            state.store_step(Seed(H256::from_low_u64_be(s)), s);
+        }
+
+        // Fork window: the trailing 6 steps [95, 100].
+        let corrected: VecDeque<Seed> = (95..=100_u64)
+            .map(|s| Seed(H256::repeat_byte(s as u8)))
+            .collect();
+        state.reanchor_seeds(corrected).unwrap();
+
+        let deep = state
+            .get_steps(ii(1, 94))
+            .expect("pre-LCA history must remain served after the re-anchor");
+        assert_eq!(deep.0.len(), 94);
+        assert_eq!(deep.0[0], H256::from_low_u64_be(1));
+        assert_eq!(deep.0[93], H256::from_low_u64_be(94));
+        let window = state.get_steps(ii(95, 100)).unwrap();
+        assert_eq!(window.0[0], H256::repeat_byte(95));
+    }
+
+    /// When the corrected window is at least as long as the whole buffer there is
+    /// no prefix to keep: the window simply becomes the buffer.
+    #[test]
+    fn reanchor_seeds_replaces_buffer_when_window_covers_it() {
+        let mut state = VdfState::new(64, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        for s in 1..=3_u64 {
+            state.store_step(Seed(H256::repeat_byte(0xAA)), s);
+        }
+        // Counter is 3; a 3-step window covers the entire buffer.
+        let corrected: VecDeque<Seed> = (0..3).map(|_| Seed(H256::repeat_byte(0xBB))).collect();
+        state.reanchor_seeds(corrected).unwrap();
+
+        assert_eq!(state.current_step(), 3);
+        let steps = state.get_steps(ii(1, 3)).unwrap();
+        assert_eq!(steps.0, vec![H256::repeat_byte(0xBB); 3]);
     }
 
     #[tokio::test]

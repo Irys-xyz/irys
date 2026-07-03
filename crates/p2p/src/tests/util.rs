@@ -33,7 +33,7 @@ use irys_types::{
     TokioServiceHandle, Traced, TxChunkOffset, TxKnownStatus, UnpackedChunk,
 };
 use irys_utils::circuit_breaker::CircuitBreakerConfig;
-use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::state::VdfStateReadonly;
 use reth_tasks::TaskExecutor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
@@ -337,11 +337,8 @@ impl GossipServiceTestFixture {
             ),
         );
 
-        let vdf_state_stub = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
-            0,
-            0,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        ))));
+        let vdf_state_stub =
+            VdfStateReadonly::test_stub(0, 0, Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
         let vdf_state = vdf_state_stub;
         let mut vdf_receiver = vdf_fast_forward_rx;

@@ -989,26 +989,13 @@ impl ValidationServiceInner {
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
-        // The previous-step continuity check that compared the local buffer's
-        // stored step against `vdf_info.prev_output` was removed here. On a node
-        // recovering from a network partition the local buffer can be poisoned —
-        // it folded a minority reset seed across a boundary — so comparing a
-        // canonical block's `prev_output` against the buffer yields a false
-        // rejection and wedges recovery at the validation gate. Both halves of
-        // the continuity invariant are instead enforced block-rootedly in
-        // mandatory prevalidation (crates/actors/src/block_validation.rs):
-        // `prev_output_is_valid` anchors the VALUE (`prev_output` equals the
-        // parent block's `output`) and `vdf_step_continuity_is_valid` anchors
-        // the NUMBERING (`global_step_number` equals the parent's plus
-        // `steps.len()` — without it, the buffer check's removal would let a
-        // block inflate its step number past the work chained from the parent).
-        // The step chain itself is re-derived from the block's own data by
-        // `vdf_step_batch_is_valid`. The buffer is no longer consulted as an
-        // authority for continuity.
-        //
-        // `wait_for_step` above is kept as the liveness/sync gate (and carries
-        // the never-mislabel stall detection); it gates on availability, not on
-        // step-value equality.
+        // No buffer-vs-`prev_output` continuity check here: a partition-recovery
+        // buffer can be legitimately poisoned, so treating it as the authority
+        // falsely rejects canonical blocks and wedges recovery. Continuity is
+        // enforced block-rootedly in mandatory prevalidation instead — see
+        // `prev_output_is_valid` (value half) and `vdf_step_continuity_is_valid`
+        // (numbering half) in `block_validation.rs`. `wait_for_step` above stays
+        // as the liveness/sync gate only: availability, not step-value equality.
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = vdf_config.reset_frequency as u64;
