@@ -3140,6 +3140,98 @@ mod c1_side_fork_regression_tests {
 }
 
 #[cfg(test)]
+mod poa_bounds_snapshot_tests {
+    use super::*;
+    use irys_domain::{BlockIndex, BlockTree};
+    use irys_testing_utils::new_mock_signed_header;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{BlockHash, BlockIndexItem, DataLedger, DbSyncMode, H256, LedgerIndexItem};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn indexed_bounds_return_snapshot_hash_without_migrated_hash_reread() {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("poa_bounds_snapshot_hash")
+            .build();
+        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+            tmp_dir.path(),
+            DbSyncMode::UtterlyNoSync,
+        )
+        .expect("open db");
+        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+
+        let genesis_hash = BlockHash::random();
+        let parent_hash = BlockHash::random();
+        let genesis_submit_root = H256::random();
+
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: genesis_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 10,
+                            tx_root: genesis_submit_root,
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                0,
+            )
+            .expect("push genesis index item");
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: parent_hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: 20,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                1,
+            )
+            .expect("push parent index item");
+
+        let genesis_for_tree = new_mock_signed_header();
+        let tree = BlockTree::new(&genesis_for_tree, ConsensusConfig::testing());
+        let block_index_guard = BlockIndexReadGuard::new(block_index);
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let (bounds, owning_hash) = get_data_poa_bounds_with_block_tree_fallback(
+            &block_index_guard,
+            &block_tree_guard,
+            &db,
+            parent_hash,
+            1,
+            DataLedger::Submit,
+            5,
+        )
+        .expect("indexed bounds should not require a second canonical hash lookup");
+
+        assert_eq!(bounds.height, 0);
+        assert_eq!(bounds.block_hash, genesis_hash);
+        assert_eq!(bounds.tx_root, genesis_submit_root);
+        assert_eq!(owning_hash, genesis_hash);
+    }
+}
+
+#[cfg(test)]
 mod perm_fee_threshold_tests {
     use super::*;
     use irys_types::U256;
@@ -3426,19 +3518,6 @@ fn ledger_tx_ids_in(header: &IrysBlockHeader, ledger: DataLedger) -> Option<Vec<
         .map(|l| l.tx_ids.0.clone())
 }
 
-/// Canonical (migrated) block hash at `height` from `MigratedBlockHashes`. Used by the
-/// PoA data-ledger branch to name the recall chunk's owning block for owning-tx lookup
-/// when it lives below `block_tree`'s window (older history is always canonical/migrated).
-/// Cheap (one point read, no header fetch) so it can run during bounds resolution; the
-/// heavier header + tx-header fetch is deferred until after `tx_path` validation succeeds.
-fn canonical_block_hash_at(db: &DatabaseProvider, height: u64) -> Result<H256, PreValidationError> {
-    db.view_eyre(|tx| {
-        tx.get::<MigratedBlockHashes>(height)?
-            .ok_or_else(|| eyre::eyre!("no canonical (migrated) block at height {height}"))
-    })
-    .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))
-}
-
 /// True iff the tx whose folded `tx_root` leaf starts at cumulative byte `cursor` (prefix
 /// sums of `data_size` in `tx_ids` order) is the recall chunk's owner for a tx_path leaf
 /// at `target`. A `data_size == 0` tx contributes a zero-width leaf that shares its start
@@ -3575,7 +3654,8 @@ fn get_data_poa_bounds_with_block_tree_fallback(
     // the hash is resolved here (cheap); the header + tx-header fetch is deferred to
     // after `tx_path` validation so an invalid proof still surfaces as
     // `MerkleProofInvalid` rather than a lookup error. The tree-walk path has the
-    // owning header in hand; the index paths resolve the canonical hash by height.
+    // owning header in hand; the index paths use the hash carried by `BlockBounds`
+    // so the returned hash and bounds come from the same index snapshot.
     //
     // Fast path: parent is migrated. Identical disambiguation to the prior
     // implementation — offsets past chain-max and ledger-not-active are
@@ -3612,7 +3692,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                     }
                     other => PreValidationError::BlockBoundsLookupError(other.to_string()),
                 })?;
-            let owning_hash = canonical_block_hash_at(db, bounds.height)?;
+            let owning_hash = bounds.block_hash;
             return Ok((bounds, owning_hash));
         }
         // Either the index doesn't have parent_height yet (un-migrated window)
@@ -3781,7 +3861,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                         prev_height,
                     )
                     .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
-                let owning_hash = canonical_block_hash_at(db, bounds.height)?;
+                let owning_hash = bounds.block_hash;
                 return Ok((bounds, owning_hash));
             }
         }
