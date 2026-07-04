@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782928220881,
+  "lastUpdate": 1783183998254,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7819,6 +7819,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ce26231b1ceba103294d5c81014c897c72e49527",
+          "message": "feat(api): add canonical ledger offset -> tx attribution endpoints (#1467)\n\n* feat(api): add canonical ledger offset -> tx attribution endpoints\n\nGET /v1/ledger/{ledger_id}/offset/{ledger_offset}/tx\nGET /v1/ledger/{ledger_id}/slot/{slot_index}/offset/{slot_offset}/tx\n\nResolves a ledger chunk offset to the owning data transaction via the\nblock index and canonical block headers. Works for all data ledgers,\nincluding the Cascade term ledgers (OneYear/ThirtyDay).\n\n* refactor(api): single-snapshot ledger attribution + typed BlockBoundsError\n\n- Resolve the whole offset->tx lookup (bounds search, block header,\n  tx-header walk) inside one MDBX view transaction so a concurrent\n  deep-reorg truncation can't mix index states mid-request, and the\n  tx walk costs one transaction instead of one per tx\n- Add typed BlockBoundsError (IndexEmpty / LedgerInactive /\n  OffsetBeyondFrontier / Internal) on the BlockIndex bounds API and\n  migrate all callers: the API maps not-allocated variants to 404,\n  PoA prevalidation to its typed consensus errors, and cache/storage\n  services drop their frontier-precheck + expect() patterns\n- BlockBounds now carries block_hash from the resolved index item\n  (same snapshot); cross-check header total_chunks against the index\n  and reject tx walks that overshoot the block's appended range\n- Wire contract: txOffset -> txIndex (u32; it is a list index, not a\n  chunk offset), all u64 response fields serialize as strings, slot\n  endpoint 404s restate the client's slot coordinates\n- Share parse_ledger_id across ledger + chunk routes\n\n* fix poa bounds owning hash snapshot\n\n* use ledger accessor for poa inactive error",
+          "timestamp": "2026-07-04T09:38:03-07:00",
+          "tree_id": "e33caad2f3f8bbfff27b70cc7efce67b2828e363",
+          "url": "https://github.com/Irys-xyz/irys/commit/ce26231b1ceba103294d5c81014c897c72e49527"
+        },
+        "date": 1783183997152,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01522,
+            "range": "± 0.000312",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152804,
+            "range": "± 0.002101",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.558842,
+            "range": "± 0.0423",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.452425,
+            "range": "± 0.243781",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083206,
+            "range": "± 0.000551",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 782.437634,
+            "range": "± 27.159884",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.582946,
+            "range": "± 9.751211",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117518,
+            "range": "± 0.001519",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1183.750351,
+            "range": "± 5.26791",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1578.28051,
+            "range": "± 105.804734",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033928,
+            "range": "± 0.000978",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.418731,
+            "range": "± 1.141344",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.491195,
+            "range": "± 2.335947",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
