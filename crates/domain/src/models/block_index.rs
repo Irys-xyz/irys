@@ -238,33 +238,68 @@ impl BlockIndex {
     /// For a given chunk offset in a ledger, what block was responsible for adding
     /// that chunk to the data ledger?
     ///
-    /// Thin wrapper over [`Self::get_block_bounds_at_height`] anchored on the
-    /// latest indexed height. The anchored variant assumes a non-empty index;
-    /// the empty-index precheck lives here, the public entry point.
+    /// Thin wrapper over [`Self::block_bounds_in_tx`] in a fresh view
+    /// transaction. Callers composing multiple reads that must observe one
+    /// consistent index snapshot should open their own view transaction and
+    /// call the `_in_tx` variant instead.
     pub fn get_block_bounds(
         &self,
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
-    ) -> eyre::Result<BlockBounds> {
-        let latest_height = self
-            .db
-            .view_eyre(block_index_latest_height)?
-            .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
-        self.get_block_bounds_at_height(ledger, chunk_offset, latest_height)
+    ) -> Result<BlockBounds, BlockBoundsError> {
+        self.db
+            .view_eyre(|tx| Ok(Self::block_bounds_in_tx(tx, ledger, chunk_offset)))
+            .map_err(BlockBoundsError::Internal)?
     }
 
-    // Note: `get_block_bounds_at_height` and `get_block_index_item` both
+    /// Like [`Self::get_block_bounds`], but anchored on `anchor_height`
+    /// instead of the latest indexed height. See
+    /// [`Self::block_bounds_at_height_in_tx`] for the anchoring semantics.
+    pub fn get_block_bounds_at_height(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        anchor_height: u64,
+    ) -> Result<BlockBounds, BlockBoundsError> {
+        self.db
+            .view_eyre(|tx| {
+                Ok(Self::block_bounds_at_height_in_tx(
+                    tx,
+                    ledger,
+                    chunk_offset,
+                    anchor_height,
+                ))
+            })
+            .map_err(BlockBoundsError::Internal)?
+    }
+
+    /// [`Self::block_bounds_at_height_in_tx`] anchored on the latest height
+    /// indexed in the same transaction's snapshot.
+    pub fn block_bounds_in_tx<T: DbTx>(
+        tx: &T,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+    ) -> Result<BlockBounds, BlockBoundsError> {
+        let anchor_height = block_index_latest_height(tx)?.ok_or(BlockBoundsError::IndexEmpty)?;
+        Self::block_bounds_at_height_in_tx(tx, ledger, chunk_offset, anchor_height)
+    }
+
+    // Note: `block_bounds_at_height_in_tx` and `get_block_index_item` both
     // binary-search the index but intentionally diverge on how they treat a
     // probed block whose ledger entry is missing; any future refactor that
     // unifies them must take a missing-ledger-policy parameter rather than
     // collapse the two behaviours.
 
-    /// Like [`Self::get_block_bounds`], but anchored on `anchor_height`
-    /// instead of the latest indexed height. This produces fork-deterministic
-    /// results across peers regardless of how far their local indices have
-    /// advanced past the anchor — the caller (e.g. PoA pre-validation) passes
-    /// the block's parent height so two honest peers on the same fork compute
-    /// identical bounds.
+    /// Resolves the block introducing `chunk_offset`, anchored on
+    /// `anchor_height`. Anchoring produces fork-deterministic results across
+    /// peers regardless of how far their local indices have advanced past the
+    /// anchor — the caller (e.g. PoA pre-validation) passes the block's parent
+    /// height so two honest peers on the same fork compute identical bounds.
+    ///
+    /// Runs entirely inside the caller's view transaction, so every probe of
+    /// the binary search — and any further reads the caller makes with the
+    /// same `tx` — observes one consistent index snapshot even while a
+    /// concurrent deep-reorg truncation rewrites the index.
     ///
     /// Missing-ledger policy: a probed block whose ledger entry is absent is
     /// treated as pre-introduction (`total_chunks = 0`) so the search moves
@@ -272,99 +307,97 @@ impl BlockIndex {
     /// late-introduced ledger. This differs intentionally from
     /// [`Self::get_block_index_item`], which reports a missing ledger as
     /// `Err`; see the section comment above for why the two policies must
-    /// remain distinct.
-    pub fn get_block_bounds_at_height(
-        &self,
+    /// remain distinct. The *anchor* block lacking the ledger entirely is
+    /// reported as [`BlockBoundsError::LedgerInactive`].
+    pub fn block_bounds_at_height_in_tx<T: DbTx>(
+        tx: &T,
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
         anchor_height: u64,
-    ) -> eyre::Result<BlockBounds> {
-        self.db.view_eyre(|tx| {
-            let anchor_item = block_index_item_by_height(tx, &anchor_height)?;
-            let anchor_max = anchor_item
-                .ledgers
-                .iter()
-                .find(|l| l.ledger == ledger)
-                .map(|l| l.total_chunks)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        anchor_height
-                    )
-                })?;
+    ) -> Result<BlockBounds, BlockBoundsError> {
+        let anchor_item = block_index_item_by_height(tx, &anchor_height)?;
+        let anchor_max = anchor_item
+            .ledgers
+            .iter()
+            .find(|l| l.ledger == ledger)
+            .map(|l| l.total_chunks)
+            .ok_or(BlockBoundsError::LedgerInactive {
+                ledger,
+                anchor_height,
+            })?;
 
-            let chunk_offset_val: u64 = chunk_offset.into();
-            eyre::ensure!(
-                chunk_offset_val < anchor_max,
-                "chunk_offset {} beyond anchor block's max_chunk_offset {}, anchor height {}",
-                chunk_offset_val,
-                anchor_max,
-                anchor_height
-            );
+        let chunk_offset_val: u64 = chunk_offset.into();
+        if chunk_offset_val >= anchor_max {
+            return Err(BlockBoundsError::OffsetBeyondFrontier {
+                ledger,
+                chunk_offset: chunk_offset_val,
+                frontier: anchor_max,
+                anchor_height,
+            });
+        }
 
-            // Binary search bounded by anchor_height (inclusive) so this never
-            // consults blocks beyond the parent — fork-deterministic regardless
-            // of how far the local tip has advanced. A probed block lacking
-            // this ledger entirely (ledger introduced at a later height) is
-            // equivalent to total_chunks = 0; the search just moves right.
-            let (block_height, found_item) = {
-                let mut lo: u64 = 0;
-                let mut hi: u64 = anchor_height;
+        // Binary search bounded by anchor_height (inclusive) so this never
+        // consults blocks beyond the parent — fork-deterministic regardless
+        // of how far the local tip has advanced. A probed block lacking
+        // this ledger entirely (ledger introduced at a later height) is
+        // equivalent to total_chunks = 0; the search just moves right.
+        let (block_height, found_item) = {
+            let mut lo: u64 = 0;
+            let mut hi: u64 = anchor_height;
 
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
-                    let item = block_index_item_by_height(tx, &mid)?;
-                    let total = item
-                        .ledgers
-                        .iter()
-                        .find(|l| l.ledger == ledger)
-                        .map(|l| l.total_chunks)
-                        .unwrap_or(0);
-                    if chunk_offset_val < total {
-                        hi = mid;
-                    } else {
-                        lo = mid + 1;
-                    }
-                }
-
-                let item = block_index_item_by_height(tx, &lo)?;
-                (lo, item)
-            };
-
-            // prev_total is 0 for genesis (no predecessor) and for blocks that
-            // first introduce this ledger (predecessor has no entry).
-            let prev_total = if block_height == 0 {
-                0
-            } else {
-                let previous_item = block_index_item_by_height(tx, &(block_height - 1))?;
-                previous_item
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let item = block_index_item_by_height(tx, &mid)?;
+                let total = item
                     .ledgers
                     .iter()
                     .find(|l| l.ledger == ledger)
                     .map(|l| l.total_chunks)
-                    .unwrap_or(0)
-            };
+                    .unwrap_or(0);
+                if chunk_offset_val < total {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
 
-            let found_ledger = found_item
+            let item = block_index_item_by_height(tx, &lo)?;
+            (lo, item)
+        };
+
+        // prev_total is 0 for genesis (no predecessor) and for blocks that
+        // first introduce this ledger (predecessor has no entry).
+        let prev_total = if block_height == 0 {
+            0
+        } else {
+            let previous_item = block_index_item_by_height(tx, &(block_height - 1))?;
+            previous_item
                 .ledgers
                 .iter()
                 .find(|l| l.ledger == ledger)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Ledger {:?} not found in block at height {}",
-                        ledger,
-                        block_height
-                    )
-                })?;
+                .map(|l| l.total_chunks)
+                .unwrap_or(0)
+        };
 
-            Ok(BlockBounds {
-                height: block_height,
-                ledger,
-                start_chunk_offset: prev_total,
-                end_chunk_offset: found_ledger.total_chunks,
-                tx_root: found_ledger.tx_root,
-            })
+        let found_ledger = found_item
+            .ledgers
+            .iter()
+            .find(|l| l.ledger == ledger)
+            .ok_or_else(|| {
+                BlockBoundsError::Internal(eyre::eyre!(
+                    "Ledger {:?} not found in block at height {}",
+                    ledger,
+                    block_height
+                ))
+            })?;
+
+        Ok(BlockBounds {
+            height: block_height,
+            block_hash: found_item.block_hash,
+            ledger,
+            start_chunk_offset: prev_total,
+            end_chunk_offset: found_ledger.total_chunks,
+            tx_root: found_ledger.tx_root,
         })
     }
 
@@ -452,6 +485,11 @@ impl BlockIndex {
 pub struct BlockBounds {
     /// Block height where these bounds apply
     pub height: u64,
+    /// Hash of the block introducing these bounds, taken from the same index
+    /// item (and so the same snapshot) the search resolved — callers must not
+    /// re-read the index for it, or a concurrent truncation could pair these
+    /// bounds with a different fork's hash.
+    pub block_hash: H256,
     /// Target ledger (Publish or Submit)
     pub ledger: DataLedger,
     /// First chunk offset included in this block (inclusive)
@@ -462,6 +500,41 @@ pub struct BlockBounds {
     pub end_chunk_offset: u64,
     /// Merkle root (`tx_root`) of all transactions this block applied to the ledger
     pub tx_root: H256,
+}
+
+/// Typed outcome of a block-bounds lookup, so callers can tell "this offset
+/// is not (yet) allocated in this ledger" apart from a real lookup failure
+/// without re-deriving the ledger frontier themselves: API routes map the
+/// first three variants to 404, PoA pre-validation to its typed consensus
+/// errors, and background services skip the work item.
+#[derive(Debug, thiserror::Error)]
+pub enum BlockBoundsError {
+    #[error("block index is empty")]
+    IndexEmpty,
+    /// The anchor block carries no entry for this ledger — e.g. a Cascade
+    /// term ledger before activation.
+    #[error("ledger {ledger:?} has no entry in the anchor block at height {anchor_height}")]
+    LedgerInactive {
+        ledger: DataLedger,
+        anchor_height: u64,
+    },
+    #[error(
+        "chunk offset {chunk_offset} is beyond the {ledger:?} ledger frontier ({frontier} chunks) at anchor height {anchor_height}"
+    )]
+    OffsetBeyondFrontier {
+        ledger: DataLedger,
+        chunk_offset: u64,
+        frontier: u64,
+        anchor_height: u64,
+    },
+    #[error("block bounds lookup failed: {0}")]
+    Internal(eyre::Report),
+}
+
+impl From<eyre::Report> for BlockBoundsError {
+    fn from(err: eyre::Report) -> Self {
+        Self::Internal(err)
+    }
 }
 
 // === Migration-only code (temporary, will be removed once all nodes have migrated) ===
@@ -681,12 +754,20 @@ mod tests {
         assert_eq!(block_index.get_item(1).unwrap(), block_items[1]);
         assert_eq!(block_index.get_item(2).unwrap(), block_items[2]);
 
-        // check an invalid byte offset causes get_block_bounds to return an error
+        // an offset past the frontier is reported as the typed
+        // OffsetBeyondFrontier, carrying the frontier value
         let invalid_block_bounds =
             block_index.get_block_bounds(DataLedger::Publish, LedgerChunkOffset::from(300));
         assert!(
-            invalid_block_bounds.is_err(),
-            "expected invalid block bound to generate an error"
+            matches!(
+                invalid_block_bounds,
+                Err(BlockBoundsError::OffsetBeyondFrontier {
+                    frontier: 300,
+                    chunk_offset: 300,
+                    ..
+                })
+            ),
+            "expected OffsetBeyondFrontier, got {invalid_block_bounds:?}"
         );
 
         // check valid block bound
@@ -697,6 +778,7 @@ mod tests {
             block_bounds,
             BlockBounds {
                 height: 1,
+                block_hash: block_items[1].block_hash,
                 ledger: DataLedger::Publish,
                 start_chunk_offset: 100,
                 end_chunk_offset: 200,
@@ -711,6 +793,7 @@ mod tests {
             block_bounds,
             BlockBounds {
                 height: 1,
+                block_hash: block_items[1].block_hash,
                 ledger: DataLedger::Submit,
                 start_chunk_offset: 1000,
                 end_chunk_offset: 2000,

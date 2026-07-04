@@ -12,7 +12,7 @@ use irys_database::{
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{CachedChunks, CachedDataRoots, CompactCachedIngressProof, IngressProofs},
 };
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_domain::{BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
@@ -175,17 +175,25 @@ impl InnerCacheTask {
 
         // Check to see if the first overlapping block in our first active submit ledger slot is in the block index
         let mut prune_height: Option<u64> = None;
-        if let Some(latest) = self.block_index_guard.read().get_latest_item() {
-            let submit_ledger_max_chunk_offset = latest.ledgers[ledger_id].total_chunks;
-            if submit_ledger_max_chunk_offset > chunk_offset {
-                let block_bounds = self
-                    .block_index_guard
-                    .read()
-                    .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
-                    .expect("Should be able to get block bounds as max_chunk_offset was checked");
+        match self
+            .block_index_guard
+            .read()
+            .get_block_bounds(ledger_id, LedgerChunkOffset::from(chunk_offset))
+        {
+            Ok(block_bounds) => {
                 // Genesis block (height 0) never enters block_index as it has no submit ledger
                 // data, use saturating_sub (defensive).
                 prune_height = Some(block_bounds.height.saturating_sub(1));
+            }
+            // Nothing indexed at this offset (yet) — fall through to the
+            // canonical-chain scan below.
+            Err(
+                BlockBoundsError::IndexEmpty
+                | BlockBoundsError::LedgerInactive { .. }
+                | BlockBoundsError::OffsetBeyondFrontier { .. },
+            ) => {}
+            Err(BlockBoundsError::Internal(e)) => {
+                return Err(e.wrap_err("Failed to get block bounds for cache pruning"));
             }
         }
 
