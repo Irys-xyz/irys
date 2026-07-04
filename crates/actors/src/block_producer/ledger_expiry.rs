@@ -1127,12 +1127,9 @@ fn resolve_offset_via_index(
     offset: u64,
 ) -> eyre::Result<(BlockHeight, H256, u64, u64)> {
     let bounds = block_index.get_block_bounds(ledger, LedgerChunkOffset::from(offset))?;
-    let item = block_index
-        .get_item(bounds.height)
-        .ok_or_eyre("block bounds height absent from block index")?;
     Ok((
         bounds.height,
-        item.block_hash,
+        bounds.block_hash,
         bounds.start_chunk_offset,
         bounds.end_chunk_offset,
     ))

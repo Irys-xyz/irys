@@ -130,9 +130,22 @@ async fn heavy_ledger_offset_tx_endpoint() -> eyre::Result<()> {
     let at_boundary_right = get_attribution(&app, "/v1/ledger/1/offset/3/tx").await;
     assert_ne!(at_boundary_left.tx_id, at_boundary_right.tx_id);
     assert_eq!(at_boundary_right.tx_start_offset, 3);
+    // txIndex points into the block's Submit tx list — cross-check the
+    // response indices against the canonical block content
+    let submit_tx_ids = &inclusion_block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::Submit)
+        .expect("inclusion block should carry a Submit ledger entry")
+        .tx_ids
+        .0;
     assert_eq!(
-        [at_boundary_left.tx_offset, at_boundary_right.tx_offset],
-        [0, 1]
+        at_boundary_left.tx_id,
+        submit_tx_ids[at_boundary_left.tx_index as usize]
+    );
+    assert_eq!(
+        at_boundary_right.tx_id,
+        submit_tx_ids[at_boundary_right.tx_index as usize]
     );
 
     // The slot-relative endpoint resolves to the identical response
@@ -298,7 +311,7 @@ async fn heavy_ledger_offset_tx_endpoint_cascade_term_ledgers() -> eyre::Result<
             assert_eq!(resp.block_height, inclusion_block.height);
             assert_eq!(resp.tx_id, tx.header.id);
             assert_eq!(resp.data_root, tx.header.data_root);
-            assert_eq!(resp.tx_offset, 0);
+            assert_eq!(resp.tx_index, 0);
             assert_eq!(resp.tx_start_offset, 0);
             assert_eq!(resp.tx_end_offset, 3);
             assert_eq!(resp.chunks_in_tx, 3);

@@ -6,7 +6,7 @@ use actix_web::{
 };
 
 use awc::http::StatusCode;
-use irys_types::{ChunkFormat, DataLedger, H256};
+use irys_types::{ChunkFormat, H256};
 use serde::Deserialize;
 use tracing::debug;
 
@@ -20,10 +20,7 @@ pub async fn get_chunk_by_ledger_offset(
     state: web::Data<ApiState>,
     path: web::Path<LedgerChunkApiPath>,
 ) -> Result<HttpResponse, ApiError> {
-    let ledger = match DataLedger::try_from(path.ledger_id) {
-        Ok(l) => l,
-        Err(e) => return Err((format!("Invalid ledger id: {e}"), StatusCode::BAD_REQUEST).into()),
-    };
+    let ledger = crate::routes::parse_ledger_id(path.ledger_id)?;
 
     match state
         .chunk_provider
@@ -58,10 +55,7 @@ pub async fn get_chunk_by_data_root_offset(
     state: web::Data<ApiState>,
     path: web::Path<DataRootChunkApiPath>,
 ) -> Result<HttpResponse, ApiError> {
-    let ledger = match DataLedger::try_from(path.ledger_id) {
-        Ok(l) => l,
-        Err(e) => return Err((format!("Invalid ledger id: {e}"), StatusCode::BAD_REQUEST).into()),
-    };
+    let ledger = crate::routes::parse_ledger_id(path.ledger_id)?;
 
     match state
         .chunk_provider

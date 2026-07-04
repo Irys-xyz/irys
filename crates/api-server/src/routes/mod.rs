@@ -18,3 +18,17 @@ pub mod storage;
 pub mod supply;
 pub mod tip;
 pub mod tx;
+
+/// Shared parse for `{ledger_id}` path params (numeric [`DataLedger`] ids:
+/// 0 = Publish, 1 = Submit, 10 = OneYear, 20 = ThirtyDay).
+pub(crate) fn parse_ledger_id(
+    ledger_id: u32,
+) -> Result<irys_types::DataLedger, crate::error::ApiError> {
+    irys_types::DataLedger::try_from(ledger_id).map_err(|_| {
+        (
+            format!("Invalid ledger id: {ledger_id}"),
+            awc::http::StatusCode::BAD_REQUEST,
+        )
+            .into()
+    })
+}

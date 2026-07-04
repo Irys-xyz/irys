@@ -20,8 +20,8 @@ use eyre::{OptionExt as _, eyre};
 use irys_config::StorageSubmodulesConfig;
 use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{
-    BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME, PackingParams,
-    StorageModule, StorageModuleInfo,
+    BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME,
+    PackingParams, StorageModule, StorageModuleInfo,
 };
 use irys_types::{
     BlockHash, Config, DataLedger, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
@@ -340,7 +340,16 @@ impl StorageModuleServiceInner {
                 };
 
                 let data_ledger = DataLedger::try_from(ledger_id).unwrap();
-                let max_chunk_offset = latest_item.ledgers[data_ledger as usize].total_chunks;
+                // Frontier for this ledger; an absent entry (e.g. a term
+                // ledger before Cascade activation) means no data yet. Still
+                // read here (not just via the bounds error) because the end
+                // offset is clamped against it below.
+                let max_chunk_offset = latest_item
+                    .ledgers
+                    .iter()
+                    .find(|l| l.ledger == data_ledger)
+                    .map(|l| l.total_chunks)
+                    .unwrap_or(0);
 
                 // Check if start offset is within bounds
                 if *ledger_chunk_offset >= max_chunk_offset {
@@ -348,10 +357,21 @@ impl StorageModuleServiceInner {
                     continue;
                 }
 
-                // Now we can safely get block bounds for the start
-                let block_bounds = block_index_guard
-                    .get_block_bounds(data_ledger, ledger_chunk_offset)
-                    .expect("Should be able to get block bounds as max_chunk_offset was checked");
+                let block_bounds =
+                    match block_index_guard.get_block_bounds(data_ledger, ledger_chunk_offset) {
+                        Ok(bounds) => bounds,
+                        // The index shrank between the frontier read and the
+                        // search (reorg truncation) — skip; the next update
+                        // re-evaluates against the new index.
+                        Err(
+                            BlockBoundsError::IndexEmpty
+                            | BlockBoundsError::LedgerInactive { .. }
+                            | BlockBoundsError::OffsetBeyondFrontier { .. },
+                        ) => continue,
+                        Err(BlockBoundsError::Internal(e)) => {
+                            return Err(e.wrap_err("Failed to get start block bounds"));
+                        }
+                    };
 
                 let start_block = block_bounds.height;
 
@@ -376,9 +396,18 @@ impl StorageModuleServiceInner {
                 }
 
                 // Now get block bounds for the end
-                let end_block_bounds = block_index_guard
-                    .get_block_bounds(data_ledger, clamped_end_offset)
-                    .expect("Should be able to get end block bounds as offset was validated");
+                let end_block_bounds =
+                    match block_index_guard.get_block_bounds(data_ledger, clamped_end_offset) {
+                        Ok(bounds) => bounds,
+                        Err(
+                            BlockBoundsError::IndexEmpty
+                            | BlockBoundsError::LedgerInactive { .. }
+                            | BlockBoundsError::OffsetBeyondFrontier { .. },
+                        ) => continue,
+                        Err(BlockBoundsError::Internal(e)) => {
+                            return Err(e.wrap_err("Failed to get end block bounds"));
+                        }
+                    };
 
                 let end_block = end_block_bounds.height;
 

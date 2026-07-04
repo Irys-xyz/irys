@@ -14,8 +14,9 @@ use irys_database::{
     tables::MigratedBlockHashes,
 };
 use irys_domain::{
-    BlockBounds, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
-    CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, HardforkConfigExt as _,
+    BlockBounds, BlockBoundsError, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard,
+    CommitmentSnapshot, CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
+    HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{ShadowTransaction, ShadowTxError, detect_and_decode};
@@ -111,9 +112,8 @@ impl ErrorClass {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
     /// Local lookup failure during the PoA-anchored `block_bounds` binary
-    /// search. Construction sites in `get_block_bounds` /
-    /// `get_block_bounds_at_height` pre-check peer-supplied offsets against
-    /// the chain max and reject out-of-range / inactive-ledger cases first
+    /// search. Construction sites map the typed `BlockBoundsError`
+    /// out-of-range / inactive-ledger variants to consensus rejections first
     /// (`PoAChunkOffsetOutOfBlockBounds`, `PoALedgerInactive`), and the
     /// walk-off-tree fallback returns `PoAOffCanonicalAncestor` when a
     /// side-fork ancestor falls below the migration boundary; by the time
@@ -3595,24 +3595,23 @@ fn get_data_poa_bounds_with_block_tree_fallback(
         if let Some(parent_item) = index.get_item(parent_height)
             && parent_item.block_hash == parent_block_hash
         {
-            match parent_item.ledgers.iter().find(|l| l.ledger == ledger) {
-                Some(entry) if ledger_chunk_offset >= entry.total_chunks => {
-                    return Err(PreValidationError::PoAChunkOffsetOutOfBlockBounds);
-                }
-                None => {
-                    return Err(PreValidationError::PoALedgerInactive {
-                        ledger_id: ledger as u32,
-                    });
-                }
-                Some(_) => {}
-            }
             let bounds = index
                 .get_block_bounds_at_height(
                     ledger,
                     LedgerChunkOffset::from(ledger_chunk_offset),
                     parent_height,
                 )
-                .map_err(|e| PreValidationError::BlockBoundsLookupError(e.to_string()))?;
+                .map_err(|e| match e {
+                    BlockBoundsError::OffsetBeyondFrontier { .. } => {
+                        PreValidationError::PoAChunkOffsetOutOfBlockBounds
+                    }
+                    BlockBoundsError::LedgerInactive { .. } => {
+                        PreValidationError::PoALedgerInactive {
+                            ledger_id: ledger as u32,
+                        }
+                    }
+                    other => PreValidationError::BlockBoundsLookupError(other.to_string()),
+                })?;
             let owning_hash = canonical_block_hash_at(db, bounds.height)?;
             return Ok((bounds, owning_hash));
         }
@@ -3721,6 +3720,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
             return Ok((
                 BlockBounds {
                     height: curr_height,
+                    block_hash: curr.block_hash,
                     ledger,
                     start_chunk_offset: prev_total,
                     end_chunk_offset: curr_total,
