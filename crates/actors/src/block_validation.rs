@@ -3687,7 +3687,7 @@ fn get_data_poa_bounds_with_block_tree_fallback(
                     }
                     BlockBoundsError::LedgerInactive { .. } => {
                         PreValidationError::PoALedgerInactive {
-                            ledger_id: ledger as u32,
+                            ledger_id: ledger.get_id(),
                         }
                     }
                     other => PreValidationError::BlockBoundsLookupError(other.to_string()),
