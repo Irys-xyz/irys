@@ -541,7 +541,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64 {
-        consensus.mempool.tx_anchor_expiry_depth as u64
+        u64::from(consensus.mempool.tx_anchor_expiry_depth)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -624,7 +624,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64 {
-        consensus.mempool.commitment_anchor_expiry_depth as u64
+        u64::from(consensus.mempool.commitment_anchor_expiry_depth)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {

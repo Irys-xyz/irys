@@ -182,20 +182,24 @@ pub async fn select_best_txs(
     let next_block_height = parent_block_height + 1;
     // Use the new block's timestamp for hardfork params, matching what the validator uses
     let current_timestamp = new_block_timestamp;
-    let min_anchor_height = current_height.saturating_sub(
-        (ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64)
-            .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
-    );
+    // Lower anchor bound for an item type: its expiry window pulled in by the
+    // migration-depth maturity margin, floored at genesis. Shared by data txs
+    // and commitments so the two windows can't drift apart.
+    let min_anchor_floor = |expiry_depth: u64| {
+        current_height.saturating_sub(
+            expiry_depth.saturating_sub(u64::from(ctx.config.consensus.block_migration_depth)),
+        )
+    };
+    let min_anchor_height =
+        min_anchor_floor(ctx.config.consensus.mempool.tx_anchor_expiry_depth.into());
 
     let max_anchor_height =
         current_height.saturating_sub(ctx.config.consensus.block_migration_depth as u64);
 
     // Commitments use a longer expiry window than data txs; keep the same
     // maturity upper bound (max_anchor_height).
-    let commitment_min_anchor_height = current_height.saturating_sub(
-        (ctx.config.consensus.mempool.commitment_anchor_expiry_depth as u64)
-            .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
-    );
+    let commitment_min_anchor_height =
+        min_anchor_floor(ctx.config.consensus.mempool.commitment_anchor_expiry_depth.into());
 
     let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 

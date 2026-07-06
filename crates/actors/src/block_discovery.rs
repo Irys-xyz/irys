@@ -463,7 +463,7 @@ impl BlockDiscoveryServiceInner {
         // signed commitment, and it may exceed `block_tree_depth`); ingress proofs
         // their own (often longer) window.
         let min_tx_anchor_height =
-            block_height.saturating_sub(mempool_config.tx_anchor_expiry_depth as u64);
+            block_height.saturating_sub(mempool_config.tx_anchor_expiry_depth.into());
         let min_commitment_anchor_height =
             block_height.saturating_sub(mempool_config.commitment_anchor_expiry_depth.into());
         let min_ingress_proof_anchor_height =
