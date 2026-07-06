@@ -161,13 +161,36 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
     )?;
 
     // Store both data txs and all proofs in the DB.
-    // We also set included_height metadata so the tx selector's canonical DB
-    // fallback (`canonical_submit_height`) can find them as prior submit inclusions.
+    // We also set included_height metadata AND plant a synthetic canonical block
+    // at height 0 carrying both txs in its Submit ledger (repointing
+    // `MigratedBlockHashes[0]`), so the tx selector's canonical DB fallback
+    // (`canonical_submit_height`, now content-verified) finds them as prior
+    // submit inclusions. Genesis carries no data txs, so a bare metadata + MBH
+    // hint no longer suffices. The selector reads this via the fallback only;
+    // the by-hash tree fold is unaffected (it follows parent pointers).
     genesis_node.node_ctx.db.update(|tx| {
+        use irys_database::insert_block_header;
         use irys_database::tables::{
             CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
+            MigratedBlockHashes,
         };
         use irys_types::ingress::CachedIngressProof;
+        use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader};
+
+        let mut prior_block = IrysBlockHeader::new_mock_header();
+        prior_block.height = 0;
+        prior_block.block_hash = H256::random();
+        prior_block.data_ledgers = vec![DataTransactionLedger {
+            ledger_id: DataLedger::Submit as u32,
+            tx_root: H256::zero(),
+            tx_ids: H256List(vec![data_tx_1.id, data_tx_2.id]),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        }];
+        insert_block_header(tx, &prior_block)?;
+        tx.put::<MigratedBlockHashes>(0, prior_block.block_hash)?;
 
         // Insert data_root_1 proofs directly to bypass store_external_ingress_proof_checked dedup
         tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
