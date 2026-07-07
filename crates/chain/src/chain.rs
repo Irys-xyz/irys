@@ -805,7 +805,7 @@ impl IrysNode {
         }
 
         // Genesis first-includes its commitments but, as the block-index head, never
-        // flows through the confirm/migration metadata writers, so no commitment
+        // flows through the migration metadata writer, so no commitment
         // dedup row is ever written for it. Backfill it here — the single seam that
         // runs on both fresh init (genesis just persisted above) and restart (genesis
         // already in the db) — so already-initialized nodes converge on upgrade

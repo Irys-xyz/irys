@@ -208,10 +208,10 @@ pub fn batch_clear_data_tx_promoted_height<'a>(
 /// included at some prior height, and the reorg invariant in
 /// `BlockMigrationService::persist_metadata` guarantees the matching Publish
 /// block is also in `blocks_to_clear`. Its `clear_data_tx_promoted_height`
-/// call becomes a no-op on the already-deleted row. If the tx is
-/// re-canonical on the new fork, Phase 2 recreates the row via
-/// `set_data_tx_included_height` and any matching Publish re-confirmation
-/// restores `promoted_height` in the same transaction.
+/// call becomes a no-op on the already-deleted row. If the tx is re-canonical
+/// on the new fork, its row is rewritten when that fork's block migrates
+/// (`write_data_ledger_metadata` in `persist_block`), which also restores
+/// `promoted_height` for any re-included Publish block.
 pub fn clear_data_tx_included_height(
     tx: &impl DbTxMut,
     tx_id: &H256,

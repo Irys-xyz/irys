@@ -244,7 +244,7 @@ async fn heavy_same_block_duplicate_commitment_rejected() -> eyre::Result<()> {
 }
 
 /// Genesis first-includes its commitments but never flows through the
-/// confirm/migration metadata writers, so no dedup row is written for it at
+/// migration metadata writer, so no dedup row is written for it at
 /// init. The startup backfill must fill that gap: after a node boots, the
 /// finalized-inclusion lookup the dedup consults
 /// (`canonical_commitment_included_height`) must resolve every genesis

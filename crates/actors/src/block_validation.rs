@@ -5599,9 +5599,11 @@ pub async fn data_txs_are_valid(
                         // `get_previous_tx_inclusions` docblock.) As a further
                         // guard, both getters content-verify the hint against the
                         // canonical block at the returned height, so a stranded
-                        // metadata row from an orphaned tip (written at depth-0
-                        // confirmation, possibly surviving a restart-interrupted
-                        // reorg) cannot yield a false `PublishTxMissingPriorSubmit`
+                        // metadata row not backed by that block's ledger — e.g. a
+                        // legacy row from an orphaned tip written at depth-0
+                        // confirmation before canonical metadata became
+                        // migration-only, possibly surviving a restart-interrupted
+                        // reorg — cannot yield a false `PublishTxMissingPriorSubmit`
                         // or `PublishTxAlreadyIncluded`.
                         //
                         // `canonical_submit_height` is sufficient evidence of

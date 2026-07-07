@@ -14,9 +14,10 @@ use tracing::{debug, error, info, instrument, warn};
 impl Inner {
     /// Updates in-memory mempool state for a confirmed block.
     ///
-    /// DB persistence of included_height and promoted_height happens at confirmation
-    /// time (via `BlockMigrationService::persist_metadata`). Full tx header
-    /// persistence is deferred to migration time. This handler only updates:
+    /// DB persistence of canonical `included_height` / `promoted_height` (and of
+    /// full tx headers) happens at migration time via
+    /// `BlockMigrationService::persist_block`, not at confirmation. This handler
+    /// only updates:
     /// - In-memory metadata (included_height, promoted_height)
     /// - `CachedDataRoots` DB cache (needed for chunk ingress validation)
     /// - Pending tx pruning

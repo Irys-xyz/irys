@@ -287,12 +287,13 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
 /// stranded hint as canonical.  The content check is what makes `Some(h)` mean
 /// "canonically included at `h`" rather than "a hint pointing at `h` exists":
-/// the metadata row is written at tip-confirmation (depth 0), so an orphaned
-/// tip's row can survive a restart-interrupted reorg and later collide with a
-/// different canonical block migrated at the same height, where the
-/// MBH-existence check alone would read it as truth.  With the content check,
-/// callers may trust `Some(h)` on any branch — mirroring
-/// `canonical_commitment_included_height`.  Current callers:
+/// canonical metadata is now written only at migration (atomically with
+/// `MigratedBlockHashes`), but a legacy/stranded row — e.g. one written at
+/// depth-0 confirmation before that fix, or an orphaned tip's row surviving a
+/// restart-interrupted reorg — can still collide with a different canonical
+/// block migrated at the same height, where the MBH-existence check alone would
+/// read it as truth.  With the content check, callers may trust `Some(h)` on any
+/// branch — mirroring `canonical_commitment_included_height`.  Current callers:
 ///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
 ///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
 ///     only falls back to these helpers for inclusions older than
@@ -342,11 +343,13 @@ fn canonical_metadata_height<T: DbTx>(
         );
         return Ok(None);
     };
-    // Content check: the metadata row is written at tip-confirmation (depth 0,
-    // `block_migration_service::persist_metadata`), so an orphaned tip's row can
-    // survive a restart-interrupted reorg and later collide with a *different*
-    // canonical block that migrated at the same height. `MigratedBlockHashes`
-    // existence alone would then read that stranded hint as canonical truth.
+    // Content check: a stranded/legacy metadata row not backed by canonical
+    // block content (one not written atomically with `MigratedBlockHashes` at
+    // migration — e.g. a depth-0 confirmation-time row from before metadata
+    // became migration-only, or an orphaned tip's row surviving a
+    // restart-interrupted reorg) can collide with a *different* canonical block
+    // that migrated at the same height. `MigratedBlockHashes` existence alone
+    // would then read that stranded hint as canonical truth.
     // Requiring the canonical block to actually carry the tx in `ledger` makes
     // such rows harmless — `Some(h)` proves canonical inclusion at `h`, not
     // merely that a hint exists. (This is the data-tx analogue of the check in
@@ -432,15 +435,17 @@ pub fn canonical_promoted_height<T: DbTx>(
 /// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
 /// canonical block at `h` actually carries `txid` in its commitment ledger.
 ///
-/// The final content check exists because the metadata row is written at
-/// tip-confirmation (depth 0), not at migration: an orphaned local tip can
-/// leave an `included_height` hint behind that no `ReorgEvent` ever clears if
-/// the node restarts before the orphan is processed (the tree is rebuilt from
-/// the block index, which forgets confirmed-but-unmigrated tips). Once ANY
-/// winning block later migrates at `h`, the MBH check alone reads that stranded
-/// hint as canonical truth. Requiring the canonical header to actually include
-/// the tx makes such stranded rows harmless — the invariant is that
-/// `Some(h)` proves canonical inclusion at `h`, not merely that a hint exists.
+/// The final content check exists to neutralize a stranded/legacy metadata row
+/// not backed by canonical block content. Canonical metadata is now written only
+/// at migration (atomically with `MigratedBlockHashes`), but a legacy row
+/// written at depth-0 confirmation — or any `included_height` hint an orphaned
+/// local tip left behind that no `ReorgEvent` cleared because the node restarted
+/// before processing the orphan (the tree is rebuilt from the block index, which
+/// forgets confirmed-but-unmigrated tips) — can survive. Once ANY winning block
+/// later migrates at `h`, the MBH check alone reads that stranded hint as
+/// canonical truth. Requiring the canonical header to actually include the tx
+/// makes such stranded rows harmless — the invariant is that `Some(h)` proves
+/// canonical inclusion at `h`, not merely that a hint exists.
 /// Like the data-tx `canonical_submit_height`, this is only branch-invariant
 /// BELOW the reorg floor — callers must pass `max_height ≤ tip -
 /// block_tree_depth` and cover the reorg window by-hash separately.
@@ -482,9 +487,9 @@ pub fn canonical_commitment_included_height<T: DbTx>(
 /// The commitment replay-dedup's finalized lookup
 /// ([`canonical_commitment_included_height`]) keys on
 /// `IrysCommitmentTxMetadata.included_height`, which is written for ordinary
-/// blocks at confirm/migration by `BlockMigrationService`. Genesis
+/// blocks at migration by `BlockMigrationService`. Genesis
 /// first-includes its commitments but is the block-index head, so it never
-/// flows through the confirm/migration metadata writers and no row is ever
+/// flows through the migration metadata writer and no row is ever
 /// written for its commitment tx ids. Once genesis falls below the reorg floor
 /// (`tip - block_tree_depth`), that finalized lookup is the ONLY dedup path
 /// that can see a replayed genesis commitment — the by-hash ancestry walk only
@@ -1507,7 +1512,7 @@ mod tests {
     }
 
     /// Genesis first-includes its commitments but never flows through the
-    /// confirm/migration metadata writers, so no dedup row is written for it at
+    /// migration metadata writer, so no dedup row is written for it at
     /// init. The startup backfill must write `included_height = 0` for each
     /// genesis commitment so the finalized lookup resolves them once genesis
     /// passes the reorg floor — and must be idempotent across boots.
@@ -2030,9 +2035,10 @@ mod tests {
         /// points at a height where a *different* canonical block has migrated
         /// (`MBH[h] = Some`) — but that block does NOT carry the tx in its
         /// Publish ledger. This is the restart-interrupted-reorg collision the
-        /// content check exists to neutralize: the metadata row is written at
-        /// depth-0 confirmation, so an orphaned tip's `promoted_height = h` can
-        /// survive, and once a winning block later migrates at `h` the
+        /// content check exists to neutralize: a legacy metadata row written at
+        /// depth-0 confirmation (before metadata became migration-only) left by
+        /// an orphaned tip with `promoted_height = h` can survive, and once a
+        /// winning block later migrates at `h` the
         /// MBH-existence check alone would read the stale hint as a real prior
         /// promotion → false `PublishTxAlreadyIncluded` rejecting a legitimate
         /// block. Requiring the canonical block to actually carry the tx makes
