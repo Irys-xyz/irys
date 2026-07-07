@@ -922,6 +922,11 @@ pub(crate) fn resolve_promoted_on_branch(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeSet<IrysTransactionId>> {
+    // No candidates → nothing to resolve; skip the tree/DB ancestry walk entirely.
+    if candidate_txids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
     let walk_depth = crate::block_validation::prior_inclusion_walk_depth(config);
     let walk_min_height = block_height.saturating_sub(walk_depth);
 
