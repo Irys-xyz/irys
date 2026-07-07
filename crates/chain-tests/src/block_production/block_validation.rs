@@ -783,14 +783,7 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
     // genesis at height 0), so the bad block we'll build below has
     // `parent_height = 0`.  Both `included_height` and `promoted_height`
     // must be ≤ 0 for the fallback to consider the tx "already canonical";
-    // we collapse both onto the genesis row and pin the assertion to the
-    // genesis block hash already populated in `MigratedBlockHashes[0]`.
-    let genesis_block_hash = ctx
-        .node
-        .get_block_by_height(0)
-        .await
-        .expect("genesis block")
-        .block_hash;
+    // we collapse both onto the height-0 canonical row.
 
     // A Publish-ledger tx that will impersonate "already canonically
     // promoted" via the pre-populated metadata below.
@@ -805,19 +798,22 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         .expect("Failed to sign test transaction");
 
     // Pre-populate canonical metadata: tx was Submit-included AND
-    // Publish-promoted at genesis (same-block promotion).  Both heights are
-    // ≤ parent_height = 0; both share `MigratedBlockHashes[0]` which the
-    // node already populated with `genesis_block_hash`.  This is the
-    // minimum-viable canonical-storage state that exercises the fallback's
-    // `promoted_height` rejection without touching adjacent canonical
-    // rows.
+    // Publish-promoted at height 0 (same-block promotion).  Because the
+    // canonical helpers now content-verify the hint against the canonical
+    // block at the height, genesis (which carries no data txs) can't back
+    // this fixture; supply a synthetic canonical block at height 0 that
+    // carries the tx in BOTH ledgers and repoint `MigratedBlockHashes[0]`.
     let prior_submit_height = 0_u64;
     let prior_publish_height = 0_u64;
+    let prior_block_hash = crate::utils::plant_canonical_block(
+        &ctx.node.node_ctx.db,
+        0,
+        vec![
+            (DataLedger::Submit, vec![tx.id]),
+            (DataLedger::Publish, vec![tx.id]),
+        ],
+    )?;
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
-        // `canonical_submit_height` / `canonical_promoted_height` consult
-        // `IrysDataTxMetadata` + `MigratedBlockHashes` only, but populate
-        // the header table for parity with the production write path and
-        // to keep this fixture useful if a future helper consults it.
         insert_tx_header(db_tx, &tx)?;
         set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
         set_data_tx_promoted_height(db_tx, &tx.id, prior_publish_height)?;
@@ -918,8 +914,8 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
         Err(PreValidationError::PublishTxAlreadyIncluded { tx_id, block_hash }) => {
             assert_eq!(tx_id, tx.id, "rejection must name the doubly-published tx");
             assert_eq!(
-                block_hash, genesis_block_hash,
-                "rejection must surface the canonical promoted-block hash from MigratedBlockHashes (= genesis hash in this fixture)"
+                block_hash, prior_block_hash,
+                "rejection must surface the canonical promoted-block hash from MigratedBlockHashes (the planted height-0 block)"
             );
         }
         other => panic!(
@@ -988,13 +984,23 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
         .sign(&ctx.config.signer())
         .expect("Failed to sign test transaction");
 
-    // Canonical Submit at genesis (`MBH[0]` is populated by node init);
-    // stranded `promoted_height = 1` that the canonical helper will strip
-    // (parent_height = 0, so `promoted_height > max_height` triggers the
-    // strip — orthogonal to the MBH-None-within-window strip but produces
-    // the same stripped metadata).
+    // Canonical Submit at height 0 — supply a synthetic canonical block that
+    // carries the tx in its Submit ledger and repoint `MigratedBlockHashes[0]`,
+    // so `canonical_submit_height` (now content-verified) attests it and control
+    // flow reaches the promoted-height check. Stranded `promoted_height = 1` is
+    // stripped by the canonical helper (parent_height = 0, so
+    // `promoted_height > max_height` triggers the strip — orthogonal to the
+    // MBH-None-within-window strip but produces the same stripped metadata).
     let prior_submit_height = 0_u64;
     let stranded_promote_height = 1_u64;
+    let _prior_block_hash = crate::utils::plant_canonical_block(
+        &ctx.node.node_ctx.db,
+        0,
+        vec![
+            (DataLedger::Submit, vec![tx.id]),
+            (DataLedger::Publish, vec![]),
+        ],
+    )?;
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
         insert_tx_header(db_tx, &tx)?;
         set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;

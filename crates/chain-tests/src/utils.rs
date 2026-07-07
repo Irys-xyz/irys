@@ -84,6 +84,52 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
+/// Insert a synthetic canonical block header at `height` carrying the given
+/// per-ledger `tx_ids`, and repoint `MigratedBlockHashes[height]` at it. Returns
+/// the block hash.
+///
+/// The `canonical_submit_height` / `canonical_promoted_height` /
+/// `canonical_commitment_included_height` helpers content-verify the metadata
+/// hint against the canonical block at the hint height — a bare metadata +
+/// `MigratedBlockHashes` row is no longer trusted (the stranded-row defense).
+/// Genesis carries no data txs, so tests that drive the validator's canonical-DB
+/// fallback must supply a canonical block that actually carries the tx. The
+/// by-hash inclusion walk is unaffected (it follows parent pointers, not
+/// `MigratedBlockHashes`), so repointing the row here only feeds the fallback's
+/// content check.
+pub fn plant_canonical_block(
+    db: &DatabaseProvider,
+    height: u64,
+    ledgers: Vec<(DataLedger, Vec<H256>)>,
+) -> eyre::Result<H256> {
+    use irys_database::{insert_block_header, tables::MigratedBlockHashes};
+    use irys_types::DataTransactionLedger;
+    use reth_db::transaction::DbTxMut as _;
+
+    let mut header = IrysBlockHeader::new_mock_header();
+    header.height = height;
+    header.block_hash = H256::random();
+    header.data_ledgers = ledgers
+        .into_iter()
+        .map(|(id, tx_ids)| DataTransactionLedger {
+            ledger_id: id as u32,
+            tx_root: H256::zero(),
+            tx_ids: H256List(tx_ids),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        })
+        .collect();
+    let block_hash = header.block_hash;
+    db.update_eyre(|tx| {
+        insert_block_header(tx, &header)?;
+        tx.put::<MigratedBlockHashes>(height, block_hash)?;
+        Ok(())
+    })?;
+    Ok(block_hash)
+}
+
 /// Coverage instrumentation multiplier for in-test timeouts.
 ///
 /// `cargo-llvm-cov` sets `LLVM_PROFILE_FILE` when running under coverage.
@@ -2279,24 +2325,34 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
-        // Check DB first (authoritative source)
-        match self
+        // The DB carries `promoted_height` only once the promoting (Publish)
+        // block has migrated. A confirmed-but-unmigrated promotion lives only in
+        // the live mempool, so consult it whenever the DB doesn't already show
+        // the tx as promoted (row absent, or present from the Submit migration
+        // with `promoted_height = None`).
+        let db_header = self
             .node_ctx
             .db
             .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+            .map_err(|e| eyre::eyre!("Failed to collect tx header: {}", e))?;
+
+        if db_header
+            .as_ref()
+            .is_some_and(|h| h.promoted_height().is_some())
         {
-            Ok(Some(tx_header)) => {
-                debug!("{:?}", tx_header);
-                Ok(tx_header.promoted_height().is_some())
-            }
-            Ok(None) => {
-                // Fall back to mempool metadata
-                if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
-                    return Ok(meta.promoted_height().is_some());
-                }
-                Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
-            }
-            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+            return Ok(true);
+        }
+
+        if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
+            return Ok(meta.promoted_height().is_some());
+        }
+
+        // Not promoted in the mempool. Known (DB row exists) → not promoted;
+        // entirely unknown → error.
+        if db_header.is_some() {
+            Ok(false)
+        } else {
+            Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
         }
     }
 

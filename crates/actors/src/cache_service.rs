@@ -458,12 +458,13 @@ impl InnerCacheTask {
                 // Pruning horizon priority: canonical tx inclusion > expiry height > evict-anomalous.
                 //
                 // CDR lifetime is bounded by either (a) `expiry_height` set at tx
-                // ingress (`cache_data_root_with_expiry`), or (b) `included_height`
-                // set atomically with the confirming tip change in
-                // `BlockMigrationService::persist_metadata` (Phase 2 sets
-                // `included_height`, Phase 3 clears `expiry_height` — same write
-                // tx).  The local-proof exemption below extends (b) indefinitely
-                // while a local ingress proof is present.
+                // ingress (`cache_data_root_with_expiry`), or (b) the tx's
+                // `included_height`, written at migration by
+                // `BlockMigrationService::persist_block` (`write_data_ledger_metadata`).
+                // `expiry_height` is cleared earlier, at confirmation, by
+                // `persist_metadata` Phase 3 (`update_data_root_block_set`).  The
+                // local-proof exemption below extends (b) indefinitely while a
+                // local ingress proof is present.
                 //
                 // The `(None, None)` arm is reachable only when a CDR has lost
                 // both bounds: a reorg cleared `included_height` for every tx in
@@ -643,7 +644,8 @@ impl InnerCacheTask {
     /// constraint and evict the CDR before chunk migration completes,
     /// destroying chunks that are still needed.  Per-txid metadata recheck
     /// inside the write tx closes that race: if `IrysDataTxMetadata[tx_id]`
-    /// is `Some` now, the tx is confirmed and the txid_set entry must stay.
+    /// is `Some` now, the tx is migrated (finalized) and the txid_set entry
+    /// must stay.
     ///
     /// Residual race the recheck does not close: a peer gossips the tx back
     /// in during the scrub window and `cache_data_root` re-adds it to

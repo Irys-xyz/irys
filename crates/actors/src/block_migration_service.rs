@@ -206,14 +206,22 @@ impl BlockMigrationService {
         self.storage_modules_guard = Some(guard);
     }
 
-    /// Atomically persists tx metadata (included_height, promoted_height) and
-    /// keeps the `CachedDataRoots.block_set` hint consistent with the canonical
-    /// chain.
+    /// Runs at block confirmation (every tip change, `block_tree_service`), NOT
+    /// at migration. It does two things: (1) on reorg, clears canonical tx
+    /// metadata for orphaned blocks that had already migrated; (2) maintains the
+    /// non-consensus `CachedDataRoots.block_set` hint for confirmed Submit txs.
+    ///
+    /// It does NOT *write* canonical tx metadata (`included_height` /
+    /// `promoted_height`) — that happens only at migration (`persist_block`),
+    /// atomically with `MigratedBlockHashes`. Confirmation is depth 0 and its
+    /// blocks aren't durably persisted until migration, so writing canonical
+    /// metadata here would let an orphaned tip strand a row that a later block
+    /// migrating at the same height reads as canonical.
     ///
     /// For normal blocks: `blocks_to_clear` is empty, `blocks_to_confirm` contains just the tip.
     /// For reorgs: `blocks_to_clear` contains orphaned fork blocks, `blocks_to_confirm` contains
     /// the new canonical fork blocks. Both operations happen in a single DB transaction to
-    /// prevent inconsistent metadata state.
+    /// prevent inconsistent hint state.
     ///
     /// Invariant established at every commit boundary: if a Submit-ledger tx
     /// in `blocks_to_confirm` has a [`CachedDataRoot`] entry, its `block_set`
@@ -232,13 +240,12 @@ impl BlockMigrationService {
     ///     populated `block_set` and proceeds.  It may fabricate a CDR row
     ///     for a data_root the node has no chunks for yet; the entry is
     ///     harmless until either chunks arrive or the prune pass evicts it.
-    ///   - `persist_metadata` (this function) runs at migration time and is
-    ///     the authoritative writer for canonical state changes: Phase 1
+    ///   - `persist_metadata` (this function) runs at confirmation: Phase 1
     ///     scrubs orphan block_hashes from any retained `block_set`, and
     ///     Phase 3's `update_data_root_block_set` is update-only — it never
-    ///     fabricates, because by migration time any data_root the node
-    ///     cares about already has a CDR (either chunks have arrived, or
-    ///     the mempool BlockConfirmed path put one there).
+    ///     fabricates, because by confirmation any data_root the node cares
+    ///     about already has a CDR (either chunks have arrived, or the mempool
+    ///     BlockConfirmed path put one there).
     ///
     /// A stale `BlockConfirmed` arriving after a reorg can re-add an orphan
     /// block_hash to `block_set`; that is tolerated because consumers treat
@@ -248,27 +255,25 @@ impl BlockMigrationService {
     /// Reorg invariant: if a Publish-promotion remains canonical, the
     /// underlying Submit inclusion must also be present in `blocks_to_confirm`
     /// — otherwise the Publish block itself would be in `blocks_to_clear`.
-    /// Therefore Phase 1 always deletes orphaned term-ledger metadata rows
-    /// outright (the `{None, Some}` state is semantically illegal:
-    /// `promoted_height` requires a prior `included_height`).  Any matching
-    /// Publish `clear_data_tx_promoted_height` becomes a no-op on the
-    /// already-deleted row.  Phase 2 then recreates rows for txs that are
-    /// re-canonical on the new fork, restoring `promoted_height` in the same
-    /// transaction when the Publish block is also re-included.
+    /// Phase 1's clears only ever hit rows for orphaned blocks that had already
+    /// *migrated* (a deep reorg past `block_migration_depth`); orphaned
+    /// unmigrated blocks never wrote canonical metadata, so the clears are a
+    /// no-op for them. Re-canonical blocks on the new fork get their metadata
+    /// (re)written when they migrate, not here — so this function never
+    /// recreates a `{None, Some}` state.
     pub fn persist_metadata(
         &self,
         blocks_to_clear: &[Arc<SealedBlock>],
         blocks_to_confirm: &[Arc<SealedBlock>],
     ) -> eyre::Result<()> {
         // Phase 1 scrub and Phase 3 append both iterate
-        // `block.transactions().get_ledger_txs(...)`.  The in-memory
+        // `block.transactions().get_ledger_txs(Submit)`.  The in-memory
         // block-tree path always carries full transactions, but future code
         // paths (e.g. blocks hydrated from disk without their body) could
         // regress this without any error.  Surface the divergence in every
         // build so the caller fails loudly rather than committing partial
-        // state.  Checked across all data ledgers because Phase 2's
-        // `write_data_ledger_metadata` writes from `header.data_ledgers` for
-        // every ledger, not just Submit.
+        // state.  Checked across all data ledgers because Phase 1 clears
+        // orphaned metadata from `header.data_ledgers` for every ledger.
         for block in blocks_to_clear.iter().chain(blocks_to_confirm.iter()) {
             ensure_header_body_consistent(block)?;
         }
@@ -276,12 +281,12 @@ impl BlockMigrationService {
         // Defense-in-depth structural check on the reorg invariant documented
         // above: a Publish-ledger tx_id appearing in `blocks_to_confirm` while
         // its Submit row is being orphaned by `blocks_to_clear` (and NOT
-        // re-confirmed in this same batch) would leave the DB in the illegal
-        // `{None, Some}` state — promoted_height set, included_height
-        // missing.  `batch_set_data_tx_promoted_height` already errs on this,
-        // so production behavior is to fail the transaction; this assert
-        // surfaces the caller-side construction bug earlier and more loudly
-        // in debug builds, before any DB I/O.
+        // re-confirmed in this same batch) is a malformed reorg batch — it would
+        // eventually try to migrate a `promoted_height` with no prior
+        // `included_height` (the illegal `{None, Some}` state), which
+        // `batch_set_data_tx_promoted_height` rejects at migration. This assert
+        // surfaces the caller-side construction bug earlier and more loudly in
+        // debug builds, at confirmation, before the batch can reach migration.
         #[cfg(debug_assertions)]
         {
             use std::collections::HashSet;
@@ -352,29 +357,28 @@ impl BlockMigrationService {
                     )?;
                 }
             }
-            // Phase 2: Write confirmed metadata.
-            // Phase 3: Backstop the CachedDataRoot.block_set invariant for the
+            // Phase 3: Maintain the CachedDataRoot.block_set hint for the
             //          canonical Submit-ledger txs we just confirmed (update-only,
             //          does not create cache entries for data_roots the node
             //          never tracked chunks for).
             //
-            // `included_height` ↔ term ledgers (Submit, OneYear, ThirtyDay) only.
-            // `promoted_height` ↔ Publish ledger only.
-            // Writing `included_height` for Publish txs would overwrite the
-            // Submit-block height that was set when the tx first entered the
-            // Submit ledger, violating the "first included in Submit" invariant.
-            // Phase 3 reads tx bodies (not the metadata written in Phase 2), so
-            // it has no ordering dependency on Phase 2 writes and is folded into
-            // the same outer loop.
+            // Canonical tx metadata (`IrysDataTxMetadata` / `IrysCommitmentTxMetadata`)
+            // is deliberately NOT written here. It is written only at migration
+            // (`persist_block`), atomically with `MigratedBlockHashes` and the
+            // block header — so a metadata row can never exist without its MBH
+            // entry naming the same canonical block. Writing it here (at
+            // confirmation, depth 0) previously let an orphaned tip strand a
+            // metadata row that a later block migrating at the same height would
+            // read as canonical. Unmigrated blocks are served branch-correctly
+            // from the in-memory block tree (see `tx_inclusion` / the validator's
+            // by-hash walk), so the DB metadata is only ever consulted for
+            // migrated heights, where `MigratedBlockHashes` is branch-stable.
+            // `block_set` is only a non-consensus hint (never read by
+            // `find_canonical_ledger_range` / `canonical_*_height`), and the
+            // ingress-proof pipeline needs it populated at confirmation, so it
+            // stays here.
             for block in blocks_to_confirm {
-                let header = block.header();
-                let height = header.height;
-                let block_hash = header.block_hash;
-
-                write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
-                self.persist_commitment_inclusions(tx, header)?;
-
-                // Phase 3: append `block_hash` to each Submit-tx's CDR.block_set.
+                let block_hash = block.header().block_hash;
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                     irys_database::update_data_root_block_set(tx, submit_tx.data_root, block_hash)?;
                 }
@@ -761,9 +765,12 @@ impl BlockMigrationService {
 
 #[cfg(test)]
 mod tests {
-    //! Focused unit tests for `BlockMigrationService::persist_metadata` —
-    //! the authoritative-writer entry point for
-    //! `CachedDataRoot.block_set` and `IrysDataTxMetadata.included_height`.
+    //! Focused unit tests for `BlockMigrationService::persist_metadata` (the
+    //! confirmation-time maintainer of the `CachedDataRoot.block_set` hint and
+    //! reorg-orphan metadata cleanup) and for the migration-time metadata writer
+    //! `write_data_ledger_metadata` (`IrysDataTxMetadata` /
+    //! `IrysCommitmentTxMetadata`). Canonical metadata is written only at
+    //! migration, never at confirmation.
     //!
     //! The function only touches `self.db`; the other service fields
     //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
@@ -1294,10 +1301,12 @@ mod tests {
     }
 
     /// Genesis (height 0) is excluded from the epoch skip: it genuinely
-    /// first-includes its commitments, so it writes on confirm and clears on
-    /// orphan like any inclusion block.
+    /// first-includes its commitments, so orphaning it clears the dedup row like
+    /// any inclusion block. Metadata is written at migration (`persist_block`),
+    /// so we seed the migrated row, then orphan. (The genesis migration write is
+    /// covered by `persist_block_epoch_block_skips_commitment_included_height`.)
     #[tokio::test]
-    async fn persist_metadata_genesis_writes_and_clears_commitment_rows() -> eyre::Result<()> {
+    async fn persist_metadata_genesis_orphan_clears_commitment_rows() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
         let (svc, _svc_tmp) = make_service(db.clone());
 
@@ -1305,19 +1314,13 @@ mod tests {
         let genesis = make_commitment_header(0, H256::zero(), vec![commitment]);
         let genesis_sealed = make_sealed_commitment(genesis);
 
-        svc.persist_metadata(&[], std::slice::from_ref(&genesis_sealed))?;
-        assert_eq!(
-            read_commitment_tx_metadata(&db, &commitment)
-                .expect("genesis must write commitment included_height")
-                .included_height,
-            Some(0),
-            "height 0 is not skipped — genesis genuinely first-includes",
-        );
+        // Migrated state: genesis wrote its commitment dedup row at migration.
+        seed_commitment_included_height(&db, commitment, 0);
 
         svc.persist_metadata(std::slice::from_ref(&genesis_sealed), &[])?;
         assert!(
             read_commitment_tx_metadata(&db, &commitment).is_none(),
-            "height 0 keeps normal clear behavior",
+            "genesis orphan clears the commitment dedup row (height 0 not epoch-skipped)",
         );
         Ok(())
     }
@@ -1367,31 +1370,34 @@ mod tests {
     #[tokio::test]
     async fn submit_to_publish_promotion_preserves_included_height() -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
-        let (svc, _svc_tmp) = make_service(db.clone());
+        let (_svc, _svc_tmp) = make_service(db.clone());
 
         let tx_id = H256::random();
         let submit_height = 1_u64;
         let publish_height = 5_u64;
 
-        // Confirm in Submit ledger at height 1
+        // Migrate the Submit-ledger block at height 1 (metadata is written at
+        // migration via `write_data_ledger_metadata`, never at confirmation).
         let submit_header =
             make_block_header_with_ledger(submit_height, H256::random(), DataLedger::Submit, tx_id);
-        let submit_sealed = make_sealed_single_ledger_tx(submit_header, DataLedger::Submit, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&submit_sealed))?;
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &submit_header.data_ledgers, submit_height)?;
+            Ok(())
+        })?;
 
-        // Confirm same tx in Publish ledger at height 5
+        // Migrate the Publish-ledger block promoting the same tx at height 5
         let publish_header = make_block_header_with_ledger(
             publish_height,
             H256::random(),
             DataLedger::Publish,
             tx_id,
         );
-        let publish_sealed =
-            make_sealed_single_ledger_tx(publish_header, DataLedger::Publish, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&publish_sealed))?;
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &publish_header.data_ledgers, publish_height)?;
+            Ok(())
+        })?;
 
-        let meta =
-            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        let meta = read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after migration");
         assert_eq!(
             meta.included_height,
             Some(submit_height),
@@ -1405,33 +1411,10 @@ mod tests {
         Ok(())
     }
 
-    /// Same-block Submit→Publish promotion: the term-ledger metadata write
-    /// must happen before the Publish write so `promoted_height` can be set in
-    /// the same transaction.
-    #[tokio::test]
-    async fn same_block_submit_publish_promotion_sets_both_heights() -> eyre::Result<()> {
-        let (db, _db_tmp) = open_db()?;
-        let (svc, _svc_tmp) = make_service(db.clone());
-
-        let tx_id = H256::random();
-        let data_root = H256::random();
-        let height = 11_u64;
-
-        let header = make_block_header(height, H256::random(), 50, vec![tx_id]);
-        let sealed = make_sealed_same_block_submit_publish_promotion(header, tx_id, data_root);
-
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
-
-        let meta =
-            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
-        assert_eq!(meta.included_height, Some(height));
-        assert_eq!(meta.promoted_height, Some(height));
-        Ok(())
-    }
-
-    /// `persist_block` uses the same metadata helpers as `persist_metadata`,
-    /// so same-block promotions must also write `included_height` before
-    /// `promoted_height` during migration.
+    /// Same-block Submit→Publish promotion at migration: the term-ledger
+    /// metadata write must happen before the Publish write so `promoted_height`
+    /// can be set in the same transaction. (Covered via `persist_block` — the
+    /// real migration path — below.)
     #[tokio::test]
     async fn persist_block_same_block_submit_publish_promotion_sets_both_heights()
     -> eyre::Result<()> {
@@ -1465,18 +1448,64 @@ mod tests {
         #[case] height: u64,
     ) -> eyre::Result<()> {
         let (db, _db_tmp) = open_db()?;
-        let (svc, _svc_tmp) = make_service(db.clone());
+        let (_svc, _svc_tmp) = make_service(db.clone());
 
         let tx_id = H256::random();
 
         let header = make_block_header_with_ledger(height, H256::random(), ledger, tx_id);
-        let sealed = make_sealed_single_ledger_tx(header, ledger, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
+            Ok(())
+        })?;
 
-        let meta =
-            read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after confirmation");
+        let meta = read_data_tx_metadata(&db, &tx_id).expect("metadata must exist after migration");
         assert_eq!(meta.included_height, Some(height));
         assert_eq!(meta.promoted_height, None);
+        Ok(())
+    }
+
+    /// Root-fix guard: `persist_metadata` (confirmation, depth 0) writes NO
+    /// canonical tx metadata — `IrysDataTxMetadata` / `IrysCommitmentTxMetadata`
+    /// are written only at migration (`persist_block`). It still maintains the
+    /// non-consensus `block_set` hint. Writing canonical metadata at confirmation
+    /// would let an orphaned tip strand a row that a later block migrating at the
+    /// same height reads as canonical.
+    #[tokio::test]
+    async fn confirm_does_not_write_canonical_metadata() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        // A Submit-ledger data tx with a pre-existing CDR (Phase 3 is update-only).
+        let tx_id = H256::random();
+        let data_root = H256::random();
+        seed_cdr(&db, data_root, tx_id, vec![], None);
+        let header = make_block_header(1, H256::random(), 50, vec![tx_id]);
+        let block_hash = header.block_hash;
+        let sealed = make_sealed_with_submit_txs(header, &[(tx_id, data_root)]);
+
+        // A commitment tx in a separate confirmed block.
+        let commitment = H256::random();
+        let commitment_sealed =
+            make_sealed_commitment(make_commitment_header(2, H256::random(), vec![commitment]));
+
+        svc.persist_metadata(&[], &[sealed, commitment_sealed])?;
+
+        // No canonical metadata written at confirmation.
+        assert!(
+            read_data_tx_metadata(&db, &tx_id).is_none(),
+            "confirmation must NOT write IrysDataTxMetadata (written at migration only)"
+        );
+        assert!(
+            read_commitment_tx_metadata(&db, &commitment).is_none(),
+            "confirmation must NOT write IrysCommitmentTxMetadata (written at migration only)"
+        );
+
+        // But the non-consensus block_set hint IS maintained (Phase 3).
+        let cdr = read_cdr(&db, data_root).expect("CDR present");
+        assert!(
+            cdr.block_set.contains(&block_hash),
+            "confirmation still maintains the block_set hint the ingress pipeline needs"
+        );
         Ok(())
     }
 
@@ -1492,13 +1521,15 @@ mod tests {
         let submit_height = 2_u64;
         let publish_height = 8_u64;
 
-        // Confirm in Submit at height 2
+        // Migrate the Submit block at height 2 (metadata written at migration)
         let submit_header =
             make_block_header_with_ledger(submit_height, H256::random(), DataLedger::Submit, tx_id);
-        let submit_sealed = make_sealed_single_ledger_tx(submit_header, DataLedger::Submit, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&submit_sealed))?;
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &submit_header.data_ledgers, submit_height)?;
+            Ok(())
+        })?;
 
-        // Promote in Publish at height 8
+        // Migrate the Publish block promoting the tx at height 8
         let publish_header = make_block_header_with_ledger(
             publish_height,
             H256::random(),
@@ -1507,7 +1538,10 @@ mod tests {
         );
         let publish_sealed =
             make_sealed_single_ledger_tx(publish_header, DataLedger::Publish, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&publish_sealed))?;
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &publish_sealed.header().data_ledgers, publish_height)?;
+            Ok(())
+        })?;
 
         // Verify both are set
         let meta = read_data_tx_metadata(&db, &tx_id).unwrap();
@@ -1544,7 +1578,11 @@ mod tests {
         let header =
             make_block_header_with_ledger(height, H256::random(), DataLedger::Submit, tx_id);
         let sealed = make_sealed_single_ledger_tx(header, DataLedger::Submit, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+        // Migrated state: the Submit block wrote its metadata at migration.
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &sealed.header().data_ledgers, height)?;
+            Ok(())
+        })?;
 
         // Verify it exists
         assert!(read_data_tx_metadata(&db, &tx_id).is_some());
@@ -1576,7 +1614,11 @@ mod tests {
 
         let header = make_block_header_with_ledger(height, H256::random(), ledger, tx_id);
         let sealed = make_sealed_single_ledger_tx(header, ledger, tx_id);
-        svc.persist_metadata(&[], std::slice::from_ref(&sealed))?;
+        // Migrated state: the term-ledger block wrote its metadata at migration.
+        db.update_eyre(|tx| {
+            write_data_ledger_metadata(tx, &sealed.header().data_ledgers, height)?;
+            Ok(())
+        })?;
 
         assert!(read_data_tx_metadata(&db, &tx_id).is_some());
 
@@ -1690,21 +1732,16 @@ mod tests {
             &[new1_sealed, new2_sealed],
         )?;
 
-        // Phase 1 cleared → Phase 2 restored: included_height == new block heights.
-        let meta_a = read_data_tx_metadata(&db, &tx_id_a)
-            .expect("tx_a metadata must exist after re-confirmation");
-        assert_eq!(
-            meta_a.included_height,
-            Some(10),
-            "tx_a included_height must be updated to new canonical height"
+        // Phase 1 cleared the orphaned rows. Confirmation no longer re-writes
+        // canonical metadata — the new-fork blocks write their own
+        // `included_height` when they migrate — so both rows are absent here.
+        assert!(
+            read_data_tx_metadata(&db, &tx_id_a).is_none(),
+            "tx_a metadata cleared on reorg; re-written only when the new fork migrates"
         );
-
-        let meta_b = read_data_tx_metadata(&db, &tx_id_b)
-            .expect("tx_b metadata must exist after re-confirmation");
-        assert_eq!(
-            meta_b.included_height,
-            Some(11),
-            "tx_b included_height must be updated to new canonical height"
+        assert!(
+            read_data_tx_metadata(&db, &tx_id_b).is_none(),
+            "tx_b metadata cleared on reorg; re-written only when the new fork migrates"
         );
 
         // Phase 1 scrubbed orphan hashes; Phase 3 appended new canonical hashes.
@@ -1790,20 +1827,18 @@ mod tests {
 
         svc.persist_metadata(&[orphan1_sealed, orphan2_sealed], &[new1_sealed])?;
 
-        // tx_a: re-confirmed on the new fork.
-        let meta_a = read_data_tx_metadata(&db, &tx_id_a)
-            .expect("tx_a metadata must exist after re-confirmation");
-        assert_eq!(
-            meta_a.included_height,
-            Some(10),
-            "tx_a included_height updated to new canonical height"
+        // tx_a: cleared by Phase 1. Confirmation no longer re-writes metadata,
+        // so it's absent until the new fork migrates — the re-confirmation is
+        // visible only in the CDR block_set below.
+        assert!(
+            read_data_tx_metadata(&db, &tx_id_a).is_none(),
+            "tx_a metadata cleared on reorg; re-written only when the new fork migrates"
         );
 
-        // tx_b: row fully deleted — term-ledger Phase 1 unconditional delete,
-        // no Phase 2 recreation because tx_b is not in `blocks_to_confirm`.
+        // tx_b: row deleted by Phase 1 (permanently orphaned, never re-confirmed).
         assert!(
             read_data_tx_metadata(&db, &tx_id_b).is_none(),
-            "permanently-orphaned tx_b metadata row must be fully deleted"
+            "permanently-orphaned tx_b metadata row must be deleted"
         );
 
         // CDR A: re-confirmation path — orphan scrubbed, new canonical hash

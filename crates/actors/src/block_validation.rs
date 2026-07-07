@@ -5589,14 +5589,22 @@ pub async fn data_txs_are_valid(
                         // window (max(tx_anchor_expiry_depth, block_tree_depth)).
                         // So any inclusion reaching this fallback is BELOW the
                         // reorg floor: finalized, hence branch-invariant, so the
-                        // by-height canonical-height getters in `irys_database`
+                        // canonical-height getters in `irys_database`
                         // (metadata hint + `MigratedBlockHashes`) resolve it
                         // identically on every node/branch. (Before the walk was
                         // widened, this arm could run inside the reorg-mutable
                         // `(tip - block_tree_depth, tip - block_migration_depth]`
                         // band and fork — widening the walk to the reorg window is
                         // exactly what makes this fallback safe; see the
-                        // `get_previous_tx_inclusions` docblock.)
+                        // `get_previous_tx_inclusions` docblock.) As a further
+                        // guard, both getters content-verify the hint against the
+                        // canonical block at the returned height, so a stranded
+                        // metadata row not backed by that block's ledger — e.g. a
+                        // legacy row from an orphaned tip written at depth-0
+                        // confirmation before canonical metadata became
+                        // migration-only, possibly surviving a restart-interrupted
+                        // reorg — cannot yield a false `PublishTxMissingPriorSubmit`
+                        // or `PublishTxAlreadyIncluded`.
                         //
                         // `canonical_submit_height` is sufficient evidence of
                         // prior Submit: the structural pre-pass guarantees

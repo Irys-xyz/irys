@@ -281,13 +281,19 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// alone.
 ///
 /// The two helpers in this section return a height from `IrysDataTxMetadata`
-/// only if MBH has a row for it ≤ `max_height`.  They return primitive
+/// only if MBH has a row for it ≤ `max_height` AND the canonical block at that
+/// height actually carries the tx in the corresponding ledger (Submit for
+/// `included_height`, Publish for `promoted_height`).  They return primitive
 /// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
-/// stranded hint as canonical.  Because the existence check is NOT
-/// branch-invariant in the window above, every caller must either (a) only
-/// consult these helpers for heights guaranteed below the reorg floor, or
-/// (b) treat the result as a hint and confirm membership against the evaluated
-/// branch's own ancestry.  Current callers:
+/// stranded hint as canonical.  The content check is what makes `Some(h)` mean
+/// "canonically included at `h`" rather than "a hint pointing at `h` exists":
+/// canonical metadata is now written only at migration (atomically with
+/// `MigratedBlockHashes`), but a legacy/stranded row — e.g. one written at
+/// depth-0 confirmation before that fix, or an orphaned tip's row surviving a
+/// restart-interrupted reorg — can still collide with a different canonical
+/// block migrated at the same height, where the MBH-existence check alone would
+/// read it as truth.  With the content check, callers may trust `Some(h)` on any
+/// branch — mirroring `canonical_commitment_included_height`.  Current callers:
 ///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
 ///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
 ///     only falls back to these helpers for inclusions older than
@@ -306,6 +312,7 @@ fn canonical_metadata_height<T: DbTx>(
     txid: &IrysTransactionId,
     max_height: u64,
     pick: impl FnOnce(&DataTransactionMetadata) -> Option<u64>,
+    ledger: DataLedger,
     field_name: &'static str,
 ) -> eyre::Result<Option<u64>> {
     let Some(metadata) = crate::get_data_tx_metadata(tx, txid)? else {
@@ -324,7 +331,10 @@ fn canonical_metadata_height<T: DbTx>(
         );
         return Ok(None);
     }
-    if tx.get::<MigratedBlockHashes>(height)?.is_none() {
+    // MBH-verified canonical header at the hint height. `None` = no canonical
+    // block migrated at `height` (stranded local-tip write or not yet migrated);
+    // `Err` = MBH/header cross-table inconsistency (surfaced to the caller).
+    let Some(canonical_header) = canonical_header_at_height(tx, height)? else {
         debug!(
             tx.id = %txid,
             tx.height = height,
@@ -332,23 +342,47 @@ fn canonical_metadata_height<T: DbTx>(
             "canonical lookup: MigratedBlockHashes has no row for hint — rejecting (stranded write or unmigrated)"
         );
         return Ok(None);
+    };
+    // Content check: a stranded/legacy metadata row not backed by canonical
+    // block content (one not written atomically with `MigratedBlockHashes` at
+    // migration — e.g. a depth-0 confirmation-time row from before metadata
+    // became migration-only, or an orphaned tip's row surviving a
+    // restart-interrupted reorg) can collide with a *different* canonical block
+    // that migrated at the same height. `MigratedBlockHashes` existence alone
+    // would then read that stranded hint as canonical truth.
+    // Requiring the canonical block to actually carry the tx in `ledger` makes
+    // such rows harmless — `Some(h)` proves canonical inclusion at `h`, not
+    // merely that a hint exists. (This is the data-tx analogue of the check in
+    // `canonical_commitment_included_height`.)
+    if !canonical_header
+        .get_data_ledger_tx_ids_ordered(ledger)
+        .is_some_and(|ids| ids.contains(txid))
+    {
+        debug!(
+            tx.id = %txid,
+            tx.height = height,
+            field = field_name,
+            "canonical lookup: canonical block at hint does not carry tx in ledger — rejecting (stranded write)"
+        );
+        return Ok(None);
     }
     Ok(Some(height))
 }
 
-/// Returns the MBH-verified Submit-ledger inclusion height of `txid`, if
+/// Returns the content-verified Submit-ledger inclusion height of `txid`, if
 /// any, capped at `max_height`.
 ///
 /// `Some(h)` means: `IrysDataTxMetadata` carries `included_height = h ≤
-/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).  The
-/// raw header table is not consulted — Submit confirmation is purely a
-/// metadata-vs-MBH question.
+/// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
+/// canonical block at `h` actually carries `txid` in its Submit ledger.  The
+/// content check neutralizes a stranded hint left behind by an orphaned tip
+/// (see `canonical_metadata_height`).
 ///
-/// `None` means: tx unknown, metadata missing, hint > `max_height`, OR
-/// hint not confirmed by MBH (stranded local-tip write).  Callers cannot
-/// distinguish these cases from the return value alone — by design, since
-/// they all share the same outcome at every existing call site ("no
-/// canonical Submit at or below `max_height`").
+/// `None` means: tx unknown, metadata missing, hint > `max_height`, hint not
+/// confirmed by MBH (stranded/unmigrated), OR the canonical block at the hint
+/// does not include the tx.  Callers cannot distinguish these cases from the
+/// return value alone — by design, since they all share the same outcome at
+/// every existing call site ("no canonical Submit at or below `max_height`").
 pub fn canonical_submit_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
@@ -359,22 +393,26 @@ pub fn canonical_submit_height<T: DbTx>(
         txid,
         max_height,
         |m| m.included_height,
+        DataLedger::Submit,
         "included_height",
     )
 }
 
-/// Returns the MBH-verified Publish (promotion) height of `txid`, if any,
+/// Returns the content-verified Publish (promotion) height of `txid`, if any,
 /// capped at `max_height`.
 ///
 /// `Some(h)` means: `IrysDataTxMetadata` carries `promoted_height = h ≤
-/// max_height`, AND `MigratedBlockHashes[h]` is `Some` (canonical).
+/// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
+/// canonical block at `h` actually carries `txid` in its Publish ledger.
 ///
 /// `None` is the validator-safe answer for *all* of: tx unknown, no
-/// `promoted_height` hint, hint > `max_height`, OR hint not confirmed by
-/// MBH.  This is the explicit fix for the stranded-`promoted_height` bug
-/// where an orphaned local-tip write left a hint behind that
-/// `MigratedBlockHashes` never recorded — previously read as cross-table
-/// corruption, now correctly classified as "no canonical promotion."
+/// `promoted_height` hint, hint > `max_height`, hint not confirmed by MBH, OR
+/// the canonical block at the hint does not include the tx.  This covers the
+/// stranded-`promoted_height` bug: an orphaned local-tip write can leave a hint
+/// that `MigratedBlockHashes` never recorded (unmigrated), or — once a
+/// *different* block later migrates at the same height — one that MBH confirms
+/// but the canonical block does not actually carry. Both now classify as "no
+/// canonical promotion."
 pub fn canonical_promoted_height<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
@@ -385,6 +423,7 @@ pub fn canonical_promoted_height<T: DbTx>(
         txid,
         max_height,
         |m| m.promoted_height,
+        DataLedger::Publish,
         "promoted_height",
     )
 }
@@ -396,15 +435,17 @@ pub fn canonical_promoted_height<T: DbTx>(
 /// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
 /// canonical block at `h` actually carries `txid` in its commitment ledger.
 ///
-/// The final content check exists because the metadata row is written at
-/// tip-confirmation (depth 0), not at migration: an orphaned local tip can
-/// leave an `included_height` hint behind that no `ReorgEvent` ever clears if
-/// the node restarts before the orphan is processed (the tree is rebuilt from
-/// the block index, which forgets confirmed-but-unmigrated tips). Once ANY
-/// winning block later migrates at `h`, the MBH check alone reads that stranded
-/// hint as canonical truth. Requiring the canonical header to actually include
-/// the tx makes such stranded rows harmless — the invariant is that
-/// `Some(h)` proves canonical inclusion at `h`, not merely that a hint exists.
+/// The final content check exists to neutralize a stranded/legacy metadata row
+/// not backed by canonical block content. Canonical metadata is now written only
+/// at migration (atomically with `MigratedBlockHashes`), but a legacy row
+/// written at depth-0 confirmation — or any `included_height` hint an orphaned
+/// local tip left behind that no `ReorgEvent` cleared because the node restarted
+/// before processing the orphan (the tree is rebuilt from the block index, which
+/// forgets confirmed-but-unmigrated tips) — can survive. Once ANY winning block
+/// later migrates at `h`, the MBH check alone reads that stranded hint as
+/// canonical truth. Requiring the canonical header to actually include the tx
+/// makes such stranded rows harmless — the invariant is that `Some(h)` proves
+/// canonical inclusion at `h`, not merely that a hint exists.
 /// Like the data-tx `canonical_submit_height`, this is only branch-invariant
 /// BELOW the reorg floor — callers must pass `max_height ≤ tip -
 /// block_tree_depth` and cover the reorg window by-hash separately.
@@ -446,9 +487,9 @@ pub fn canonical_commitment_included_height<T: DbTx>(
 /// The commitment replay-dedup's finalized lookup
 /// ([`canonical_commitment_included_height`]) keys on
 /// `IrysCommitmentTxMetadata.included_height`, which is written for ordinary
-/// blocks at confirm/migration by `BlockMigrationService`. Genesis
+/// blocks at migration by `BlockMigrationService`. Genesis
 /// first-includes its commitments but is the block-index head, so it never
-/// flows through the confirm/migration metadata writers and no row is ever
+/// flows through the migration metadata writer and no row is ever
 /// written for its commitment tx ids. Once genesis falls below the reorg floor
 /// (`tip - block_tree_depth`), that finalized lookup is the ONLY dedup path
 /// that can see a replayed genesis commitment — the by-hash ancestry walk only
@@ -1471,7 +1512,7 @@ mod tests {
     }
 
     /// Genesis first-includes its commitments but never flows through the
-    /// confirm/migration metadata writers, so no dedup row is written for it at
+    /// migration metadata writer, so no dedup row is written for it at
     /// init. The startup backfill must write `included_height = 0` for each
     /// genesis commitment so the finalized lookup resolves them once genesis
     /// passes the reorg floor — and must be idempotent across boots.
@@ -1750,9 +1791,12 @@ mod tests {
         use crate::{
             canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
             db_index::set_data_tx_included_height, db_index::set_data_tx_promoted_height,
-            insert_tx_header, tables::IrysTables, tables::MigratedBlockHashes,
+            insert_block_header, insert_tx_header, tables::IrysTables, tables::MigratedBlockHashes,
         };
-        use irys_types::{DataTransactionHeader, H256};
+        use irys_types::{
+            DataLedger, DataTransactionHeader, DataTransactionLedger, H256, H256List,
+            IrysBlockHeader,
+        };
         use reth_db::{Database as _, DatabaseError, transaction::DbTxMut as _};
         use rstest::rstest;
 
@@ -1768,6 +1812,34 @@ mod tests {
                 },
                 metadata: Default::default(),
             })
+        }
+
+        /// Insert a canonical block header at `height`/`block_hash` carrying
+        /// `tx_ids` in `ledger`, and record it in `MigratedBlockHashes`. This is
+        /// the state the content check in `canonical_metadata_height` verifies:
+        /// a real migrated block whose ledger actually carries the tx.
+        fn insert_canonical_block(
+            tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+            height: u64,
+            block_hash: H256,
+            ledger: DataLedger,
+            tx_ids: Vec<H256>,
+        ) -> Result<(), DatabaseError> {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.height = height;
+            header.block_hash = block_hash;
+            header.data_ledgers = vec![DataTransactionLedger {
+                ledger_id: ledger as u32,
+                tx_root: H256::zero(),
+                tx_ids: H256List(tx_ids),
+                total_chunks: 0,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            }];
+            insert_block_header(tx, &header).map_err(|e| DatabaseError::Other(e.to_string()))?;
+            tx.put::<MigratedBlockHashes>(height, block_hash)?;
+            Ok(())
         }
 
         #[rstest]
@@ -1799,7 +1871,13 @@ mod tests {
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 set_data_tx_included_height(tx, &tx_id, 5)?;
                 if insert_migration {
-                    tx.put::<MigratedBlockHashes>(5, block_hash_at_5)?;
+                    insert_canonical_block(
+                        tx,
+                        5,
+                        block_hash_at_5,
+                        DataLedger::Submit,
+                        vec![tx_id],
+                    )?;
                 }
                 Ok(())
             })
@@ -1855,9 +1933,15 @@ mod tests {
             db.update(|tx| -> Result<(), DatabaseError> {
                 insert_tx_header(tx, &tx_header)
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
-                // Canonical Submit inclusion: metadata hint + MBH agree.
+                // Canonical Submit inclusion: metadata hint + MBH + header agree.
                 set_data_tx_included_height(tx, &tx_id, submit_height)?;
-                tx.put::<MigratedBlockHashes>(submit_height, canonical_submit_hash)?;
+                insert_canonical_block(
+                    tx,
+                    submit_height,
+                    canonical_submit_hash,
+                    DataLedger::Submit,
+                    vec![tx_id],
+                )?;
                 // Stranded promotion: metadata hint set, MBH deliberately absent.
                 set_data_tx_promoted_height(tx, &tx_id, stranded_promote_height)?;
                 Ok(())
@@ -1913,8 +1997,20 @@ mod tests {
                     .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 set_data_tx_included_height(tx, &tx_id, submit_height)?;
                 set_data_tx_promoted_height(tx, &tx_id, promote_height)?;
-                tx.put::<MigratedBlockHashes>(submit_height, submit_hash)?;
-                tx.put::<MigratedBlockHashes>(promote_height, publish_hash)?;
+                insert_canonical_block(
+                    tx,
+                    submit_height,
+                    submit_hash,
+                    DataLedger::Submit,
+                    vec![tx_id],
+                )?;
+                insert_canonical_block(
+                    tx,
+                    promote_height,
+                    publish_hash,
+                    DataLedger::Publish,
+                    vec![tx_id],
+                )?;
                 Ok(())
             })
             .unwrap()
@@ -1931,7 +2027,86 @@ mod tests {
             assert_eq!(
                 promoted,
                 Some(promote_height),
-                "MBH-confirmed promotion must survive the cross-check"
+                "MBH-confirmed promotion whose canonical block carries the tx must survive the cross-check"
+            );
+        }
+
+        /// Content-check regression: a stranded `promoted_height` hint that
+        /// points at a height where a *different* canonical block has migrated
+        /// (`MBH[h] = Some`) — but that block does NOT carry the tx in its
+        /// Publish ledger. This is the restart-interrupted-reorg collision the
+        /// content check exists to neutralize: a legacy metadata row written at
+        /// depth-0 confirmation (before metadata became migration-only) left by
+        /// an orphaned tip with `promoted_height = h` can survive, and once a
+        /// winning block later migrates at `h` the
+        /// MBH-existence check alone would read the stale hint as a real prior
+        /// promotion → false `PublishTxAlreadyIncluded` rejecting a legitimate
+        /// block. Requiring the canonical block to actually carry the tx makes
+        /// the stranded row return `None`.
+        #[test]
+        fn promoted_height_returns_none_when_canonical_block_lacks_tx() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let unrelated_tx = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            let submit_hash = H256::random();
+            let publish_hash = H256::random();
+            let submit_height = 5_u64;
+            let stranded_promote_height = 7_u64;
+            let parent_height = 25_000_u64;
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                // Genuine canonical Submit inclusion.
+                set_data_tx_included_height(tx, &tx_id, submit_height)?;
+                insert_canonical_block(
+                    tx,
+                    submit_height,
+                    submit_hash,
+                    DataLedger::Submit,
+                    vec![tx_id],
+                )?;
+                // Stranded promotion hint at `stranded_promote_height`, where a
+                // DIFFERENT canonical block migrated that carries an unrelated
+                // tx (NOT `tx_id`) in its Publish ledger.
+                set_data_tx_promoted_height(tx, &tx_id, stranded_promote_height)?;
+                insert_canonical_block(
+                    tx,
+                    stranded_promote_height,
+                    publish_hash,
+                    DataLedger::Publish,
+                    vec![unrelated_tx],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let submit = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            let promoted = db
+                .view_eyre(|tx| canonical_promoted_height(tx, &tx_id, parent_height))
+                .unwrap();
+
+            assert_eq!(
+                submit,
+                Some(submit_height),
+                "the genuine Submit inclusion (canonical block carries the tx) must still attest"
+            );
+            assert_eq!(
+                promoted, None,
+                "a stranded promoted_height whose canonical block does not carry the tx MUST be \
+                 rejected by the content check — otherwise a legitimate promotion is falsely \
+                 rejected as PublishTxAlreadyIncluded"
             );
         }
 

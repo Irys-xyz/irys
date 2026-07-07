@@ -161,8 +161,20 @@ async fn mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
     )?;
 
     // Store both data txs and all proofs in the DB.
-    // We also set included_height metadata so the tx selector's canonical DB
-    // fallback (`canonical_submit_height`) can find them as prior submit inclusions.
+    // We also set included_height metadata AND plant a synthetic canonical block
+    // at height 0 carrying both txs in its Submit ledger (repointing
+    // `MigratedBlockHashes[0]`), so the tx selector's canonical DB fallback
+    // (`canonical_submit_height`, now content-verified) finds them as prior
+    // submit inclusions. Genesis carries no data txs, so a bare metadata + MBH
+    // hint no longer suffices. The selector reads this via the fallback only;
+    // the by-hash tree fold is unaffected (it follows parent pointers).
+    use irys_types::DataLedger;
+    crate::utils::plant_canonical_block(
+        &genesis_node.node_ctx.db,
+        0,
+        vec![(DataLedger::Submit, vec![data_tx_1.id, data_tx_2.id])],
+    )?;
+
     genesis_node.node_ctx.db.update(|tx| {
         use irys_database::tables::{
             CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,

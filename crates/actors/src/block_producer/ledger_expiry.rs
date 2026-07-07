@@ -914,7 +914,7 @@ fn block_includes_ledger_tx(
 /// `MigratedBlockHashes` is branch-invariant (see `canonical_metadata_height` in
 /// `irys_database`), so an old finalized promotion (one made long before expiry,
 /// outside the reorg window) resolves identically on every node/branch.
-fn resolve_promoted_on_branch(
+pub(crate) fn resolve_promoted_on_branch(
     candidate_txids: &[IrysTransactionId],
     parent_block_hash: H256,
     block_height: u64,
@@ -922,6 +922,11 @@ fn resolve_promoted_on_branch(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeSet<IrysTransactionId>> {
+    // No candidates → nothing to resolve; skip the tree/DB ancestry walk entirely.
+    if candidate_txids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
     let walk_depth = crate::block_validation::prior_inclusion_walk_depth(config);
     let walk_min_height = block_height.saturating_sub(walk_depth);
 
@@ -3210,15 +3215,15 @@ mod tests {
     #[test]
     fn resolve_promoted_on_branch_ignores_in_window_node_local_hint() -> eyre::Result<()> {
         use irys_database::{
-            IrysDatabaseArgs as _, canonical_promoted_height, insert_tx_header, open_or_create_db,
-            set_data_tx_included_height, set_data_tx_promoted_height, tables::IrysTables,
-            tables::MigratedBlockHashes,
+            IrysDatabaseArgs as _, canonical_promoted_height, insert_block_header,
+            insert_tx_header, open_or_create_db, set_data_tx_included_height,
+            set_data_tx_promoted_height, tables::IrysTables, tables::MigratedBlockHashes,
         };
         use irys_domain::{BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::IrysBlockHeaderTestExt as _;
         use irys_types::{
             BlockTransactions, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, SealedBlock,
+            DataTransactionLedger, DataTransactionMetadata, H256List, SealedBlock,
         };
         use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
         use std::sync::RwLock;
@@ -3280,9 +3285,40 @@ mod tests {
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
 
-        // Plant the stale node-local promotion hint at height 1 (inside the reorg
-        // window for the block at height 3) with MBH agreeing — exactly the
-        // node-local state the old code read and the new code must ignore.
+        // Divergent sibling at height 1: `h1_alt` is a *second* child of h0 that
+        // DOES carry `target` in its Publish ledger, and is the node-local
+        // canonical block at height 1 (`MBH[1] = h1_alt`). h2's own branch goes
+        // through the `submit_only` `headers[1]`, which never carried `target`.
+        // This is the reorg-window divergence the resolver must survive: the
+        // node-canonical view (MBH + content) says "promoted", but the block's
+        // own by-hash ancestry says "not promoted". `h1_alt` is reachable only
+        // via MBH (in the DB header table), never by the parent-pointer walk.
+        let mut h1_alt = IrysBlockHeader::new_mock_header();
+        h1_alt.height = 1;
+        h1_alt.previous_block_hash = headers[0].block_hash;
+        h1_alt.cumulative_diff = 100.into();
+        h1_alt.data_ledgers = vec![
+            DataTransactionLedger {
+                ledger_id: DataLedger::Publish as u32,
+                tx_root: H256::zero(),
+                tx_ids: H256List(vec![target]),
+                total_chunks: 0,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            },
+            DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids: H256List(vec![]),
+                total_chunks: 0,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            },
+        ];
+        h1_alt.test_sign();
+
         let target_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
                 id: target,
@@ -3297,19 +3333,25 @@ mod tests {
             // value is immaterial here.
             set_data_tx_included_height(wtx, &target, 1)?;
             set_data_tx_promoted_height(wtx, &target, 1)?;
-            wtx.put::<MigratedBlockHashes>(1, headers[1].block_hash)?;
+            // The node-local canonical block at height 1 is the divergent sibling,
+            // which carries `target` in Publish — so the by-height content check
+            // is satisfied and a naive lookup is fooled.
+            insert_block_header(wtx, &h1_alt)?;
+            wtx.put::<MigratedBlockHashes>(1, h1_alt.block_hash)?;
             Ok(())
         })?;
 
         let config = Config::new_with_random_peer_id(irys_types::NodeConfig::testing());
 
         // The trap is live: a naive by-height lookup at the parent height WOULD
-        // report `target` promoted (hint 1 ≤ 2 and MBH[1] is set).
+        // report `target` promoted — MBH[1] = h1_alt, which genuinely carries
+        // `target` in its Publish ledger, so even the content check passes for
+        // the node-canonical (but off-branch) block.
         let naive = db.view_eyre(|tx| canonical_promoted_height(tx, &target, 2))?;
         assert_eq!(
             naive,
             Some(1),
-            "precondition: the stale in-window hint would fool a parent-height lookup"
+            "precondition: the in-window node-canonical block fools a parent-height lookup"
         );
 
         // The branch-correct resolver ignores it: `target` is not in any Publish

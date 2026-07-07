@@ -297,18 +297,25 @@ pub async fn get_tx_promotion_status(
             err: format!("Database error: {}", e),
         })?;
 
-    let promotion_height = if let Some(metadata) = db_metadata {
-        // DB metadata exists - use it unconditionally
-        metadata.promoted_height
-    } else if let Some(mempool_meta) = state.mempool_guard.get_tx_metadata(&tx_id).await {
-        // Mempool metadata exists - use its promoted_height
-        mempool_meta.promoted_height()
-    } else {
-        // Transaction not found in either DB or mempool
-        return Err(ApiError::ErrNoId {
-            id: tx_id.to_string(),
-            err: String::from("Unable to find tx"),
-        });
+    // `promoted_height` is written to the DB only at migration, so a
+    // confirmed-but-unmigrated promotion lives only in the live mempool. Prefer
+    // the DB value when present; otherwise fall back to the mempool (a DB row
+    // may exist from the Submit migration with `promoted_height = None` while
+    // the Publish block is still unmigrated).
+    let promotion_height = match db_metadata.as_ref().and_then(|m| m.promoted_height) {
+        Some(height) => Some(height),
+        None => match state.mempool_guard.get_tx_metadata(&tx_id).await {
+            Some(mempool_meta) => mempool_meta.promoted_height(),
+            // No mempool entry: known (DB row exists) but not promoted, or
+            // entirely unknown → 404.
+            None if db_metadata.is_none() => {
+                return Err(ApiError::ErrNoId {
+                    id: tx_id.to_string(),
+                    err: String::from("Unable to find tx"),
+                });
+            }
+            None => None,
+        },
     };
 
     Ok(web::Json(PromotionStatus { promotion_height }))
