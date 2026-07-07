@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783183998254,
+  "lastUpdate": 1783446881632,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -7927,6 +7927,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "76ba7bdcfb32f589b6e4a180bc529040ba9827a4",
+          "message": "feat(consensus): longer anchor-expiry window for commitment txs (+ durable replay protection) (#1463)\n\n* docs: spec for longer commitment-tx anchor expiry depth\n\nSeparate, longer anchor-expiry window for commitment transactions\n(custody/multisig workflows, ~24h). Decouples the anchor-validity\nwindow from replay protection: extending the window requires durable,\nconsensus-level commitment dedup (the current epoch-reset snapshot only\nbounds replay because anchors expire within an epoch).\n\n* docs: implementation plan for commitment anchor expiry depth\n\nTwo phases: (A) durable consensus-level commitment replay protection\n(by-hash ancestry walk within the reorg window + MBH-verified finalized\nlookup below it, reusing IrysCommitmentTxMetadata.included_height), then\n(B) the longer commitment_anchor_expiry_depth window wired through\ningress, pruning, production, and validation. Records the resolved\nfinalized-lookup primitive in the spec.\n\n* feat(db): MBH-verified canonical commitment inclusion lookup\n\n* feat(actors): by-hash ancestor commitment tx_id collector\n\n* feat(consensus): reject replayed commitments in prevalidation\n\n* feat(consensus): reject replayed commitments in full validation\n\n* fix(consensus): park (not discard) on commitment-dedup DB read fault\n\n* test(consensus): reorged-out commitment remains includable\n\n* feat(config): add commitment_anchor_expiry_depth\n\n* chore(config): add commitment_anchor_expiry_depth to docker TOMLs\n\n* feat(mempool): validate commitment anchors against commitment window\n\n* feat(mempool): prune commitments against the commitment window\n\n* feat(block-producer): select commitments over the commitment window\n\n* feat(consensus): validate commitment anchors over the commitment window\n\n* test(consensus): end-to-end commitment anchor window\n\nAdd heavy_e2e_commitment_in_window_anchor_produces_and_validates: mines\na real block via mine_block() containing a commitment anchored beyond\ntx_anchor_expiry_depth but within commitment_anchor_expiry_depth, and\nasserts both that the canonical height advances (the node validated its\nown produced block) and that the block contains the commitment. Proves\nselector (B5) and block-level anchor validation (B6) agree end-to-end.\n\nAlso rename the strat local (ForceCommitmentStrategy/ReplayStrategy\ninstances) to strategy across commitment_anchor_window.rs,\ncommitment_replay.rs, and the design doc, to satisfy the typos gate\nrequired by cargo xtask local-checks.\n\n* test(consensus): pin commitment anchor window in anchor double-check test\n\nThe block-validation anchor double-check test crafted a genesis-anchored\ncommitment expected to be rejected as too-old. With commitments now on a\nseparate, longer anchor window, that commitment inherited the default\n(100) and stayed valid — so pin commitment_anchor_expiry_depth to the same\ntight bound the test already uses for tx anchors, keeping the\ncommitment-anchor double-check meaningful.\n\n* feat(config): require ingress_proof_anchor_expiry_depth >= tx_anchor_expiry_depth\n\nDocuments the anchor-set-depth assumption in block_discovery: the ingress\nanchor set is built from the by-hash tx-anchor walk extended by the\nfinalized index, so the ingress window must be at least the tx window.\nProduction-gated, matching the sibling tx_anchor_expiry_depth <=\nblock_tree_depth invariant; no shipped config violates it.\n\n* perf(consensus): batch commitment dedup reads into one db txn\n\nBoth replay-dedup paths opened one MDBX read txn per commitment for the\nfinalized-inclusion lookup; wrap all lookups in a single read txn instead.\nDedup decisions (which blocks are rejected) are unchanged.\n\n* chore: clarify commitment-selection log field and stale anchor-set comment\n\n* refactor(mempool): select anchor-expiry depth on the tx type\n\nvalidate_tx_anchor and should_prune_tx took the anchor-expiry depth as a\nparameter, so every call site had to pick the right window for the tx kind\n(and could pass the wrong one — the compiler wouldn't catch a data-tx depth\nhanded to a commitment). Move the choice onto IrysTransactionCommon via\nanchor_expiry_depth(&consensus): data txs report tx_anchor_expiry_depth,\ncommitments report commitment_anchor_expiry_depth. The two functions now\nderive the depth from the tx, so no caller can mismatch it.\n\n* perf(consensus): bound anchor-validation walk to the reorg window\n\nBlock validation built a map of every canonical anchor block down to\nmin(ingress_floor, commitment_floor) — on mainnet the commitment window is\n~7200 blocks, so every block (even commitment-free ones) walked ~7200\nblock-index entries, up from ~200 pre-commitment-window.\n\nThe eager map only needs branch-correct coverage of the reorg window\n(block_tree_depth): below the reorg floor the chain is finalized, so an\nanchor there is branch-invariant and can be resolved on demand via an\nMBH-verified canonical_block_height_by_hash lookup. Cap the index walk at\nthe reorg floor and add a finalized fallback in anchor_valid_for (a\nnot-in-map anchor is valid only if it resolves strictly below map_floor and\nwithin the item's window; at/above the floor it is a sibling-branch anchor\nand is rejected). Anchor validation is now O(block_tree_depth + items)\ninstead of O(anchor_expiry_depth). NC-0042 by-hash/index handoff unchanged.\n\n* refactor(consensus): clarify block_discovery anchor validation\n\nBehavior-preserving cleanup after commitments gained a divergent (longer)\nanchor window:\n- group the three per-item anchor floors + the two map bounds (reorg_floor,\n  map_floor) with a single explanatory comment\n- make the ancestry walk unconditional (the anchor map is needed by\n  commitment and ingress anchors, not just submit txs) with submit-ledger\n  duplicate detection as an inner check; the Submit ledger is always present\n  so this is behavior-preserving\n- reuse reorg_floor in the commitment replay dedup instead of recomputing an\n  identical finalized_floor\n\n* fix(consensus): content-verify finalized commitment-inclusion lookups\n\ncanonical_commitment_included_height trusted the metadata included_height\nhint once MigratedBlockHashes recorded any canonical block at that height.\nA row is written at tip-confirmation (depth 0), so an orphaned local tip\ncan strand a hint that no ReorgEvent ever clears across a restart+reorg.\nOnce a different winning block migrates at that height, the MBH check alone\nreads the stranded hint as canonical truth -> false DuplicateCommitmentTransaction.\n\nLoad the canonical header at MBH[h] and require it to actually carry the\ntxid in its commitment ledger before returning Some(h). A missing header\nfor the attested hash is a cross-table inconsistency and fails loud (Err);\nboth dedup call sites already map Err to the safe SoftInternal-park path.\n\n* fix(consensus): fail closed on unknown ancestor in commitment dedup walk\n\nThe by-hash ancestor walk returned a partial set (None => break) when an\nin-window ancestor resolved in neither the block tree nor the DB. A partial\nset can miss a replay included in an ancestor below the break point but still\ninside the reorg window, letting it slip past both the by-hash set and the\nfinalized lookup.\n\nEvery ancestor of a validatable block was itself validated-and-stored, so an\nin-window gap is a local inconsistency. bail! loud (naming the missing hash,\nthe block under validation, and heights) like resolve_promoted_on_branch.\nBoth callers already map the error to a SoftInternal-park path (retry, don't\naccept or reject). The clean stops (below min_height, genesis) still return.\n\n* perf(consensus): skip commitment replay dedup when the block has no commitments\n\nEvery non-epoch block ran the by-hash ancestor walk (up to block_tree_depth\nheaders) and a finalized-lookup read txn even carrying zero commitment txs,\nthe overwhelmingly common case.\n\nGate both on !commitment_txs.is_empty(). In block_discovery the commitment\nanchor loop is unchanged (a no-op over an empty slice) and only the dedup\nwalk + read are gated. In commitment_txs_are_valid an early return after the\nepoch branch short-circuits the walk, read, and simulated-snapshot loop; the\nsnapshot loop was already a no-op on empty and the tail already returned Ok\nthere, so this is behavior-preserving (the now-redundant tail empty-check is\nremoved).\n\n* perf(consensus): short-circuit the in-memory dedup check before the DB read\n\nThe dedup loops computed canonical_commitment_included_height (a DB read)\nbefore testing the in-memory prior_commitment_ids set, so the read ran even\nwhen the reorg-window set already matched. Test the in-memory set first and\nonly do the read on a miss, letting || short-circuit. The reported tx_id is\nunchanged.\n\n* fix(consensus): epoch blocks apply commitments — only inclusion blocks write dedup metadata\n\nNon-genesis epoch blocks re-list (apply) every commitment of the epoch but\nnever first-include one, yet the ledger-driven metadata path treated their\nconfirmation/migration like any other block: it overwrote each commitment's\n`included_height` with the epoch height and deleted the rows on orphan. A\nreorg orphaning an epoch block then stranded the dedup rows of commitments\nwhose true inclusions remained canonical below the fork point, opening a\nreplay hole the by-hash walk (bounded to block_tree_depth) cannot cover\nacross a full epoch.\n\n`included_height` must name the block that INCLUDED a commitment, never the\nepoch block that APPLIED it. Skip commitment-metadata create/overwrite (Phase\n2 / persist_block) and delete (Phase 1) for non-genesis epoch blocks; data-tx\nmetadata and IrysCommitments inserts are untouched. Genesis (height 0)\ngenuinely first-includes, so it retains normal behavior. Thread\nnum_blocks_in_epoch into BlockMigrationService for the epoch check.\n\n* fix(consensus): backfill genesis commitment inclusion metadata at startup\n\nGenesis first-includes its commitment txs but, as the block-index head,\nnever flows through the confirm/migration metadata writers, so no\nIrysCommitmentTxMetadata.included_height row is written for it. Once\ngenesis falls below the reorg floor the commitment replay-dedup's\nfinalized lookup (canonical_commitment_included_height) is the only path\nthat can catch a replayed genesis commitment — the by-hash ancestry walk\nonly covers the reorg window — so a producer bypassing the mempool could\nreplay a genesis Stake and double-debit the signer.\n\nAdd backfill_genesis_commitment_included_height and call it at the single\nstartup seam that runs on both fresh init and restart (after genesis is\nguaranteed persisted). The write is unconditional and trivially\nidempotent; running it every boot lets already-initialized data dirs\nconverge on upgrade restart rather than diverging from fresh nodes. A\nmissing MigratedBlockHashes[0] or genesis header fails loud.\n\n* refactor(consensus): consolidate commitment replay dedup into one shared helper\n\n* perf(consensus): reuse one read transaction for on-demand anchor resolution\n\n* refactor(db): extract the canonical-header-at-height primitive\n\n* refactor(consensus)+test: single owner for commitment-inclusion writes; shared test scaffolding\n\n* refactor actors ancestry walks\n\n* fix(consensus): skip unresolvable-anchor txs in selection; reject same-block duplicate commitments\n\nAn orphan-anchored tx sitting in the mempool must not abort block\nproduction. `validate_anchor_for_inclusion` now returns Ok(false) (skip)\nwhen an anchor can't resolve to a canonical block, mirroring the ingress\npath; both selector call sites already skip on Ok(false) and still\npropagate genuine DB errors. Otherwise a commitment whose anchor was\nreorged out could poison every production attempt for the whole\ncommitment-anchor-expiry window.\n\n`find_replayed_commitment` also now rejects a commitment listed twice\nwithin the same block. `CommitmentSnapshot::add_commitment` is idempotent\nfor Stake/Pledge, so the snapshot alone cannot reject a same-block\nduplicate; this is the layer that catches it (defense-in-depth behind the\nheader/body reconciliation backstop).\n\nCovered by unit tests plus end-to-end regression tests for both paths.\n\n* style(consensus): use widening conversions for anchor expiry depths\n\nReplace lossless as-casts with .into()/u64::from() for u8/u16 anchor\nexpiry depths, and centralize the tx-selector min-anchor margin math in\na shared closure so the data-tx and commitment windows can't drift.\n\nRemove superseded superpowers plan/spec docs.\n\n* chore: fmt\n\n* harden(consensus): reject inflated block height before anchor walk; review followups\n\nblock_discovery: reject a block whose height != parent.height + 1 before the\nanchor index-walk. An inflated height (parent = the real tip) drove the\nreorg_floor..bt_finished_height loop into not-yet-migrated heights and panicked\nthe node; prevalidation's height_is_valid runs after the walk, too late to guard\nit. Convert the walk's two internal block-index assertions from panic! to\nBlockDiscoveryInternalError so index inconsistency parks the block instead of\naborting the process.\n\nblock_ancestry: stop the ancestry walk on the floor height instead of fetching\none below-floor parent and then discarding it (drops an extra header read and\nits fail-closed bail! path).\n\ndatabase: canonical_header_at_height cross-checks the resolved header's height\nagainst the requested height, guarding against cross-table corruption.\n\ntests: extract a shared InjectCommitmentsStrategy and shared node/setup\nscaffolding across the commitment replay and fork-recovery tests; strengthen\nheavy_commitment_reorged_out_stays_includable to assert the stake+pledge tx ids\nactually land in the orphaned block, so the dedup false-positive path is\nexercised rather than passing vacuously.\n\nMinor polish: u64::from over an as-cast in tx_selector, soften an\nunenforced-ordering doc comment, drop a stray blank line.\n\n* harden(consensus): dedup finalized commitments in block production selection\n\n`select_best_txs` deduped commitment candidates only against the block-tree\ncanonical cache (~block_tree_depth blocks). A commitment finalized below\n`tip - block_tree_depth` is pruned from that cache but stays in the mempool\n(confirmation stamps `included_height` without evicting it) while still inside\nits longer `commitment_anchor_expiry_depth` window, so it remained a selection\ncandidate and could be re-included — building a block the producer's own\nvalidation rejects as a replay via `find_replayed_commitment`.\n\nExtend selection with the same durable finalized-inclusion index the validator\nuses (`canonical_commitment_included_height`), in a single read txn over the\ncandidate set. The floor is anchored at `tip - block_tree_depth` so the\nin-memory reorg-window set and the finalized index meet with no coverage gap\neven when building on a non-tip parent, and never over-skip: the parent is\ncanonical and within the cache, so every height at or below the floor is both\nfinalized and on the parent's ancestry.",
+          "timestamp": "2026-07-07T18:34:51+01:00",
+          "tree_id": "7fb7a5a3ebd0d757fa04df922a11405584062b42",
+          "url": "https://github.com/Irys-xyz/irys/commit/76ba7bdcfb32f589b6e4a180bc529040ba9827a4"
+        },
+        "date": 1783446879623,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011989,
+            "range": "± 0.00028",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152845,
+            "range": "± 0.00234",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.262565,
+            "range": "± 0.029641",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.355532,
+            "range": "± 0.279815",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07763,
+            "range": "± 0.001706",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 765.724676,
+            "range": "± 12.518602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1015.444597,
+            "range": "± 48.405696",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119936,
+            "range": "± 0.000485",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1213.76496,
+            "range": "± 13.647638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1599.944824,
+            "range": "± 22.053164",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034946,
+            "range": "± 0.000734",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.685878,
+            "range": "± 0.253137",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.247753,
+            "range": "± 0.231917",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
