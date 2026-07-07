@@ -1,9 +1,11 @@
-use crate::utils::{AddTxError, BlockValidationOutcome, IrysNodeTest, solution_context};
+use crate::utils::{
+    AddTxError, BlockValidationOutcome, InjectCommitmentsStrategy, IrysNodeTest, solution_context,
+};
 use irys_actors::mempool_service::TxIngressError;
 use irys_actors::{
-    BlockProducerInner, ProductionStrategy, async_trait,
+    ProductionStrategy,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _},
-    block_producer::{BlockProdStrategy, MempoolTxsBundle},
+    block_producer::BlockProdStrategy as _,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{CommitmentTransaction, DataLedger, NodeConfig, irys::IrysSigner};
@@ -155,37 +157,6 @@ async fn heavy_block_production_selects_commitment_over_commitment_window() -> e
     Ok(())
 }
 
-/// Evil producer that force-includes a commitment in the commitment ledger,
-/// bypassing the normal mempool selection (which would reject an anchor outside
-/// the commitment window). Used to drive block_discovery's anchor check directly.
-struct ForceCommitmentStrategy {
-    prod: ProductionStrategy,
-    commitment: CommitmentTransaction,
-}
-
-#[async_trait::async_trait]
-impl BlockProdStrategy for ForceCommitmentStrategy {
-    fn inner(&self) -> &BlockProducerInner {
-        &self.prod.inner
-    }
-
-    async fn get_mempool_txs(
-        &self,
-        prev_block_header: &irys_types::IrysBlockHeader,
-        block_timestamp: irys_types::UnixTimestampMs,
-    ) -> Result<MempoolTxsBundle, irys_actors::tx_selector::TxSelectorError> {
-        // Start from a correctly-populated bundle (right epoch snapshot / fees),
-        // then substitute the target commitment as the sole commitment tx.
-        let mut bundle = self
-            .prod
-            .get_mempool_txs(prev_block_header, block_timestamp)
-            .await?;
-        bundle.commitment_txs = vec![self.commitment.clone()];
-        bundle.commitment_txs_to_bill = vec![self.commitment.clone()];
-        Ok(bundle)
-    }
-}
-
 /// Block-level prevalidation (`block_discovery`) must accept a commitment whose
 /// anchor is older than `tx_anchor_expiry_depth` (20) but still within
 /// `commitment_anchor_expiry_depth` (100). Before this fix commitments were
@@ -269,8 +240,8 @@ async fn heavy_commitment_out_of_window_anchor_rejected() -> eyre::Result<()> {
     let mut stake_tx = CommitmentTransaction::new_stake(consensus, old_anchor);
     signer.sign_commitment(&mut stake_tx)?;
 
-    let strategy = ForceCommitmentStrategy {
-        commitment: stake_tx.clone(),
+    let strategy = InjectCommitmentsStrategy {
+        txs: vec![stake_tx.clone()],
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
         },

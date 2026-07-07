@@ -365,7 +365,6 @@ impl Inner {
         // Phase 2: Evaluate expiry
         let mut expired_data: Vec<(H256, H256)> = Vec::new();
         let mut expired_by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
-
         for tx in data_txs.values() {
             if self.should_prune_tx(current_height, tx) {
                 expired_data.push((tx.id, tx.anchor));

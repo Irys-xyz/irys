@@ -3789,6 +3789,42 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     Ok(poa_solution)
 }
 
+/// Evil producer that substitutes a fixed set of commitment txs as the sole
+/// contents of the commitment ledger, bypassing normal mempool selection.
+/// Shared by tests that need to force-include a specific commitment (or the
+/// same commitment more than once) regardless of what the mempool would
+/// otherwise select.
+pub struct InjectCommitmentsStrategy {
+    pub prod: irys_actors::ProductionStrategy,
+    pub txs: Vec<irys_types::CommitmentTransaction>,
+}
+
+#[irys_actors::async_trait::async_trait]
+impl irys_actors::block_producer::BlockProdStrategy for InjectCommitmentsStrategy {
+    fn inner(&self) -> &irys_actors::BlockProducerInner {
+        &self.prod.inner
+    }
+
+    async fn get_mempool_txs(
+        &self,
+        prev_block_header: &irys_types::IrysBlockHeader,
+        block_timestamp: irys_types::UnixTimestampMs,
+    ) -> Result<
+        irys_actors::block_producer::MempoolTxsBundle,
+        irys_actors::tx_selector::TxSelectorError,
+    > {
+        // Start from a correctly-populated bundle (right epoch snapshot / fees),
+        // then substitute the target commitments as the sole commitment txs.
+        let mut bundle = self
+            .prod
+            .get_mempool_txs(prev_block_header, block_timestamp)
+            .await?;
+        bundle.commitment_txs = self.txs.clone();
+        bundle.commitment_txs_to_bill = self.txs.clone();
+        Ok(bundle)
+    }
+}
+
 /// Outcome of block validation for testing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockValidationOutcome {

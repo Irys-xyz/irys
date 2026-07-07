@@ -512,7 +512,8 @@ pub struct MempoolConsensusConfig {
     pub ingress_proof_anchor_expiry_depth: u16,
 
     /// The number of blocks a given anchor is valid for when anchoring a
-    /// COMMITMENT transaction. Longer than `tx_anchor_expiry_depth` so custody
+    /// COMMITMENT transaction. Typically longer than `tx_anchor_expiry_depth`
+    /// (though this is not enforced by `Config::validate`) so custody
     /// workflows (multisig coordination) have time to broadcast a signed
     /// commitment. Unlike `tx_anchor_expiry_depth` it is NOT capped at
     /// `block_tree_depth`: commitment anchors below the reorg floor are

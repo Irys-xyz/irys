@@ -53,6 +53,8 @@ pub enum BlockDiscoveryError {
     InvalidCommitmentTransaction(String),
     #[error("Invalid data ledgers length: expected {0} ledgers, got {1}")]
     InvalidDataLedgersLength(u32, usize),
+    #[error("Invalid block height: expected {expected} (parent height + 1), got {got}")]
+    InvalidBlockHeight { expected: u64, got: u64 },
     #[error("Anchor {anchor} for {item_type:?} is unknown/not part of this block's fork")]
     InvalidAnchor {
         item_type: AnchorItemType,
@@ -78,6 +80,7 @@ impl BlockDiscoveryError {
             Self::InvalidEpochBlock(_) => "invalid_epoch_block",
             Self::InvalidCommitmentTransaction(_) => "invalid_commitment_transaction",
             Self::InvalidDataLedgersLength(_, _) => "invalid_data_ledgers_length",
+            Self::InvalidBlockHeight { .. } => "invalid_block_height",
             Self::InvalidAnchor { .. } => "invalid_anchor",
             Self::InvalidSignature(_) => "invalid_signature",
             Self::TransactionIdMismatch { .. } => "transaction_id_mismatch",
@@ -112,6 +115,8 @@ pub enum BlockDiscoveryInternalError {
     EpochRequestFailed(String),
     #[error("Failed to send message to the block tree service: {0}")]
     BlockTreeRequestFailed(String),
+    #[error("Block index anchor-walk inconsistency: {0}")]
+    BlockIndexInconsistency(String),
 }
 
 #[async_trait::async_trait]
@@ -457,6 +462,21 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
+        // The claimed height must be exactly one above the resolved parent.
+        // Anchor-window floors (and the index-walk range below) are derived from
+        // this height; an inflated height whose parent is the real tip would drive
+        // the index walk into unmigrated heights. Reject before that walk.
+        // `prevalidate_block` re-checks height (`height_is_valid`) as the
+        // authoritative gate, but it runs after the walk — this earlier check is
+        // deliberate and must not be removed as "redundant".
+        let expected_height = previous_block_header.height + 1;
+        if block_height != expected_height {
+            return Err(BlockDiscoveryError::InvalidBlockHeight {
+                expected: expected_height,
+                got: block_height,
+            });
+        }
+
         // Per-item anchor windows: an item's anchor must resolve to a canonical
         // block no older than its floor. Data txs get the shortest window;
         // commitments a longer one (custody workflows need time to broadcast a
@@ -586,23 +606,32 @@ impl BlockDiscoveryServiceInner {
             // reorg window; anchors below the floor are finalized and resolved on
             // demand in `anchor_valid_for`.
             for height in reorg_floor..bt_finished_height {
-                // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
-                let block_index_item =
-                    block_index
-                        .get_item(height)
-                        .unwrap_or_else(|| panic!("Internal critical assertion failed: Unable to get entry for height {height} from block index\nDEBUG: reorg_floor {reorg_floor} validating block: height {}, hash {} - block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash));
+                // these block index assertions should always hold (we enforce that the block tree must at least go to the boundary for migration in Config::validate); treat a violation as internal inconsistency rather than aborting
+                let block_index_item = match block_index.get_item(height) {
+                    Some(item) => item,
+                    None => {
+                        return Err(BlockDiscoveryError::InternalError(
+                            BlockDiscoveryInternalError::BlockIndexInconsistency(format!(
+                                "Unable to get entry for height {height} from block index (reorg_floor {reorg_floor}, validating block height {}, hash {}, block tree finished height {bt_finished_height}, remaining {remaining})",
+                                &new_block_header.height, &new_block_header.block_hash
+                            )),
+                        ));
+                    }
+                };
 
                 if last_bt_safe_parent_height.is_some_and(|s| s == height)
                     && block_index_item.block_hash != parent_block.previous_block_hash
                 {
                     // this indicates some sort of block index corruption
-                    panic!(
-                        "Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}",
-                        &parent_block.height - 1,
-                        &parent_block.previous_block_hash,
-                        &height,
-                        &block_index_item.block_hash
-                    )
+                    return Err(BlockDiscoveryError::InternalError(
+                        BlockDiscoveryInternalError::BlockIndexInconsistency(format!(
+                            "block height: {} hash: {} doesn't match block_index height: {} hash: {}",
+                            &parent_block.height - 1,
+                            &parent_block.previous_block_hash,
+                            &height,
+                            &block_index_item.block_hash
+                        )),
+                    ));
                 }
                 valid_anchor_block_heights.insert(block_index_item.block_hash, height);
             }

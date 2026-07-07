@@ -40,7 +40,8 @@ pub(crate) fn walk_ancestors_tree_then_db(
             if header.height < min_height {
                 break None;
             }
-            if matches!(visit(header)?, ControlFlow::Break(())) || header.height == 0 {
+            let is_floor = header.height == min_height;
+            if matches!(visit(header)?, ControlFlow::Break(())) || header.height == 0 || is_floor {
                 break None;
             }
             cursor = header.previous_block_hash;
@@ -59,7 +60,11 @@ pub(crate) fn walk_ancestors_tree_then_db(
                 if header.height < min_height {
                     break;
                 }
-                if matches!(visit(&header)?, ControlFlow::Break(())) || header.height == 0 {
+                let is_floor = header.height == min_height;
+                if matches!(visit(&header)?, ControlFlow::Break(()))
+                    || header.height == 0
+                    || is_floor
+                {
                     break;
                 }
                 cursor = header.previous_block_hash;

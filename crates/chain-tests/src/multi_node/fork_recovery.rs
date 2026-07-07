@@ -930,24 +930,19 @@ async fn heavy4_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()
 /// (by-hash ancestry walk within the reorg window + MBH-verified finalized DB
 /// lookup below the reorg floor).
 ///
-/// A commitment whose ONLY prior inclusion was on a branch that gets reorged
-/// out was never actually applied on the canonical chain, so it must remain
-/// includable once the surviving branch mines a new block. If the dedup
-/// wrongly treated the orphaned-branch inclusion as a canonical one, this
-/// would be a liveness bug: the commitment would be permanently stuck,
-/// unable to ever land in a canonical block.
-///
-/// Two nodes fork from a common ancestor. node_b's fork (containing a stake +
-/// pledge commitment) is orphaned when node_c reveals a longer competing
-/// chain. The test asserts the orphaned commitments (a) return to mempool and
-/// (b) get re-included in a new canonical block on the surviving branch, i.e.
-/// `commitment_tx_ids()` of that block contains them — proving the dedup does
-/// not false-positive on reorged-out-only inclusions.
-#[test_log::test(tokio::test)]
-async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
-    let num_blocks_in_epoch = 5;
-    let seconds_to_wait = 15;
-
+/// Spins up a 3-node cluster (node_a genesis + node_b/node_c peers) on
+/// `num_blocks_in_epoch`'s epoch schedule, syncs all three to height 0, mines
+/// one common block so future txs anchor at height 1 on all nodes, then
+/// disables gossip so node_b and node_c can be driven onto diverging forks.
+/// Shared scaffolding for the commitment/reorg tests below.
+async fn setup_diverging_fork_nodes(
+    num_blocks_in_epoch: usize,
+    seconds_to_wait: usize,
+) -> eyre::Result<(
+    IrysNodeTest<IrysNodeCtx>,
+    IrysNodeTest<IrysNodeCtx>,
+    IrysNodeTest<IrysNodeCtx>,
+)> {
     let block_migration_depth = num_blocks_in_epoch - 1;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = 32;
@@ -996,6 +991,29 @@ async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
     node_b.gossip_disable();
     node_c.gossip_disable();
 
+    Ok((node_a, node_b, node_c))
+}
+
+/// A commitment whose ONLY prior inclusion was on a branch that gets reorged
+/// out was never actually applied on the canonical chain, so it must remain
+/// includable once the surviving branch mines a new block. If the dedup
+/// wrongly treated the orphaned-branch inclusion as a canonical one, this
+/// would be a liveness bug: the commitment would be permanently stuck,
+/// unable to ever land in a canonical block.
+///
+/// Two nodes fork from a common ancestor. node_b's fork (containing a stake +
+/// pledge commitment) is orphaned when node_c reveals a longer competing
+/// chain. The test asserts the orphaned commitments (a) return to mempool and
+/// (b) get re-included in a new canonical block on the surviving branch, i.e.
+/// `commitment_tx_ids()` of that block contains them — proving the dedup does
+/// not false-positive on reorged-out-only inclusions.
+#[test_log::test(tokio::test)]
+async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 5;
+    let seconds_to_wait = 15;
+    let (node_a, node_b, node_c) =
+        setup_diverging_fork_nodes(num_blocks_in_epoch, seconds_to_wait).await?;
+
     // node_b posts a stake + pledge commitment kept local to its own fork.
     let anchor = node_a.get_anchor().await?;
     let stake_tx = node_b
@@ -1014,6 +1032,15 @@ async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
         b_block2.system_ledgers.len(),
         1,
         "expect the stake commitment (and, if capacity allows, the pledge) to land on node_b's branch"
+    );
+    let b_block2_commitment_tx_ids = b_block2.commitment_tx_ids();
+    assert!(
+        b_block2_commitment_tx_ids.contains(&stake_tx.id()),
+        "expect the stake commitment tx id to be included in node_b's branch"
+    );
+    assert!(
+        b_block2_commitment_tx_ids.contains(&pledge_tx.id()),
+        "expect the pledge commitment tx id to be included in node_b's branch"
     );
 
     // node_c mines two blocks without these commitments, producing a longer
@@ -1116,54 +1143,8 @@ async fn heavy_commitment_reorged_out_stays_includable() -> eyre::Result<()> {
 async fn heavy_orphan_anchored_commitment_does_not_block_production() -> eyre::Result<()> {
     let num_blocks_in_epoch = 5;
     let seconds_to_wait = 15;
-
-    let block_migration_depth = num_blocks_in_epoch - 1;
-    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
-    genesis_config.consensus.get_mut().chunk_size = 32;
-    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
-
-    let b_signer = genesis_config.new_random_signer();
-    let c_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&b_signer, &c_signer]);
-
-    let node_a = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("NODE_A", seconds_to_wait)
-        .await;
-
-    let config_b = node_a.testing_peer_with_signer(&b_signer);
-    let config_c = node_a.testing_peer_with_signer(&c_signer);
-
-    let node_b = IrysNodeTest::new(config_b)
-        .start_and_wait_for_packing("NODE_B", seconds_to_wait)
-        .await;
-    let node_c = IrysNodeTest::new(config_c)
-        .start_and_wait_for_packing("NODE_C", seconds_to_wait)
-        .await;
-
-    // Sync everyone to height 0 before diverging.
-    let current_height = node_a.get_canonical_chain_height().await;
-    assert_eq!(current_height, 0);
-    node_b
-        .wait_until_height(current_height, seconds_to_wait)
-        .await?;
-    node_c
-        .wait_until_height(current_height, seconds_to_wait)
-        .await?;
-
-    // Mine a common block so future txs anchor at height 1 on all nodes.
-    node_a.mine_block().await?;
-    node_a.wait_until_height(1, seconds_to_wait).await?;
-    let block_height_1 = node_a.get_block_by_height(1).await?;
-    node_b
-        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
-        .await?;
-    node_c
-        .wait_for_block(&block_height_1.block_hash, seconds_to_wait)
-        .await?;
-
-    node_a.gossip_disable();
-    node_b.gossip_disable();
-    node_c.gossip_disable();
+    let (node_a, node_b, node_c) =
+        setup_diverging_fork_nodes(num_blocks_in_epoch, seconds_to_wait).await?;
 
     // node_b mines its own block 2, becoming node_b's canonical tip.
     let (b_block2, _b_block2_payload, _b_block2_txs) = node_b.mine_block_without_gossip().await?;

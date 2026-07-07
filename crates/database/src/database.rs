@@ -219,6 +219,15 @@ pub fn canonical_header_at_height<T: DbTx>(
             canonical_hash
         )
     })?;
+    if header.height != height {
+        eyre::bail!(
+            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders[{}].height = {}",
+            height,
+            canonical_hash,
+            canonical_hash,
+            header.height
+        );
+    }
     Ok(Some(header))
 }
 

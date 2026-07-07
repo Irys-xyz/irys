@@ -194,7 +194,7 @@ pub async fn select_best_txs(
         min_anchor_floor(ctx.config.consensus.mempool.tx_anchor_expiry_depth.into());
 
     let max_anchor_height =
-        current_height.saturating_sub(ctx.config.consensus.block_migration_depth as u64);
+        current_height.saturating_sub(u64::from(ctx.config.consensus.block_migration_depth));
 
     // Commitments use a longer expiry window than data txs; keep the same
     // maturity upper bound (max_anchor_height).
