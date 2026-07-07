@@ -286,14 +286,24 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// `included_height`, Publish for `promoted_height`).  They return primitive
 /// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
 /// stranded hint as canonical.  The content check is what makes `Some(h)` mean
-/// "canonically included at `h`" rather than "a hint pointing at `h` exists":
-/// canonical metadata is now written only at migration (atomically with
-/// `MigratedBlockHashes`), but a legacy/stranded row — e.g. one written at
-/// depth-0 confirmation before that fix, or an orphaned tip's row surviving a
-/// restart-interrupted reorg — can still collide with a different canonical
-/// block migrated at the same height, where the MBH-existence check alone would
-/// read it as truth.  With the content check, callers may trust `Some(h)` on any
-/// branch — mirroring `canonical_commitment_included_height`.  Current callers:
+/// "canonically included at `h` on THIS node's canonical chain" rather than "a
+/// hint pointing at `h` exists": canonical metadata is now written only at
+/// migration (atomically with `MigratedBlockHashes`), but a legacy/stranded
+/// row — e.g. one written at depth-0 confirmation before that fix, or an
+/// orphaned tip's row surviving a restart-interrupted reorg — can still collide
+/// with a different canonical block migrated at the same height, where the
+/// MBH-existence check alone would read it as truth.
+///
+/// The content check neutralizes stranded rows, but it does NOT make the result
+/// branch-invariant inside the reorg window: `MigratedBlockHashes` is node-local
+/// and can differ per branch above the reorg floor, so `Some(h)` is only
+/// branch-agnostic when `h` is BELOW the reorg floor (`tip - block_tree_depth`),
+/// where MBH is stable across every node/branch — exactly the contract of
+/// `canonical_commitment_included_height`.  Callers evaluating a specific branch
+/// within the reorg window must therefore either cap `max_height` at/below the
+/// reorg floor or confirm membership against that branch's own by-hash ancestry;
+/// they must not treat an in-window `Some(h)` as authoritative for a branch other
+/// than this node's own.  Current callers:
 ///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
 ///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
 ///     only falls back to these helpers for inclusions strictly below its
