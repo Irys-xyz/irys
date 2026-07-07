@@ -51,7 +51,8 @@ pub fn get_anchor_height(
 }
 
 /// Validates that a transaction's anchor falls within `[min_anchor_height, max_anchor_height]`.
-/// Returns `Ok(true)` if valid, `Ok(false)` if out of range.
+/// Returns `Ok(true)` if valid, `Ok(false)` if out of range or if the anchor is not resolvable
+/// to a canonical block.
 #[tracing::instrument(level = "trace", skip_all)]
 pub fn validate_anchor_for_inclusion(
     block_tree: &BlockTreeReadGuard,
@@ -68,7 +69,10 @@ pub fn validate_anchor_for_inclusion(
     })? {
         Some(height) => height,
         None => {
-            return Err(TxIngressError::InvalidAnchor(anchor).into());
+            warn!(
+                "Tx {tx_id} anchor {anchor} is not resolvable to a canonical block; skipping for inclusion"
+            );
+            return Ok(false);
         }
     };
 

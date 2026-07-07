@@ -197,6 +197,40 @@ pub fn canonical_block_height_by_hash<T: DbTx>(
     }
 }
 
+/// Returns the canonical block header at `height`, verified against
+/// [`MigratedBlockHashes`].
+///
+/// `Ok(None)` when no canonical block is recorded at `height` (MBH has no row).
+/// `Err` when MBH attests a canonical block at `height` but `IrysBlockHeaders`
+/// has no entry for that hash — the two tables disagree, a hard inconsistency.
+pub fn canonical_header_at_height<T: DbTx>(
+    tx: &T,
+    height: u64,
+) -> eyre::Result<Option<IrysBlockHeader>> {
+    let Some(canonical_hash) = tx.get::<MigratedBlockHashes>(height)? else {
+        return Ok(None);
+    };
+    // MBH attested a canonical block at this height; a missing header means the
+    // two tables disagree.
+    let header = block_header_by_hash(tx, &canonical_hash, false)?.ok_or_else(|| {
+        eyre::eyre!(
+            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders has no entry for that hash",
+            height,
+            canonical_hash
+        )
+    })?;
+    if header.height != height {
+        eyre::bail!(
+            "canonical metadata inconsistent: MigratedBlockHashes[{}] = {} but IrysBlockHeaders[{}].height = {}",
+            height,
+            canonical_hash,
+            canonical_hash,
+            header.height
+        );
+    }
+    Ok(Some(header))
+}
+
 /// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
     Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
@@ -353,6 +387,96 @@ pub fn canonical_promoted_height<T: DbTx>(
         |m| m.promoted_height,
         "promoted_height",
     )
+}
+
+/// Returns the content-verified commitment inclusion height of `txid`, if any,
+/// capped at `max_height`.
+///
+/// `Some(h)` means: `IrysCommitmentTxMetadata` carries `included_height = h ≤
+/// max_height`, `MigratedBlockHashes[h]` is `Some` (canonical), AND the
+/// canonical block at `h` actually carries `txid` in its commitment ledger.
+///
+/// The final content check exists because the metadata row is written at
+/// tip-confirmation (depth 0), not at migration: an orphaned local tip can
+/// leave an `included_height` hint behind that no `ReorgEvent` ever clears if
+/// the node restarts before the orphan is processed (the tree is rebuilt from
+/// the block index, which forgets confirmed-but-unmigrated tips). Once ANY
+/// winning block later migrates at `h`, the MBH check alone reads that stranded
+/// hint as canonical truth. Requiring the canonical header to actually include
+/// the tx makes such stranded rows harmless — the invariant is that
+/// `Some(h)` proves canonical inclusion at `h`, not merely that a hint exists.
+/// Like the data-tx `canonical_submit_height`, this is only branch-invariant
+/// BELOW the reorg floor — callers must pass `max_height ≤ tip -
+/// block_tree_depth` and cover the reorg window by-hash separately.
+///
+/// `None` = tx unknown / no `included_height` / hint > `max_height` / hint not
+/// confirmed by MBH / canonical block at the hint does not include the tx
+/// (stranded write from an orphaned block).
+///
+/// Returns `Err` on cross-table inconsistency: MBH attests a canonical block at
+/// `h` but `IrysBlockHeaders` has no entry for that hash.
+pub fn canonical_commitment_included_height<T: DbTx>(
+    tx: &T,
+    txid: &IrysTransactionId,
+    max_height: u64,
+) -> eyre::Result<Option<u64>> {
+    let Some(metadata) = crate::db_index::get_commitment_tx_metadata(tx, txid)? else {
+        return Ok(None);
+    };
+    let Some(height) = metadata.included_height else {
+        return Ok(None);
+    };
+    if height > max_height {
+        return Ok(None);
+    }
+    let Some(canonical_header) = canonical_header_at_height(tx, height)? else {
+        return Ok(None);
+    };
+    // Content check: a stranded hint from an orphaned tip points at a canonical
+    // block that does not actually carry this commitment tx — treat it as no
+    // canonical inclusion.
+    if !canonical_header.commitment_tx_ids().contains(txid) {
+        return Ok(None);
+    }
+    Ok(Some(height))
+}
+
+/// Writes `included_height = 0` for every commitment tx in the genesis block.
+///
+/// The commitment replay-dedup's finalized lookup
+/// ([`canonical_commitment_included_height`]) keys on
+/// `IrysCommitmentTxMetadata.included_height`, which is written for ordinary
+/// blocks at confirm/migration by `BlockMigrationService`. Genesis
+/// first-includes its commitments but is the block-index head, so it never
+/// flows through the confirm/migration metadata writers and no row is ever
+/// written for its commitment tx ids. Once genesis falls below the reorg floor
+/// (`tip - block_tree_depth`), that finalized lookup is the ONLY dedup path
+/// that can see a replayed genesis commitment — the by-hash ancestry walk only
+/// covers the reorg window — so the row must exist for the dedup to be sound.
+///
+/// The write is unconditional and trivially idempotent (same value every boot):
+/// a genesis commitment tx's only canonical inclusion IS genesis, so
+/// `included_height = 0` is always correct; any pre-existing different value
+/// would itself be a stray row this corrects. Running it at every boot (not
+/// only at fresh genesis init) makes already-initialized data dirs converge on
+/// upgrade restart — init-only would leave existing nodes without the row while
+/// fresh nodes have it, yielding node-divergent replay verdicts.
+///
+/// Genesis must already be persisted before this runs. A missing
+/// `MigratedBlockHashes[0]` or missing genesis header is therefore a hard
+/// invariant violation and returns `Err` (fail loud, node refuses to start)
+/// rather than silently skipping.
+pub fn backfill_genesis_commitment_included_height(db: &DatabaseProvider) -> eyre::Result<()> {
+    db.update_eyre(|tx| {
+        let Some(genesis_header) = canonical_header_at_height(tx, 0)? else {
+            eyre::bail!("genesis commitment backfill: MigratedBlockHashes has no row at height 0")
+        };
+        let commitment_ids = genesis_header.commitment_tx_ids();
+        if !commitment_ids.is_empty() {
+            crate::db_index::batch_set_commitment_tx_included_height(tx, commitment_ids.iter(), 0)?;
+        }
+        Ok(())
+    })
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -1229,6 +1353,211 @@ mod tests {
         assert!(
             db.view_eyre(|tx| Ok(tx.get::<PeerListItems>(peer_id)?.is_none()))?,
             "peer should be gone after delete"
+        );
+        Ok(())
+    }
+
+    /// Builds a stored-able header at `height` whose commitment ledger carries
+    /// `commitment_tx_ids`.
+    fn header_with_commitments(height: u64, commitment_tx_ids: Vec<H256>) -> IrysBlockHeader {
+        irys_testing_utils::mock_header_with_commitments(height, commitment_tx_ids)
+    }
+
+    #[test]
+    fn canonical_commitment_included_height_requires_mbh() -> eyre::Result<()> {
+        use crate::tables::MigratedBlockHashes;
+        use crate::{canonical_commitment_included_height, set_commitment_tx_included_height};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let txid = H256::random();
+
+        // Write inclusion height 10, but no MBH row yet -> not canonical.
+        db.update(|tx| set_commitment_tx_included_height(tx, &txid, 10))??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None
+        );
+
+        // MBH points at height 10 but no stored header for that hash -> the
+        // MBH/IrysBlockHeaders cross-table disagreement now fails loud.
+        db.update(|tx| tx.put::<MigratedBlockHashes>(10, H256::random()))??;
+        assert!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))?
+                .is_err(),
+            "missing canonical header for the MBH hash must be a cross-table Err"
+        );
+
+        // MBH points at a real stored header that does NOT carry the txid ->
+        // stranded row, no canonical inclusion.
+        let other_block = header_with_commitments(10, vec![H256::random()]);
+        db.update(|tx| {
+            insert_block_header(tx, &other_block)?;
+            tx.put::<MigratedBlockHashes>(10, other_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None
+        );
+
+        // MBH points at a stored header that DOES carry the txid -> canonical.
+        let including_block = header_with_commitments(10, vec![txid]);
+        db.update(|tx| {
+            insert_block_header(tx, &including_block)?;
+            tx.put::<MigratedBlockHashes>(10, including_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            Some(10)
+        );
+
+        // max_height below the inclusion height -> filtered out.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 5))??,
+            None
+        );
+
+        // Unknown tx -> None.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &H256::random(), 100))??,
+            None
+        );
+        Ok(())
+    }
+
+    /// A stranded metadata row (an orphaned tip left an `included_height` hint,
+    /// and a different winning block later migrated at that height) must NOT
+    /// read as canonical inclusion: the content check on the canonical header
+    /// makes such rows harmless.
+    #[test]
+    fn canonical_commitment_included_height_ignores_stranded_row() -> eyre::Result<()> {
+        use crate::tables::MigratedBlockHashes;
+        use crate::{canonical_commitment_included_height, set_commitment_tx_included_height};
+        use reth_db::transaction::DbTxMut as _;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = open_or_create_db(
+            path.path(),
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        let txid = H256::random();
+
+        // Stranded hint: the tx was confirmed at the orphaned tip at height 10,
+        // but the block that actually migrated there carries different txs.
+        let winning_block = header_with_commitments(10, vec![H256::random(), H256::random()]);
+        db.update(|tx| {
+            set_commitment_tx_included_height(tx, &txid, 10)?;
+            insert_block_header(tx, &winning_block)?;
+            tx.put::<MigratedBlockHashes>(10, winning_block.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &txid, 100))??,
+            None,
+            "stranded row must not be treated as canonical inclusion"
+        );
+        Ok(())
+    }
+
+    /// Genesis first-includes its commitments but never flows through the
+    /// confirm/migration metadata writers, so no dedup row is written for it at
+    /// init. The startup backfill must write `included_height = 0` for each
+    /// genesis commitment so the finalized lookup resolves them once genesis
+    /// passes the reorg floor — and must be idempotent across boots.
+    #[test]
+    fn backfill_genesis_commitment_included_height_is_idempotent() -> eyre::Result<()> {
+        use crate::backfill_genesis_commitment_included_height;
+        use crate::canonical_commitment_included_height;
+        use crate::tables::MigratedBlockHashes;
+        use irys_types::DatabaseProvider;
+        use reth_db::transaction::DbTxMut as _;
+        use std::sync::Arc;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        // Persist genesis the way `persist_genesis_block_and_commitments` does:
+        // header at height 0 carrying its commitment ledger, plus MBH[0].
+        let c0 = H256::random();
+        let c1 = H256::random();
+        let genesis = header_with_commitments(0, vec![c0, c1]);
+        db.update(|tx| {
+            insert_block_header(tx, &genesis)?;
+            tx.put::<MigratedBlockHashes>(0, genesis.block_hash)?;
+            Ok::<_, eyre::Report>(())
+        })??;
+
+        // No dedup row exists before the backfill — this is the gap the fix closes.
+        assert_eq!(
+            db.view(|tx| canonical_commitment_included_height(tx, &c0, u64::MAX))??,
+            None,
+            "no genesis commitment row before backfill"
+        );
+
+        backfill_genesis_commitment_included_height(&db)?;
+
+        // Each genesis commitment now resolves to height 0 (also exercises the
+        // content check against the genesis header).
+        for id in [c0, c1] {
+            assert_eq!(
+                db.view(|tx| canonical_commitment_included_height(tx, &id, u64::MAX))??,
+                Some(0),
+                "genesis commitment must resolve to included_height 0 after backfill"
+            );
+        }
+
+        // Second boot writes the same value — trivially idempotent.
+        backfill_genesis_commitment_included_height(&db)?;
+        for id in [c0, c1] {
+            assert_eq!(
+                db.view(|tx| canonical_commitment_included_height(tx, &id, u64::MAX))??,
+                Some(0),
+                "backfill must be idempotent across boots"
+            );
+        }
+        Ok(())
+    }
+
+    /// A missing `MigratedBlockHashes[0]` at backfill time is a hard invariant
+    /// violation (genesis must be persisted first) and must fail loud rather
+    /// than silently skip.
+    #[test]
+    fn backfill_genesis_commitment_included_height_fails_without_mbh() -> eyre::Result<()> {
+        use crate::backfill_genesis_commitment_included_height;
+        use irys_types::DatabaseProvider;
+        use std::sync::Arc;
+
+        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db = DatabaseProvider(Arc::new(
+            open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap(),
+        ));
+
+        assert!(
+            backfill_genesis_commitment_included_height(&db).is_err(),
+            "missing MigratedBlockHashes[0] must fail loud"
         );
         Ok(())
     }

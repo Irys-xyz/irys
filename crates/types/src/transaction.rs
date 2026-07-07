@@ -489,6 +489,12 @@ pub trait IrysTransactionCommon {
 
     /// Computed using a combination of signature bytes + prehash + ID bytes to uniquely identify even invalid transactions (i.e with an invalid ID/signature set)
     fn fingerprint(&self) -> H256;
+
+    /// The anchor-expiry window (in blocks) that applies to THIS transaction
+    /// kind. Data txs and commitment txs use different windows; keeping the
+    /// choice on the tx type stops call sites from having to select — and
+    /// potentially mismatch — the depth for a given transaction.
+    fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64;
 }
 
 impl DataTransactionHeader {
@@ -532,6 +538,10 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
     fn user_fee(&self) -> U256 {
         Self::user_fee(self).into()
+    }
+
+    fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64 {
+        u64::from(consensus.mempool.tx_anchor_expiry_depth)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -611,6 +621,10 @@ impl IrysTransactionCommon for CommitmentTransaction {
 
     fn user_fee(&self) -> U256 {
         Self::user_fee(self)
+    }
+
+    fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64 {
+        u64::from(consensus.mempool.commitment_anchor_expiry_depth)
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -719,6 +733,13 @@ impl IrysTransactionCommon for IrysTransaction {
         match self {
             Self::Data(tx) => tx.user_fee().into(),
             Self::Commitment(tx) => tx.user_fee(),
+        }
+    }
+
+    fn anchor_expiry_depth(&self, consensus: &ConsensusConfig) -> u64 {
+        match self {
+            Self::Data(tx) => tx.anchor_expiry_depth(consensus),
+            Self::Commitment(tx) => tx.anchor_expiry_depth(consensus),
         }
     }
 

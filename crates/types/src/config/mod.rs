@@ -96,6 +96,18 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
+        // Commitment anchors must survive at least until their anchor block
+        // migrates; but they may outlive the reorg window (resolved from the
+        // finalized index below the floor), so they are NOT capped at
+        // block_tree_depth.
+        ensure!(
+            self.consensus.block_migration_depth
+                <= u32::from(self.consensus.mempool.commitment_anchor_expiry_depth),
+            "commitment_anchor_expiry_depth ({}) must be >= block_migration_depth ({})",
+            self.consensus.mempool.commitment_anchor_expiry_depth,
+            self.consensus.block_migration_depth,
+        );
+
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
             ensure!(
                 self.consensus.expected_genesis_hash.is_some(),
@@ -372,6 +384,22 @@ impl Config {
                  only branch-invariant below the reorg floor — risking a consensus fork",
                 self.consensus.mempool.tx_anchor_expiry_depth,
                 self.consensus.block_tree_depth,
+            );
+
+            // The ingress-proof anchor window must be at least the tx-anchor
+            // window. Prevalidation builds the ingress anchor set from the by-hash
+            // tx-anchor walk (which reaches `tx_anchor_expiry_depth` deep) extended
+            // by the finalized block index; a shorter ingress window than the tx
+            // window has no shipped use and would make the ingress set narrower
+            // than the by-hash walk it is derived from. Keep the ordering explicit.
+            // (Not capped above — ingress anchors past the reorg floor are resolved
+            // from the finalized index, which is safe.)
+            ensure!(
+                self.consensus.mempool.ingress_proof_anchor_expiry_depth
+                    >= u16::from(self.consensus.mempool.tx_anchor_expiry_depth),
+                "ingress_proof_anchor_expiry_depth ({}) must be >= tx_anchor_expiry_depth ({})",
+                self.consensus.mempool.ingress_proof_anchor_expiry_depth,
+                self.consensus.mempool.tx_anchor_expiry_depth,
             );
         }
 
@@ -876,6 +904,7 @@ mod tests {
         max_commitment_txs_per_block = 100
         tx_anchor_expiry_depth = 20
         ingress_proof_anchor_expiry_depth = 200
+        commitment_anchor_expiry_depth = 100
         commitment_fee = 100
 
 
@@ -1399,6 +1428,34 @@ mod tests {
             config.validate().is_ok(),
             "test-mode configs must skip the tx-anchor vs tree-depth guard"
         );
+    }
+
+    #[test]
+    fn commitment_anchor_expiry_depth_invariant() {
+        // Must be >= block_migration_depth. Unconditional (applies in test mode too).
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .mempool
+            .commitment_anchor_expiry_depth = 3; // < block_migration_depth (6)
+        let config = Config::new_with_random_peer_id(node_config);
+        let _ = config
+            .validate()
+            .expect_err("commitment_anchor_expiry_depth < block_migration_depth must fail");
+
+        // May EXCEED block_tree_depth (unlike tx_anchor_expiry_depth): validated via
+        // finalized index below the reorg floor.
+        let mut node_config = NodeConfig::testing();
+        node_config
+            .consensus
+            .get_mut()
+            .mempool
+            .commitment_anchor_expiry_depth = 100; // > block_tree_depth (50)
+        let config = Config::new_with_random_peer_id(node_config);
+        config
+            .validate()
+            .expect("commitment_anchor_expiry_depth may exceed block_tree_depth");
     }
 
     #[test]

@@ -12,8 +12,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, canonical_submit_height, ingress_proofs_by_data_root,
-    tx_header_by_txid,
+    cached_data_root_by_data_root, canonical_commitment_included_height, canonical_submit_height,
+    ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
     BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
@@ -111,6 +111,7 @@ pub async fn select_best_txs(
     let (
         canonical,
         parent_block_height,
+        tip_block_height,
         parent_evm_block_id,
         commitment_snapshot,
         parent_epoch_snapshot,
@@ -144,6 +145,15 @@ pub async fn select_best_txs(
         }
         let canonical = full_canonical[..=parent_pos].to_vec();
 
+        // Height of the true canonical tip (before truncation to the parent). The
+        // finalized-inclusion dedup floor is anchored here, not at the parent, so
+        // the in-memory reorg-window set and the DB finalized index meet with no
+        // gap even when building on a non-tip parent — see the dedup pre-pass below.
+        let tip_block_height = full_canonical
+            .last()
+            .expect("canonical chain always has at least one entry")
+            .height();
+
         let block = tree
             .get_block(&parent_block_hash)
             .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
@@ -171,6 +181,7 @@ pub async fn select_best_txs(
         (
             canonical,
             block_height,
+            tip_block_height,
             evm_block_id,
             commitment_snapshot,
             epoch_snapshot,
@@ -182,13 +193,29 @@ pub async fn select_best_txs(
     let next_block_height = parent_block_height + 1;
     // Use the new block's timestamp for hardfork params, matching what the validator uses
     let current_timestamp = new_block_timestamp;
-    let min_anchor_height = current_height.saturating_sub(
-        (ctx.config.consensus.mempool.tx_anchor_expiry_depth as u64)
-            .saturating_sub(ctx.config.consensus.block_migration_depth as u64),
-    );
+    // Lower anchor bound for an item type: its expiry window pulled in by the
+    // migration-depth maturity margin, floored at genesis. Shared by data txs
+    // and commitments so the two windows can't drift apart.
+    let min_anchor_floor = |expiry_depth: u64| {
+        current_height.saturating_sub(
+            expiry_depth.saturating_sub(u64::from(ctx.config.consensus.block_migration_depth)),
+        )
+    };
+    let min_anchor_height =
+        min_anchor_floor(ctx.config.consensus.mempool.tx_anchor_expiry_depth.into());
 
     let max_anchor_height =
-        current_height.saturating_sub(ctx.config.consensus.block_migration_depth as u64);
+        current_height.saturating_sub(u64::from(ctx.config.consensus.block_migration_depth));
+
+    // Commitments use a longer expiry window than data txs; keep the same
+    // maturity upper bound (max_anchor_height).
+    let commitment_min_anchor_height = min_anchor_floor(
+        ctx.config
+            .consensus
+            .mempool
+            .commitment_anchor_expiry_depth
+            .into(),
+    );
 
     let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 
@@ -233,6 +260,41 @@ pub async fn select_best_txs(
         .consensus
         .hardforks
         .retain_valid_commitment_versions(&mut sorted_commitments, new_block_timestamp);
+
+    // `confirmed_commitments` (built from the canonical cache above) only reaches
+    // ~block_tree_depth blocks back. A commitment included below that window is
+    // pruned from the block tree yet may still sit inside its much longer
+    // anchor-expiry window, so it stays selectable — and re-including it would
+    // produce a block the producer's own validation rejects as a replay (see
+    // `find_replayed_commitment`). Extend the dedup with the same durable
+    // finalized-inclusion index the validator uses. That index is only
+    // branch-invariant at or below the tip's reorg floor, so cap it at
+    // `tip_height - block_tree_depth` — the exact floor the canonical cache
+    // reaches down to — so the in-memory set and the finalized index meet with no
+    // gap, even on a non-tip parent (anchoring at the parent instead would leave
+    // the band `[parent - depth + 1, tip - depth]` uncovered). No over-skip: the
+    // parent is canonical (StaleParent check) and sits within the cache
+    // (`parent >= tip - depth`), so every height `<= tip - depth` is finalized AND
+    // on the parent's own ancestry.
+    if !sorted_commitments.is_empty() {
+        let commitment_finalized_floor =
+            tip_block_height.saturating_sub(ctx.config.consensus.block_tree_depth);
+        ctx.db.view_eyre(|read_tx| -> eyre::Result<()> {
+            for tx in &sorted_commitments {
+                if !confirmed_commitments.contains(&tx.id())
+                    && canonical_commitment_included_height(
+                        read_tx,
+                        &tx.id(),
+                        commitment_finalized_floor,
+                    )?
+                    .is_some()
+                {
+                    confirmed_commitments.insert(tx.id());
+                }
+            }
+            Ok(())
+        })?;
+    }
 
     balances.extend(
         helpers::fetch_balances_for_transactions(
@@ -279,7 +341,7 @@ pub async fn select_best_txs(
         if !crate::anchor_validation::validate_anchor_for_inclusion(
             ctx.block_tree,
             ctx.db,
-            min_anchor_height,
+            commitment_min_anchor_height,
             max_anchor_height,
             tx,
         )? {
@@ -288,7 +350,7 @@ pub async fn select_best_txs(
                 tx.signer = ?tx.signer(),
                 tx.commitment_type = ?tx.commitment_type(),
                 tx.anchor = ?tx.anchor(),
-                min_anchor_height = min_anchor_height,
+                commitment_min_anchor_height = commitment_min_anchor_height,
                 max_anchor_height = max_anchor_height,
                 "Not promoting commitment tx - anchor validation failed"
             );

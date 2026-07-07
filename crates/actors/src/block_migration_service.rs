@@ -28,6 +28,10 @@ pub struct BlockMigrationService {
     block_index_guard: BlockIndexReadGuard,
     supply_state: Option<Arc<SupplyState>>,
     chunk_size: u64,
+    /// Epoch length, used to identify non-genesis epoch blocks: those APPLY
+    /// (re-list) every commitment of the epoch but never first-INCLUDE one, so
+    /// they must not write commitment dedup metadata.
+    num_blocks_in_epoch: u64,
     cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     storage_modules_guard: Option<StorageModulesReadGuard>,
@@ -128,6 +132,7 @@ impl BlockMigrationService {
         block_index_guard: BlockIndexReadGuard,
         supply_state: Option<Arc<SupplyState>>,
         chunk_size: u64,
+        num_blocks_in_epoch: u64,
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     ) -> Self {
@@ -136,10 +141,65 @@ impl BlockMigrationService {
             block_index_guard,
             supply_state,
             chunk_size,
+            num_blocks_in_epoch,
             cache,
             chunk_migration_sender,
             storage_modules_guard: None,
         }
+    }
+
+    /// A non-genesis epoch block (`height % num_blocks_in_epoch == 0`, height
+    /// != 0) re-lists every commitment of the epoch as an application/rollup —
+    /// it never first-includes one (validators enforce exact equality with the
+    /// producer's epoch rollup, so a non-genesis epoch block cannot introduce a
+    /// commitment). Its confirmation/migration must therefore NOT touch
+    /// commitment dedup metadata, so `included_height` keeps naming the true
+    /// inclusion block and survives an epoch-boundary reorg. Genesis (height 0)
+    /// is the one epoch block that genuinely first-includes its commitments, so
+    /// it is excluded here and retains normal write behavior.
+    fn is_non_genesis_epoch_block(&self, height: u64) -> bool {
+        height != 0 && height.is_multiple_of(self.num_blocks_in_epoch)
+    }
+
+    /// Writes the commitment replay-dedup metadata (`included_height = header
+    /// height`) for every commitment in `header`.
+    ///
+    /// Guarded by the invariant shared with [`clear_commitment_inclusions`]:
+    /// only blocks that first-INCLUDE a commitment own its dedup metadata. A
+    /// non-genesis epoch block merely re-lists (applies) the epoch's commitments
+    /// as a rollup — writing `included_height = h_epoch` would overwrite the
+    /// commitment's true inclusion height, so it is skipped. Genesis (height 0)
+    /// genuinely first-includes its commitments and is NOT skipped. A
+    /// commitment-free block is a no-op.
+    fn persist_commitment_inclusions(
+        &self,
+        tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+        header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let commitment_ids = header.commitment_tx_ids();
+        if commitment_ids.is_empty() || self.is_non_genesis_epoch_block(header.height) {
+            return Ok(());
+        }
+        irys_database::batch_set_commitment_tx_included_height(tx, commitment_ids, header.height)?;
+        Ok(())
+    }
+
+    /// Clears the commitment replay-dedup metadata for every commitment in
+    /// `header` (re-org orphan handling). Guarded identically to
+    /// [`persist_commitment_inclusions`] — see its docs for the epoch/genesis
+    /// invariant: orphaning a non-genesis epoch block must not delete the dedup
+    /// row of a commitment whose true (non-epoch) inclusion is still canonical.
+    fn clear_commitment_inclusions(
+        &self,
+        tx: &(impl reth_db::transaction::DbTxMut + reth_db::transaction::DbTx),
+        header: &IrysBlockHeader,
+    ) -> eyre::Result<()> {
+        let commitment_ids = header.commitment_tx_ids();
+        if commitment_ids.is_empty() || self.is_non_genesis_epoch_block(header.height) {
+            return Ok(());
+        }
+        irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
+        Ok(())
     }
 
     pub fn set_storage_modules_guard(&mut self, guard: StorageModulesReadGuard) {
@@ -269,7 +329,6 @@ impl BlockMigrationService {
             for block in blocks_to_clear {
                 let header = block.header();
                 let orphan_block_hash = header.block_hash;
-                let commitment_ids = header.commitment_tx_ids();
 
                 for dl in &header.data_ledgers {
                     let tx_ids = &dl.tx_ids.0;
@@ -283,9 +342,7 @@ impl BlockMigrationService {
                         irys_database::batch_clear_data_tx_included_height(tx, tx_ids)?;
                     }
                 }
-                if !commitment_ids.is_empty() {
-                    irys_database::batch_clear_commitment_tx_metadata(tx, commitment_ids)?;
-                }
+                self.clear_commitment_inclusions(tx, header)?;
 
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
                     irys_database::remove_data_root_block_set_entry(
@@ -311,18 +368,11 @@ impl BlockMigrationService {
             // the same outer loop.
             for block in blocks_to_confirm {
                 let header = block.header();
-                let commitment_ids = header.commitment_tx_ids();
                 let height = header.height;
                 let block_hash = header.block_hash;
 
                 write_data_ledger_metadata(tx, &header.data_ledgers, height)?;
-                if !commitment_ids.is_empty() {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        commitment_ids,
-                        height,
-                    )?;
-                }
+                self.persist_commitment_inclusions(tx, header)?;
 
                 // Phase 3: append `block_hash` to each Submit-tx's CDR.block_set.
                 for submit_tx in block.transactions().get_ledger_txs(DataLedger::Submit) {
@@ -640,7 +690,6 @@ impl BlockMigrationService {
         let transactions = sealed_block.transactions();
 
         let commitment_txs = transactions.get_ledger_system_txs(SystemLedger::Commitment);
-        let commitment_tx_ids = header.commitment_tx_ids();
         let block_height = header.height;
 
         let migrated_block = (**header).clone();
@@ -673,13 +722,9 @@ impl BlockMigrationService {
 
             write_data_ledger_metadata(tx, &header.data_ledgers, block_height)?;
 
-            if !commitment_tx_ids.is_empty() {
-                irys_database::batch_set_commitment_tx_included_height(
-                    tx,
-                    commitment_tx_ids,
-                    block_height,
-                )?;
-            }
+            // `insert_commitment_tx` above (IrysCommitments) is unconditional and
+            // untouched; this only owns the replay-dedup `included_height` row.
+            self.persist_commitment_inclusions(tx, header)?;
 
             irys_database::insert_block_header(tx, &migrated_block)?;
 
@@ -741,9 +786,23 @@ mod tests {
 
     /// Build a `BlockMigrationService` whose only meaningful field is `db`.
     /// All other dependencies are placeholders sufficient to construct but
-    /// not exercised by `persist_metadata`.
+    /// not exercised by `persist_metadata`. Uses the testing epoch length.
     fn make_service(
         db: DatabaseProvider,
+    ) -> (
+        BlockMigrationService,
+        irys_testing_utils::utils::tempfile::TempDir,
+    ) {
+        make_service_with_epoch(db, ConsensusConfig::testing().epoch.num_blocks_in_epoch)
+    }
+
+    /// Like [`make_service`] but with an explicit `num_blocks_in_epoch`, so
+    /// `persist_block` epoch-skip coverage can reach an epoch height (height 1
+    /// with `num_blocks_in_epoch = 1`) after seeding only genesis, instead of
+    /// seeding a full 100-block index.
+    fn make_service_with_epoch(
+        db: DatabaseProvider,
+        num_blocks_in_epoch: u64,
     ) -> (
         BlockMigrationService,
         irys_testing_utils::utils::tempfile::TempDir,
@@ -771,6 +830,7 @@ mod tests {
             block_index_guard,
             None, // supply_state — unused by persist_metadata
             ConsensusConfig::testing().chunk_size,
+            num_blocks_in_epoch,
             cache,
             chunk_migration_sender,
         );
@@ -1078,6 +1138,225 @@ mod tests {
         db.view(|tx| irys_database::get_data_tx_metadata(tx, tx_id))
             .unwrap()
             .unwrap()
+    }
+
+    fn read_commitment_tx_metadata(
+        db: &DatabaseProvider,
+        tx_id: &H256,
+    ) -> Option<irys_types::CommitmentTransactionMetadata> {
+        db.view(|tx| irys_database::get_commitment_tx_metadata(tx, tx_id))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Build a signed header whose `SystemLedger::Commitment` ledger lists
+    /// `commitment_tx_ids` (what `header.commitment_tx_ids()` reads). Data
+    /// ledgers are left empty so an empty body is header/body-consistent.
+    fn make_commitment_header(
+        height: u64,
+        previous_block_hash: H256,
+        commitment_tx_ids: Vec<H256>,
+    ) -> IrysBlockHeader {
+        use irys_types::SystemTransactionLedger;
+        let mut header = IrysBlockHeader::new_mock_header();
+        header.height = height;
+        header.previous_block_hash = previous_block_hash;
+        header.cumulative_diff = U256::from(height);
+        header.system_ledgers = vec![SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment as u32,
+            tx_ids: H256List(commitment_tx_ids),
+        }];
+        header.test_sign();
+        header
+    }
+
+    /// Wrap a commitment header in a `SealedBlock` with an empty body. The
+    /// commitment-metadata paths under test read tx_ids from the header's
+    /// system ledger, not the body.
+    fn make_sealed_commitment(header: IrysBlockHeader) -> Arc<SealedBlock> {
+        Arc::new(SealedBlock::new_unchecked(
+            Arc::new(header),
+            BlockTransactions::default(),
+        ))
+    }
+
+    /// Seed a commitment dedup row (`IrysCommitmentTxMetadata.included_height`)
+    /// at `height`, modeling a prior inclusion.
+    fn seed_commitment_included_height(db: &DatabaseProvider, tx_id: H256, height: u64) {
+        db.update_eyre(|tx| {
+            irys_database::set_commitment_tx_included_height(tx, &tx_id, height)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // ---- commitment included_height: epoch-block skip tests ----
+    //
+    // Invariant: `included_height` names the block that INCLUDED a commitment,
+    // never the (non-genesis) epoch block that later APPLIED it. Epoch blocks
+    // re-list every commitment of the epoch as a rollup, so their
+    // confirmation/migration must not create, overwrite, or delete commitment
+    // dedup rows — otherwise an epoch-boundary reorg would strand or move rows
+    // whose true inclusions remain canonical below the fork point.
+
+    /// Confirming a non-genesis epoch block must neither overwrite an existing
+    /// commitment row nor create a new one.
+    #[tokio::test]
+    async fn persist_metadata_epoch_confirm_does_not_write_commitment_rows() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+        let epoch_len = ConsensusConfig::testing().epoch.num_blocks_in_epoch;
+
+        // A commitment truly included earlier at a non-epoch height.
+        let included_commitment = H256::random();
+        let true_inclusion_height = 5_u64;
+        seed_commitment_included_height(&db, included_commitment, true_inclusion_height);
+
+        // A commitment with no prior row (never included before this rollup).
+        let fresh_commitment = H256::random();
+
+        // Epoch block E re-lists both as a rollup at height = epoch_len.
+        let epoch_block = make_commitment_header(
+            epoch_len,
+            H256::random(),
+            vec![included_commitment, fresh_commitment],
+        );
+        let epoch_sealed = make_sealed_commitment(epoch_block);
+
+        svc.persist_metadata(&[], std::slice::from_ref(&epoch_sealed))?;
+
+        assert_eq!(
+            read_commitment_tx_metadata(&db, &included_commitment)
+                .expect("row must still exist")
+                .included_height,
+            Some(true_inclusion_height),
+            "epoch-block confirm must not overwrite the true inclusion height",
+        );
+        assert!(
+            read_commitment_tx_metadata(&db, &fresh_commitment).is_none(),
+            "epoch-block confirm must not create a commitment row",
+        );
+        Ok(())
+    }
+
+    /// Orphaning a non-genesis epoch block (in `blocks_to_clear`) must not
+    /// delete commitment rows whose true inclusion remains canonical below the
+    /// fork point.
+    #[tokio::test]
+    async fn persist_metadata_epoch_orphan_does_not_delete_commitment_rows() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+        let epoch_len = ConsensusConfig::testing().epoch.num_blocks_in_epoch;
+
+        let included_commitment = H256::random();
+        let true_inclusion_height = 5_u64;
+        seed_commitment_included_height(&db, included_commitment, true_inclusion_height);
+
+        let epoch_block =
+            make_commitment_header(epoch_len, H256::random(), vec![included_commitment]);
+        let epoch_sealed = make_sealed_commitment(epoch_block);
+
+        // Orphan the epoch block.
+        svc.persist_metadata(std::slice::from_ref(&epoch_sealed), &[])?;
+
+        assert_eq!(
+            read_commitment_tx_metadata(&db, &included_commitment)
+                .expect("row must survive an epoch-block orphan")
+                .included_height,
+            Some(true_inclusion_height),
+            "orphaning an epoch block must not delete the dedup row",
+        );
+        Ok(())
+    }
+
+    /// Regression guard: orphaning a NON-epoch inclusion block still clears its
+    /// commitment rows (the stranded-row self-heal / last-write-wins path is
+    /// preserved for inclusion blocks).
+    #[tokio::test]
+    async fn persist_metadata_non_epoch_orphan_still_clears_commitment_rows() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let commitment = H256::random();
+        let height = 5_u64; // non-epoch (5 % 100 != 0)
+        seed_commitment_included_height(&db, commitment, height);
+
+        let block = make_commitment_header(height, H256::random(), vec![commitment]);
+        let sealed = make_sealed_commitment(block);
+
+        svc.persist_metadata(std::slice::from_ref(&sealed), &[])?;
+
+        assert!(
+            read_commitment_tx_metadata(&db, &commitment).is_none(),
+            "orphaning a non-epoch inclusion block must still clear its commitment row",
+        );
+        Ok(())
+    }
+
+    /// Genesis (height 0) is excluded from the epoch skip: it genuinely
+    /// first-includes its commitments, so it writes on confirm and clears on
+    /// orphan like any inclusion block.
+    #[tokio::test]
+    async fn persist_metadata_genesis_writes_and_clears_commitment_rows() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service(db.clone());
+
+        let commitment = H256::random();
+        let genesis = make_commitment_header(0, H256::zero(), vec![commitment]);
+        let genesis_sealed = make_sealed_commitment(genesis);
+
+        svc.persist_metadata(&[], std::slice::from_ref(&genesis_sealed))?;
+        assert_eq!(
+            read_commitment_tx_metadata(&db, &commitment)
+                .expect("genesis must write commitment included_height")
+                .included_height,
+            Some(0),
+            "height 0 is not skipped — genesis genuinely first-includes",
+        );
+
+        svc.persist_metadata(std::slice::from_ref(&genesis_sealed), &[])?;
+        assert!(
+            read_commitment_tx_metadata(&db, &commitment).is_none(),
+            "height 0 keeps normal clear behavior",
+        );
+        Ok(())
+    }
+
+    /// Migration (`persist_block`) of a non-genesis epoch block must not write
+    /// commitment `included_height`, while genesis migration still does.
+    /// Uses `num_blocks_in_epoch = 1` so height 1 is an epoch block reachable
+    /// after seeding only genesis (avoids seeding a full 100-block index).
+    #[tokio::test]
+    async fn persist_block_epoch_block_skips_commitment_included_height() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (svc, _svc_tmp) = make_service_with_epoch(db.clone(), 1);
+
+        // Genesis (height 0) is not skipped: migrating it writes the row.
+        let genesis_commitment = H256::random();
+        let genesis = make_commitment_header(0, H256::zero(), vec![genesis_commitment]);
+        let genesis_sealed = make_sealed_commitment(genesis);
+        svc.persist_block(genesis_sealed.as_ref())?;
+        assert_eq!(
+            read_commitment_tx_metadata(&db, &genesis_commitment).and_then(|m| m.included_height),
+            Some(0),
+            "genesis migration writes commitment included_height",
+        );
+
+        // Epoch block at height 1 (num_blocks_in_epoch = 1): migrating it must
+        // NOT write the commitment row.
+        let epoch_commitment = H256::random();
+        let epoch_block = make_commitment_header(
+            1,
+            genesis_sealed.header().block_hash,
+            vec![epoch_commitment],
+        );
+        let epoch_sealed = make_sealed_commitment(epoch_block);
+        svc.persist_block(epoch_sealed.as_ref())?;
+        assert!(
+            read_commitment_tx_metadata(&db, &epoch_commitment).is_none(),
+            "migration of a non-genesis epoch block must not write commitment included_height",
+        );
+        Ok(())
     }
 
     // ---- included_height / promoted_height correctness tests ----

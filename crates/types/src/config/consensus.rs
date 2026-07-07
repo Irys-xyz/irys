@@ -511,6 +511,15 @@ pub struct MempoolConsensusConfig {
     /// The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
     pub ingress_proof_anchor_expiry_depth: u16,
 
+    /// The number of blocks a given anchor is valid for when anchoring a
+    /// COMMITMENT transaction. Typically longer than `tx_anchor_expiry_depth`
+    /// (though this is not enforced by `Config::validate`) so custody
+    /// workflows (multisig coordination) have time to broadcast a signed
+    /// commitment. Unlike `tx_anchor_expiry_depth` it is NOT capped at
+    /// `block_tree_depth`: commitment anchors below the reorg floor are
+    /// resolved from the finalized block index, like ingress-proof anchors.
+    pub commitment_anchor_expiry_depth: u16,
+
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
 }
@@ -717,6 +726,8 @@ impl ConsensusConfig {
                 tx_anchor_expiry_depth: 20,
                 // The number of blocks a given anchor (tx or block hash) is valid for. The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
                 ingress_proof_anchor_expiry_depth: 200,
+                // The number of blocks a given anchor is valid for when anchoring a commitment transaction.
+                commitment_anchor_expiry_depth: 7200,
                 // Fee required for commitment transactions (stake, unstake, pledge, unpledge)
                 commitment_fee: 62500000000000000,
             },
@@ -854,6 +865,7 @@ impl ConsensusConfig {
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 20,
                 ingress_proof_anchor_expiry_depth: 200,
+                commitment_anchor_expiry_depth: 100,
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
@@ -995,6 +1007,7 @@ impl ConsensusConfig {
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 50,
                 ingress_proof_anchor_expiry_depth: 200,
+                commitment_anchor_expiry_depth: 7200,
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
@@ -1275,7 +1288,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("6v2x1bjvaqtoVaQ52dc4J6DR7hMhCebwa178P9TU5isQ");
+        let expected_hash = H256::from_base58("ZRo1XRxuY4bYeuUKy2VPcBDpnuUsDGUBJk4uCYByaLE");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
