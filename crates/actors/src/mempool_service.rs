@@ -503,10 +503,15 @@ impl Inner {
         self.mempool_state.wipe_blacklists().await;
     }
 
-    /// After restoring the mempool from disk, reconstruct metadata fields (included_height,
-    /// promoted_height) from the database. The `#[serde(skip)]` on `DataTransactionMetadata`
-    /// means these fields are lost during serialization. The DB is authoritative since
-    /// `BlockMigrationService` persists them at confirmation time.
+    /// After restoring the mempool from disk, reconstruct metadata fields
+    /// (included_height, promoted_height) from the database. The
+    /// `#[serde(skip)]` on `DataTransactionMetadata` means these fields are lost
+    /// during serialization. The DB carries them only for **migrated**
+    /// (finalized) inclusions — `BlockMigrationService` writes them at migration,
+    /// not at confirmation — so this restores the finalized view. A
+    /// confirmed-but-unmigrated tx correctly comes back as pending: its block was
+    /// never durably persisted, so claiming it "confirmed" would name a block the
+    /// node no longer has.
     pub async fn reconstruct_metadata_from_db(&self) {
         // Startup-only path: no other writers exist yet, so the timeout-guarded
         // `mempool_state.write()` helper is unnecessary here. Direct write is safe.

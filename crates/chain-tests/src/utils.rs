@@ -2279,24 +2279,34 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn get_is_promoted(&self, tx_id: &H256) -> eyre::Result<bool> {
-        // Check DB first (authoritative source)
-        match self
+        // The DB carries `promoted_height` only once the promoting (Publish)
+        // block has migrated. A confirmed-but-unmigrated promotion lives only in
+        // the live mempool, so consult it whenever the DB doesn't already show
+        // the tx as promoted (row absent, or present from the Submit migration
+        // with `promoted_height = None`).
+        let db_header = self
             .node_ctx
             .db
             .view_eyre(|tx| tx_header_by_txid(tx, tx_id))
+            .map_err(|e| eyre::eyre!("Failed to collect tx header: {}", e))?;
+
+        if db_header
+            .as_ref()
+            .is_some_and(|h| h.promoted_height().is_some())
         {
-            Ok(Some(tx_header)) => {
-                debug!("{:?}", tx_header);
-                Ok(tx_header.promoted_height().is_some())
-            }
-            Ok(None) => {
-                // Fall back to mempool metadata
-                if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
-                    return Ok(meta.promoted_height().is_some());
-                }
-                Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
-            }
-            Err(e) => Err(eyre::eyre!("Failed to collect tx header: {}", e)),
+            return Ok(true);
+        }
+
+        if let Some(meta) = self.node_ctx.mempool_guard.get_tx_metadata(tx_id).await {
+            return Ok(meta.promoted_height().is_some());
+        }
+
+        // Not promoted in the mempool. Known (DB row exists) → not promoted;
+        // entirely unknown → error.
+        if db_header.is_some() {
+            Ok(false)
+        } else {
+            Err(eyre::eyre!("No tx header found for txid {:?}", tx_id))
         }
     }
 

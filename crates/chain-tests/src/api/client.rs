@@ -4,7 +4,7 @@ use crate::utils::{IrysNodeTest, coverage_adjusted_timeout};
 use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient, TransactionStatus};
 use irys_chain::IrysNodeCtx;
-use irys_types::{BlockIndexQuery, DataLedger, IrysTransactionResponse, NodeConfig};
+use irys_types::{BlockIndexQuery, IrysTransactionResponse, NodeConfig};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr as _,
@@ -435,12 +435,16 @@ async fn api_tx_status_finalized_survives_restart() {
     ctx.stop().await;
 }
 
-/// Tests that CONFIRMED (pre-migration) transaction status survives a node restart.
-/// This is the critical edge case: included_height may only live in memory before
-/// migration. After restart, the status endpoint must still return CONFIRMED with
-/// the correct block_height.
+/// A CONFIRMED-but-unmigrated transaction reverts to PENDING after a node
+/// restart. `included_height` lives only in memory before migration, and the
+/// block that included it is never durably persisted pre-migration — so after a
+/// restart the mempool restores the tx as pending. Reporting it as CONFIRMED
+/// would name a block the node no longer has. (The prior behavior persisted this
+/// metadata to the consensus DB at confirmation to fake survival across restart;
+/// that write was removed because it let an orphaned row masquerade as canonical
+/// in consensus.)
 #[test_log::test(tokio::test)]
-async fn api_tx_status_confirmed_survives_restart() {
+async fn api_tx_status_reverts_to_pending_after_restart_before_migration() {
     let mut config = NodeConfig::testing();
     // Use a larger migration depth so we can capture CONFIRMED state without risking migration.
     // Must stay <= tx_anchor_expiry_depth (20 in testing config).
@@ -503,25 +507,20 @@ async fn api_tx_status_confirmed_survives_restart() {
         ctx.node_ctx.config.node_config.http.bind_port,
     );
 
-    // Verify status after restart — must still be CONFIRMED with the same block_height
+    // After restart the confirmed-but-unmigrated tx reverts to PENDING: its
+    // block was never durably persisted, so the mempool restores the tx as
+    // pending. `block_height_before` named a block the node no longer has.
     let status_after = api_client
         .get_transaction_status(api_address, tx_id)
         .await
         .expect("get_transaction_status should succeed after restart")
-        .expect("status should still exist after restart");
+        .expect("tx should still be known (restored to mempool) after restart");
 
     assert!(
-        matches!(
-            status_after.status,
-            TransactionStatus::Confirmed | TransactionStatus::Finalized
-        ),
-        "expected CONFIRMED or FINALIZED after restart, got {:?}",
+        matches!(status_after.status, TransactionStatus::Pending),
+        "unmigrated CONFIRMED tx must revert to PENDING after restart (its block \
+         is gone); was confirmed at {block_height_before}, got {:?}",
         status_after.status
-    );
-    assert_eq!(
-        status_after.block_height.expect("should have block_height"),
-        block_height_before,
-        "block_height should be identical after restart"
     );
 
     ctx.stop().await;
@@ -604,11 +603,20 @@ async fn api_tx_status_commitment_tx() {
     ctx.stop().await;
 }
 
-/// Tests that a promoted transaction is NOT promoted a second time after node restart.
-/// Regression test for the double-promotion bug caused by `#[serde(skip)]` on metadata
-/// which loses `promoted_height` when the mempool persists to disk.
+/// A promotion that has not yet migrated does NOT survive a node restart: the
+/// promoting (Publish) block was never durably persisted, so after restart the
+/// tx reverts to un-promoted (restored to the mempool as pending). Re-promoting
+/// it afterwards is legitimate recovery, not a double-promotion — the original
+/// promotion never became canonical.
+///
+/// (Previously `promoted_height` was persisted to the consensus DB at
+/// confirmation so this state faked survival across restart; that write was
+/// removed because it let an orphaned row masquerade as canonical in consensus.
+/// The genuine same-chain double-promotion guard — a tx already promoted on the
+/// parent's branch cannot be re-promoted — is branch-correct in the producer/
+/// validator and covered by their tests.)
 #[test_log::test(tokio::test)]
-async fn api_double_promotion_after_restart() {
+async fn api_promotion_reverts_after_restart_before_migration() {
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -657,53 +665,31 @@ async fn api_double_promotion_after_restart() {
         .await
         .expect("tx should be promoted");
 
-    let height_before_restart = ctx.get_canonical_chain_height().await;
-
-    // Find which block promoted the tx by scanning Publish ledgers
-    let mut promotion_height = None;
-    for h in 1..=height_before_restart {
-        let block = ctx.get_block_by_height(h).await.unwrap();
-        if block.data_ledgers[DataLedger::Publish]
-            .tx_ids
-            .0
-            .contains(&tx_id)
-        {
-            promotion_height = Some(h);
-            break;
-        }
-    }
-    let promotion_height = promotion_height.expect("tx should appear in a Publish ledger");
-    debug!(
-        "Tx {} promoted at height {}. Restarting node...",
-        tx_id, promotion_height
+    // Confirm the tx is promoted before the restart.
+    assert!(
+        ctx.get_is_promoted(&tx_id)
+            .await
+            .expect("promotion state should be queryable"),
+        "tx should be promoted before restart"
     );
 
-    // Restart the node — promoted_height metadata is lost due to #[serde(skip)]
+    // Restart the node. The promoting block was not yet migrated, so it is not
+    // durably persisted; the mempool restores the tx as pending with its
+    // `promoted_height` gone (`#[serde(skip)]` strips it and the DB never held it
+    // pre-migration).
     let ctx = ctx.stop().await.start().await;
 
-    // Mine more blocks after restart
-    let blocks_to_mine = 10;
-    for _ in 0..blocks_to_mine {
-        ctx.mine_block().await.expect("expected mined block");
-    }
-
-    let height_after = ctx.get_canonical_chain_height().await;
-
-    // Verify the tx does NOT appear in any new block's Publish ledger (no double promotion)
-    for h in (height_before_restart + 1)..=height_after {
-        let block = ctx.get_block_by_height(h).await.unwrap();
-        assert!(
-            !block.data_ledgers[DataLedger::Publish]
-                .tx_ids
-                .0
-                .contains(&tx_id),
-            "Double promotion detected! Tx {} appeared in Publish ledger at height {} \
-             (originally promoted at height {})",
-            tx_id,
-            h,
-            promotion_height,
-        );
-    }
+    // The promotion did not survive: the tx is no longer reported as promoted.
+    // (Re-promotion by subsequent mining would be legitimate recovery, since the
+    // original promotion never became canonical — so we do not assert against
+    // it; the same-chain double-promotion guard is exercised by the producer/
+    // validator branch-correctness tests.)
+    assert!(
+        !ctx.get_is_promoted(&tx_id)
+            .await
+            .expect("promotion state should be queryable after restart"),
+        "unmigrated promotion must not survive restart (its block is gone)"
+    );
 
     ctx.stop().await;
 }
