@@ -12,8 +12,8 @@ use irys_database::db::IrysDatabaseExt as _;
 use irys_database::db_cache::CachedDataRoot;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, canonical_submit_height, ingress_proofs_by_data_root,
-    tx_header_by_txid,
+    cached_data_root_by_data_root, canonical_commitment_included_height, canonical_submit_height,
+    ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
     BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
@@ -111,6 +111,7 @@ pub async fn select_best_txs(
     let (
         canonical,
         parent_block_height,
+        tip_block_height,
         parent_evm_block_id,
         commitment_snapshot,
         parent_epoch_snapshot,
@@ -144,6 +145,15 @@ pub async fn select_best_txs(
         }
         let canonical = full_canonical[..=parent_pos].to_vec();
 
+        // Height of the true canonical tip (before truncation to the parent). The
+        // finalized-inclusion dedup floor is anchored here, not at the parent, so
+        // the in-memory reorg-window set and the DB finalized index meet with no
+        // gap even when building on a non-tip parent — see the dedup pre-pass below.
+        let tip_block_height = full_canonical
+            .last()
+            .expect("canonical chain always has at least one entry")
+            .height();
+
         let block = tree
             .get_block(&parent_block_hash)
             .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
@@ -171,6 +181,7 @@ pub async fn select_best_txs(
         (
             canonical,
             block_height,
+            tip_block_height,
             evm_block_id,
             commitment_snapshot,
             epoch_snapshot,
@@ -249,6 +260,41 @@ pub async fn select_best_txs(
         .consensus
         .hardforks
         .retain_valid_commitment_versions(&mut sorted_commitments, new_block_timestamp);
+
+    // `confirmed_commitments` (built from the canonical cache above) only reaches
+    // ~block_tree_depth blocks back. A commitment included below that window is
+    // pruned from the block tree yet may still sit inside its much longer
+    // anchor-expiry window, so it stays selectable — and re-including it would
+    // produce a block the producer's own validation rejects as a replay (see
+    // `find_replayed_commitment`). Extend the dedup with the same durable
+    // finalized-inclusion index the validator uses. That index is only
+    // branch-invariant at or below the tip's reorg floor, so cap it at
+    // `tip_height - block_tree_depth` — the exact floor the canonical cache
+    // reaches down to — so the in-memory set and the finalized index meet with no
+    // gap, even on a non-tip parent (anchoring at the parent instead would leave
+    // the band `[parent - depth + 1, tip - depth]` uncovered). No over-skip: the
+    // parent is canonical (StaleParent check) and sits within the cache
+    // (`parent >= tip - depth`), so every height `<= tip - depth` is finalized AND
+    // on the parent's own ancestry.
+    if !sorted_commitments.is_empty() {
+        let commitment_finalized_floor =
+            tip_block_height.saturating_sub(ctx.config.consensus.block_tree_depth);
+        ctx.db.view_eyre(|read_tx| -> eyre::Result<()> {
+            for tx in &sorted_commitments {
+                if !confirmed_commitments.contains(&tx.id())
+                    && canonical_commitment_included_height(
+                        read_tx,
+                        &tx.id(),
+                        commitment_finalized_floor,
+                    )?
+                    .is_some()
+                {
+                    confirmed_commitments.insert(tx.id());
+                }
+            }
+            Ok(())
+        })?;
+    }
 
     balances.extend(
         helpers::fetch_balances_for_transactions(

@@ -285,3 +285,62 @@ async fn genesis_commitments_resolve_to_included_height_zero_after_boot() -> eyr
     node.stop().await;
     Ok(())
 }
+
+/// Selection-side counterpart to the two validation tests above: the block
+/// PRODUCER (`select_best_txs`) must not re-select a commitment already finalized
+/// below the reorg floor.
+///
+/// After [`setup_finalized_update_reward_address`], the `UpdateRewardAddress`'s
+/// inclusion block sits below `tip - block_tree_depth` — pruned from the canonical
+/// cache, migrated to the DB — while the tx object is still inside its
+/// anchor-expiry window. Confirmation does NOT evict a commitment from the
+/// mempool; it only stamps `included_height`, so the finalized tx is STILL a
+/// `sorted_commitments()` candidate. The in-memory `confirmed_commitments` dedup
+/// (built from the ~block_tree_depth canonical cache) can no longer see it — only
+/// the finalized-index dedup (`canonical_commitment_included_height`) can. Mining
+/// a normal block through the default `ProductionStrategy` must therefore exclude
+/// it; without the selection-side finalized check the producer would re-include
+/// it and build a block its own validation rejects as a replay.
+#[test_log::test(tokio::test)]
+async fn heavy_finalized_commitment_not_reselected_by_producer() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
+    let (node, update) = setup_finalized_update_reward_address(seconds_to_wait).await?;
+
+    // Guard against a vacuous pass: the finalized commitment must still be a live
+    // selection candidate (present in the exact set `select_best_txs` iterates),
+    // otherwise "absent from the produced block" would prove nothing.
+    let candidates = node
+        .node_ctx
+        .mempool_guard
+        .atomic_state()
+        .sorted_commitments()
+        .await;
+    assert!(
+        candidates.iter().any(|c| c.id() == update.id()),
+        "finalized UpdateRewardAddress must still be a mempool selection candidate \
+         (confirmation stamps included_height but does not evict); got {} candidates",
+        candidates.len()
+    );
+
+    // Produce a normal (non-epoch) block through mempool selection. With
+    // num_blocks_in_epoch = 4 the setup leaves the tip at height 12, so this
+    // block is height 13 — deliberately not an epoch boundary, where commitment
+    // selection is bypassed.
+    let block = node.mine_block().await?;
+    assert_ne!(
+        block.height % 4,
+        0,
+        "assertion block must be a non-epoch block so commitment selection runs"
+    );
+    assert!(
+        !block.commitment_tx_ids().contains(&update.id()),
+        "producer must not re-select a commitment finalized below the reorg floor; \
+         block {} at height {} re-included {}",
+        block.block_hash,
+        block.height,
+        update.id()
+    );
+
+    node.stop().await;
+    Ok(())
+}
