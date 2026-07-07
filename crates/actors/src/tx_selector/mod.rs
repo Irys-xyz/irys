@@ -198,8 +198,13 @@ pub async fn select_best_txs(
 
     // Commitments use a longer expiry window than data txs; keep the same
     // maturity upper bound (max_anchor_height).
-    let commitment_min_anchor_height =
-        min_anchor_floor(ctx.config.consensus.mempool.commitment_anchor_expiry_depth.into());
+    let commitment_min_anchor_height = min_anchor_floor(
+        ctx.config
+            .consensus
+            .mempool
+            .commitment_anchor_expiry_depth
+            .into(),
+    );
 
     let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 
