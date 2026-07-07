@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783446881632,
+  "lastUpdate": 1783459742449,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8035,6 +8035,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c126b5aed936a8c734f71090407d6b0fa753eab6",
+          "message": "fix(consensus): branch-correct data-tx publish selection + content-verified canonical lookups (#1468)\n\n* fix(consensus): branch-correct data-tx publish selection + content-verified canonical lookups\n\nProducer publish-candidate selection gated on the node-local\n`promoted_height` hint, which is branch-variant under reorg: it can read\n`None` for a tx already promoted on the parent's branch, so the producer\nre-selects it and mints a block validators reject as a double-promotion.\nResolve promotion from the parent's own ancestry (`resolve_promoted_on_branch`,\nby-hash over the reorg window, MBH-verified below the floor) and filter the\ncommitment/Submit dedup folds to `Onchain` ancestors.\n\n`canonical_submit_height`/`canonical_promoted_height` trusted a metadata hint\non `MigratedBlockHashes` existence alone. The row is written at tip\nconfirmation, so a stranded hint from an orphaned tip that survives a\nrestart-interrupted reorg can collide with a different block migrated at the\nsame height, yielding a false PublishTxAlreadyIncluded / PublishTxMissingPriorSubmit.\nContent-verify the canonical block actually carries the tx in the relevant\nledger, matching `canonical_commitment_included_height`.\n\n* fix(consensus): write canonical tx/commitment metadata only at migration\n\n`persist_metadata` wrote `IrysDataTxMetadata`/`IrysCommitmentTxMetadata` at\nblock confirmation (depth 0), before the block is durably persisted. An\norphaned confirmed-but-unmigrated tip could strand such a row; once a different\nblock later migrated at the same height, the `MigratedBlockHashes`-existence\ncheck read the stale row as canonical — the root of the branch-safety hazard.\n\nWrite these rows only at migration (`persist_block`), atomically with\n`MigratedBlockHashes` and the block header, so a metadata row cannot exist\nwithout its MBH entry naming the same canonical block. Unmigrated blocks are\nalready served branch-correctly from the in-memory block tree, so consensus\nnever needed the confirmation-time rows. The non-consensus\n`CachedDataRoots.block_set` hint stays at confirmation — the ingress-proof\npipeline depends on it pre-migration.\n\nQuery paths that reported pre-migration state from the DB now read the live\nmempool for the unmigrated window: the promotion-status endpoint and the\n`get_is_promoted` test helper fall back to the mempool when the DB lacks\n`promoted_height`.\n\nThis intentionally drops the prior \"status survives a node restart before\nmigration\" behavior: an unmigrated block is not durably persisted, so after a\nrestart the mempool restores its txs as pending. Reporting them CONFIRMED named\na block the node no longer had. Tests updated accordingly.\n\nThe content-verified `canonical_*_height` lookups are kept as defense-in-depth\nfor the deep-reorg-past-migration case.\n\n* test(consensus): share plant_canonical_block helper across tests\n\nThe synthetic-canonical-block setup (insert a mock header carrying given\nledger tx_ids, repoint MigratedBlockHashes) was duplicated between the\nblock-validation and mempool-ingress-dedup tests. Extract one helper in\nutils.rs taking flexible (DataLedger, Vec<H256>) ledger pairs; both tests\ncall it. Behavior-preserving.\n\n* docs(consensus): correct stale confirmation-time metadata-write comments\n\nCanonical tx/commitment metadata (included_height / promoted_height) is now\nwritten only at migration (persist_block), not at confirmation. Update the\ncomments that still described the old depth-0 confirmation write path:\n\n- reframe stranded-row rationale in terms of legacy/stale rows not backed by\n  canonical block content (block_validation, database canonical_* helpers)\n- persist_metadata no longer has a Phase 2 nor writes canonical metadata;\n  fix references in cache_service, db_index, mempool lifecycle\n- a present IrysDataTxMetadata row means migrated (finalized), not merely\n  confirmed (cache_service scrub recheck)\n- genesis backfill / test docs: 'confirm/migration' -> 'migration' writer\n\nComment-only; no behavior change.\n\n* perf(consensus): skip ancestry walk for empty promotion-resolver input\n\nresolve_promoted_on_branch unconditionally ran walk_ancestors_tree_then_db,\nwhich takes the block-tree read lock and fetches at least the parent header\nbefore the visit closure can break. tx_selector reaches it with an empty\ncandidate list (publish candidates filtered to none), so guard on an empty\ninput and return the empty set directly. Behavior-identical.",
+          "timestamp": "2026-07-07T22:10:37+01:00",
+          "tree_id": "c3f03dff54ad600b3d5da784482575c324571447",
+          "url": "https://github.com/Irys-xyz/irys/commit/c126b5aed936a8c734f71090407d6b0fa753eab6"
+        },
+        "date": 1783459740196,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012151,
+            "range": "± 0.000263",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.118789,
+            "range": "± 0.00732",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.192267,
+            "range": "± 0.008998",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.917343,
+            "range": "± 0.429124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074966,
+            "range": "± 0.000682",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.393062,
+            "range": "± 6.218182",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1016.793149,
+            "range": "± 33.688787",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119849,
+            "range": "± 0.0004",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1202.47823,
+            "range": "± 11.17467",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1572.384379,
+            "range": "± 5.546212",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034483,
+            "range": "± 0.00154",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.687372,
+            "range": "± 0.954542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.101621,
+            "range": "± 1.944819",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
