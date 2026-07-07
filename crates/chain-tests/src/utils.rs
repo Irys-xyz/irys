@@ -84,6 +84,52 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
+/// Insert a synthetic canonical block header at `height` carrying the given
+/// per-ledger `tx_ids`, and repoint `MigratedBlockHashes[height]` at it. Returns
+/// the block hash.
+///
+/// The `canonical_submit_height` / `canonical_promoted_height` /
+/// `canonical_commitment_included_height` helpers content-verify the metadata
+/// hint against the canonical block at the hint height — a bare metadata +
+/// `MigratedBlockHashes` row is no longer trusted (the stranded-row defense).
+/// Genesis carries no data txs, so tests that drive the validator's canonical-DB
+/// fallback must supply a canonical block that actually carries the tx. The
+/// by-hash inclusion walk is unaffected (it follows parent pointers, not
+/// `MigratedBlockHashes`), so repointing the row here only feeds the fallback's
+/// content check.
+pub fn plant_canonical_block(
+    db: &DatabaseProvider,
+    height: u64,
+    ledgers: Vec<(DataLedger, Vec<H256>)>,
+) -> eyre::Result<H256> {
+    use irys_database::{insert_block_header, tables::MigratedBlockHashes};
+    use irys_types::DataTransactionLedger;
+    use reth_db::transaction::DbTxMut as _;
+
+    let mut header = IrysBlockHeader::new_mock_header();
+    header.height = height;
+    header.block_hash = H256::random();
+    header.data_ledgers = ledgers
+        .into_iter()
+        .map(|(id, tx_ids)| DataTransactionLedger {
+            ledger_id: id as u32,
+            tx_root: H256::zero(),
+            tx_ids: H256List(tx_ids),
+            total_chunks: 0,
+            expires: None,
+            proofs: None,
+            required_proof_count: None,
+        })
+        .collect();
+    let block_hash = header.block_hash;
+    db.update_eyre(|tx| {
+        insert_block_header(tx, &header)?;
+        tx.put::<MigratedBlockHashes>(height, block_hash)?;
+        Ok(())
+    })?;
+    Ok(block_hash)
+}
+
 /// Coverage instrumentation multiplier for in-test timeouts.
 ///
 /// `cargo-llvm-cov` sets `LLVM_PROFILE_FILE` when running under coverage.

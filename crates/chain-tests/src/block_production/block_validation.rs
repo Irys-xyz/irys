@@ -102,54 +102,6 @@ fn mock_data_txs(count: usize) -> Vec<DataTransactionHeader> {
         .collect()
 }
 
-/// Insert a synthetic canonical block header at `height` carrying `submit_tx_ids`
-/// in its Submit ledger and `publish_tx_ids` in its Publish ledger, and repoint
-/// `MigratedBlockHashes[height]` at it. Returns the block hash.
-///
-/// The `canonical_submit_height` / `canonical_promoted_height` helpers now
-/// content-verify the metadata hint against the canonical block at the hint
-/// height — a bare metadata + `MigratedBlockHashes` row is no longer trusted
-/// (the stranded-row defense). Genesis carries no data txs, so tests that drive
-/// the validator's canonical-DB fallback must supply a canonical block that
-/// actually carries the tx. The by-hash inclusion walk is unaffected (it follows
-/// parent pointers, not `MigratedBlockHashes`), so repointing the row here only
-/// feeds the fallback's content check.
-fn plant_canonical_block(
-    db: &irys_types::app_state::DatabaseProvider,
-    height: u64,
-    submit_tx_ids: Vec<H256>,
-    publish_tx_ids: Vec<H256>,
-) -> Result<H256> {
-    use irys_database::db::IrysDatabaseExt as _;
-    use irys_database::{insert_block_header, tables::MigratedBlockHashes};
-    use irys_types::{DataTransactionLedger, H256List};
-    use reth_db::transaction::DbTxMut as _;
-
-    let ledger = |id: DataLedger, tx_ids: Vec<H256>| DataTransactionLedger {
-        ledger_id: id as u32,
-        tx_root: H256::zero(),
-        tx_ids: H256List(tx_ids),
-        total_chunks: 0,
-        expires: None,
-        proofs: None,
-        required_proof_count: None,
-    };
-    let mut header = IrysBlockHeader::new_mock_header();
-    header.height = height;
-    header.block_hash = H256::random();
-    header.data_ledgers = vec![
-        ledger(DataLedger::Submit, submit_tx_ids),
-        ledger(DataLedger::Publish, publish_tx_ids),
-    ];
-    let block_hash = header.block_hash;
-    db.update_eyre(|tx| {
-        insert_block_header(tx, &header)?;
-        tx.put::<MigratedBlockHashes>(height, block_hash)?;
-        Ok(())
-    })?;
-    Ok(block_hash)
-}
-
 fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
     use irys_types::{IrysTransactionCommon as _, NodeConfig};
 
@@ -853,8 +805,14 @@ async fn test_prevalidation_rejects_doubly_published_tx_via_fallback() -> Result
     // carries the tx in BOTH ledgers and repoint `MigratedBlockHashes[0]`.
     let prior_submit_height = 0_u64;
     let prior_publish_height = 0_u64;
-    let prior_block_hash =
-        plant_canonical_block(&ctx.node.node_ctx.db, 0, vec![tx.id], vec![tx.id])?;
+    let prior_block_hash = crate::utils::plant_canonical_block(
+        &ctx.node.node_ctx.db,
+        0,
+        vec![
+            (DataLedger::Submit, vec![tx.id]),
+            (DataLedger::Publish, vec![tx.id]),
+        ],
+    )?;
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
         insert_tx_header(db_tx, &tx)?;
         set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
@@ -1035,7 +993,14 @@ async fn test_prevalidation_accepts_publish_when_promoted_height_hint_stripped()
     // MBH-None-within-window strip but produces the same stripped metadata).
     let prior_submit_height = 0_u64;
     let stranded_promote_height = 1_u64;
-    let _prior_block_hash = plant_canonical_block(&ctx.node.node_ctx.db, 0, vec![tx.id], vec![])?;
+    let _prior_block_hash = crate::utils::plant_canonical_block(
+        &ctx.node.node_ctx.db,
+        0,
+        vec![
+            (DataLedger::Submit, vec![tx.id]),
+            (DataLedger::Publish, vec![]),
+        ],
+    )?;
     ctx.node.node_ctx.db.update_eyre(|db_tx| {
         insert_tx_header(db_tx, &tx)?;
         set_data_tx_included_height(db_tx, &tx.id, prior_submit_height)?;
