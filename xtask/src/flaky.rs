@@ -1046,6 +1046,7 @@ fn render_markdown(report: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn counts(runs: usize, fails: usize, timeouts: usize) -> PhaseCounts {
         PhaseCounts {
@@ -1074,64 +1075,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_broken_when_isolation_always_fails() {
-        let r = report(counts(5, 5, 0), None, Some(counts(10, 10, 0)));
-        assert_eq!(r.classify(), Classification::Broken);
-    }
-
-    #[test]
-    fn classify_genuine_when_isolation_sometimes_fails() {
-        let r = report(counts(5, 3, 0), None, Some(counts(10, 4, 0)));
-        assert_eq!(r.classify(), Classification::GenuineFlaky);
-    }
-
-    #[test]
-    fn classify_timeout_bound_when_all_isolation_failures_are_timeouts() {
-        let r = report(counts(5, 3, 3), None, Some(counts(10, 3, 3)));
-        assert_eq!(r.classify(), Classification::TimeoutBound);
-    }
-
-    #[test]
-    fn classify_peer_contention_when_isolation_clean_but_stress_fails() {
-        let r = report(
-            counts(5, 2, 0),
-            Some(counts(5, 2, 0)),
-            Some(counts(10, 0, 0)),
-        );
-        assert_eq!(r.classify(), Classification::PeerContention);
-    }
-
-    #[test]
-    fn classify_suite_contention_when_only_full_suite_fails() {
-        let r = report(
-            counts(5, 2, 0),
-            Some(counts(5, 0, 0)),
-            Some(counts(10, 0, 0)),
-        );
-        assert_eq!(r.classify(), Classification::SuiteContention);
-    }
-
-    #[test]
-    fn classify_clean_when_isolation_passes_with_no_earlier_failures() {
-        // verify mode: phase1/stress empty, isolation all-pass → CLEAN, not contention.
-        let r = report(counts(0, 0, 0), None, Some(counts(10, 0, 0)));
-        assert_eq!(r.classify(), Classification::Clean);
-        assert!(!Classification::Clean.is_genuine());
-    }
-
-    #[test]
-    fn classify_unverified_when_isolation_skipped_and_stress_clean() {
-        let r = report(counts(5, 2, 0), Some(counts(5, 0, 0)), None);
-        assert_eq!(r.classify(), Classification::Unverified);
-    }
-
-    #[test]
-    fn classify_unverified_when_isolation_skipped_even_if_stress_fails() {
-        // Without an isolation pass we can't prove the test passes alone, so a
-        // stress failure must not be labeled PeerContention — stays Unverified.
-        let r = report(counts(5, 2, 0), Some(counts(5, 2, 0)), None);
-        assert_eq!(r.classify(), Classification::Unverified);
+    #[rstest]
+    #[case::broken(counts(5, 5, 0), None, Some(counts(10, 10, 0)), Classification::Broken)]
+    #[case::genuine(
+        counts(5, 3, 0),
+        None,
+        Some(counts(10, 4, 0)),
+        Classification::GenuineFlaky
+    )]
+    // All isolation failures are timeouts → distinct, actionable category.
+    #[case::timeout_bound(
+        counts(5, 3, 3),
+        None,
+        Some(counts(10, 3, 3)),
+        Classification::TimeoutBound
+    )]
+    #[case::peer_contention(
+        counts(5, 2, 0),
+        Some(counts(5, 2, 0)),
+        Some(counts(10, 0, 0)),
+        Classification::PeerContention
+    )]
+    #[case::suite_contention(
+        counts(5, 2, 0),
+        Some(counts(5, 0, 0)),
+        Some(counts(10, 0, 0)),
+        Classification::SuiteContention
+    )]
+    // verify mode: phase1/stress empty, isolation all-pass → CLEAN, not contention.
+    #[case::clean(counts(0, 0, 0), None, Some(counts(10, 0, 0)), Classification::Clean)]
+    #[case::unverified_stress_clean(
+        counts(5, 2, 0),
+        Some(counts(5, 0, 0)),
+        None,
+        Classification::Unverified
+    )]
+    // Without an isolation pass we can't prove the test passes alone, so a stress
+    // failure must not be labeled PeerContention — stays Unverified.
+    #[case::unverified_stress_fails(
+        counts(5, 2, 0),
+        Some(counts(5, 2, 0)),
+        None,
+        Classification::Unverified
+    )]
+    fn classify_cases(
+        #[case] phase1: PhaseCounts,
+        #[case] stress: Option<PhaseCounts>,
+        #[case] isolation: Option<PhaseCounts>,
+        #[case] expected: Classification,
+    ) {
+        assert_eq!(report(phase1, stress, isolation).classify(), expected);
     }
 
     #[test]
@@ -1141,6 +1134,7 @@ mod tests {
         assert!(Classification::TimeoutBound.is_genuine());
         assert!(!Classification::PeerContention.is_genuine());
         assert!(!Classification::SuiteContention.is_genuine());
+        assert!(!Classification::Clean.is_genuine());
         assert!(!Classification::Unverified.is_genuine());
     }
 
