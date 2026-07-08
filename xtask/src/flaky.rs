@@ -288,8 +288,13 @@ fn run_isolated(
         "--test-threads",
         "1",
         "--no-fail-fast",
+        // Stream the test's own stdout/stderr (panics, tracing) into our capture
+        // instead of letting nextest buffer it — this is what makes the isolated
+        // failure logs actually useful.
+        "--no-capture",
     ]);
-    cmd.env("RUST_BACKTRACE", "1");
+    // Full backtraces in isolation to maximize debugging signal.
+    cmd.env("RUST_BACKTRACE", "full");
     if let Some(log) = isolation_log {
         cmd.env("RUST_LOG", log);
     }
@@ -493,15 +498,23 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             std::io::stdout().flush().ok();
 
             let counts = isolation.entry(test.clone()).or_default();
+            // Per-test summary of each iteration's outcome, written alongside the
+            // logs so a failing test's history is readable at a glance.
+            let mut summary = String::new();
             for i in 1..=opts.isolation_iterations {
-                let log_path = test_dir.join(format!("run-{i}.log"));
-                match run_isolated(test, &log_path, opts.isolation_log.as_deref())? {
+                // Write to a temp name, then rename to encode the outcome so the
+                // failing runs' logs are trivially findable (*.FAIL.log).
+                let tmp_log = test_dir.join(format!("run-{i}.log"));
+                let result = run_isolated(test, &tmp_log, opts.isolation_log.as_deref())?;
+                match result {
                     IsoResult::Passed => {
                         counts.record(Outcome {
                             passed: true,
                             timed_out: false,
                             duration_ms: 0,
                         });
+                        let _ = fs::rename(&tmp_log, test_dir.join(format!("run-{i}.pass.log")));
+                        summary.push_str(&format!("run {i}: PASS\n"));
                         print!(".");
                     }
                     IsoResult::Failed {
@@ -513,10 +526,17 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                             timed_out,
                             duration_ms,
                         });
+                        let tag = if timed_out { "TIMEOUT" } else { "FAIL" };
+                        let _ = fs::rename(&tmp_log, test_dir.join(format!("run-{i}.{tag}.log")));
+                        summary.push_str(&format!("run {i}: {tag} ({duration_ms}ms)\n"));
                         print!("{}", if timed_out { "T" } else { "F" });
                     }
                     IsoResult::NoMatch => {
                         // Don't count runs that never executed; note and stop.
+                        let _ = fs::remove_file(&tmp_log);
+                        summary.push_str(&format!(
+                            "run {i}: NO MATCH (filter matched no tests — name may have changed)\n"
+                        ));
                         print!("?");
                         break;
                     }
@@ -524,6 +544,10 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                 std::io::stdout().flush().ok();
             }
             let c = &isolation[test];
+            let header = format!("{test}\n{}/{} isolated runs failed\n\n", c.fails, c.runs);
+            if let Err(e) = fs::write(test_dir.join("summary.txt"), header + &summary) {
+                eprintln!("warning: failed to write isolation summary for {test}: {e}");
+            }
             println!(" → {}/{} failed", c.fails, c.runs);
         }
     } else {
