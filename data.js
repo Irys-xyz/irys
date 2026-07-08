@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783534480472,
+  "lastUpdate": 1783535397358,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8575,6 +8575,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000148,
             "range": "± 0.000014",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "94fc7fc24f11f49ad65e9f06b7531af17c36e6b8",
+          "message": "fix(ci): remove empty GitHub-expression from flaky workflow run block (#1473)\n\nGitHub Actions evaluates ${{ }} across the entire run: block string,\nincluding shell comments. A literal empty expression written as prose in\na comment made the workflow invalid (\"An expression was expected\"),\nanchored to the block-scalar start. Reword the comment to drop the token.",
+          "timestamp": "2026-07-08T19:10:55+01:00",
+          "tree_id": "a0b44dbd8b57a72e793765a62845ca5d87fbde23",
+          "url": "https://github.com/Irys-xyz/irys/commit/94fc7fc24f11f49ad65e9f06b7531af17c36e6b8"
+        },
+        "date": 1783535395251,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012504,
+            "range": "± 0.000744",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.12548,
+            "range": "± 0.005427",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.226388,
+            "range": "± 0.034895",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.925571,
+            "range": "± 0.300638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074598,
+            "range": "± 0.000314",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 749.203945,
+            "range": "± 4.313461",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 976.153649,
+            "range": "± 7.032608",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120528,
+            "range": "± 0.002213",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1235.086308,
+            "range": "± 32.350844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1589.147948,
+            "range": "± 21.298636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034548,
+            "range": "± 0.001931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 228.674143,
+            "range": "± 14.625423",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.223946,
+            "range": "± 2.860343",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
