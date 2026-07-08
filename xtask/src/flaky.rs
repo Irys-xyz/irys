@@ -273,12 +273,9 @@ impl TestReport {
             return Classification::Clean;
         }
 
-        // No isolation data: fall back to stress, then to timeout heuristic.
-        if let Some(stress) = self.stress
-            && stress.fails > 0
-        {
-            return Classification::PeerContention;
-        }
+        // No isolation data: PeerContention asserts the test passes *alone*, which
+        // only an isolation pass can establish — so a stress failure here can't be
+        // called contention. Leave it Unverified (unless it's purely timeouts).
         if self.phase1.timeouts == self.phase1.fails && self.phase1.fails > 0 {
             return Classification::TimeoutBound;
         }
@@ -493,16 +490,17 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let _ = cmd!(sh, "cargo install --locked --version 0.9.124 cargo-nextest").run();
 
     if opts.clean {
-        println!("Cleaning workspace and prebuilding...");
-        cmd!(sh, "cargo build --workspace --tests").run()?;
+        println!("Cleaning workspace...");
+        cmd!(sh, "cargo clean").run()?;
     }
 
     // Build tests once up front so compile time doesn't pollute iteration 1 and
-    // every iteration measures pure test time.
+    // every iteration measures pure test time. Fail fast: a compile error here
+    // must abort, otherwise every phase fails confusingly downstream.
     println!("Prebuilding tests (cargo nextest run --no-run)...");
-    let _ = remove_ring_env_vars(cmd!(sh, "cargo nextest run --workspace --no-run"))
+    remove_ring_env_vars(cmd!(sh, "cargo nextest run --workspace --no-run"))
         .env("RUST_BACKTRACE", "1")
-        .run();
+        .run()?;
 
     // Build the wrapper and generate the phase-1 config (default profile with
     // the monitoring run-wrapper attached — retries stay at the profile default
@@ -602,6 +600,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             );
             if s.is_empty() {
                 println!("No flaky tests detected. 🎉");
+                // No genuine flakes → clear stale failures so `--rerun-failures`
+                // doesn't re-run a previous run's entries.
+                if let Err(e) = FailuresFile::clear() {
+                    eprintln!("warning: failed to clear failures.json: {e}");
+                }
                 // Only phase 1 ran on this path.
                 write_reports(&run_dir, &started, &opts, opts.iterations, 0, 0, Vec::new())?;
                 return Ok(());
@@ -734,13 +737,15 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                         print!("{}", if timed_out { "T" } else { "F" });
                     }
                     IsoResult::NoMatch => {
-                        // Don't count runs that never executed; note and stop.
+                        // A suspect whose filter matches nothing in isolation is a
+                        // configuration problem (renamed/removed test), not a flake —
+                        // fail hard rather than let it fall through and be silently
+                        // classified as contention/clean on zero recorded runs.
                         let _ = fs::remove_file(&tmp_log);
-                        summary.push_str(&format!(
-                            "run {i}: NO MATCH (filter matched no tests — name may have changed)\n"
-                        ));
-                        print!("?");
-                        break;
+                        println!();
+                        eyre::bail!(
+                            "isolation filter matched no tests for '{test}' — the test name may have changed or been removed"
+                        );
                     }
                 }
                 std::io::stdout().flush().ok();
@@ -791,7 +796,9 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let genuine_count = genuine.len();
 
     // Feed genuine flakes into failures.json so `xtask test --rerun-failures`
-    // can pick them up.
+    // can pick them up. Always rewrite it for the current run — when there are no
+    // genuine flakes, clear it so `--rerun-failures` doesn't re-run stale entries
+    // from a previous run.
     if genuine_count > 0 {
         let mut failures = FailuresFile {
             failed_tests: genuine.iter().map(|r| r.name.clone()).collect(),
@@ -800,6 +807,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         if let Err(e) = failures.save() {
             eprintln!("warning: failed to update failures.json: {e}");
         }
+    } else if let Err(e) = FailuresFile::clear() {
+        eprintln!("warning: failed to clear failures.json: {e}");
     }
 
     print_summary(&reports);
@@ -1108,6 +1117,14 @@ mod tests {
     #[test]
     fn classify_unverified_when_isolation_skipped_and_stress_clean() {
         let r = report(counts(5, 2, 0), Some(counts(5, 0, 0)), None);
+        assert_eq!(r.classify(), Classification::Unverified);
+    }
+
+    #[test]
+    fn classify_unverified_when_isolation_skipped_even_if_stress_fails() {
+        // Without an isolation pass we can't prove the test passes alone, so a
+        // stress failure must not be labeled PeerContention — stays Unverified.
+        let r = report(counts(5, 2, 0), Some(counts(5, 2, 0)), None);
         assert_eq!(r.classify(), Classification::Unverified);
     }
 
