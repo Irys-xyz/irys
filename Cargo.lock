@@ -14612,6 +14612,7 @@ dependencies = [
  "eyre",
  "irys-testing-utils",
  "nextest-monitor",
+ "rstest",
  "serde",
  "serde_json",
  "tempfile",

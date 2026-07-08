@@ -25,6 +25,7 @@ nextest-monitor = { path = "../crates/utils/nextest-monitor" }
 
 [dev-dependencies]
 irys-testing-utils.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true
