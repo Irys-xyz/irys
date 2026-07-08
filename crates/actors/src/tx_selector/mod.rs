@@ -16,8 +16,8 @@ use irys_database::{
     ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
-    BlockIndex, BlockTreeEntry, BlockTreeReadGuard, ChainState, CommitmentSnapshotStatus,
-    EpochSnapshot, HardforkConfigExt as _,
+    BlockIndex, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus, EpochSnapshot,
+    HardforkConfigExt as _,
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::ingress::{CachedIngressProof, IngressProof};
@@ -111,7 +111,6 @@ pub async fn select_best_txs(
 
     let (
         canonical,
-        onchain_block_hashes,
         parent_block_height,
         tip_block_height,
         parent_evm_block_id,
@@ -156,23 +155,20 @@ pub async fn select_best_txs(
             .expect("canonical chain always has at least one entry")
             .height();
 
-        // Dedup against `Onchain`-only ancestors, matching
-        // `tx_inclusion::lookup_via_block_tree`. During reorg replay a canonical
-        // entry can transiently be `Validated` before the longest-chain walk
-        // promotes it; its tx_ids may be about to roll back, so counting them in
-        // the commitment/Submit dedup sets below can drop a tx that should stay
-        // includable. The parent block itself is still used for the header lookup
-        // regardless of state, so this only narrows the dedup sets.
-        let onchain_block_hashes: HashSet<BlockHash> = canonical
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    tree.get_block_and_status(&entry.block_hash()),
-                    Some((_, ChainState::Onchain))
-                )
-            })
-            .map(BlockTreeEntry::block_hash)
-            .collect();
+        // The commitment/Submit dedup sets below iterate `canonical`
+        // (`full_canonical[..=parent_pos]`) directly, i.e. every ancestor of the
+        // parent we build on. We must NOT narrow this to `Onchain`-only entries:
+        // the validator dedups against the parent ancestry BY HASH regardless of
+        // `ChainState` (`commitment_dedup::ancestor_commitment_tx_ids` and
+        // `data_txs_are_valid`'s inclusion walk both follow `previous_block_hash`,
+        // not chain state). During reorg replay an in-window ancestor can
+        // transiently be `Validated` before the longest-chain walk promotes it; if
+        // the producer skipped it here while the validator still saw it by hash,
+        // the producer would re-select a tx the validator rejects
+        // (`DuplicateCommitmentTransaction` / double-publish). Deduping against the
+        // full parent ancestry keeps the producer symmetric with the validator.
+        // (An ancestor that later rolls back takes the parent with it, so the
+        // whole production attempt is on a doomed branch and self-corrects.)
 
         let block = tree
             .get_block(&parent_block_hash)
@@ -200,7 +196,6 @@ pub async fn select_best_txs(
 
         (
             canonical,
-            onchain_block_hashes,
             block_height,
             tip_block_height,
             evm_block_id,
@@ -246,15 +241,12 @@ pub async fn select_best_txs(
         "Starting mempool transaction selection"
     );
 
-    // Collect confirmed commitment transactions from canonical chain to avoid
-    // duplicates. Restricted to `Onchain` ancestors (`onchain_block_hashes`): a
-    // transiently-`Validated` entry's commitments may be about to roll back under
-    // reorg replay, so deduping against them could drop a commitment that should
-    // stay includable.
-    for entry in canonical
-        .iter()
-        .filter(|entry| onchain_block_hashes.contains(&entry.block_hash()))
-    {
+    // Collect confirmed commitment transactions from the parent ancestry to
+    // avoid duplicates. Iterates every entry in `canonical` (all ancestors of the
+    // parent) regardless of `ChainState` — matching the validator's by-hash
+    // replay-dedup walk (`commitment_dedup::ancestor_commitment_tx_ids`). See the
+    // rationale where `canonical` is built.
+    for entry in canonical.iter() {
         let commitment_ledger = entry
             .header()
             .system_ledgers
@@ -782,7 +774,6 @@ pub async fn select_best_txs(
     let publish_txs_and_proofs = get_publish_txs_and_proofs(
         ctx,
         &canonical,
-        &onchain_block_hashes,
         current_height,
         current_timestamp,
         &parent_epoch_snapshot,
@@ -855,7 +846,6 @@ pub async fn select_best_txs(
 async fn get_publish_txs_and_proofs(
     ctx: &TxSelectionContext<'_>,
     canonical: &[BlockTreeEntry],
-    onchain_block_hashes: &HashSet<BlockHash>,
     current_height: u64,
     current_timestamp: UnixTimestamp,
     epoch_snapshot: &Arc<EpochSnapshot>,
@@ -970,20 +960,18 @@ async fn get_publish_txs_and_proofs(
                 .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
         });
 
-        // Reduce down the canonical chain to the txs in the Submit ledger — the
-        // fast-path prior-Submit gate for publish candidates. Restricted to
-        // `Onchain` ancestors (`onchain_block_hashes`): a transiently-`Validated`
-        // entry's Submit inclusion may be about to roll back under reorg replay,
-        // so counting it here would let the gate say "already submitted" for a tx
-        // whose Submit is not durable. A miss simply falls through to the
-        // content-verified `canonical_submit_height` DB check below.
-        let submit_txs_from_canonical = canonical
-            .iter()
-            .filter(|v| onchain_block_hashes.contains(&v.block_hash()))
-            .fold(HashSet::new(), |mut acc, v| {
-                acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
-                acc
-            });
+        // Reduce down the parent ancestry to the txs in the Submit ledger — the
+        // fast-path prior-Submit gate for publish candidates. Iterates every
+        // entry in `canonical` (all ancestors of the parent) regardless of
+        // `ChainState`, matching the validator's by-hash inclusion walk; skipping
+        // a transiently-`Validated` ancestor here would drop a genuine prior
+        // Submit and make the producer promote a tx the validator rejects. A miss
+        // still falls through to the content-verified `canonical_submit_height` DB
+        // check below.
+        let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
+            acc.extend(v.header().data_ledgers[DataLedger::Submit].tx_ids.0.clone());
+            acc
+        });
 
         // NC-0042 §4b: the expired-Submit range is the same for every candidate,
         // so compute it once here and reuse it per-candidate via `submit_tx_expired`

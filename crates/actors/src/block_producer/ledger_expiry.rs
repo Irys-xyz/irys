@@ -61,7 +61,7 @@ use crate::block_ancestry::{block_header_from_tree_then_db, walk_ancestors_tree_
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
-use eyre::{OptionExt as _, eyre};
+use eyre::{OptionExt as _, ensure, eyre};
 use irys_database::{
     canonical_promoted_height, canonical_submit_height, db::IrysDatabaseExt as _,
     reth_db::transaction::DbTx as _, tables::MigratedBlockHashes,
@@ -969,6 +969,10 @@ pub(crate) fn resolve_promoted_on_branch(
     // reorg floor, where MBH (and thus `canonical_promoted_height`) is
     // branch-invariant. Cap strictly below the window so a reorg-mutable height
     // can never be trusted here — the walk already covered that band by hash.
+    // (The validator's sibling fallback in `data_txs_are_valid` caps the same
+    // way — strictly below its own walk window, not just at the reorg floor.
+    // Keep the two cap forms in sync when the walk depth or reorg ceiling
+    // changes.)
     if !remaining.is_empty() {
         let max_height = walk_min_height.saturating_sub(1);
         db.view_eyre(|tx| {
@@ -1340,8 +1344,20 @@ fn find_block_range(
             // so it is exactly the next block's first offset. The old `+ 1` here
             // skipped that boundary chunk, so a block whose first chunk landed on a
             // slot boundary was never resolved — silently dropping its expired txs
-            // from the refund/fee walk (NC-0042). `block_total > chunk_offset`
-            // always (the offset lies within this block), so progress is guaranteed.
+            // from the refund/fee walk (NC-0042). A well-formed index always has
+            // `block_total > chunk_offset` (the offset lies within this block);
+            // fail loud on a corrupted index instead of spinning forever on a
+            // non-advancing probe.
+            ensure!(
+                block_total > chunk_offset,
+                "non-advancing block-index probe in {:?} ledger: block at height {} \
+                 resolved for chunk offset {} has cumulative total {} (must exceed \
+                 the probed offset) — corrupted ledger index",
+                ledger_type,
+                height,
+                chunk_offset,
+                block_total,
+            );
             chunk_offset = block_total.min(*chunk_range.end());
         }
     }

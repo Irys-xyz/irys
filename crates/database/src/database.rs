@@ -286,18 +286,28 @@ pub fn tx_header_by_txid<T: DbTx>(
 /// `included_height`, Publish for `promoted_height`).  They return primitive
 /// `Option<u64>` (no header mutation) so call sites can't accidentally treat a
 /// stranded hint as canonical.  The content check is what makes `Some(h)` mean
-/// "canonically included at `h`" rather than "a hint pointing at `h` exists":
-/// canonical metadata is now written only at migration (atomically with
-/// `MigratedBlockHashes`), but a legacy/stranded row — e.g. one written at
-/// depth-0 confirmation before that fix, or an orphaned tip's row surviving a
-/// restart-interrupted reorg — can still collide with a different canonical
-/// block migrated at the same height, where the MBH-existence check alone would
-/// read it as truth.  With the content check, callers may trust `Some(h)` on any
-/// branch — mirroring `canonical_commitment_included_height`.  Current callers:
+/// "canonically included at `h` on THIS node's canonical chain" rather than "a
+/// hint pointing at `h` exists": canonical metadata is now written only at
+/// migration (atomically with `MigratedBlockHashes`), but a legacy/stranded
+/// row — e.g. one written at depth-0 confirmation before that fix, or an
+/// orphaned tip's row surviving a restart-interrupted reorg — can still collide
+/// with a different canonical block migrated at the same height, where the
+/// MBH-existence check alone would read it as truth.
+///
+/// The content check neutralizes stranded rows, but it does NOT make the result
+/// branch-invariant inside the reorg window: `MigratedBlockHashes` is node-local
+/// and can differ per branch above the reorg floor, so `Some(h)` is only
+/// branch-agnostic when `h` is BELOW the reorg floor (`tip - block_tree_depth`),
+/// where MBH is stable across every node/branch — exactly the contract of
+/// `canonical_commitment_included_height`.  Callers evaluating a specific branch
+/// within the reorg window must therefore either cap `max_height` at/below the
+/// reorg floor or confirm membership against that branch's own by-hash ancestry;
+/// they must not treat an in-window `Some(h)` as authoritative for a branch other
+/// than this node's own.  Current callers:
 ///   - `data_txs_are_valid` (`block_validation.rs`) uses the content-based
 ///     ancestry walk (`get_previous_tx_inclusions`) as its primary path and
-///     only falls back to these helpers for inclusions older than
-///     `tx_anchor_expiry_depth`.
+///     only falls back to these helpers for inclusions strictly below its
+///     inclusion-history walk window (which spans at least the reorg window).
 ///   - the NC-0042 expiry fast path
 ///     (`ledger_expiry::resolve_submit_inclusion`) relies on the config
 ///     invariant that a ledger slot's lifetime exceeds `block_tree_depth`
@@ -2152,6 +2162,70 @@ mod tests {
                 promoted, None,
                 "promoted_height > max_height must return None — \
                  it's not visible to the validator's parent_height window"
+            );
+        }
+        /// Band-cap invariant that the promotion-prevalidation fallback in
+        /// `data_txs_are_valid` relies on: a fully-canonical, content-valid row
+        /// at a height inside the reorg-mutable band `(reorg_floor, parent]` is
+        /// returned when queried up to `parent_height` but excluded once the
+        /// query is capped at or below `reorg_floor`.  The Searching{Publish}
+        /// fallback now caps strictly *below* its inclusion-history walk
+        /// window — in production config that walk bottoms out at the reorg
+        /// floor, so the fallback's actual cap sits one height below it — so a
+        /// node-local band row (which describes this node's chain, not the
+        /// candidate's branch) cannot decide validity and fork the network.
+        /// Any cap `<= reorg_floor`, including the validator's stricter one,
+        /// excludes the band row exercised below.
+        #[test]
+        fn band_height_row_excluded_below_reorg_floor() {
+            let path = irys_testing_utils::utils::TempDirBuilder::new().build();
+            let db = open_or_create_db(
+                path.path(),
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+
+            let tx_id = H256::random();
+            let tx_header = make_tx_header(tx_id);
+            // Candidate at height 100 with block_tree_depth = 8 -> reorg_floor 92.
+            // The row sits at 95, inside the reorg-mutable band (92, 99].
+            let band_height = 95_u64;
+            let parent_height = 99_u64;
+            let reorg_floor = 92_u64;
+            let block_hash = H256::random();
+
+            db.update(|tx| -> Result<(), DatabaseError> {
+                insert_tx_header(tx, &tx_header)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
+                set_data_tx_included_height(tx, &tx_id, band_height)?;
+                insert_canonical_block(
+                    tx,
+                    band_height,
+                    block_hash,
+                    DataLedger::Submit,
+                    vec![tx_id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+            let at_parent = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, parent_height))
+                .unwrap();
+            assert_eq!(
+                at_parent,
+                Some(band_height),
+                "the old parent-height cap WOULD consult the band row (the fork vector)"
+            );
+
+            let at_floor = db
+                .view_eyre(|tx| canonical_submit_height(tx, &tx_id, reorg_floor))
+                .unwrap();
+            assert_eq!(
+                at_floor, None,
+                "capping at the reorg floor must exclude the band-height row"
             );
         }
     }
