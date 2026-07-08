@@ -26,9 +26,14 @@ use std::ops::ControlFlow;
 ///   - Reorg window `[floor, height)`: resolved by-hash along THIS block's own
 ///     ancestry (block tree, DB fallback), so a reorged-out sibling's inclusion
 ///     never counts. See [`ancestor_commitment_tx_ids`].
-///   - Below `floor`: the chain is finalized, so a content-verified lookup
-///     ([`canonical_commitment_included_height`], capped at `floor`) is
-///     branch-invariant there.
+///   - Strictly below `floor`: the chain is finalized, so a content-verified
+///     lookup ([`canonical_commitment_included_height`], capped at `floor - 1`)
+///     is branch-invariant there. The walk owns the floor height itself: a
+///     node-local `MigratedBlockHashes` row there is reorg-mutable, and since
+///     the walk resolves the floor on the candidate's own branch, a
+///     lookup answer at that height is never a true positive — the same
+///     strictly-below cap as the data-tx fallbacks in `data_txs_are_valid` and
+///     `resolve_promoted_on_branch` (keep the cap forms in sync).
 ///
 /// The in-memory reorg-window set is checked before the DB lookup, so a
 /// commitment-free branch or an in-window hit never pays for a finalized read.
@@ -52,9 +57,13 @@ pub fn find_replayed_commitment(
 
     let prior_ids =
         ancestor_commitment_tx_ids(block_tree, db, block_under_validation, block_tree_depth)?;
-    let floor = block_under_validation
+    // Cap the finalized lookup strictly below the walk window (see the
+    // two-range contract above). Zero coverage loss: the walk covers `[floor,
+    // height)` inclusively on the candidate's branch.
+    let finalized_cap = block_under_validation
         .height
-        .saturating_sub(block_tree_depth);
+        .saturating_sub(block_tree_depth)
+        .saturating_sub(1);
 
     // One read txn covers every finalized-inclusion lookup (a single MDBX txn
     // instead of one per commitment). The walk's own DB descent (Phase 2 below)
@@ -69,7 +78,7 @@ pub fn find_replayed_commitment(
             // reorg-window check; only pay the DB read on a miss on both.
             if !seen.insert(tx.id())
                 || prior_ids.contains(&tx.id())
-                || canonical_commitment_included_height(read_tx, &tx.id(), floor)?.is_some()
+                || canonical_commitment_included_height(read_tx, &tx.id(), finalized_cap)?.is_some()
             {
                 return Ok(Some(tx.id()));
             }
