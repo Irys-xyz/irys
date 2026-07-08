@@ -4,14 +4,15 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
-use xshell::{Cmd, Shell, cmd};
+use xshell::{Shell, cmd};
 
 use xtask::failures::{
     self, FailuresFile, RunResults, generate_nextest_config, get_failures_file_path,
     get_stats_file_path,
 };
+use xtask::flaky::{FlakyOptions, run_flaky};
+use xtask::util::{CmdExt as _, RING_ENV_VARS, build_wrapper};
 
-const CARGO_FLAKE_VERSION: &str = "0.0.5";
 const LLVM_COV_VERSION: &str = "0.6.16";
 const NEXTEST_VERSION: &str = "0.9.124";
 
@@ -155,51 +156,46 @@ enum Commands {
         #[clap(last = true)]
         args: Vec<String>,
     },
+    /// Nextest-based flaky-test detection.
+    ///
+    /// Runs the full suite N times, then stresses the tests that failed, then
+    /// runs each of those in isolation to distinguish genuine flakes from
+    /// contention-sensitive tests. See `xtask::flaky` for the phase details.
     Flaky {
-        #[clap(short, long, help = "Number of iterations to run")]
-        iterations: Option<usize>,
-        #[clap(short, long, help = "Clean workspace before running")]
-        clean: bool,
-        #[clap(short, long, help = "Number of threads to use")]
+        /// Phase 1: number of full-suite iterations
+        #[clap(short, long, default_value_t = 5)]
+        iterations: usize,
+        /// Phase 2: number of stress iterations over the suspect set
+        #[clap(long, default_value_t = 5)]
+        stress_iterations: usize,
+        /// Phase 3: per-test isolated iterations
+        #[clap(short = 'y', long, default_value_t = 10)]
+        isolation_iterations: usize,
+        /// `--test-threads` for phases 1 & 2 (default: nextest auto)
+        #[clap(short, long)]
         threads: Option<usize>,
-        #[clap(short, long, help = "Save output to timestamped file")]
+        /// Clean & prebuild the workspace before running
+        #[clap(short, long, default_value_t = false)]
+        clean: bool,
+        /// Skip the stress phase (phase 2)
+        #[clap(long, default_value_t = false)]
+        no_stress: bool,
+        /// Skip the isolation phase (phase 3)
+        #[clap(long, default_value_t = false)]
+        no_isolation: bool,
+        /// Number of genuinely-flaky tests to tolerate before exiting non-zero
+        #[clap(short = 'f', long, default_value_t = 0)]
+        tolerable_failures: usize,
+        /// `RUST_LOG` value to set during the isolation phase (for richer logs)
+        #[clap(long)]
+        isolation_log: Option<String>,
+        /// Accepted for backwards-compat; reports are always saved
+        #[clap(short, long, default_value_t = false, hide = true)]
         save: bool,
-        #[clap(short = 'f', long, help = "Number of tolerable failures")]
-        tolerable_failures: Option<usize>,
-        #[clap(last = true, help = "Arguments to pass to cargo-flake")]
+        /// Passthrough args forwarded to the phase-1 nextest invocation
+        #[clap(last = true)]
         args: Vec<String>,
     },
-}
-
-/// Build the nextest-wrapper binary, optionally with additional features
-fn build_wrapper(sh: &Shell, features: Option<&str>) -> eyre::Result<PathBuf> {
-    println!("Building nextest-wrapper...");
-    let mut build_args = vec![
-        "build".to_string(),
-        "--package".to_string(),
-        "nextest-monitor".to_string(),
-        "--bin".to_string(),
-        "nextest-wrapper".to_string(),
-    ];
-    if let Some(feat) = features {
-        build_args.push("--features".to_string());
-        build_args.push(feat.to_string());
-    }
-    cmd!(sh, "cargo {build_args...}").remove_and_run()?;
-
-    // Get the target directory
-    let metadata = MetadataCommand::new().exec()?;
-    let target_dir = metadata.target_directory.as_std_path();
-    let wrapper_path = target_dir.join("debug").join("nextest-wrapper");
-
-    if !wrapper_path.exists() {
-        return Err(eyre::eyre!(
-            "Failed to find built wrapper at {}",
-            wrapper_path.display()
-        ));
-    }
-
-    Ok(wrapper_path)
 }
 
 fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
@@ -861,169 +857,32 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
         }
         Commands::Flaky {
             iterations,
-            clean,
+            stress_iterations,
+            isolation_iterations,
             threads,
-            save,
+            clean,
+            no_stress,
+            no_isolation,
             tolerable_failures,
+            isolation_log,
+            save: _,
             args,
         } => {
-            // Clean workspace if requested
-            if clean {
-                run_command(Commands::CleanWorkspace, sh)?;
-
-                // Prebuild the project after cleaning
-                println!("Prebuilding the project");
-                cmd!(sh, "cargo build --workspace --tests").remove_and_run()?;
-            }
-
-            // Build command arguments
-            let mut command_args = vec!["flake".to_string()];
-
-            // Add iterations (default to 5 if not specified)
-            let iters = iterations.unwrap_or(5);
-            command_args.push("--iterations".to_string());
-            command_args.push(iters.to_string());
-
-            // Add threads if specified
-            if let Some(thread_count) = threads {
-                command_args.push("--threads".to_string());
-                command_args.push(thread_count.to_string());
-            }
-
-            // Add tolerable failures if specified
-            if let Some(failures) = tolerable_failures {
-                command_args.push("--tolerable-failures".to_string());
-                command_args.push(failures.to_string());
-            }
-
-            // Add any additional arguments after --
-            let args_for_header = args.clone();
-            if !args.is_empty() {
-                command_args.push("--".to_string());
-                command_args.extend(args);
-            }
-
-            if save {
-                // Create target directory if it doesn't exist
-                fs::create_dir_all("target")?;
-
-                // Generate timestamp for output file
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs();
-                let timestamp = chrono::DateTime::from_timestamp(now as i64, 0)
-                    .unwrap()
-                    .format("%Y-%m-%d-%H-%M-%S");
-                let output_file = format!("target/flaky-test-output-{timestamp}.txt");
-
-                // Create output file and write header
-                let mut file = fs::File::create(&output_file)?;
-                writeln!(file, "=== Flaky Test Run - {timestamp} ===")?;
-                write!(file, "Command: cargo flake --iterations {iters}")?;
-                if let Some(thread_count) = threads {
-                    write!(file, " --threads {thread_count}")?;
-                }
-                if let Some(failures) = tolerable_failures {
-                    write!(file, " --tolerable-failures {failures}")?;
-                }
-                if !args_for_header.is_empty() {
-                    write!(file, " -- {}", args_for_header.join(" "))?;
-                }
-                writeln!(file)?;
-                writeln!(file)?;
-                file.flush()?;
-                drop(file);
-
-                // Use script to preserve TTY behavior for progress bars
-                println!("Running cargo-flake to detect flaky tests");
-                println!("Streaming output to: {output_file}");
-
-                // Install cargo-flake first
-                cmd!(
-                    sh,
-                    "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
-                )
-                .remove_and_run()?;
-
-                // Shell-quote each arg — these strings are interpreted by
-                // `bash -c`, so unquoted args with spaces/metacharacters
-                // would be re-split or executed
-                let quoted_args = command_args
-                    .iter()
-                    .map(|a| shell_quote(a))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let quoted_output = shell_quote(&output_file);
-
-                // Use script command to preserve TTY and tee to save output.
-                // `set -o pipefail` so a cargo/script failure isn't masked by
-                // tee's (successful) exit status. Commands go through
-                // remove_ring_env_vars like every other cargo invocation here.
-                // Handle different script syntax between platforms
-                let script_result = if cfg!(target_os = "macos") {
-                    // macOS script syntax
-                    let script_command = format!(
-                        "set -o pipefail; script -q /dev/stdout cargo {quoted_args} | tee -a {quoted_output}"
-                    );
-                    remove_ring_env_vars(cmd!(sh, "bash -c {script_command}"))
-                        .env("RUST_BACKTRACE", "1")
-                        .run()
-                } else if cfg!(target_os = "linux") {
-                    // Linux script syntax (-c takes the whole command as one
-                    // argument, so quote the assembled cargo invocation again)
-                    let inner = shell_quote(&format!("cargo {quoted_args}"));
-                    let script_command = format!(
-                        "set -o pipefail; script -q -e -c {inner} /dev/stdout | tee -a {quoted_output}"
-                    );
-                    remove_ring_env_vars(cmd!(sh, "bash -c {script_command}"))
-                        .env("RUST_BACKTRACE", "1")
-                        .run()
-                } else {
-                    // Fallback for other platforms - try basic tee without script
-                    eprintln!(
-                        "Warning: script command may not be available on this platform, progress bars may not display correctly"
-                    );
-                    let tee_command = format!(
-                        "set -o pipefail; cargo {quoted_args} 2>&1 | tee -a {quoted_output}"
-                    );
-                    remove_ring_env_vars(cmd!(sh, "bash -c {tee_command}"))
-                        .env("RUST_BACKTRACE", "1")
-                        .run()
-                };
-
-                // If the `script` command itself is unavailable, fall back to
-                // basic tee. Only retry in that case — with pipefail a cargo
-                // failure also surfaces here, and rerunning the whole flaky
-                // suite on a genuine test failure would be very expensive.
-                let script_missing = cmd!(sh, "which script").quiet().run().is_err();
-                if script_result.is_err() && script_missing {
-                    eprintln!(
-                        "Warning: script command unavailable, falling back to basic output capture"
-                    );
-                    let tee_command = format!(
-                        "set -o pipefail; cargo {quoted_args} 2>&1 | tee -a {quoted_output}"
-                    );
-                    remove_ring_env_vars(cmd!(sh, "bash -c {tee_command}"))
-                        .env("RUST_BACKTRACE", "1")
-                        .run()?;
-                } else {
-                    script_result?;
-                }
-            } else {
-                // Run command without file output - show output in terminal
-                println!("Running cargo-flake to detect flaky tests");
-
-                // Install cargo-flake if not already installed
-                cmd!(
-                    sh,
-                    "cargo install --locked --version {CARGO_FLAKE_VERSION} cargo-flake"
-                )
-                .remove_and_run()?;
-
-                remove_ring_env_vars(cmd!(sh, "cargo {command_args...}"))
-                    .env("RUST_BACKTRACE", "1")
-                    .run()?;
-            }
+            run_flaky(
+                sh,
+                FlakyOptions {
+                    iterations,
+                    stress_iterations,
+                    isolation_iterations,
+                    threads,
+                    clean,
+                    no_stress,
+                    no_isolation,
+                    tolerable_failures,
+                    isolation_log,
+                    args,
+                },
+            )?;
         }
     };
     Ok(())
@@ -1034,12 +893,6 @@ fn main() -> eyre::Result<()> {
     let sh = Shell::new()?;
     let args = Args::parse();
     run_command(args.command, &sh)
-}
-
-/// Quote a string for safe inclusion in a `bash -c` command line.
-/// Wraps in single quotes; embedded single quotes become `'\''`.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Scans per-test `.status` marker files and writes an aggregate `status.txt`.
@@ -1330,51 +1183,6 @@ fn log_coverage_mismatches(sh: &Shell, scope_args: &[String]) -> eyre::Result<()
     }
 
     Ok(())
-}
-
-/// Env vars that Ring's build.rs emits rerun conditions for, many of which are
-/// absent under a regular `cargo check`, causing unnecessary rebuilds when
-/// alternating between `cargo check` and xtask commands.
-// TODO: remove once briansmith/ring#2454 is resolved and released; that issue
-// tracks spurious rebuilds caused by ring's build.rs rerun conditions
-const RING_ENV_VARS: &[&str] = &[
-    "CARGO_MANIFEST_DIR",
-    "CARGO_PKG_NAME",
-    "CARGO_PKG_VERSION_MAJOR",
-    "CARGO_PKG_VERSION_MINOR",
-    "CARGO_PKG_VERSION_PATCH",
-    "CARGO_PKG_VERSION_PRE",
-    "CARGO_MANIFEST_LINKS",
-    "RING_PREGENERATE_ASM",
-    // "OUT_DIR",
-    "CARGO_CFG_TARGET_ARCH",
-    "CARGO_CFG_TARGET_OS",
-    "CARGO_CFG_TARGET_ENV",
-    "CARGO_CFG_TARGET_ENDIAN",
-    // "DEBUG",
-];
-
-fn remove_ring_env_vars(cmd: Cmd<'_>) -> Cmd<'_> {
-    let mut c = cmd;
-    for k in RING_ENV_VARS {
-        c = c.env_remove(k);
-    }
-    c
-}
-
-pub trait CmdExt {
-    fn remove_and_run(self) -> Result<(), xshell::Error>;
-    fn remove_and_read(self) -> Result<String, xshell::Error>;
-}
-
-impl CmdExt for Cmd<'_> {
-    fn remove_and_run(self) -> Result<(), xshell::Error> {
-        remove_ring_env_vars(self).run()
-    }
-
-    fn remove_and_read(self) -> Result<String, xshell::Error> {
-        remove_ring_env_vars(self).read()
-    }
 }
 
 #[cfg(test)]

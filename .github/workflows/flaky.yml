@@ -6,12 +6,22 @@ on:
   workflow_dispatch:
     inputs:
       iterations:
-        description: 'Number of iterations to run'
+        description: 'Phase 1: full-suite iterations'
         required: false
         default: '3'
         type: string
+      stress_iterations:
+        description: 'Phase 2: stress iterations over the suspect set'
+        required: false
+        default: '3'
+        type: string
+      isolation_iterations:
+        description: 'Phase 3: per-test isolated iterations'
+        required: false
+        default: '5'
+        type: string
       tolerable_failures:
-        description: 'Number of tolerable failures'
+        description: 'Genuinely-flaky tests to tolerate before failing'
         required: false
         default: '5'
         type: string
@@ -30,6 +40,8 @@ concurrency:
 # are set by the setup-repo composite action via GITHUB_ENV.
 env:
   ITERATIONS: ${{ github.event.inputs.iterations || '3' }}
+  STRESS_ITERATIONS: ${{ github.event.inputs.stress_iterations || '3' }}
+  ISOLATION_ITERATIONS: ${{ github.event.inputs.isolation_iterations || '5' }}
   TOLERABLE_FAILURES: ${{ github.event.inputs.tolerable_failures || '5' }}
   RETENTION_DAYS: 10
   CARGO_TERM_COLOR: always
@@ -68,90 +80,59 @@ jobs:
         run: |
           # Use available cores (Linux/macOS fallback)
           export RUST_TEST_THREADS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
-          
+
           START_TIME=$(date +%s)
           set +e
-          cargo xtask flaky --clean --save -i ${{ env.ITERATIONS }} -f ${{ env.TOLERABLE_FAILURES }}
+          cargo xtask flaky --clean \
+            -i ${{ env.ITERATIONS }} \
+            --stress-iterations ${{ env.STRESS_ITERATIONS }} \
+            -y ${{ env.ISOLATION_ITERATIONS }} \
+            -f ${{ env.TOLERABLE_FAILURES }}
           EXIT_CODE=$?
           END_TIME=$(date +%s)
-          
-          # Copy the timestamped output file to results directory
-          if ls target/flaky-test-output-*.txt 1> /dev/null 2>&1; then
-            cp target/flaky-test-output-*.txt flaky-test-results/flaky-test-output.txt
+
+          # Locate the most recent flaky report directory produced by the run.
+          REPORT_DIR="$(ls -dt .target/nextest-monitor/flaky/*/ target/nextest-monitor/flaky/*/ 2>/dev/null | head -1)"
+          if [ -n "$REPORT_DIR" ] && [ -f "${REPORT_DIR}report.md" ]; then
+            cp "${REPORT_DIR}report.md" flaky-test-results/report.md
+            cp "${REPORT_DIR}report.json" flaky-test-results/report.json 2>/dev/null || true
+            # Preserve per-test isolation logs for debugging.
+            tar -czf flaky-test-results/isolation-logs.tar.gz -C "$REPORT_DIR" phase3-isolation 2>/dev/null || true
           else
-            echo "No flaky output file found in target directory" > flaky-test-results/flaky-test-output.txt
+            echo "# Flaky Test Detection Report" > flaky-test-results/report.md
+            echo "No report produced (no flaky tests detected, or the run failed early)." >> flaky-test-results/report.md
           fi
-          
+
           echo $EXIT_CODE > flaky-test-results/exit_code.txt
           echo "Duration: $((END_TIME - START_TIME)) seconds" > flaky-test-results/duration.txt
         continue-on-error: true
 
       - name: Generate summary report
+        id: parse
         if: always()
         shell: bash
         run: |
-          # Read duration if available
           DURATION=$(cat flaky-test-results/duration.txt 2>/dev/null || echo "n/a")
-          
+          EXIT_CODE=$(cat flaky-test-results/exit_code.txt 2>/dev/null || echo "n/a")
+
+          # genuine_flakes is a top-level field in report.json.
+          GENUINE=$(python3 -c "import json;print(json.load(open('flaky-test-results/report.json')).get('genuine_flakes',0))" 2>/dev/null || echo 0)
+          SUSPECTS=$(python3 -c "import json;print(json.load(open('flaky-test-results/report.json')).get('total_suspects',0))" 2>/dev/null || echo 0)
+          echo "genuine_flakes=$GENUINE" >> "$GITHUB_OUTPUT"
+
           {
             echo "# Flaky Test Detection Report"
             echo "**Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
             echo "**Commit:** ${{ github.sha }}"
             echo "**Runner:** ${{ runner.name }}"
-            echo "**Tool:** cargo xtask flaky"
-            echo "**Iterations:** ${{ env.ITERATIONS }}"
-            echo "**Tolerable Failures:** ${{ env.TOLERABLE_FAILURES }}"
-            echo "**Clean Workspace:** Yes"
-            echo "**Output Saved:** Yes (timestamped file in target/)"
+            echo "**Phases:** full-suite ×${{ env.ITERATIONS }}, stress ×${{ env.STRESS_ITERATIONS }}, isolation ×${{ env.ISOLATION_ITERATIONS }}"
+            echo "**Tolerable genuine flakes:** ${{ env.TOLERABLE_FAILURES }}"
             echo "**Duration:** $DURATION"
+            echo "**Exit code:** $EXIT_CODE"
+            echo "**Suspects:** $SUSPECTS — **Genuine flakes:** $GENUINE"
             echo
-            echo "## Results"
-            if grep -Eiq 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt; then
-              echo "### Flaky Tests Detected"
-              echo
-              echo '```text'
-              # Show matching lines with line numbers (top 200 for brevity)
-              grep -Ein 'Found.*failing test|flaky|intermittent' flaky-test-results/flaky-test-output.txt | head -n 200 || true
-              echo '```'
-            else
-              echo "### No Flaky Tests Detected"
-            fi
-            echo
-            echo "### Exit Code"
-            echo '```text'
-            cat flaky-test-results/exit_code.txt 2>/dev/null || echo "n/a"
-            echo '```'
+            cat flaky-test-results/report.md 2>/dev/null || echo "_No report available._"
           } > flaky-test-results/summary.md
-
-      - name: Parse flaky test details
-        id: parse
-        if: always()
-        shell: bash
-        run: |
-          # Extract test names and failure counts
-          grep -E "^test:.*stdout" flaky-test-results/flaky-test-output.txt | \
-            awk '{print $2, $3}' | \
-            sort | uniq > flaky-test-results/flaky-tests-list.txt || true
-          
-          # Count for metrics
-          FLAKY_COUNT=$(wc -l < flaky-test-results/flaky-tests-list.txt 2>/dev/null || echo 0)
-          echo "flaky_count=$FLAKY_COUNT" >> "$GITHUB_OUTPUT"
-          
-          # Add count to summary
-          echo "" >> flaky-test-results/summary.md
-          echo "### Flaky Test Count: $FLAKY_COUNT" >> flaky-test-results/summary.md
-
-      - name: Compress results
-        if: always()
-        shell: bash
-        run: |
-          # Create a tar.gz of everything except summary.md
-          cd flaky-test-results
-          tar -czf compressed-results.tar.gz \
-            --exclude=summary.md \
-            --exclude=compressed-results.tar.gz \
-            *.txt 2>/dev/null || true
-          cd ..
 
       - name: Upload flaky test results
         if: always()
@@ -160,8 +141,9 @@ jobs:
           name: flaky-test-results-${{ github.run_number }}
           path: |
             flaky-test-results/summary.md
-            flaky-test-results/compressed-results.tar.gz
-            target/flaky-test-output-*.txt
+            flaky-test-results/report.md
+            flaky-test-results/report.json
+            flaky-test-results/isolation-logs.tar.gz
           retention-days: ${{ env.RETENTION_DAYS }}
 
       - name: Post to job summary

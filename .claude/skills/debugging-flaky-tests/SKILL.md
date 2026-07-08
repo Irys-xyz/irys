@@ -154,10 +154,16 @@ Run both commands — **both must pass**:
 
 ```sh
 cargo nextest run -p irys-chain test_name          # sanity check
-cargo xtask flaky -i 10 -- -E 'test(test_name)'   # must show 0 failures
+# Scope phase 1 to the target test; the isolation phase re-runs it alone.
+# "No flaky tests detected" (exit 0) means the fix holds.
+cargo xtask flaky -i 10 -y 10 -- -E 'test(test_name)'
 ```
 
-If `flaky` still shows failures, the fix is incomplete. Go back to Step 5.
+If `flaky` reports the test as GENUINE FLAKY / BROKEN / TIMEOUT-BOUND (or exits
+non-zero), the fix is incomplete. Go back to Step 5. A `CONTENTION`
+classification means it only fails alongside other tests — see Step 5 on
+resource contention. The full report (per-test failure rates and isolation logs)
+is written to `target/nextest-monitor/flaky/<timestamp>/`.
 
 ## Common Mistakes
 

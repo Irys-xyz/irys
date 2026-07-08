@@ -12,7 +12,7 @@ cargo xtask test               # Run tests via nextest with failure tracking
 cargo xtask test --rerun-failures  # Re-run only previously failed tests
 cargo xtask local-checks       # Run ~99% of CI checks (fmt, check, clippy, unused-deps, typos)
 cargo xtask local-checks --fix # Auto-fix issues
-cargo xtask flaky -i 5         # Run tests 5 times to detect flakiness
+cargo xtask flaky -i 5         # Nextest flaky detection: full suite ×5, then stress + isolate failures
 ```
 
 Run a single test:
