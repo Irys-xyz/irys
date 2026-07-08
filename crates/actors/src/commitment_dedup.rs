@@ -259,4 +259,94 @@ mod tests {
             find_replayed_commitment(&block_tree, &db, &block1, &[tx_a, tx_b], 100).unwrap();
         assert_eq!(result, None);
     }
+
+    // The by-hash walk owns the floor height (`height - block_tree_depth`)
+    // inclusively on the candidate's own branch, so a node-local
+    // `MigratedBlockHashes` inclusion EXACTLY at the floor is reorg-mutable and
+    // must never decide replay-validity. The finalized lookup is capped strictly
+    // below the floor: a boundary-height sibling on a divergent local branch
+    // carrying the same commitment is not a duplicate.
+    #[test]
+    fn floor_height_sibling_inclusion_is_not_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        // b1 on the candidate's own branch at the floor height (1), carrying no
+        // commitments; only in the DB (below the retained tree window), so the
+        // walk resolves the floor via its DB fallback and finds no replay.
+        let b1 = child_with_commitments(&genesis, 1, vec![]);
+        // Candidate at height 2 carrying commitment C; floor = 2 - 1 = 1.
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        let b2 = child_with_commitments(&b1, 2, vec![cid]);
+
+        // Node-local SIBLING at the floor height whose commitment ledger carries
+        // C: the local canonical chain diverges from the candidate's branch at
+        // the boundary, and the metadata row points at this sibling.
+        let mut sibling = mock_header_with_commitments(1, vec![cid]);
+        sibling.test_sign();
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &b1)?;
+            insert_block_header(tx, &sibling)?;
+            tx.put::<MigratedBlockHashes>(1, sibling.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[commitment], 1)?;
+        assert_eq!(
+            result, None,
+            "a canonical inclusion exactly at the walk floor must not count as replay"
+        );
+        Ok(())
+    }
+
+    // A genuine finalized inclusion STRICTLY below the floor is still flagged:
+    // the stricter cap loses no coverage. C2 is included at height 1, the
+    // candidate at height 3 replays it, floor = 2 (walk covers height 2 only),
+    // so the finalized lookup (capped at 1) is the sole path that can see it.
+    #[test]
+    fn finalized_inclusion_below_floor_is_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        // b1 finalizes C2 at height 1 (below the candidate's floor of 2).
+        let b1 = child_with_commitments(&genesis, 1, vec![cid]);
+        // b2 at the floor carries no commitments; the walk covers it and finds
+        // nothing.
+        let b2 = child_with_commitments(&b1, 2, vec![]);
+        // Candidate at height 3 replays C2; floor = 3 - 1 = 2, cap = 1.
+        let b3 = child_with_commitments(&b2, 3, vec![cid]);
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &b1)?;
+            insert_block_header(tx, &b2)?;
+            tx.put::<MigratedBlockHashes>(1, b1.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b3, &[commitment], 1)?;
+        assert_eq!(
+            result,
+            Some(cid),
+            "a finalized inclusion strictly below the floor must still be a replay"
+        );
+        Ok(())
+    }
 }
