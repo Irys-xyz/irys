@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783509116700,
+  "lastUpdate": 1783533579161,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8359,6 +8359,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "18c3ed1e8fa530a657d8d766e2452140a516881c",
+          "message": "feat: flaky nextest detection (#1472)\n\n* feat(xtask): nextest-based three-phase flaky-test detection\n\nReplace the cargo-flake wrapper with a nextest-native `cargo xtask flaky`\nthat reuses the existing nextest-wrapper stats infrastructure.\n\nPhases:\n1. Full suite xN under normal parallelism -> suspects (any test that\n   fails at least once), pass/fail read from per-iteration wrapper stats.\n2. Stress the suspect set together at high concurrency xK to reproduce\n   peer contention cheaply.\n3. Run each suspect in isolation (single-threaded, one process) xY,\n   capturing full logs; pass/fail from the process exit code.\n\nSuspects are classified as GENUINE FLAKY / BROKEN / TIMEOUT-BOUND (gate\nCI) vs CONTENTION (peers / full-suite) (warn only). Emits report.md +\nreport.json under target/nextest-monitor/flaky/<ts>/, feeds genuine\nflakes into failures.json, and exits non-zero when genuine flakes exceed\n-f/--tolerable-failures.\n\nEnforces retries=0, builds tests once up front, and never fail-fasts so\nevery iteration observes the full suite. Shared xtask helpers moved to a\nnew xtask::util module.\n\nUpdates flaky.yml, CLAUDE.md, and the debugging-flaky-tests skill.\n\n* feat(xtask): richer per-test isolated failure logs\n\nIsolation phase now runs with --no-capture and RUST_BACKTRACE=full so each\nrun's full stdout/stderr (panics, tracing) is captured. Log files are\nrenamed by outcome (run-N.FAIL.log / run-N.TIMEOUT.log / run-N.pass.log)\nand a per-test summary.txt records each iteration's result, making a\nflaky test's failure history readable at a glance.\n\n* feat(xtask): flag-gated JSON report on stdout for CI/tooling\n\nAdd `--json` to `cargo xtask flaky`: on completion it emits the report as\na single compact JSON line on stdout, bracketed by\n<<<FLAKY_REPORT_JSON_BEGIN>>> / <<<FLAKY_REPORT_JSON_END>>> sentinels so\ndownstream tooling can extract it amid the streamed nextest output without\ndiscovering the timestamped report.json path.\n\nflaky.yml now runs with --json and extracts the payload via sed, using it\nas the authoritative source for genuine_flakes/total_suspects metrics\n(falling back to the report.json file), and uploads run-output.log.\n\n* fix: tests using testnet() consensus config\n\n* ci(flaky): fail the job when genuine flakes exceed tolerance\n\nThe run step keeps continue-on-error so reporting/upload still happen, but\na final step now re-raises the captured exit code (non-zero only when\ngenuine flakes exceed -f, or on a run error). A red job triggers GitHub's\nnative scheduled-failure email and any Slack GitHub-app workflow\nsubscription — no webhook secret required.\n\n* feat(xtask): targeted mode, failure signatures, verify fast-path\n\nOptimize the flaky tool for the agent-driven \"diagnose these known flaky\ntests and fix them\" loop:\n\n- Targeted mode: --tests 'a,b' and --tests-from <report.json|failures.json>\n  skip 40-min full-suite discovery; phase 1 is scoped to the given tests\n  (still gets the contention signal) before stress + isolation.\n- Failure signatures: parse each isolated run's captured output for the\n  panic/assertion message + file:line, dedupe distinct signatures per test,\n  and surface them in report.json / report.md / stdout — the \"why\" without\n  opening logs.\n- Verify fast-path: --verify 'a,b' runs isolation only (post-fix check);\n  a test that passes every isolated run is classified CLEAN (exit 0).\n- Report iteration counts now reflect what actually ran (0 for skipped\n  phases in verify mode).\n- debugging-flaky-tests skill routes agents to the targeted/--verify/--json\n  path with the report schema.\n\n* fix(xtask/flaky): address review findings\n\n- flaky.yml: pass workflow_dispatch inputs and github/runner context via\n  quoted shell env expansion instead of ${{ }} interpolation inside run\n  scripts, closing a script-injection vector.\n- classify: with isolation skipped, a stress failure no longer returns\n  PeerContention (which asserts the test passes alone — unprovable without\n  isolation); it stays Unverified. Add regression test.\n- clean: --clean now runs `cargo clean` (previously only rebuilt), and the\n  --no-run prebuild fails fast instead of swallowing compile errors.\n- isolation: IsoResult::NoMatch is now a hard error as documented, rather\n  than breaking out and being silently classified as contention/clean on\n  zero recorded runs.\n- failures.json: always rewritten for the current run — cleared when there\n  are no genuine flakes so `--rerun-failures` can't re-run stale entries.\n\n* refactor(xtask): share NEXTEST_VERSION between test and flaky\n\nHoist the pinned cargo-nextest version into a shared util constant so\n`xtask flaky` installs the same version as `xtask test` whenever the\npin changes, instead of drifting via a hardcoded copy.\n\n* feat: address feedback",
+          "timestamp": "2026-07-08T18:43:31+01:00",
+          "tree_id": "222e447f219e71060073291091f503d0c4015958",
+          "url": "https://github.com/Irys-xyz/irys/commit/18c3ed1e8fa530a657d8d766e2452140a516881c"
+        },
+        "date": 1783533577850,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01613,
+            "range": "± 0.002235",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155383,
+            "range": "± 0.011278",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.584417,
+            "range": "± 0.105902",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.498468,
+            "range": "± 0.309044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083896,
+            "range": "± 0.002157",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 836.973302,
+            "range": "± 10.878018",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1030.098606,
+            "range": "± 43.223691",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.159635,
+            "range": "± 0.013848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1212.190352,
+            "range": "± 15.634588",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1566.905929,
+            "range": "± 127.472961",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.038035,
+            "range": "± 0.002939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 220.980093,
+            "range": "± 9.825404",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 281.003496,
+            "range": "± 4.014158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
