@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783533579161,
+  "lastUpdate": 1783534480472,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8467,6 +8467,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bcb7a333bae7b751672ce9e4199d27d1573fd4e1",
+          "message": "fix(consensus): strictly-below dedup fallback caps + CDR scrub confirmed-window recheck (#1471)\n\n* fix(consensus): cap dedup finalized fallbacks strictly below their branch-resolved windows\n\ncommitment_dedup: the finalized replay lookup was capped AT the walk floor\n(height - block_tree_depth), overlapping the by-hash walk's inclusive\ncoverage of that height. A node-local MigratedBlockHashes row at the\nboundary is reorg-mutable, and since the walk already resolves the floor on\nthe candidate's own branch, a lookup answer there is never a true positive\n— only a potential false DuplicateCommitmentTransaction (a hard reject) on\na maximal-depth fork whose boundary sibling carries the same commitment.\nCap the lookup strictly below the floor; the walk covers [floor, height),\nso coverage is unchanged. This matches the data-tx fallbacks in\ndata_txs_are_valid and resolve_promoted_on_branch, which already cap\nstrictly below their walk windows.\n\ntx_selector: the publish prior-Submit gate capped canonical_submit_height\nat the parent height, admitting node-local reorg-band rows into the answer.\nThe canonical fold already resolves the parent's ancestry down to the cache\nfloor, so cap the DB lookup at tip - block_tree_depth — finalized,\nbranch-invariant heights only — mirroring the commitment selection dedup's\nfinalized floor. Anchoring at the tip rather than the parent keeps the band\n(parent - depth, tip - depth] covered when building on a non-tip parent.\n\n* test(consensus): pin the dedup finalized-fallback caps on both sides\n\ncommitment_dedup unit tests: a node-local canonical inclusion at exactly\nthe walk floor must never decide replay-validity (the walk owns that\nheight on the candidate's branch), while a finalized inclusion strictly\nbelow the floor must still be flagged — the stricter cap loses no\ncoverage.\n\nchain-tests: producer-side sibling of the validator pin\ntest_prevalidation_ignores_content_verified_row_inside_walk_window. A\ncontent-verified canonical Submit row inside the reorg-mutable band must\nnot satisfy the publish prior-Submit gate (in-band inclusions are owned\nby the canonical fold, never the DB), and a finalized row at or below\ntip - block_tree_depth must still promote — the cap does not over-skip.\n\nBoth regression arms were verified to fail against the pre-fix caps.\n\n* fix(cache): recheck the canonical tree window before scrubbing CachedDataRoots txids\n\nThe txid scrub's re-confirmation recheck keyed solely on IrysDataTxMetadata\nexistence. Canonical metadata is written only at migration, so a tx\nre-confirmed in a still-unmigrated block during the scrub window had no row\nyet and was wrongly scrubbed from txid_set — letting the prune loop evict\nchunks that chunk migration still needs.\n\nConfirmed-but-unmigrated inclusions live only in the in-memory block tree,\nso snapshot the canonical tree window's data-ledger txids before the write\ntxn (guard released before DB I/O) and keep a queued txid when either\nsignal holds: metadata row present (migrated) or in the canonical window\n(confirmed, not yet migrated). Only the canonical chain counts —\n\"(re-)confirmed\" means on the branch this node currently follows; a kept\nentry is re-scrubbed by the next TTL/reorg pass, so over-keeping is safe.\n\nThe scrub body moves out of the spawned thread into\nprune_txids_from_cached_data_roots so the recheck is directly testable;\nthread wrapper, panic handling, and completion signaling are unchanged.\nThe residual race (gossip re-adds a tx that has confirmed nowhere) remains\nas documented.\n\nThe regression test was verified to fail with the tree-window recheck\ndisabled.\n\n* test(consensus): pin the saturated dedup floor and tighten the gate-test geometry guard\n\ncommitment_dedup: near genesis (block_tree_depth >= height) the walk floor\nand the finalized cap both saturate to 0, leaving the walk owning the whole\n[0, height) range. Pin that coverage does not break down there: an\nin-window inclusion is still flagged (via the walk — the metadata row sits\nabove the saturated cap), a never-included commitment is not, and the\ndouble saturating_sub cannot underflow. The walk's DB phase descends to\nheight 0, so genesis is stored in the DB as in production.\n\npublish_gate_reorg_band: the geometry assert only guarded\ncontrol_height = floor - 1, not the later parent lookup at floor - 2,\nwhich underflows at floor == 1. Require floor >= 2 so the guard covers\nevery height subtraction it exists to protect.",
+          "timestamp": "2026-07-08T18:55:15+01:00",
+          "tree_id": "c1baf6d26d1d5ac313f0a0673a1084b8ae6b06e0",
+          "url": "https://github.com/Irys-xyz/irys/commit/bcb7a333bae7b751672ce9e4199d27d1573fd4e1"
+        },
+        "date": 1783534478283,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012434,
+            "range": "± 0.00051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120525,
+            "range": "± 0.003517",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.2147,
+            "range": "± 0.064507",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.099755,
+            "range": "± 0.237626",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077438,
+            "range": "± 0.001925",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 753.307951,
+            "range": "± 4.901297",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 979.904204,
+            "range": "± 5.225859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117632,
+            "range": "± 0.001834",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.874905,
+            "range": "± 124.128148",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1592.292681,
+            "range": "± 114.873231",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033552,
+            "range": "± 0.000857",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 218.790726,
+            "range": "± 10.343125",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 308.985077,
+            "range": "± 16.718627",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000148,
+            "range": "± 0.000014",
             "unit": "ms/iter"
           }
         ]
