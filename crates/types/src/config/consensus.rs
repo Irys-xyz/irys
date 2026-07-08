@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, Cascade, FrontierParams, IrysHardforkConfig};
 use crate::{
     H256, IrysAddress,
     storage_pricing::{
@@ -969,7 +969,7 @@ impl ConsensusConfig {
             safe_minimum_number_of_years: 200,
 
             expected_genesis_hash: Some(H256::from_base58(
-                "CVqXN2QqETJYke83dKCMjBWEnxstrFGk6ySUqNho7QRr",
+                "DoAEJ8R2CZw6QUFVXzAoPNXjGL8m6uQFEBGweagrUMMP", // spellchecker:disable-line
             )),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
@@ -990,7 +990,7 @@ impl ConsensusConfig {
             max_future_timestamp_drift_millis: 15_000,
 
             genesis: GenesisConfig {
-                timestamp_millis: 1764677430138,
+                timestamp_millis: 1781823141172,
                 miner_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
                     .unwrap(),
                 reward_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
@@ -999,7 +999,7 @@ impl ConsensusConfig {
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
                 genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
-                initial_packed_partitions: None,
+                initial_packed_partitions: Some(0.01),
             },
 
             mempool: MempoolConsensusConfig {
@@ -1037,7 +1037,12 @@ impl ConsensusConfig {
             },
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                genesis_evm_state: GenesisEvmState::Alloc(BTreeMap::new()),
+                genesis_evm_state: GenesisEvmState::StateRoot(
+                    B256::from_hex(
+                        "0x7d4ce97c69022a80f58bcd5613cd522b2420b243fdcdb6b1662bac9849b88a24",
+                    )
+                    .expect("valid genesis state root"),
+                ),
             },
             block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
@@ -1064,12 +1069,23 @@ impl ConsensusConfig {
                 borealis: Some(Borealis {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
                         StringDeserializer::<serde::de::value::Error>::new(
-                            "2026-06-10T12:00:00+00:00".to_owned(),
+                            "2026-05-22T08:00:00+00:00".to_owned(),
                         ),
                     )
                     .unwrap(),
                 }),
-                cascade: None,
+
+                cascade: Some(Cascade {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-07-06T19:30:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    one_year_epoch_length: 120,  // ~5 days
+                    thirty_day_epoch_length: 10, // 10 hrs
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
             },
         }
     }
