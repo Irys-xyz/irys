@@ -1,3 +1,4 @@
+use crate::vdf_utils::{ReanchorSignals, VdfReanchorGenerationChanged};
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::{bail, eyre};
 use irys_efficient_sampling::num_recall_ranges_in_partition;
@@ -320,6 +321,47 @@ impl VdfStateReadonly {
         cancel: Arc<AtomicU8>,
         progress_timeout: std::time::Duration,
     ) -> eyre::Result<()> {
+        self.wait_for_step_inner(desired_step_number, cancel, progress_timeout, None)
+            .await
+    }
+
+    /// [`Self::wait_for_step`], additionally aborting with
+    /// [`VdfReanchorGenerationChanged`] as soon as a re-anchor heal applies
+    /// (`signals` generation moves past `captured_generation`).
+    ///
+    /// Exists for the fast-forward catch-up wait: a heal landing after
+    /// `send_validated_batch`'s generation check but before `run_vdf` drains
+    /// the channel silently drops the stale-stamped steps. Without this watch
+    /// the waiter can only lose — a paused/FF-driven VDF freezes and the
+    /// `Stalled` error escalates to the never-mislabel panic, while a
+    /// free-running VDF keeps the progress check alive and the wait outlasts
+    /// the whole catch-up backlog. The generation abort routes the task to the
+    /// requeue lane instead, and the block revalidates against the healed
+    /// buffer.
+    pub async fn wait_for_step_or_reanchor(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        signals: &ReanchorSignals,
+        captured_generation: u64,
+    ) -> eyre::Result<()> {
+        self.wait_for_step_inner(
+            desired_step_number,
+            cancel,
+            progress_timeout,
+            Some((signals, captured_generation)),
+        )
+        .await
+    }
+
+    async fn wait_for_step_inner(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        reanchor_watch: Option<(&ReanchorSignals, u64)>,
+    ) -> eyre::Result<()> {
         use tokio::time::Instant;
 
         let retries_per_second = 20;
@@ -335,6 +377,23 @@ impl VdfStateReadonly {
                     "VDF wait cancelled"
                 );
                 return Err(WaitForStepError::Cancelled.into());
+            }
+
+            // Checked before the success return: a generation change means the
+            // steps this waiter depends on were validated against a pre-heal
+            // buffer, so the whole task must requeue and revalidate — even if
+            // the counter has meanwhile reached the desired step.
+            if let Some((signals, captured)) = reanchor_watch {
+                let current = signals.generation();
+                if current != captured {
+                    warn!(
+                        vdf.desired_step = desired_step_number,
+                        vdf.captured_generation = captured,
+                        vdf.current_generation = current,
+                        "VDF wait aborted: a re-anchor heal applied mid-validation"
+                    );
+                    return Err(VdfReanchorGenerationChanged { captured, current }.into());
+                }
             }
 
             let current_step = self.current_step();
@@ -1141,6 +1200,101 @@ mod tests {
 
         advancer.await.unwrap();
         assert!(result.is_ok(), "wait should succeed when state advances");
+    }
+
+    /// The re-anchor race (heal applies after `send_validated_batch`'s check,
+    /// before `run_vdf` drains — the queued steps are dropped as stale): the
+    /// generation-aware wait must abort with `VdfReanchorGenerationChanged`
+    /// as soon as the heal applies, instead of freezing until the `Stalled`
+    /// error escalates to the never-mislabel panic.
+    #[tokio::test(start_paused = true)]
+    async fn wait_aborts_with_generation_change_when_heal_applies_mid_wait() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let captured = signals.generation();
+
+        let healer = {
+            let signals = signals.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                signals.record_heal_applied();
+            })
+        };
+
+        // Step 200 is unreachable (the state never advances) and the progress
+        // timeout is far longer than the heal, so only the generation watch
+        // can end this wait early.
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                200,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(3600),
+                &signals,
+                captured,
+            )
+            .await;
+
+        healer.await.unwrap();
+        let err = result.expect_err("a mid-wait heal must abort the wait");
+        let change = err
+            .downcast_ref::<crate::vdf_utils::VdfReanchorGenerationChanged>()
+            .expect("the abort must carry the typed generation-change error");
+        assert_eq!(change.captured, captured);
+        assert_eq!(change.current, captured + 1);
+    }
+
+    /// A stale capture aborts on the first poll — even when the desired step
+    /// is ALREADY reached. The steps were validated against a pre-heal buffer;
+    /// requeueing for revalidation always wins over a vacuous `Ok`.
+    #[tokio::test(start_paused = true)]
+    async fn wait_with_stale_generation_aborts_even_when_step_is_reached() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let captured = signals.generation();
+        signals.record_heal_applied();
+
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                50, // already below the current step 100
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+                captured,
+            )
+            .await;
+
+        assert!(
+            result
+                .expect_err("a stale capture must abort")
+                .downcast_ref::<crate::vdf_utils::VdfReanchorGenerationChanged>()
+                .is_some()
+        );
+    }
+
+    /// With a stable generation the watch variant is behaviourally identical
+    /// to `wait_for_step`: reaching the desired step returns `Ok`.
+    #[tokio::test(start_paused = true)]
+    async fn wait_with_stable_generation_completes_normally() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                100,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+                signals.generation(),
+            )
+            .await;
+
+        assert!(result.is_ok());
     }
 
     /// SSOT invariant: after N sequential `store_step` calls the owned atomic

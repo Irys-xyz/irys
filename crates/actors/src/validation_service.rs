@@ -965,7 +965,10 @@ impl ValidationServiceInner {
         // in-place heal lands mid-validation, the send observes the newer
         // generation and aborts with `VdfReanchorGenerationChanged`, routing the
         // whole task to the requeue lane — steps validated against the pre-heal
-        // buffer can never replay onto the healed one.
+        // buffer can never replay onto the healed one. The final catch-up wait
+        // watches the same capture (see below): a heal landing after the send
+        // check but before `run_vdf` drains leaves the queued steps silently
+        // dropped as stale, and only the wait can observe that.
         let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let captured_generation = vdf_ff.current_generation();
 
@@ -1139,12 +1142,22 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: waiting for fast-forward to reach block end"
         );
         let final_wait_started = Instant::now();
+        // Generation-aware wait: if a heal applied after `send_validated_batch`'s
+        // check but before `run_vdf` drained the channel, the batch above was
+        // dropped as stale and this step may never arrive through fast-forward.
+        // Without the watch that race dead-ends — a paused/FF-driven VDF freezes
+        // into the `Stalled` never-mislabel panic, a free-running one keeps the
+        // progress check alive until the live counter walks the whole backlog.
+        // The generation abort routes to the same `VdfReanchorGenerationChanged`
+        // → `Cancelled` requeue lane as the send-side check.
         let final_wait_result = self
             .vdf_state
-            .wait_for_step(
+            .wait_for_step_or_reanchor(
                 vdf_info.global_step_number,
                 Arc::clone(&cancel),
                 progress_timeout,
+                &self.service_senders.vdf_reanchor_signals,
+                captured_generation,
             )
             .await;
         metrics::record_vdf_step_wait_duration_ms(

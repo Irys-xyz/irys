@@ -1642,6 +1642,24 @@ impl IrysNode {
             service_senders.chunk_migration.clone(),
         );
 
+        // Create the VDF state before the block tree service: its re-anchor
+        // gate reads the live step through the read-only handle. The DB/header
+        // seed replay lives in irys-chain (DbVdfSeedSource); irys-vdf only sees
+        // the VdfSeedSource trait. Borrow block_index/irys_db here —
+        // block_index is moved later (init_block_producer).
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
+        let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
+            &DbVdfSeedSource {
+                block_index: &block_index,
+                db: &irys_db,
+            },
+            Arc::clone(&is_vdf_mining_enabled),
+            &config,
+        )));
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
+        // Single controller over the shared mining flag (same Arc as VdfState).
+        let vdf_controller = VdfController::new(&is_vdf_mining_enabled);
+
         // Start the block tree service
         let block_tree_lifecycle = Arc::new(BlockTreeLifecycleTimestamps::default());
         let block_tree_handle = BlockTreeService::spawn_service(
@@ -1654,6 +1672,7 @@ impl IrysNode {
             block_migration_service,
             block_tree_cache,
             block_tree_lifecycle.clone(),
+            vdf_state_readonly.clone(),
             runtime_handle.clone(),
         );
 
@@ -1778,23 +1797,8 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
-        // Spawn VDF service. The DB/header seed replay lives in irys-chain
-        // (DbVdfSeedSource); irys-vdf only sees the VdfSeedSource trait. Borrow
-        // block_index/irys_db here — block_index is moved later (init_block_producer).
-        let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
-            &DbVdfSeedSource {
-                block_index: &block_index,
-                db: &irys_db,
-            },
-            Arc::clone(&is_vdf_mining_enabled),
-            &config,
-        )));
-        let vdf_state_readonly = VdfStateReadonly::new(Arc::clone(&vdf_state));
-        // Single controller over the shared mining flag (same Arc as VdfState).
-        let vdf_controller = VdfController::new(&is_vdf_mining_enabled);
-
-        // Spawn the validation service
+        // Spawn the validation service (the VDF state it reads was created
+        // above, before the block tree service)
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),

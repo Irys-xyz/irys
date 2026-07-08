@@ -35,14 +35,18 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
 /// lookup so the genesis / shallow / deep / capacity-boundary cases are
 /// unit-testable without a database.
 ///
-/// Behaviour is identical to the legacy `create_state` replay, including the
-/// **`capacity + 1`** case: when `capacity` steps are exhausted within a
-/// height-1 block the loop still advances to the genesis block and
-/// unconditionally prepends its seed, so the returned window can hold
-/// `capacity + 1` seeds. `first_step` is derived as `global_step -
-/// ordered_seeds.len() + 1` (matching `VdfState::get_steps`), which yields the
-/// one-based genesis contract (`{1, 1, [genesis.steps[0]]}` for a genesis-only
-/// chain).
+/// Behaviour matches the legacy `create_state` replay, including the
+/// **`capacity + 1`** case: when `capacity` steps are exhausted EXACTLY at the
+/// height-1 block's boundary the loop still advances to the genesis block and
+/// prepends its seed, so the returned window can hold `capacity + 1` seeds.
+/// The prepend is guarded, not unconditional: when the capacity cut lands
+/// strictly INSIDE the height-1 block (a suffix of its steps consumed), the
+/// walk also ends on genesis, but prepending would fabricate a gap over the
+/// skipped steps and shift `first_step` off by their count — so the anchor is
+/// added only when the collected window actually abuts it (front at global
+/// step 2). `first_step` is derived as `global_step - ordered_seeds.len() + 1`
+/// (matching `VdfState::get_steps`), which yields the one-based genesis
+/// contract (`{1, 1, [genesis.steps[0]]}` for a genesis-only chain).
 fn replay_vdf_seeds(
     latest_block_hash: BlockHash,
     capacity: usize,
@@ -95,7 +99,16 @@ fn replay_vdf_seeds(
             1,
             "genesis anchor must carry exactly one VDF step",
         );
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+        // Prepend only when the collected window abuts the anchor (its front is
+        // global step 2). The walk also lands on genesis when the capacity cut
+        // stops strictly inside the height-1 block — there the front is a later
+        // step, and prepending would splice the genesis seed under a gap and
+        // mis-map every `first_step`-derived lookup by the skipped count.
+        let steps_collected = u64::try_from(seeds.len()).expect("seed window length fits in u64");
+        let window_first_step = global_step_number - steps_collected + 1;
+        if window_first_step == 2 {
+            seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+        }
     }
 
     let seed_count = u64::try_from(seeds.len()).expect("seed window length fits in u64");
@@ -205,6 +218,31 @@ mod tests {
         assert_eq!(
             bootstrap.ordered_seeds,
             VecDeque::from(vec![Seed(h(1)), Seed(h(2)), Seed(h(3)), Seed(h(4))]),
+        );
+    }
+
+    /// Capacity cut strictly INSIDE the height-1 block: the walk still lands on
+    /// genesis, but the collected window no longer abuts it (height-1's oldest
+    /// step was skipped). Prepending the genesis seed here would fabricate a
+    /// gap and map the anchor to global step 2+j — the returned window must
+    /// instead be the plain contiguous suffix, no anchor.
+    #[test]
+    fn truncation_inside_height_one_skips_genesis_prepend() {
+        // genesis(step 1) <- b1(steps 2,3,4). capacity 2 consumes only steps
+        // 4 and 3; step 2 is skipped.
+        let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
+        let block1 = header(h(10), h(0), 1, 4, &[h(2), h(3), h(4)]);
+        let bootstrap = replay_vdf_seeds(block1.block_hash, 2, reader(vec![genesis, block1]));
+
+        assert_eq!(bootstrap.global_step, 4);
+        assert_eq!(
+            bootstrap.ordered_seeds,
+            VecDeque::from(vec![Seed(h(3)), Seed(h(4))]),
+            "the window must be the contiguous suffix, without the genesis anchor"
+        );
+        assert_eq!(
+            bootstrap.first_step, 3,
+            "first_step must map the front of the window to its true global step"
         );
     }
 

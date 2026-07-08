@@ -26,7 +26,7 @@ use irys_types::{
 };
 use irys_vdf::{
     ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
-    state::calc_capacity,
+    state::{VdfStateReadonly, calc_capacity},
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
@@ -151,6 +151,12 @@ pub struct BlockTreeServiceInner {
     /// Shared with `ApiState` so `/v1/tip` can expose the same in-process
     /// canonical-advance / reorg timestamps the OTEL gauges record.
     pub lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
+    /// Lock-free read view of the VDF state. The deep-reorg re-anchor gate
+    /// reads the LIVE step from it: the free-running loop can cross a reset
+    /// boundary neither fork tip has reached (the confirmation gate admits a
+    /// crossing once the CONFIRMED step reaches `boundary - reset_frequency`),
+    /// so block-derived step numbers alone under-detect a poisoned buffer.
+    vdf_state: VdfStateReadonly,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +338,7 @@ impl BlockTreeService {
         block_migration_service: BlockMigrationService,
         cache: Arc<RwLock<BlockTree>>,
         lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
+        vdf_state: VdfStateReadonly,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -360,6 +367,7 @@ impl BlockTreeService {
                             NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                         ),
                         lifecycle_timestamps,
+                        vdf_state,
                     },
                 };
                 if let Err(e) = block_tree_service.start().await {
@@ -1335,10 +1343,16 @@ impl BlockTreeServiceInner {
     /// dropped above): it walks canonical ancestry — block tree, DB fallback below
     /// the cache — to build a capacity-deep window.
     ///
-    /// The canonical tip step `c_step` stands in for the free-running VDF step: in
-    /// the poison scenario both are wall-clock-paced across the same boundary, and
-    /// the request can only carry canonical seeds up to `c_step` regardless — the
-    /// VDF thread appends the free-running tail `(c_step, live_step]` itself.
+    /// The crossing test takes the highest of the canonical tip, the rolled-back
+    /// fork tip, and the LIVE VDF step. The live term is load-bearing: the
+    /// free-running loop may cross a boundary `B` neither tip has reached — the
+    /// confirmation gate ([`irys_vdf::vdf::is_reset_boundary_blocked`]) admits
+    /// the crossing once the CONFIRMED step reaches `B - reset_frequency` — and
+    /// it folds the then-canonical (now rolled-back) fork's seed there. Gating
+    /// on block-derived steps alone would skip the heal in exactly that window,
+    /// leaving the poison in place with the suspect flag unset and therefore no
+    /// retry source. The request still carries canonical seeds only up to
+    /// `c_step`; the VDF thread recomputes the free-running tail itself.
     ///
     /// This is the DEEP-reorg half of fork-related VDF correctness — an out-of-band
     /// cure after a reorg has already crossed a divergent boundary. The SHALLOW-reorg
@@ -1363,14 +1377,16 @@ impl BlockTreeServiceInner {
         let lca_step = reorg.fork_parent.vdf_limiter_info.global_step_number;
 
         // The local VDF followed the OLD (minority) fork, so its buffer is poisoned
-        // once EITHER the canonical tip or the rolled-back fork crossed the first
-        // divergent boundary. Gate on the higher of the two: BlockTreeServiceInner
-        // has no live VDF step to read, and the old-fork tip is a lower bound on how
-        // far the local VDF ran past the fork point.
+        // once ANY of the canonical tip, the rolled-back fork tip, or the local
+        // free-running step crossed the first divergent boundary. The live step is
+        // the sharp one: the loop crosses a boundary as soon as the CONFIRMED step
+        // reaches its rotation point (see `is_reset_boundary_blocked`), which can
+        // happen while both fork tips are still short of the boundary itself.
         let old_fork_tip_step = reorg.old_fork.last().map_or(c_step, |block| {
             block.header().vdf_limiter_info.global_step_number
         });
-        let crossing_step = c_step.max(old_fork_tip_step);
+        let live_step = self.vdf_state.current_step();
+        let crossing_step = c_step.max(old_fork_tip_step).max(live_step);
 
         // Below the first divergent boundary the forks share every rotation block,
         // so the buffers already agree and no heal is needed. The boundary geometry
@@ -1384,6 +1400,7 @@ impl BlockTreeServiceInner {
         info!(
             c_step,
             lca_step,
+            live_step,
             first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency),
             "Deep reorg crossed a divergent VDF reset boundary; queuing a seed-buffer re-anchor"
         );
@@ -2106,8 +2123,18 @@ mod tests {
         }
 
         /// Like [`Self::new`] but lets the caller tweak the `NodeConfig` (e.g. the
-        /// VDF reset frequency) before the inner service is built.
+        /// VDF reset frequency) before the inner service is built. The live VDF
+        /// step starts at 0, so the re-anchor gate's `live_step` term is inert.
         fn new_with_config(configure: impl FnOnce(&mut irys_types::NodeConfig)) -> Self {
+            Self::new_with_config_and_live_step(configure, 0)
+        }
+
+        /// Like [`Self::new_with_config`], additionally pinning the local VDF's
+        /// live step — the gate's third crossing term.
+        fn new_with_config_and_live_step(
+            configure: impl FnOnce(&mut irys_types::NodeConfig),
+            live_step: u64,
+        ) -> Self {
             use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
@@ -2164,6 +2191,15 @@ mod tests {
                 chunk_migration_sender,
             );
 
+            // Real (not mocked) VDF state pinned at `live_step`; the gate only
+            // reads the lock-free counter.
+            let vdf_state =
+                VdfStateReadonly::new(Arc::new(RwLock::new(irys_vdf::state::VdfState::new(
+                    64,
+                    live_step,
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ))));
+
             let inner = BlockTreeServiceInner {
                 db,
                 cache,
@@ -2177,6 +2213,7 @@ mod tests {
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                 ),
                 lifecycle_timestamps: Arc::new(BlockTreeLifecycleTimestamps::default()),
+                vdf_state,
             };
 
             Self {
@@ -2379,6 +2416,81 @@ mod tests {
         assert!(
             h.vdf_reanchor_rx.borrow_and_update().is_none(),
             "a reorg below the first divergent boundary must not queue a re-anchor"
+        );
+    }
+
+    /// The LIVE VDF step can cross the first divergent boundary while BOTH fork
+    /// tips are still short of it — the confirmation gate admits the crossing
+    /// once the CONFIRMED step reaches `boundary - reset_frequency`, and the
+    /// loop then folds the rolled-back fork's seed there. The gate must queue
+    /// the heal on the live step alone; block-derived steps under-detect
+    /// exactly this window (and the suspect flag would otherwise stay unset,
+    /// leaving no retry source).
+    #[test]
+    fn deep_reorg_crossed_only_by_live_vdf_queues_reanchor() {
+        let mut h = DiscardHarness::new_with_config_and_live_step(
+            |c| {
+                let cc = c.consensus.get_mut();
+                cc.block_migration_depth = 1;
+                cc.vdf.reset_frequency = 100;
+            },
+            // first_divergent_boundary(lca=5, rf=100) = 200: the live VDF at
+            // 250 has crossed it; the canonical tip below stays at 20.
+            250,
+        );
+        let (tip, steps) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a live-VDF-only boundary crossing must queue a ReanchorRequest");
+        assert_eq!(
+            req.c_step, 20,
+            "the request still anchors at the canonical tip; the VDF thread recomputes the tail"
+        );
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(sent, steps);
+        assert!(
+            h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "the live-only crossing must also mark the buffer suspect"
+        );
+    }
+
+    /// Companion bound for the live term: a live step short of the boundary
+    /// adds nothing — with every crossing term below it the gate stays quiet.
+    #[test]
+    fn deep_reorg_with_live_vdf_below_boundary_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config_and_live_step(
+            |c| {
+                let cc = c.consensus.get_mut();
+                cc.block_migration_depth = 1;
+                cc.vdf.reset_frequency = 100;
+            },
+            // Below first_divergent_boundary(lca=5, rf=100) = 200.
+            150,
+        );
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "no crossing term reached the boundary, so no re-anchor may queue"
+        );
+        assert!(
+            !h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "an idle gate must not mark the buffer suspect"
         );
     }
 
