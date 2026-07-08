@@ -11,10 +11,9 @@ use xtask::failures::{
     get_stats_file_path,
 };
 use xtask::flaky::{FlakyOptions, run_flaky};
-use xtask::util::{CmdExt as _, RING_ENV_VARS, build_wrapper};
+use xtask::util::{CmdExt as _, NEXTEST_VERSION, RING_ENV_VARS, build_wrapper};
 
 const LLVM_COV_VERSION: &str = "0.6.16";
-const NEXTEST_VERSION: &str = "0.9.124";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

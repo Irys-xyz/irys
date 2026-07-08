@@ -4,6 +4,10 @@ use cargo_metadata::MetadataCommand;
 use std::path::PathBuf;
 use xshell::{Cmd, Shell, cmd};
 
+/// Pinned cargo-nextest version, shared by `xtask test` and `xtask flaky` so the
+/// two install the same binary whenever the version changes.
+pub const NEXTEST_VERSION: &str = "0.9.124";
+
 /// Env vars that Ring's build.rs emits rerun conditions for, many of which are
 /// absent under a regular `cargo check`, causing unnecessary rebuilds when
 /// alternating between `cargo check` and xtask commands.

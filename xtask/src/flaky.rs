@@ -31,7 +31,9 @@ use xshell::{Shell, cmd};
 use crate::failures::{
     FailuresFile, build_failure_filter, generate_nextest_config, get_monitor_dir,
 };
-use crate::util::{RING_ENV_VARS, build_wrapper, remove_ring_env_vars, shell_quote};
+use crate::util::{
+    NEXTEST_VERSION, RING_ENV_VARS, build_wrapper, remove_ring_env_vars, shell_quote,
+};
 
 /// Options for the flaky-detection run, parsed from the CLI.
 #[derive(Debug, Clone)]
@@ -487,7 +489,11 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     let targeted = !target_tests.is_empty();
 
     // Ensure nextest is available (matches the version pinned by `xtask test`).
-    let _ = cmd!(sh, "cargo install --locked --version 0.9.124 cargo-nextest").run();
+    let _ = cmd!(
+        sh,
+        "cargo install --locked --version {NEXTEST_VERSION} cargo-nextest"
+    )
+    .run();
 
     if opts.clean {
         println!("Cleaning workspace...");
