@@ -164,3 +164,19 @@ jobs:
         if: always()
         continue-on-error: true
         run: sccache --show-stats
+
+      # Re-raise the flaky detector's exit code so the job reflects reality: it
+      # exits non-zero only when genuine flakes exceeded -f (TOLERABLE_FAILURES),
+      # or the run errored. A red job triggers GitHub's scheduled-failure email
+      # and any Slack "GitHub" app workflow subscription. All reporting/upload
+      # steps above run first (via if: always()), so artifacts survive the fail.
+      - name: Surface flaky detection result
+        if: always()
+        shell: bash
+        run: |
+          EXIT_CODE=$(cat flaky-test-results/exit_code.txt 2>/dev/null || echo 1)
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Flaky detection exited ${EXIT_CODE}: genuine flakes exceeded tolerance (-f ${{ env.TOLERABLE_FAILURES }}) or the run errored. See the job summary and the flaky-test-results artifact."
+            exit 1
+          fi
+          echo "Flaky detection within tolerance (exit 0)."
