@@ -86,8 +86,8 @@ jobs:
           # --json emits the report to stdout wrapped in sentinel lines; tee so we
           # can both stream to the CI log and extract the machine-readable payload.
           # Pass the workflow-level env vars via shell expansion (quoted) rather
-          # than ${{ }} interpolation, so untrusted workflow_dispatch inputs can't
-          # inject into the run script.
+          # than GitHub-expression interpolation, so untrusted workflow_dispatch
+          # inputs can't inject into the run script.
           cargo xtask flaky --clean --json \
             -i "$ITERATIONS" \
             --stress-iterations "$STRESS_ITERATIONS" \
