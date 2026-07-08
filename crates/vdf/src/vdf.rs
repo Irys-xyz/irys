@@ -130,6 +130,7 @@ pub fn run_vdf<B: BlockProvider>(
                 &vdf_state,
                 global_step_number,
                 &mut checkpoints,
+                &shutdown_token,
             ) {
                 ReanchorOutcome::Healed {
                     new_hash,
@@ -438,6 +439,11 @@ enum ReanchorOutcome {
 ///   fold seed yet (its rotation block lies strictly past the tip), so the
 ///   request is [`ReanchorOutcome::Skipped`] rather than folded speculatively.
 ///   The gate re-sends with a fresher `c_step` on the next canonical advance.
+///
+/// The tail recompute is sequential (~1 s/step at production difficulty) and
+/// runs on the VDF thread, so it honours `shutdown_token`: a cancellation
+/// mid-recompute aborts to [`ReanchorOutcome::Skipped`] BEFORE the buffer
+/// write, keeping shutdown prompt instead of stalling it into the watchdog.
 #[must_use]
 fn apply_reanchor(
     request: ReanchorRequest,
@@ -445,6 +451,7 @@ fn apply_reanchor(
     vdf_state: &AtomicVdfState,
     live_step: u64,
     checkpoints: &mut [H256],
+    shutdown_token: &CancellationToken,
 ) -> ReanchorOutcome {
     let ReanchorRequest {
         mut canonical_seeds,
@@ -497,6 +504,16 @@ fn apply_reanchor(
     // is a no-op and the argument is ignored.
     let mut running = process_reset(c_step, tip_seed, reset_frequency, seed);
     for step in (c_step + 1)..=live_step {
+        // Abort BEFORE the buffer write: plain `Skipped` semantics — the
+        // suspect flag stays set and the gate re-sends from the next canonical
+        // tip if the node comes back before shutdown completes.
+        if shutdown_token.is_cancelled() {
+            warn!(
+                c_step,
+                live_step, step, "VDF re-anchor aborted by shutdown; buffer left untouched"
+            );
+            return ReanchorOutcome::Skipped;
+        }
         let salt = U256::from(step_number_to_salt_number(config, step - 1));
         let mut step_seed = running;
         vdf_sha(
@@ -1600,6 +1617,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::RwLock;
         use std::sync::atomic::AtomicBool;
+        use tokio_util::sync::CancellationToken;
 
         /// Canonical seed values for steps `[1, live]`, derived exactly as
         /// `run_vdf`: `salt(step-1)` -> `vdf_sha` -> keep the pre-reset value ->
@@ -1678,7 +1696,14 @@ mod tests {
             let ReanchorOutcome::Healed {
                 new_hash,
                 new_next_seed,
-            } = apply_reanchor(request, vdf, &vdf_state, live_step, &mut checkpoints)
+            } = apply_reanchor(
+                request,
+                vdf,
+                &vdf_state,
+                live_step,
+                &mut checkpoints,
+                &CancellationToken::new(),
+            )
             else {
                 panic!("a boundary-free re-anchor must heal, not skip");
             };
@@ -1753,7 +1778,14 @@ mod tests {
             let ReanchorOutcome::Healed {
                 new_hash,
                 new_next_seed,
-            } = apply_reanchor(request, vdf, &vdf_state, live_step, &mut checkpoints)
+            } = apply_reanchor(
+                request,
+                vdf,
+                &vdf_state,
+                live_step,
+                &mut checkpoints,
+                &CancellationToken::new(),
+            )
             else {
                 panic!("a boundary tip with a one-boundary tail must heal, not skip");
             };
@@ -1823,7 +1855,14 @@ mod tests {
             };
 
             let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
-            let outcome = apply_reanchor(request, vdf, &vdf_state, live_step, &mut checkpoints);
+            let outcome = apply_reanchor(
+                request,
+                vdf,
+                &vdf_state,
+                live_step,
+                &mut checkpoints,
+                &CancellationToken::new(),
+            );
             assert!(
                 matches!(outcome, ReanchorOutcome::Skipped),
                 "a tail crossing a second, unpinned boundary must skip the re-anchor"
@@ -1833,6 +1872,62 @@ mod tests {
             assert!(
                 guard.seeds.iter().all(|s| *s == poison),
                 "the buffer must be untouched on a skip"
+            );
+        }
+
+        /// The sequential tail recompute (~1 s/step in production) honours the
+        /// shutdown token: a cancellation aborts to `Skipped` BEFORE the buffer
+        /// write, so shutdown stays prompt and the state is untouched — the
+        /// suspect flag remains set for the gate's retry if the node survives.
+        #[test]
+        fn shutdown_mid_recompute_skips_and_leaves_buffer_untouched() {
+            let mut node_config = NodeConfig::testing();
+            node_config.consensus.get_mut().vdf.reset_frequency = 5;
+            node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+            let config = Config::new_with_random_peer_id(node_config);
+            let vdf = &config.vdf;
+
+            let (c_step, live_step) = (8_u64, 9_u64); // one tail step to recompute
+            let capacity = 1_000_usize;
+            let poison = Seed(H256::repeat_byte(0xEE));
+            let mut state = VdfState::new(capacity, live_step, Arc::new(AtomicBool::new(false)));
+            state.seeds = vec![poison.clone(); live_step as usize].into();
+            let vdf_state: AtomicVdfState = Arc::new(RwLock::new(state));
+
+            let request = ReanchorRequest {
+                canonical_seeds: (1..=c_step)
+                    .map(|i| Seed(H256::from_low_u64_be(i)))
+                    .collect(),
+                c_step,
+                seed: H256::repeat_byte(0x44),
+                next_seed: H256::repeat_byte(0x22),
+            };
+
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            let mut checkpoints = vec![H256::default(); vdf.num_checkpoints_in_vdf_step];
+            let outcome = apply_reanchor(
+                request,
+                vdf,
+                &vdf_state,
+                live_step,
+                &mut checkpoints,
+                &cancelled,
+            );
+            assert!(
+                matches!(outcome, ReanchorOutcome::Skipped),
+                "a shutdown mid-recompute must skip the re-anchor"
+            );
+
+            let guard = vdf_state.read().unwrap();
+            assert_eq!(
+                guard.current_step(),
+                live_step,
+                "the step counter must be untouched on a shutdown abort"
+            );
+            assert!(
+                guard.seeds.iter().all(|s| *s == poison),
+                "the buffer must be untouched on a shutdown abort"
             );
         }
     }

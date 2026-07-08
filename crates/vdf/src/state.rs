@@ -1247,7 +1247,7 @@ mod tests {
 
     /// A stale capture aborts on the first poll — even when the desired step
     /// is ALREADY reached. The steps were validated against a pre-heal buffer;
-    /// requeueing for revalidation always wins over a vacuous `Ok`.
+    /// requeuing for revalidation always wins over a vacuous `Ok`.
     #[tokio::test(start_paused = true)]
     async fn wait_with_stale_generation_aborts_even_when_step_is_reached() {
         let inner = Arc::new(RwLock::new(vdf_state_at(100)));
