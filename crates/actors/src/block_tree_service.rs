@@ -22,7 +22,7 @@ use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
     SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
-use irys_vdf::{ReanchorRequest, state::VdfStateReadonly};
+use irys_vdf::{ReanchorRequest, partition_recovery_needs_reanchor, state::VdfStateReadonly};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -317,30 +317,6 @@ fn soft_internal_reason_tag(err: &crate::block_validation::ValidationError) -> &
     }
 }
 
-/// Returns `true` when a deep partition recovery whose fork point (LCA) is at
-/// VDF step `lca_step` has poisoned the local VDF buffer, so the VDF thread must
-/// re-anchor it onto the canonical steps in place (see [`ReanchorRequest`]).
-///
-/// The buffer diverges from canonical only past the first reset boundary whose
-/// folded seed differs between the forks — the **second** boundary above the
-/// LCA. The first boundary above the LCA has its rotation block at or below the
-/// LCA (`boundary - reset_frequency <= lca_step`), so both forks fold the same
-/// seed there; divergence begins one boundary later. The one-step margin absorbs
-/// the gap between reading the free-running `live_step` and the true counter
-/// value, failing toward re-anchor (liveness) rather than toward staying poisoned.
-///
-/// `reset_frequency == 0` disables the gate (division guard; never true in a
-/// real config).
-fn partition_recovery_needs_reanchor(lca_step: u64, live_step: u64, reset_frequency: u64) -> bool {
-    if reset_frequency == 0 {
-        return false;
-    }
-    let first_divergent_boundary = (lca_step / reset_frequency)
-        .saturating_add(2)
-        .saturating_mul(reset_frequency);
-    live_step.saturating_add(1) >= first_divergent_boundary
-}
-
 /// Assemble the canonical VDF seed window `[lca_step + 1, canonical_step]` for an
 /// in-process re-anchor, walking the header chain from the new canonical tip down through
 /// the new divergent blocks via the shared [`crate::block_validation::build_fork_local_step_window`]
@@ -449,57 +425,6 @@ mod reanchor_window_tests {
             err.to_string().contains("incomplete"),
             "the LCA must resolve (a missing-ancestor error would mean it did not): {err}"
         );
-    }
-}
-
-#[cfg(test)]
-mod partition_recovery_gate_tests {
-    use super::partition_recovery_needs_reanchor;
-
-    // reset_frequency = 100 → reset boundaries at 100, 200, 300, ...
-    const RF: u64 = 100;
-
-    #[test]
-    fn does_not_restart_before_the_second_boundary_above_the_lca() {
-        // LCA=150: first boundary above is 200 (rotation block @100 ≤ 150 → shared
-        // seed), so crossing 200 does NOT poison. The first divergent boundary is
-        // 300. Below the one-step margin (live+1 < 300) → no restart.
-        assert!(!partition_recovery_needs_reanchor(150, 150, RF));
-        assert!(!partition_recovery_needs_reanchor(150, 200, RF)); // crossed only B1
-        assert!(!partition_recovery_needs_reanchor(150, 298, RF));
-    }
-
-    #[test]
-    fn restarts_at_the_second_boundary_including_the_one_step_margin() {
-        // first divergent boundary = 300; margin fires at live+1 >= 300.
-        assert!(partition_recovery_needs_reanchor(150, 299, RF)); // one step early
-        assert!(partition_recovery_needs_reanchor(150, 300, RF));
-        assert!(partition_recovery_needs_reanchor(150, 50_000, RF));
-    }
-
-    #[test]
-    fn lca_exactly_on_a_boundary() {
-        // LCA=200 (on a boundary): 200/100=2 → first divergent = (2+2)*100 = 400.
-        // The boundary at 300 has its rotation block @200 = the LCA → still shared.
-        assert!(!partition_recovery_needs_reanchor(200, 300, RF)); // B1-equivalent, shared
-        assert!(!partition_recovery_needs_reanchor(200, 398, RF));
-        assert!(partition_recovery_needs_reanchor(200, 399, RF)); // margin
-        assert!(partition_recovery_needs_reanchor(200, 400, RF));
-    }
-
-    #[test]
-    fn lca_below_the_first_boundary() {
-        // LCA=50: 50/100=0 → first divergent = (0+2)*100 = 200. Boundary 100 has
-        // its rotation block @0 ≤ 50 → shared; divergence begins at 200.
-        assert!(!partition_recovery_needs_reanchor(50, 100, RF)); // crossed only B1
-        assert!(!partition_recovery_needs_reanchor(50, 198, RF));
-        assert!(partition_recovery_needs_reanchor(50, 199, RF)); // margin
-        assert!(partition_recovery_needs_reanchor(50, 200, RF));
-    }
-
-    #[test]
-    fn reset_frequency_zero_disables_the_gate() {
-        assert!(!partition_recovery_needs_reanchor(1_000, 100_000, 0));
     }
 }
 
@@ -1261,13 +1186,13 @@ impl BlockTreeServiceInner {
                         self.block_migration_service
                             .recover_from_network_partition(fork_height)?;
 
-                        // Divergent-boundary gate: detect whether the local VDF
-                        // buffer is poisoned after a deep reorg. The buffer
-                        // diverges from canonical only past the first reset
-                        // boundary whose folded seed differs between the forks —
-                        // the SECOND boundary above the LCA. The first boundary's
-                        // rotation block sits at/below the LCA and folds a seed
-                        // both forks share, so crossing it does not poison.
+                        // Divergent-boundary gate. Whether this reorg poisoned the
+                        // buffer is VDF domain theory owned by irys-vdf
+                        // (`partition_recovery_needs_reanchor`); this service only
+                        // supplies the reorg context. Deep-reorg safety is triggered
+                        // here; its shallow-reorg counterpart is the reset-seed
+                        // confirmation gate inside the VDF loop — the pairing is
+                        // documented in design/docs/vdf-reset-seed-confirmation-gate.md.
                         let lca_step = fork_block.vdf_limiter_info.global_step_number;
                         let live_step = self.vdf_state.current_step();
                         let reset_frequency = self.config.vdf.reset_frequency as u64;

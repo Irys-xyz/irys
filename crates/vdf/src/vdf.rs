@@ -610,6 +610,13 @@ pub fn process_reset(
 /// and is inherently reorg- and startup-safe: `confirmed_global_step_number` only advances
 /// as blocks migrate, so it cannot be fooled by a fork-loser block briefly at the tip, by
 /// a seed re-pinned across a reorg, or by a freshly started node's tip.
+///
+/// This gate is the SHALLOW-reorg half of fork-related VDF safety: it stops the loop
+/// folding a seed a reorg could still revoke. Its deep-reorg counterpart — healing a
+/// buffer a partition-recovery reorg has already poisoned — is triggered from the block
+/// tree via [`crate::partition_recovery_needs_reanchor`] and applied by
+/// `drain_reanchor_requests`; the pairing is documented in
+/// design/docs/vdf-reset-seed-confirmation-gate.md.
 #[must_use]
 pub fn is_reset_boundary_blocked(
     next_global_step: u64,

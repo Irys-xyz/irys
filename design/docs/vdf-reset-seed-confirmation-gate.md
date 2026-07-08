@@ -59,6 +59,10 @@ Between them these guards bound admissible reorg depth to `block_migration_depth
 - The fast-forward path's safety is not intrinsic; it rests on the two admission guards. Any change that loosened either — admitting a reorg deeper than `block_migration_depth`, or widening `max_reorg_depth` past the reset window — would reopen the residual concern, and the reset window would then need to grow in step. This coupling is worth stating plainly so a future reader does not relax one bound in isolation.
 - The mechanism is covered deterministically by the unit tests `gating_on_confirmed_step_not_canonical_tip_is_the_1447_fix` (the gate's verdict on the exact #1447 window) and `issue_1447_unconfirmed_reset_seed_poisons_buffer_and_wedges_block_validation` (the wedge the old rule caused), both in `crates/vdf/src/vdf.rs`.
 
+## Two Homes for Fork-Related VDF Safety
+
+This gate is the *shallow-reorg* half of fork-related VDF correctness: it prevents the local loop from ever folding a seed that a reorg inside the migration window could revoke. The *deep-reorg* half operates after the fact — once a partition-recovery reorg deeper than `block_migration_depth` has been adopted, the block tree's divergent-boundary gate decides whether the already-poisoned buffer must be healed, using the pure predicate `irys_vdf::partition_recovery_needs_reanchor`, and ships a `ReanchorRequest` that `run_vdf` applies in place. The two mechanisms guard different windows with different information — this gate needs only the confirmed step the loop already reads, while the re-anchor needs the reorg event that only the block tree observes synchronously — which is why they live apart. The division of labour is deliberate: the block tree owns *when* a heal is considered; `irys-vdf` owns *whether* the reorg crossed a divergent boundary and *what* the corrected buffer contains.
+
 ## Source
 
 Issue #1447; branch `jason/centralise_vdf_reanchor_fix`.

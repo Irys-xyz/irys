@@ -367,6 +367,43 @@ pub struct ReanchorRequest {
     pub next_reset_seed: H256,
 }
 
+/// The first VDF reset boundary at which two forks that split at `lca_step` can
+/// fold DIFFERENT reset seeds. The seed applied at boundary `B` is pinned by the
+/// rotation block at step `B - reset_frequency`, so the forks diverge only once
+/// that rotation block lies strictly after the fork point: `B - reset_frequency >
+/// lca_step`. The smallest such multiple of `reset_frequency` is
+/// `(lca_step / reset_frequency + 2) * reset_frequency`. Below it the forks share
+/// every rotation block, their VDF buffers agree, and no re-anchor is needed.
+///
+/// `reset_frequency` must be non-zero (the caller guards this).
+pub fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
+    (lca_step / reset_frequency)
+        .saturating_add(2)
+        .saturating_mul(reset_frequency)
+}
+
+/// Returns `true` when a deep partition recovery whose fork point (LCA) is at
+/// VDF step `lca_step` has poisoned the local VDF buffer, so the VDF thread must
+/// re-anchor it onto the canonical steps in place (see [`ReanchorRequest`]).
+///
+/// The buffer diverges from canonical only past [`first_divergent_boundary`].
+/// The one-step margin absorbs the gap between reading the free-running
+/// `live_step` and the true counter value, failing toward re-anchor (liveness)
+/// rather than toward staying poisoned.
+///
+/// `reset_frequency == 0` disables the gate (division guard; never true in a
+/// real config).
+pub fn partition_recovery_needs_reanchor(
+    lca_step: u64,
+    live_step: u64,
+    reset_frequency: u64,
+) -> bool {
+    if reset_frequency == 0 {
+        return false;
+    }
+    live_step.saturating_add(1) >= first_divergent_boundary(lca_step, reset_frequency)
+}
+
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
 
@@ -886,5 +923,56 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod partition_recovery_gate_tests {
+    use super::partition_recovery_needs_reanchor;
+
+    // reset_frequency = 100 → reset boundaries at 100, 200, 300, ...
+    const RF: u64 = 100;
+
+    #[test]
+    fn does_not_reanchor_before_the_second_boundary_above_the_lca() {
+        // LCA=150: first boundary above is 200 (rotation block @100 ≤ 150 → shared
+        // seed), so crossing 200 does NOT poison. The first divergent boundary is
+        // 300. Below the one-step margin (live+1 < 300) → no re-anchor.
+        assert!(!partition_recovery_needs_reanchor(150, 150, RF));
+        assert!(!partition_recovery_needs_reanchor(150, 200, RF)); // crossed only B1
+        assert!(!partition_recovery_needs_reanchor(150, 298, RF));
+    }
+
+    #[test]
+    fn reanchors_at_the_second_boundary_including_the_one_step_margin() {
+        // first divergent boundary = 300; margin fires at live+1 >= 300.
+        assert!(partition_recovery_needs_reanchor(150, 299, RF)); // one step early
+        assert!(partition_recovery_needs_reanchor(150, 300, RF));
+        assert!(partition_recovery_needs_reanchor(150, 50_000, RF));
+    }
+
+    #[test]
+    fn lca_exactly_on_a_boundary() {
+        // LCA=200 (on a boundary): 200/100=2 → first divergent = (2+2)*100 = 400.
+        // The boundary at 300 has its rotation block @200 = the LCA → still shared.
+        assert!(!partition_recovery_needs_reanchor(200, 300, RF)); // B1-equivalent, shared
+        assert!(!partition_recovery_needs_reanchor(200, 398, RF));
+        assert!(partition_recovery_needs_reanchor(200, 399, RF)); // margin
+        assert!(partition_recovery_needs_reanchor(200, 400, RF));
+    }
+
+    #[test]
+    fn lca_below_the_first_boundary() {
+        // LCA=50: 50/100=0 → first divergent = (0+2)*100 = 200. Boundary 100 has
+        // its rotation block @0 ≤ 50 → shared; divergence begins at 200.
+        assert!(!partition_recovery_needs_reanchor(50, 100, RF)); // crossed only B1
+        assert!(!partition_recovery_needs_reanchor(50, 198, RF));
+        assert!(partition_recovery_needs_reanchor(50, 199, RF)); // margin
+        assert!(partition_recovery_needs_reanchor(50, 200, RF));
+    }
+
+    #[test]
+    fn reset_frequency_zero_disables_the_gate() {
+        assert!(!partition_recovery_needs_reanchor(1_000, 100_000, 0));
     }
 }
