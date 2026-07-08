@@ -21,6 +21,36 @@ You will always receive a **GitHub Actions run URL** (e.g., `https://github.com/
 
 Important caveat: CI-only assertion failures and CI-only panics can still be flaky if they depend on asynchronous propagation across services.
 
+## Reproduce & diagnose locally with `cargo xtask flaky`
+
+Once you know which tests are suspect (from the CI logs, or the run's
+`report.json` artifact), don't run the full suite to rediscover them — target
+them directly. This is the fast path for the "figure out why and fix" loop:
+
+```sh
+# Diagnose known tests (skips 40-min full-suite discovery; scopes phase 1 to
+# just these, then stresses + isolates them). --json prints a parsable payload.
+cargo xtask flaky --tests 'crate::mod::test_a,crate::mod::test_b' --json
+
+# Or reproduce exactly what CI flagged, from the downloaded report:
+cargo xtask flaky --tests-from report.json --json
+```
+
+Read the report (`report.json` / `report.md` under
+`target/nextest-monitor/flaky/<ts>/`, or the stdout JSON). Each test carries:
+
+- **classification** — `GENUINE FLAKY` / `BROKEN` / `TIMEOUT-BOUND` are real bugs
+  (fail in isolation); `CONTENTION (peers|full-suite)` means it only fails
+  alongside other tests → a resource/scheduling issue (see the patterns below).
+- **failure_signatures** — the panic/assertion message + `file:line`, so you can
+  jump straight to the root cause. Multiple distinct signatures = multiple bugs.
+- **log_dir** — per-iteration logs named by outcome (`run-N.FAIL.log`,
+  `run-N.TIMEOUT.log`) with full tracing, plus a `summary.txt`.
+
+The `CONTENTION` vs genuine split tells you *which kind of fix* you need before
+you start: a genuine flake needs a logic/readiness fix; a contention flake needs
+thread allocation / `serial_` / event-driven waits (Patterns 1–3 below).
+
 ## Step 1: Pull CI Logs
 
 ```sh
@@ -154,16 +184,18 @@ Run both commands — **both must pass**:
 
 ```sh
 cargo nextest run -p irys-chain test_name          # sanity check
-# Scope phase 1 to the target test; the isolation phase re-runs it alone.
-# "No flaky tests detected" (exit 0) means the fix holds.
-cargo xtask flaky -i 10 -y 10 -- -E 'test(test_name)'
+# Verify mode: isolation only, high count. Exit 0 = fix holds.
+cargo xtask flaky --verify 'crate::mod::test_name' -y 20
 ```
 
 If `flaky` reports the test as GENUINE FLAKY / BROKEN / TIMEOUT-BOUND (or exits
-non-zero), the fix is incomplete. Go back to Step 5. A `CONTENTION`
-classification means it only fails alongside other tests — see Step 5 on
-resource contention. The full report (per-test failure rates and isolation logs)
-is written to `target/nextest-monitor/flaky/<timestamp>/`.
+non-zero), the fix is incomplete. Go back to Step 5. A `CLEAN` classification
+(exit 0) means it passed every isolated run — the fix holds. The full report
+(per-test failure rates, failure signatures, and isolation logs) is written to
+`target/nextest-monitor/flaky/<timestamp>/`.
+
+For contention-class flakes, `--verify` (isolation-only) won't reproduce them —
+use `cargo xtask flaky --tests '...'` so the stress phase runs too.
 
 ## Common Mistakes
 

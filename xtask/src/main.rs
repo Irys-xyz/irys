@@ -192,6 +192,17 @@ enum Commands {
         /// Emit the machine-readable report to stdout (sentinel-wrapped) for CI/tooling
         #[clap(long, default_value_t = false)]
         json: bool,
+        /// Target known flaky tests directly (comma-separated), skipping
+        /// full-suite discovery. Phase 1 is scoped to just these.
+        #[clap(long, value_delimiter = ',')]
+        tests: Vec<String>,
+        /// Read the target test list from a prior report.json or failures.json
+        #[clap(long)]
+        tests_from: Option<std::path::PathBuf>,
+        /// Verify mode: run only the isolation phase on these tests
+        /// (comma-separated) — the post-fix "is it fixed?" check
+        #[clap(long, value_delimiter = ',')]
+        verify: Vec<String>,
         /// Accepted for backwards-compat; reports are always saved
         #[clap(short, long, default_value_t = false, hide = true)]
         save: bool,
@@ -869,6 +880,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             tolerable_failures,
             isolation_log,
             json,
+            tests,
+            tests_from,
+            verify,
             save: _,
             args,
         } => {
@@ -885,6 +899,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     tolerable_failures,
                     isolation_log,
                     json,
+                    tests,
+                    tests_from,
+                    verify,
                     args,
                 },
             )?;

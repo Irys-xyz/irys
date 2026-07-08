@@ -28,7 +28,9 @@ use nextest_monitor::types::AggregatedStats;
 use serde::Serialize;
 use xshell::{Shell, cmd};
 
-use crate::failures::{FailuresFile, generate_nextest_config, get_monitor_dir};
+use crate::failures::{
+    FailuresFile, build_failure_filter, generate_nextest_config, get_monitor_dir,
+};
 use crate::util::{RING_ENV_VARS, build_wrapper, remove_ring_env_vars, shell_quote};
 
 /// Options for the flaky-detection run, parsed from the CLI.
@@ -54,6 +56,15 @@ pub struct FlakyOptions {
     pub isolation_log: Option<String>,
     /// Emit the machine-readable report to stdout (sentinel-wrapped) on completion.
     pub json: bool,
+    /// Known flaky tests to target directly, skipping full-suite discovery.
+    /// Phase 1 is scoped to just these (fast) instead of running the whole suite.
+    pub tests: Vec<String>,
+    /// Read the target test list from a prior `report.json` or `failures.json`
+    /// instead of (or in addition to) `--tests`.
+    pub tests_from: Option<PathBuf>,
+    /// Verify mode: run *only* the isolation phase on the given tests (the
+    /// post-fix "is it fixed?" check). Skips discovery and stress.
+    pub verify: Vec<String>,
     /// Passthrough args forwarded to the phase-1 nextest invocation.
     pub args: Vec<String>,
 }
@@ -64,6 +75,78 @@ struct Outcome {
     passed: bool,
     timed_out: bool,
     duration_ms: u64,
+}
+
+/// A distinct failure fingerprint extracted from an isolated run's log, so the
+/// report tells you *why* a test failed without opening the log files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FailureSignature {
+    /// The panic/assertion message (or a timeout note).
+    message: String,
+    /// Source location (`file:line:col`) when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<String>,
+}
+
+/// Strip ANSI escape sequences (tracing colors) so extracted messages are clean.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip until the terminating letter of the CSI sequence (e.g. 'm').
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Collapse internal whitespace so signatures dedupe cleanly.
+fn normalize_msg(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Extract a failure signature from an isolated run's captured output.
+///
+/// Recognizes the standard Rust panic form
+/// `thread '..' panicked at <file:line:col>: <message>` (message may spill to the
+/// next line), falling back to an `assertion .. failed` line. Returns `None`
+/// when nothing recognizable is found (e.g. a bare timeout with no panic).
+fn extract_failure_signature(text: &str) -> Option<FailureSignature> {
+    let lines: Vec<String> = text.lines().map(strip_ansi).collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(pos) = line.find("panicked at ") {
+            let rest = line[pos + "panicked at ".len()..].trim();
+            let (location, inline_msg) = match rest.split_once(": ") {
+                Some((loc, msg)) => (loc.trim().to_string(), Some(msg.trim().to_string())),
+                None => (rest.trim_end_matches(':').trim().to_string(), None),
+            };
+            let message = inline_msg
+                .filter(|m| !m.is_empty())
+                .or_else(|| lines.get(i + 1).map(|l| l.trim().to_string()))
+                .unwrap_or_default();
+            return Some(FailureSignature {
+                message: normalize_msg(&message),
+                location: (!location.is_empty()).then_some(location),
+            });
+        }
+    }
+    for line in &lines {
+        let t = line.trim();
+        if (t.starts_with("assertion") && t.contains("failed")) || t.starts_with("Error:") {
+            return Some(FailureSignature {
+                message: normalize_msg(t),
+                location: None,
+            });
+        }
+    }
+    None
 }
 
 /// Aggregated pass/fail counters for one test across one phase.
@@ -118,6 +201,9 @@ enum Classification {
     SuiteContention,
     /// Failed only via timeouts (no assertion failures observed).
     TimeoutBound,
+    /// Passed every run we performed with no earlier failure evidence — e.g. a
+    /// verify run confirming a fix.
+    Clean,
     /// Isolation was skipped, so we can't distinguish genuine from contention.
     Unverified,
 }
@@ -130,6 +216,7 @@ impl Classification {
             Self::PeerContention => "CONTENTION (fails only alongside peers)",
             Self::SuiteContention => "CONTENTION (fails only under full-suite load)",
             Self::TimeoutBound => "TIMEOUT-BOUND (failures are timeouts)",
+            Self::Clean => "CLEAN (passed all runs)",
             Self::Unverified => "UNVERIFIED (isolation skipped)",
         }
     }
@@ -153,6 +240,9 @@ struct TestReport {
     classification: Classification,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_dir: Option<String>,
+    /// Distinct failure fingerprints observed across isolated runs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failure_signatures: Vec<FailureSignature>,
 }
 
 impl TestReport {
@@ -169,13 +259,18 @@ impl TestReport {
                 }
                 return Classification::GenuineFlaky;
             }
-            // Passed every isolated run — so failures earlier were contention.
+            // Passed every isolated run — attribute to contention only when there
+            // is actual earlier failure evidence; otherwise it's clean (e.g. a
+            // verify run confirming a fix).
             if let Some(stress) = self.stress
                 && stress.fails > 0
             {
                 return Classification::PeerContention;
             }
-            return Classification::SuiteContention;
+            if self.phase1.fails > 0 {
+                return Classification::SuiteContention;
+            }
+            return Classification::Clean;
         }
 
         // No isolation data: fall back to stress, then to timeout heuristic.
@@ -262,6 +357,8 @@ enum IsoResult {
     Failed {
         timed_out: bool,
         duration_ms: u64,
+        /// Failure fingerprint parsed from the captured output, when available.
+        signature: Option<FailureSignature>,
     },
     /// The filter matched no tests — surfaced as a hard error, not a flake.
     NoMatch,
@@ -331,12 +428,67 @@ fn run_isolated(
         Ok(IsoResult::Failed {
             timed_out,
             duration_ms,
+            signature: extract_failure_signature(&text),
         })
     }
 }
 
+/// Parse a `--tests-from` file (either a flaky `report.json` or a
+/// `failures.json`) into a list of test names.
+fn parse_tests_from(path: &Path) -> eyre::Result<Vec<String>> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| eyre::eyre!("failed to read {}: {e}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| eyre::eyre!("failed to parse {} as JSON: {e}", path.display()))?;
+
+    // report.json: { "tests": [ { "name": "..." }, ... ] }
+    if let Some(tests) = json.get("tests").and_then(|t| t.as_array()) {
+        return Ok(tests
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+            .collect());
+    }
+    // failures.json: { "failed_tests": [ "...", ... ] }
+    if let Some(failed) = json.get("failed_tests").and_then(|f| f.as_array()) {
+        return Ok(failed
+            .iter()
+            .filter_map(|f| f.as_str().map(str::to_owned))
+            .collect());
+    }
+    eyre::bail!(
+        "{} has neither a `tests` nor a `failed_tests` array",
+        path.display()
+    )
+}
+
+/// Resolve the explicit target-test list from `--tests`, `--tests-from`, and
+/// `--verify`, de-duplicated and sorted. Empty means "discover via full suite".
+fn resolve_target_tests(opts: &FlakyOptions) -> eyre::Result<Vec<String>> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for t in opts.tests.iter().chain(opts.verify.iter()) {
+        let t = t.trim();
+        if !t.is_empty() {
+            set.insert(t.to_owned());
+        }
+    }
+    if let Some(ref path) = opts.tests_from {
+        for t in parse_tests_from(path)? {
+            set.insert(t);
+        }
+    }
+    Ok(set.into_iter().collect())
+}
+
 /// Entry point for `cargo xtask flaky`.
 pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
+    // Resolve the run mode up front (errors early on a bad --tests-from file):
+    //   - verify   : isolation-only over the given tests (post-fix check)
+    //   - targeted : known tests supplied → scope discovery to them (fast)
+    //   - discovery: no tests supplied → run the full suite to find suspects
+    let verify_mode = !opts.verify.is_empty();
+    let target_tests = resolve_target_tests(&opts)?;
+    let targeted = !target_tests.is_empty();
+
     // Ensure nextest is available (matches the version pinned by `xtask test`).
     let _ = cmd!(sh, "cargo install --locked --version 0.9.124 cargo-nextest").run();
 
@@ -371,72 +523,101 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
         .threads
         .map(|t| vec!["--test-threads".to_string(), t.to_string()]);
 
-    // ---- Phase 1: full suite, N times ----
-    println!(
-        "\n=== Phase 1: full suite × {} ({} threads) ===",
-        opts.iterations,
-        opts.threads
-            .map_or_else(|| "auto".to_string(), |t| t.to_string())
-    );
-
     // test_name -> counts across phase 1
     let mut phase1: BTreeMap<String, PhaseCounts> = BTreeMap::new();
+    let suspects: Vec<String>;
 
-    for i in 1..=opts.iterations {
-        println!("\n--- Phase 1 iteration {i}/{} ---", opts.iterations);
-        let stats_base = run_dir.join(format!("phase1/iter-{i}/stats"));
-        let log_path = run_dir.join(format!("phase1/iter-{i}/output.log"));
+    if verify_mode {
+        // ---- Verify mode: isolation only, over the given tests ----
+        println!(
+            "\n=== Verify mode: isolation only ({} test(s)) ===",
+            target_tests.len()
+        );
+        suspects = target_tests;
+    } else {
+        // ---- Phase 1: run the suite N times ----
+        // Targeted runs scope phase 1 to just the supplied tests (fast); discovery
+        // runs the whole suite to find suspects.
+        let scope_filter = targeted.then(|| build_failure_filter(&target_tests));
+        println!(
+            "\n=== Phase 1: {} × {} ({} threads) ===",
+            if targeted {
+                format!("targeted ({} test(s))", target_tests.len())
+            } else {
+                "full suite".to_string()
+            },
+            opts.iterations,
+            opts.threads
+                .map_or_else(|| "auto".to_string(), |t| t.to_string())
+        );
 
-        let mut args = vec![
-            "nextest".to_string(),
-            "run".to_string(),
-            "--workspace".to_string(),
-            "--tests".to_string(),
-            "--all-targets".to_string(),
-            "--no-fail-fast".to_string(),
-            "--config-file".to_string(),
-            phase1_config_path.clone(),
-        ];
-        if let Some(ref t) = threads_arg {
-            args.extend(t.clone());
+        for i in 1..=opts.iterations {
+            println!("\n--- Phase 1 iteration {i}/{} ---", opts.iterations);
+            let stats_base = run_dir.join(format!("phase1/iter-{i}/stats"));
+            let log_path = run_dir.join(format!("phase1/iter-{i}/output.log"));
+
+            let mut args = vec![
+                "nextest".to_string(),
+                "run".to_string(),
+                "--workspace".to_string(),
+                "--tests".to_string(),
+                "--all-targets".to_string(),
+                "--no-fail-fast".to_string(),
+                "--config-file".to_string(),
+                phase1_config_path.clone(),
+            ];
+            if let Some(ref filter) = scope_filter {
+                args.push("-E".to_string());
+                args.push(filter.clone());
+            }
+            if let Some(ref t) = threads_arg {
+                args.extend(t.clone());
+            }
+            args.extend(opts.args.iter().cloned());
+
+            run_teed(sh, &args, &stats_base, &log_path)?;
+
+            let outcomes = load_outcomes(&stats_base);
+            for (name, outcome) in outcomes {
+                phase1.entry(name).or_default().record(outcome);
+            }
         }
-        args.extend(opts.args.iter().cloned());
 
-        run_teed(sh, &args, &stats_base, &log_path)?;
-
-        let outcomes = load_outcomes(&stats_base);
-        for (name, outcome) in outcomes {
-            phase1.entry(name).or_default().record(outcome);
+        if targeted {
+            // Always investigate every supplied test, even if it happened to pass
+            // in phase 1 — that's the point of naming them.
+            suspects = target_tests;
+        } else {
+            // Suspects: any test that failed at least once in phase 1.
+            let mut s: Vec<String> = phase1
+                .iter()
+                .filter(|(_, c)| c.fails > 0)
+                .map(|(name, _)| name.clone())
+                .collect();
+            s.sort();
+            println!(
+                "\nPhase 1 complete: {} test(s) failed at least once out of {} observed.",
+                s.len(),
+                phase1.len()
+            );
+            if s.is_empty() {
+                println!("No flaky tests detected. 🎉");
+                // Only phase 1 ran on this path.
+                write_reports(&run_dir, &started, &opts, opts.iterations, 0, 0, Vec::new())?;
+                return Ok(());
+            }
+            for name in &s {
+                let c = &phase1[name];
+                println!("  {} — {}/{} failed", name, c.fails, c.runs);
+            }
+            suspects = s;
         }
-    }
-
-    // Suspects: any test that failed at least once in phase 1.
-    let mut suspects: Vec<String> = phase1
-        .iter()
-        .filter(|(_, c)| c.fails > 0)
-        .map(|(name, _)| name.clone())
-        .collect();
-    suspects.sort();
-
-    println!(
-        "\nPhase 1 complete: {} test(s) failed at least once out of {} observed.",
-        suspects.len(),
-        phase1.len()
-    );
-
-    if suspects.is_empty() {
-        println!("No flaky tests detected. 🎉");
-        write_reports(&run_dir, &started, &opts, Vec::new())?;
-        return Ok(());
-    }
-    for s in &suspects {
-        let c = &phase1[s];
-        println!("  {} — {}/{} failed", s, c.fails, c.runs);
     }
 
     // ---- Phase 2: stress the suspect set together ----
+    // Skipped in verify mode (isolation-only).
     let mut stress: BTreeMap<String, PhaseCounts> = BTreeMap::new();
-    if !opts.no_stress && opts.stress_iterations > 0 {
+    if !verify_mode && !opts.no_stress && opts.stress_iterations > 0 {
         println!(
             "\n=== Phase 2: stress suspect set × {} ===",
             opts.stress_iterations
@@ -486,6 +667,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     // ---- Phase 3: isolation ----
     let mut isolation: BTreeMap<String, PhaseCounts> = BTreeMap::new();
     let mut log_dirs: HashMap<String, PathBuf> = HashMap::new();
+    // Distinct failure fingerprints per test, so the report explains the "why".
+    let mut sig_map: HashMap<String, Vec<FailureSignature>> = HashMap::new();
     if !opts.no_isolation && opts.isolation_iterations > 0 {
         println!(
             "\n=== Phase 3: isolation × {} per test ({} suspects) ===",
@@ -503,6 +686,8 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             // Per-test summary of each iteration's outcome, written alongside the
             // logs so a failing test's history is readable at a glance.
             let mut summary = String::new();
+            // Distinct failure fingerprints across this test's iterations.
+            let mut sigs: Vec<FailureSignature> = Vec::new();
             for i in 1..=opts.isolation_iterations {
                 // Write to a temp name, then rename to encode the outcome so the
                 // failing runs' logs are trivially findable (*.FAIL.log).
@@ -522,6 +707,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                     IsoResult::Failed {
                         timed_out,
                         duration_ms,
+                        signature,
                     } => {
                         counts.record(Outcome {
                             passed: false,
@@ -530,7 +716,21 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
                         });
                         let tag = if timed_out { "TIMEOUT" } else { "FAIL" };
                         let _ = fs::rename(&tmp_log, test_dir.join(format!("run-{i}.{tag}.log")));
-                        summary.push_str(&format!("run {i}: {tag} ({duration_ms}ms)\n"));
+                        summary.push_str(&format!("run {i}: {tag} ({duration_ms}ms)"));
+                        if let Some(sig) = signature {
+                            summary.push_str(&format!(
+                                " — {}{}",
+                                sig.location
+                                    .as_deref()
+                                    .map(|l| format!("{l}: "))
+                                    .unwrap_or_default(),
+                                sig.message
+                            ));
+                            if !sigs.contains(&sig) {
+                                sigs.push(sig);
+                            }
+                        }
+                        summary.push('\n');
                         print!("{}", if timed_out { "T" } else { "F" });
                     }
                     IsoResult::NoMatch => {
@@ -550,6 +750,9 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             if let Err(e) = fs::write(test_dir.join("summary.txt"), header + &summary) {
                 eprintln!("warning: failed to write isolation summary for {test}: {e}");
             }
+            if !sigs.is_empty() {
+                sig_map.insert(test.clone(), sigs);
+            }
             println!(" → {}/{} failed", c.fails, c.runs);
         }
     } else {
@@ -566,6 +769,7 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
             isolation: isolation.get(name).copied(),
             classification: Classification::Unverified,
             log_dir: log_dirs.get(name).map(|p| p.to_string_lossy().to_string()),
+            failure_signatures: sig_map.get(name).cloned().unwrap_or_default(),
         };
         tr.classification = tr.classify();
         reports.push(tr);
@@ -601,7 +805,27 @@ pub fn run_flaky(sh: &Shell, opts: FlakyOptions) -> eyre::Result<()> {
     print_summary(&reports);
     drop(phase1_config);
 
-    let report_paths = write_reports(&run_dir, &started, &opts, reports)?;
+    // Report the counts that actually ran (verify mode skips phases 1 and 2).
+    let eff_iterations = if verify_mode { 0 } else { opts.iterations };
+    let eff_stress = if verify_mode || opts.no_stress {
+        0
+    } else {
+        opts.stress_iterations
+    };
+    let eff_isolation = if opts.no_isolation {
+        0
+    } else {
+        opts.isolation_iterations
+    };
+    let report_paths = write_reports(
+        &run_dir,
+        &started,
+        &opts,
+        eff_iterations,
+        eff_stress,
+        eff_isolation,
+        reports,
+    )?;
     println!("\nReports written:");
     println!("  {}", report_paths.0.display());
     println!("  {}", report_paths.1.display());
@@ -654,6 +878,16 @@ fn print_summary(reports: &[TestReport]) {
                 print!(" ({} timeouts)", iso.timeouts);
             }
         }
+        for sig in &r.failure_signatures {
+            print!(
+                "\n  ↳ {}{}",
+                sig.location
+                    .as_deref()
+                    .map(|l| format!("{l}: "))
+                    .unwrap_or_default(),
+                sig.message
+            );
+        }
         if let Some(ref d) = r.log_dir {
             print!("\n  logs: {d}");
         }
@@ -661,11 +895,15 @@ fn print_summary(reports: &[TestReport]) {
     }
 }
 
-/// Write `report.json` and `report.md`, returning their paths.
+/// Write `report.json` and `report.md`, returning their paths. The iteration
+/// counts reflect what actually ran (e.g. 0 for phases skipped in verify mode).
 fn write_reports(
     run_dir: &Path,
     started: &chrono::DateTime<Local>,
     opts: &FlakyOptions,
+    iterations: usize,
+    stress_iterations: usize,
+    isolation_iterations: usize,
     reports: Vec<TestReport>,
 ) -> eyre::Result<(PathBuf, PathBuf)> {
     let genuine_flakes = reports
@@ -674,17 +912,9 @@ fn write_reports(
         .count();
     let report = Report {
         started_at: started.to_rfc3339(),
-        iterations: opts.iterations,
-        stress_iterations: if opts.no_stress {
-            0
-        } else {
-            opts.stress_iterations
-        },
-        isolation_iterations: if opts.no_isolation {
-            0
-        } else {
-            opts.isolation_iterations
-        },
+        iterations,
+        stress_iterations,
+        isolation_iterations,
         total_suspects: reports.len(),
         genuine_flakes,
         tests: reports,
@@ -765,6 +995,30 @@ fn render_markdown(report: &Report) -> String {
         ));
     }
 
+    // Failure signatures — the "why", so a reader (or agent) can go straight to
+    // the root cause without opening the logs.
+    if report
+        .tests
+        .iter()
+        .any(|t| !t.failure_signatures.is_empty())
+    {
+        s.push_str("\n## Failure signatures\n\n");
+        for t in &report.tests {
+            if t.failure_signatures.is_empty() {
+                continue;
+            }
+            s.push_str(&format!("- `{}`\n", t.name));
+            for sig in &t.failure_signatures {
+                let loc = sig
+                    .location
+                    .as_deref()
+                    .map(|l| format!("`{l}`: "))
+                    .unwrap_or_default();
+                s.push_str(&format!("  - {loc}{}\n", sig.message));
+            }
+        }
+    }
+
     s.push_str("\n## Logs\n\n");
     for t in &report.tests {
         if let Some(ref d) = t.log_dir {
@@ -801,6 +1055,7 @@ mod tests {
             isolation,
             classification: Classification::Unverified,
             log_dir: None,
+            failure_signatures: Vec::new(),
         }
     }
 
@@ -843,6 +1098,14 @@ mod tests {
     }
 
     #[test]
+    fn classify_clean_when_isolation_passes_with_no_earlier_failures() {
+        // verify mode: phase1/stress empty, isolation all-pass → CLEAN, not contention.
+        let r = report(counts(0, 0, 0), None, Some(counts(10, 0, 0)));
+        assert_eq!(r.classify(), Classification::Clean);
+        assert!(!Classification::Clean.is_genuine());
+    }
+
+    #[test]
     fn classify_unverified_when_isolation_skipped_and_stress_clean() {
         let r = report(counts(5, 2, 0), Some(counts(5, 0, 0)), None);
         assert_eq!(r.classify(), Classification::Unverified);
@@ -882,5 +1145,63 @@ mod tests {
     fn sanitize_replaces_path_separators() {
         assert_eq!(sanitize("a::b::c"), "a__b__c");
         assert_eq!(sanitize("crate/mod::test name"), "crate_mod__test_name");
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        assert_eq!(strip_ansi("\u{1b}[32m INFO\u{1b}[0m hi"), " INFO hi");
+        assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    #[test]
+    fn extract_signature_multiline_panic() {
+        let log = "test foo ... FAILED\n\
+            thread 'foo' (123) panicked at crates/chain-tests/src/x.rs:304:5:\n\
+            tx2 should be promoted (chunks uploaded)\n\
+            stack backtrace:\n";
+        let sig = extract_failure_signature(log).unwrap();
+        assert_eq!(
+            sig.location.as_deref(),
+            Some("crates/chain-tests/src/x.rs:304:5")
+        );
+        assert_eq!(sig.message, "tx2 should be promoted (chunks uploaded)");
+    }
+
+    #[test]
+    fn extract_signature_inline_panic() {
+        let log = "thread 'main' panicked at src/lib.rs:10:5: boom happened\n";
+        let sig = extract_failure_signature(log).unwrap();
+        assert_eq!(sig.location.as_deref(), Some("src/lib.rs:10:5"));
+        assert_eq!(sig.message, "boom happened");
+    }
+
+    #[test]
+    fn extract_signature_strips_ansi_from_message() {
+        let log = "thread 'x' panicked at src/a.rs:1:1:\n\u{1b}[31massertion failed: left == right\u{1b}[0m\n";
+        let sig = extract_failure_signature(log).unwrap();
+        assert_eq!(sig.message, "assertion failed: left == right");
+    }
+
+    #[test]
+    fn extract_signature_none_when_no_panic() {
+        assert!(extract_failure_signature("everything is fine\nPASS\n").is_none());
+    }
+
+    #[test]
+    fn parse_tests_from_report_and_failures() {
+        let dir = irys_testing_utils::TempDirBuilder::new().build();
+
+        let report = dir.path().join("report.json");
+        std::fs::write(&report, r#"{"tests":[{"name":"a::x"},{"name":"b::y"}]}"#).unwrap();
+        let mut got = parse_tests_from(&report).unwrap();
+        got.sort();
+        assert_eq!(got, vec!["a::x".to_string(), "b::y".to_string()]);
+
+        let failures = dir.path().join("failures.json");
+        std::fs::write(&failures, r#"{"failed_tests":["c::z"]}"#).unwrap();
+        assert_eq!(
+            parse_tests_from(&failures).unwrap(),
+            vec!["c::z".to_string()]
+        );
     }
 }
