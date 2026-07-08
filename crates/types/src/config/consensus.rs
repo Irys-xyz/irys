@@ -1181,7 +1181,7 @@ mod tests {
     fn test_testnet_borealis_activation_time() {
         let config = ConsensusConfig::testnet();
 
-        // Borealis — 2026-06-10T12:00:00+00:00 (epoch-aligned at runtime).
+        // Borealis — 2026-05-22T08:00:00+00:00 (epoch-aligned at runtime).
         assert_eq!(
             config
                 .hardforks
@@ -1189,7 +1189,7 @@ mod tests {
                 .as_ref()
                 .expect("testnet Borealis must be configured")
                 .activation_timestamp,
-            UnixTimestamp::from_secs(1781092800)
+            UnixTimestamp::from_secs(1779436800)
         );
     }
 

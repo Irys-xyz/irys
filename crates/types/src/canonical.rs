@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn hashmap_keys_use_camel_case() {
-        let v = to_canonical(&ConsensusConfig::testnet()).unwrap();
+        let v = to_canonical(&ConsensusConfig::testing()).unwrap();
         // `alloc` is now nested under the `genesis_evm_state` enum (camelCased to
         // `genesisEvmState`); its map keys (addresses) must survive canonicalization.
         assert!(v["reth"]["genesisEvmState"]["alloc"].is_object());
