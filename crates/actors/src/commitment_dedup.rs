@@ -26,9 +26,14 @@ use std::ops::ControlFlow;
 ///   - Reorg window `[floor, height)`: resolved by-hash along THIS block's own
 ///     ancestry (block tree, DB fallback), so a reorged-out sibling's inclusion
 ///     never counts. See [`ancestor_commitment_tx_ids`].
-///   - Below `floor`: the chain is finalized, so a content-verified lookup
-///     ([`canonical_commitment_included_height`], capped at `floor`) is
-///     branch-invariant there.
+///   - Strictly below `floor`: the chain is finalized, so a content-verified
+///     lookup ([`canonical_commitment_included_height`], capped at `floor - 1`)
+///     is branch-invariant there. The walk owns the floor height itself: a
+///     node-local `MigratedBlockHashes` row there is reorg-mutable, and since
+///     the walk resolves the floor on the candidate's own branch, a
+///     lookup answer at that height is never a true positive — the same
+///     strictly-below cap as the data-tx fallbacks in `data_txs_are_valid` and
+///     `resolve_promoted_on_branch` (keep the cap forms in sync).
 ///
 /// The in-memory reorg-window set is checked before the DB lookup, so a
 /// commitment-free branch or an in-window hit never pays for a finalized read.
@@ -52,9 +57,13 @@ pub fn find_replayed_commitment(
 
     let prior_ids =
         ancestor_commitment_tx_ids(block_tree, db, block_under_validation, block_tree_depth)?;
-    let floor = block_under_validation
+    // Cap the finalized lookup strictly below the walk window (see the
+    // two-range contract above). Zero coverage loss: the walk covers `[floor,
+    // height)` inclusively on the candidate's branch.
+    let finalized_cap = block_under_validation
         .height
-        .saturating_sub(block_tree_depth);
+        .saturating_sub(block_tree_depth)
+        .saturating_sub(1);
 
     // One read txn covers every finalized-inclusion lookup (a single MDBX txn
     // instead of one per commitment). The walk's own DB descent (Phase 2 below)
@@ -69,7 +78,7 @@ pub fn find_replayed_commitment(
             // reorg-window check; only pay the DB read on a miss on both.
             if !seen.insert(tx.id())
                 || prior_ids.contains(&tx.id())
-                || canonical_commitment_included_height(read_tx, &tx.id(), floor)?.is_some()
+                || canonical_commitment_included_height(read_tx, &tx.id(), finalized_cap)?.is_some()
             {
                 return Ok(Some(tx.id()));
             }
@@ -249,5 +258,147 @@ mod tests {
         let result =
             find_replayed_commitment(&block_tree, &db, &block1, &[tx_a, tx_b], 100).unwrap();
         assert_eq!(result, None);
+    }
+
+    // The by-hash walk owns the floor height (`height - block_tree_depth`)
+    // inclusively on the candidate's own branch, so a node-local
+    // `MigratedBlockHashes` inclusion EXACTLY at the floor is reorg-mutable and
+    // must never decide replay-validity. The finalized lookup is capped strictly
+    // below the floor: a boundary-height sibling on a divergent local branch
+    // carrying the same commitment is not a duplicate.
+    #[test]
+    fn floor_height_sibling_inclusion_is_not_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        // b1 on the candidate's own branch at the floor height (1), carrying no
+        // commitments; only in the DB (below the retained tree window), so the
+        // walk resolves the floor via its DB fallback and finds no replay.
+        let b1 = child_with_commitments(&genesis, 1, vec![]);
+        // Candidate at height 2 carrying commitment C; floor = 2 - 1 = 1.
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        let b2 = child_with_commitments(&b1, 2, vec![cid]);
+
+        // Node-local SIBLING at the floor height whose commitment ledger carries
+        // C: the local canonical chain diverges from the candidate's branch at
+        // the boundary, and the metadata row points at this sibling.
+        let mut sibling = mock_header_with_commitments(1, vec![cid]);
+        sibling.test_sign();
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &b1)?;
+            insert_block_header(tx, &sibling)?;
+            tx.put::<MigratedBlockHashes>(1, sibling.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[commitment], 1)?;
+        assert_eq!(
+            result, None,
+            "a canonical inclusion exactly at the walk floor must not count as replay"
+        );
+        Ok(())
+    }
+
+    // A genuine finalized inclusion STRICTLY below the floor is still flagged:
+    // the stricter cap loses no coverage. C2 is included at height 1, the
+    // candidate at height 3 replays it, floor = 2 (walk covers height 2 only),
+    // so the finalized lookup (capped at 1) is the sole path that can see it.
+    #[test]
+    fn finalized_inclusion_below_floor_is_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        // b1 finalizes C2 at height 1 (below the candidate's floor of 2).
+        let b1 = child_with_commitments(&genesis, 1, vec![cid]);
+        // b2 at the floor carries no commitments; the walk covers it and finds
+        // nothing.
+        let b2 = child_with_commitments(&b1, 2, vec![]);
+        // Candidate at height 3 replays C2; floor = 3 - 1 = 2, cap = 1.
+        let b3 = child_with_commitments(&b2, 3, vec![cid]);
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            insert_block_header(tx, &b1)?;
+            insert_block_header(tx, &b2)?;
+            tx.put::<MigratedBlockHashes>(1, b1.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b3, &[commitment], 1)?;
+        assert_eq!(
+            result,
+            Some(cid),
+            "a finalized inclusion strictly below the floor must still be a replay"
+        );
+        Ok(())
+    }
+
+    // Near genesis the floor saturates: `block_tree_depth >= height` clamps
+    // both the walk floor and the finalized cap to 0. The walk then owns the
+    // entire `[0, height)` range, so it — not the finalized lookup — must
+    // still flag an in-window inclusion, the double `saturating_sub` must not
+    // underflow, and a never-included commitment must not be flagged.
+    #[test]
+    fn saturated_floor_near_genesis_still_flags_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        // b1 first-includes C at height 1; the candidate at height 2 replays it
+        // with block_tree_depth >> height, so floor = 0 and cap = 0. The
+        // inclusion metadata is present but sits ABOVE the saturated cap — the
+        // walk (resolving b1 via its DB fallback) is the only path that may
+        // decide.
+        let b1 = child_with_commitments(&genesis, 1, vec![cid]);
+        let b2 = child_with_commitments(&b1, 2, vec![cid]);
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            // The saturated walk descends all the way to height 0, and once it
+            // falls back to the DB (at b1) it stays there — so genesis must be
+            // resolvable from the DB too, as in production.
+            insert_block_header(tx, &genesis)?;
+            insert_block_header(tx, &b1)?;
+            tx.put::<MigratedBlockHashes>(1, b1.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[commitment], 100)?;
+        assert_eq!(
+            result,
+            Some(cid),
+            "an in-window inclusion must still be flagged when the floor saturates to 0"
+        );
+
+        // Control: saturation must not manufacture a false positive for a
+        // commitment included nowhere.
+        let fresh = signed_commitment();
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[fresh], 100)?;
+        assert_eq!(result, None);
+        Ok(())
     }
 }

@@ -642,18 +642,25 @@ impl InnerCacheTask {
     /// docs).  Removing an entry whose tx has since been (re-)confirmed
     /// would make the prune loop miss that confirmation's chunk-retention
     /// constraint and evict the CDR before chunk migration completes,
-    /// destroying chunks that are still needed.  Per-txid metadata recheck
-    /// inside the write tx closes that race: if `IrysDataTxMetadata[tx_id]`
-    /// is `Some` now, the tx is migrated (finalized) and the txid_set entry
-    /// must stay.
+    /// destroying chunks that are still needed.  Per-txid recheck in
+    /// [`Self::prune_txids_from_cached_data_roots`] closes that race across
+    /// both confirmation states, keeping a txid if either holds:
+    ///   - `IrysDataTxMetadata[tx_id]` is `Some`: the tx is migrated
+    ///     (canonical metadata is written only at migration).
+    ///   - the tx_id appears in the canonical block-tree window: the tx is
+    ///     confirmed but not yet migrated, so no metadata row exists yet.
+    ///     Only the canonical chain counts — "(re-)confirmed" means on the
+    ///     branch this node currently follows.
+    /// Together they restore the pre-migration retention contract.
     ///
     /// Residual race the recheck does not close: a peer gossips the tx back
     /// in during the scrub window and `cache_data_root` re-adds it to
-    /// `txid_set`, but the tx has not yet confirmed (no metadata row).  The
-    /// scrub would drop it.  Bounded by mempool TTL re-population and
-    /// `cache_data_root` idempotency on the next ingress.  Acceptable for
-    /// the current architecture; revisit if the mempool grows a strong
-    /// "currently-pending" signal that can be consulted from MDBX context.
+    /// `txid_set`, but the tx has NOT confirmed anywhere — no metadata row
+    /// and not in the canonical tree window.  The scrub would drop it.
+    /// Bounded by mempool TTL re-population and `cache_data_root` idempotency
+    /// on the next ingress.  Acceptable for the current architecture; revisit
+    /// if the mempool grows a strong "currently-pending" signal that can be
+    /// consulted from MDBX context.
     ///
     /// Uses a background thread (matching `spawn_pruning_task`) to avoid
     /// blocking the actor loop.  Sends `PruneTxidsCompleted` when done so
@@ -667,77 +674,17 @@ impl InnerCacheTask {
             // jams permanently.  `AssertUnwindSafe` is sound here — the
             // captured `clone` is `Send + Clone`, and on the panic path we
             // immediately stop using it after the catch.
-            let result: eyre::Result<()> = match std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| {
-                    clone.db.update_eyre(|db_tx| {
-                for (data_root, txids_to_remove) in &by_data_root {
-                    let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
-                        continue;
-                    };
-
-                    // Build the actually-safe-to-remove set: any tx_id whose
-                    // metadata row exists now was (re-)confirmed since the
-                    // scrub was queued and must stay in txid_set — see the
-                    // race rationale in the function docs above.
-                    let mut removal_set: HashSet<H256> = HashSet::new();
-                    let mut raced_confirmed: usize = 0;
-                    for tx_id in txids_to_remove {
-                        if get_data_tx_metadata(db_tx, tx_id)?.is_some() {
-                            raced_confirmed += 1;
-                            continue;
-                        }
-                        removal_set.insert(*tx_id);
+            let result: eyre::Result<()> =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    clone.prune_txids_from_cached_data_roots(&by_data_root)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = panic_payload_string(payload);
+                        error!(custom.panic = %msg, "spawn_prune_txids_task body panicked");
+                        Err(eyre::eyre!("spawn_prune_txids_task panicked: {msg}"))
                     }
-                    if raced_confirmed > 0 {
-                        debug!(
-                            data_root = %data_root,
-                            raced_confirmed,
-                            "Skipped txid scrub for tx(es) (re-)confirmed during scrub window"
-                        );
-                    }
-                    if removal_set.is_empty() {
-                        continue;
-                    }
-
-                    let before_len = cached.txid_set.len();
-                    cached.txid_set.retain(|id| !removal_set.contains(id));
-
-                    if cached.txid_set.len() < before_len {
-                        debug!(
-                            data_root = %data_root,
-                            removed = before_len - cached.txid_set.len(),
-                            remaining = cached.txid_set.len(),
-                            "Pruned stale txids from CachedDataRoot.txid_set"
-                        );
-                        // Mirrors the `(None, None)` warn in
-                        // `remove_data_root_block_set_entry`: draining the
-                        // last txid while `expiry_height` is already None
-                        // leaves the CDR vacuously eviction-eligible (only
-                        // the local-proof exemption keeps it alive).
-                        // Surface this transition so observability is
-                        // symmetric across the two paths that produce it.
-                        if cached.txid_set.is_empty() && cached.expiry_height.is_none() {
-                            warn!(
-                                data_root = %data_root,
-                                "CachedDataRoot left in anomalous (no expiry, empty txid_set) state \
-                                 after stale-txid prune; entry now eviction-eligible unless held by \
-                                 a local ingress proof"
-                            );
-                        }
-                        db_tx.put::<CachedDataRoots>(*data_root, cached)?;
-                    }
-                }
-                Ok(())
-            })
-                }),
-            ) {
-                Ok(r) => r,
-                Err(payload) => {
-                    let msg = panic_payload_string(payload);
-                    error!(custom.panic = %msg, "spawn_prune_txids_task body panicked");
-                    Err(eyre::eyre!("spawn_prune_txids_task panicked: {msg}"))
-                }
-            };
+                };
 
             let completion = match &result {
                 Ok(_) => Ok(()),
@@ -753,6 +700,96 @@ impl InnerCacheTask {
                 warn!(custom.error = ?e, "Failed to notify PruneTxidsCompleted");
             }
         });
+    }
+
+    /// Scrub body for [`Self::spawn_prune_txids_task`]: inside a single write
+    /// txn, removes the queued txids from their `CachedDataRoot.txid_set`
+    /// entries, keeping any that has been (re-)confirmed since the scrub was
+    /// queued. See that method's docs for the full race rationale.
+    fn prune_txids_from_cached_data_roots(
+        &self,
+        by_data_root: &HashMap<H256, Vec<H256>>,
+    ) -> eyre::Result<()> {
+        // Snapshot the txids carried by the canonical block-tree window BEFORE
+        // opening the write txn. Confirmed-but-unmigrated inclusions live only
+        // here: canonical `IrysDataTxMetadata` rows are written at migration,
+        // so a tx re-confirmed in a still-unmigrated block during the scrub
+        // window has no metadata row yet. Reading only the canonical chain
+        // scopes "(re-)confirmed" to the branch this node currently follows.
+        // The tree read guard is released before any DB I/O — never held across
+        // the write txn (two-phase; see commitment_dedup.rs docs).
+        let tree_set: HashSet<H256> = {
+            let (canonical, _) = self.block_tree_guard.read().get_canonical_chain();
+            let mut set = HashSet::new();
+            for entry in &canonical {
+                for tx_ids in entry.header().get_data_ledger_tx_ids().into_values() {
+                    set.extend(tx_ids);
+                }
+            }
+            set
+        };
+
+        self.db.update_eyre(|db_tx| {
+            for (data_root, txids_to_remove) in by_data_root {
+                let Some(mut cached) = cached_data_root_by_data_root(db_tx, *data_root)? else {
+                    continue;
+                };
+
+                // Build the actually-safe-to-remove set: keep any tx_id that
+                // has been (re-)confirmed since the scrub was queued. A tx is
+                // (re-)confirmed if its metadata row exists (migrated) OR it
+                // appears in the canonical tree snapshot (confirmed but not yet
+                // migrated) — see the race rationale in `spawn_prune_txids_task`.
+                let mut removal_set: HashSet<H256> = HashSet::new();
+                let mut raced_confirmed: usize = 0;
+                for tx_id in txids_to_remove {
+                    if get_data_tx_metadata(db_tx, tx_id)?.is_some() || tree_set.contains(tx_id) {
+                        raced_confirmed += 1;
+                        continue;
+                    }
+                    removal_set.insert(*tx_id);
+                }
+                if raced_confirmed > 0 {
+                    debug!(
+                        data_root = %data_root,
+                        raced_confirmed,
+                        "Skipped txid scrub for tx(es) (re-)confirmed during scrub window"
+                    );
+                }
+                if removal_set.is_empty() {
+                    continue;
+                }
+
+                let before_len = cached.txid_set.len();
+                cached.txid_set.retain(|id| !removal_set.contains(id));
+
+                if cached.txid_set.len() < before_len {
+                    debug!(
+                        data_root = %data_root,
+                        removed = before_len - cached.txid_set.len(),
+                        remaining = cached.txid_set.len(),
+                        "Pruned stale txids from CachedDataRoot.txid_set"
+                    );
+                    // Mirrors the `(None, None)` warn in
+                    // `remove_data_root_block_set_entry`: draining the
+                    // last txid while `expiry_height` is already None
+                    // leaves the CDR vacuously eviction-eligible (only
+                    // the local-proof exemption keeps it alive).
+                    // Surface this transition so observability is
+                    // symmetric across the two paths that produce it.
+                    if cached.txid_set.is_empty() && cached.expiry_height.is_none() {
+                        warn!(
+                            data_root = %data_root,
+                            "CachedDataRoot left in anomalous (no expiry, empty txid_set) state \
+                             after stale-txid prune; entry now eviction-eligible unless held by \
+                             a local ingress proof"
+                        );
+                    }
+                    db_tx.put::<CachedDataRoots>(*data_root, cached)?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Removes a single stale block hash from `CachedDataRoot.block_set`.
@@ -1370,11 +1407,13 @@ mod tests {
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
-    use irys_testing_utils::{initialize_tracing, new_mock_signed_header};
+    use irys_testing_utils::{
+        IrysBlockHeaderTestExt as _, initialize_tracing, new_mock_signed_header,
+    };
     use irys_types::{
         Base64, Config, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, IrysAddress, NodeConfig,
-        TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256List, IrysAddress,
+        NodeConfig, TxChunkOffset, UnpackedChunk, app_state::DatabaseProvider,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -2914,6 +2953,233 @@ mod tests {
                 irys_database::ingress_proof_by_data_root_address(rtx, data_root, addr_c)?
                     .is_none(),
                 "addr_c expired proof must be deleted"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Builds an `InnerCacheTask` whose canonical block-tree window carries
+    // `submit_tx_ids` in the Submit ledger of a canonical block, so those txids
+    // appear in the tree snapshot the scrub reads. The scrub reads only
+    // headers, so the child is sealed with `new_unchecked` and an empty body
+    // (as in the `tx_inclusion` test tree builder) rather than fabricating
+    // signed matching txs. With no ids, the window is just an empty genesis.
+    // Returns the task so tests can drive the scrub directly.
+    fn task_with_canonical_submit_txids(
+        db: &DatabaseProvider,
+        config: Config,
+        submit_tx_ids: Vec<H256>,
+    ) -> InnerCacheTask {
+        use irys_domain::{ChainState, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot};
+        use irys_types::{BlockTransactions, SealedBlock};
+
+        let mut genesis_block = new_mock_signed_header();
+        genesis_block.height = 0;
+        genesis_block.cumulative_diff = 0.into();
+        genesis_block.test_sign();
+        let mut block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+
+        if !submit_tx_ids.is_empty() {
+            let mut child = new_mock_signed_header();
+            child.height = 1;
+            child.previous_block_hash = genesis_block.block_hash;
+            // Above genesis' 0, so the canonical chain cache follows the child.
+            child.cumulative_diff = 1.into();
+            // new_mock_header's data_ledgers layout is not guaranteed; target
+            // the Submit ledger by id rather than assuming the index.
+            let submit = child
+                .data_ledgers
+                .iter_mut()
+                .find(|l| l.ledger_id == DataLedger::Submit as u32)
+                .expect("mock header must carry a Submit ledger");
+            submit.tx_ids = H256List(submit_tx_ids);
+            child.test_sign();
+
+            let sealed = Arc::new(SealedBlock::new_unchecked(
+                Arc::new(child.clone()),
+                BlockTransactions::default(),
+            ));
+            block_tree
+                .add_common(
+                    child.block_hash,
+                    &sealed,
+                    Arc::new(CommitmentSnapshot::default()),
+                    Arc::new(EpochSnapshot::default()),
+                    dummy_ema_snapshot(),
+                    ChainState::Onchain,
+                )
+                .expect("add canonical child");
+        }
+
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        }
+    }
+
+    // T1 (regression pin): a tx re-confirmed in a canonical-but-unmigrated
+    // block (present in the tree's Submit ledger, NO metadata row) must NOT be
+    // scrubbed from txid_set. Before the tree-snapshot recheck, the scrub only
+    // consulted the migration-time metadata row and would wrongly drop it.
+    #[tokio::test]
+    async fn keeps_txid_confirmed_in_canonical_tree_without_metadata() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let data_root = H256::random();
+        let tx_a = H256::random();
+        // CDR whose txid_set carries tx_a; no metadata row is written for it.
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![tx_a],
+            block_set: vec![],
+            expiry_height: Some(100),
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        // tx_a lives in a canonical tree block's Submit ledger.
+        let task = task_with_canonical_submit_txids(&db, config, vec![tx_a]);
+
+        // Queue tx_a for removal; the tree snapshot must keep it.
+        let mut by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        by_data_root.insert(data_root, vec![tx_a]);
+        task.prune_txids_from_cached_data_roots(&by_data_root)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let cached = rtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("CDR must still exist");
+            eyre::ensure!(
+                cached.txid_set.contains(&tx_a),
+                "tx re-confirmed in the canonical (unmigrated) tree must be kept in txid_set"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // T2 (still removes stale): a tx in neither the canonical tree window nor
+    // the metadata table is genuinely stale and must be scrubbed.
+    #[tokio::test]
+    async fn removes_txid_absent_from_tree_and_metadata() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let data_root = H256::random();
+        let tx_b = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![tx_b],
+            block_set: vec![],
+            expiry_height: Some(100),
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            Ok(())
+        })??;
+
+        // The canonical window carries only an unrelated txid, so tx_b is absent.
+        let task = task_with_canonical_submit_txids(&db, config, vec![H256::random()]);
+
+        let mut by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        by_data_root.insert(data_root, vec![tx_b]);
+        task.prune_txids_from_cached_data_roots(&by_data_root)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let cached = rtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("CDR must still exist");
+            eyre::ensure!(
+                !cached.txid_set.contains(&tx_b),
+                "stale tx (not in tree, not migrated) must be scrubbed from txid_set"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // T3 (migrated still kept): a tx with a metadata row (migration state) and
+    // absent from the tree window must be kept — the pre-existing recheck arm.
+    #[tokio::test]
+    async fn keeps_migrated_txid_with_metadata_row() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+        let _temp_dir = irys_testing_utils::utils::TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &_temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let data_root = H256::random();
+        let tx_c = H256::random();
+        let cdr = CachedDataRoot {
+            data_size: 64,
+            data_size_confirmed: false,
+            txid_set: vec![tx_c],
+            block_set: vec![],
+            expiry_height: Some(100),
+            cached_at: irys_types::UnixTimestamp::now()?,
+        };
+        db.update(|wtx| -> eyre::Result<()> {
+            wtx.put::<CachedDataRoots>(data_root, cdr)?;
+            // Migration-time metadata row for tx_c.
+            irys_database::set_data_tx_included_height(wtx, &tx_c, 5)
+                .map_err(|e| eyre::eyre!("set_data_tx_included_height: {:?}", e))?;
+            Ok(())
+        })??;
+
+        // The canonical window does NOT carry tx_c; only the metadata row keeps it.
+        let task = task_with_canonical_submit_txids(&db, config, vec![]);
+
+        let mut by_data_root: HashMap<H256, Vec<H256>> = HashMap::new();
+        by_data_root.insert(data_root, vec![tx_c]);
+        task.prune_txids_from_cached_data_roots(&by_data_root)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let cached = rtx
+                .get::<CachedDataRoots>(data_root)?
+                .expect("CDR must still exist");
+            eyre::ensure!(
+                cached.txid_set.contains(&tx_c),
+                "migrated tx (metadata row present) must be kept in txid_set"
             );
             Ok(())
         })??;

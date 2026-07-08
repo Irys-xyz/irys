@@ -775,6 +775,7 @@ pub async fn select_best_txs(
         ctx,
         &canonical,
         current_height,
+        tip_block_height,
         current_timestamp,
         &parent_epoch_snapshot,
     )
@@ -847,6 +848,7 @@ async fn get_publish_txs_and_proofs(
     ctx: &TxSelectionContext<'_>,
     canonical: &[BlockTreeEntry],
     current_height: u64,
+    tip_block_height: u64,
     current_timestamp: UnixTimestamp,
     epoch_snapshot: &Arc<EpochSnapshot>,
 ) -> Result<PublishLedgerWithTxs, eyre::Error> {
@@ -1036,11 +1038,19 @@ async fn get_publish_txs_and_proofs(
             // others must have a canonical (migrated) Submit inclusion. The §4b
             // expiry check below resolves the inclusion itself (branch-correct),
             // so we only need the gate's continue-on-missing side effect here.
+            //
+            // Cap the DB lookup at the tip's reorg floor: the fold already
+            // covers the parent's ancestry down to the cache floor, so any
+            // in-band (reorg-mutable) inclusion is answered from the fold and
+            // the DB is only consulted for finalized, branch-invariant heights
+            // — mirroring `commitment_finalized_floor` above and the validator's
+            // strictly-below-walk-window cap (keep the cap forms in sync).
             if !submit_txs_from_canonical.contains(&tx_header.id) {
-                match ctx
-                    .db
-                    .view_eyre(|tx| canonical_submit_height(tx, &tx_header.id, current_height))
-                {
+                let submit_finalized_floor =
+                    tip_block_height.saturating_sub(ctx.config.consensus.block_tree_depth);
+                match ctx.db.view_eyre(|tx| {
+                    canonical_submit_height(tx, &tx_header.id, submit_finalized_floor)
+                }) {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         warn!(
