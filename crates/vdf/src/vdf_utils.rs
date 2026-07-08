@@ -187,6 +187,38 @@ pub struct ReanchorRequest {
     pub next_seed: H256,
 }
 
+/// The first VDF reset boundary at which two forks that split at `lca_step` can
+/// fold DIFFERENT reset seeds. The seed applied at boundary `B` is pinned by the
+/// rotation block at step `B - reset_frequency`, so the forks diverge only once
+/// that rotation block lies strictly after the fork point: `B - reset_frequency >
+/// lca_step`. The smallest such multiple of `reset_frequency` is
+/// `(lca_step / reset_frequency + 2) * reset_frequency`. Below it the forks share
+/// every rotation block, their VDF buffers agree, and no re-anchor is needed.
+///
+/// `reset_frequency` must be non-zero (the caller guards this).
+#[must_use]
+pub fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
+    (lca_step / reset_frequency)
+        .saturating_add(2)
+        .saturating_mul(reset_frequency)
+}
+
+/// Whether a reorg that split at `lca_step` and drove the local VDF as far as
+/// `crossing_step` (the furthest either fork ran past the fork point) crossed a
+/// *divergent* reset boundary — i.e. may have left the seed buffer poisoned and
+/// in need of a re-anchor. Below [`first_divergent_boundary`] the forks share
+/// every rotation block, so their buffers already agree and no heal is needed.
+///
+/// `reset_frequency` must be non-zero (the caller guards this).
+#[must_use]
+pub fn reorg_crossed_divergent_boundary(
+    lca_step: u64,
+    crossing_step: u64,
+    reset_frequency: u64,
+) -> bool {
+    crossing_step >= first_divergent_boundary(lca_step, reset_frequency)
+}
+
 /// Receiving half of the VDF re-anchor channel, consumed by `run_vdf`.
 ///
 /// A `watch` receiver: the channel holds only the LATEST request, so a burst of
@@ -292,7 +324,42 @@ pub(crate) async fn fast_forward_validated_steps(
 mod tests {
     use super::*;
     use irys_types::H256;
+    use rstest::rstest;
     use std::time::Duration;
+
+    /// The deep-reorg re-anchor gate's divergent-boundary math.
+    /// `first_divergent_boundary` must return the FIRST reset boundary whose
+    /// rotation block (at `B - reset_frequency`) lies strictly after the fork
+    /// point — the first boundary at which the two forks can fold different reset
+    /// seeds. The invariants pin the off-by-one exactly: this boundary's rotation
+    /// block is past the LCA, and the previous boundary's is not.
+    #[rstest]
+    #[case::lca_on_boundary(0, 5, 10)]
+    #[case::lca_just_after_boundary(6, 5, 15)]
+    #[case::lca_one_short_of_boundary(9, 5, 15)]
+    #[case::lca_exactly_on_second_boundary(10, 5, 20)]
+    #[case::reset_frequency_one(7, 1, 9)]
+    fn first_divergent_boundary_is_first_unshared_rotation(
+        #[case] lca_step: u64,
+        #[case] reset_frequency: u64,
+        #[case] expected: u64,
+    ) {
+        let boundary = first_divergent_boundary(lca_step, reset_frequency);
+        assert_eq!(boundary, expected);
+
+        // Its rotation block (boundary - reset_frequency) is strictly after the
+        // fork point: the forks fold different seeds here.
+        assert!(
+            boundary - reset_frequency > lca_step,
+            "the boundary's rotation block must be strictly after the LCA"
+        );
+        // The PREVIOUS boundary's rotation block (boundary - 2*reset_frequency) is
+        // at or before the fork point, so this really is the FIRST divergent one.
+        assert!(
+            boundary - 2 * reset_frequency <= lca_step,
+            "the previous boundary's rotation block must not be after the LCA"
+        );
+    }
 
     #[tokio::test]
     async fn factory_delivers_validated_steps() {

@@ -19,7 +19,8 @@ pub mod verify;
 
 pub use vdf_utils::{
     ReanchorReceiver, ReanchorRequest, ReanchorSignals, VdfFastForwardSender,
-    VdfReanchorGenerationChanged, VdfReanchorSender, fast_forward_channel, reanchor_channel,
+    VdfReanchorGenerationChanged, VdfReanchorSender, fast_forward_channel,
+    first_divergent_boundary, reanchor_channel, reorg_crossed_divergent_boundary,
 };
 
 const SHA256_IV: [u32; 8] = [

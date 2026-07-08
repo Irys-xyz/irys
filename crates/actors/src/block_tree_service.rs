@@ -24,7 +24,10 @@ use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
     SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
 };
-use irys_vdf::{ReanchorRequest, state::calc_capacity};
+use irys_vdf::{
+    ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
+    state::calc_capacity,
+};
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -438,21 +441,6 @@ impl BlockTreeService {
         tracing::info!("shutting down BlockTree service gracefully");
         Ok(())
     }
-}
-
-/// The first VDF reset boundary at which two forks that split at `lca_step` can
-/// fold DIFFERENT reset seeds. The seed applied at boundary `B` is pinned by the
-/// rotation block at step `B - reset_frequency`, so the forks diverge only once
-/// that rotation block lies strictly after the fork point: `B - reset_frequency >
-/// lca_step`. The smallest such multiple of `reset_frequency` is
-/// `(lca_step / reset_frequency + 2) * reset_frequency`. Below it the forks share
-/// every rotation block, their VDF buffers agree, and no re-anchor is needed.
-///
-/// `reset_frequency` must be non-zero (the caller guards this).
-fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
-    (lca_step / reset_frequency)
-        .saturating_add(2)
-        .saturating_mul(reset_frequency)
 }
 
 impl BlockTreeServiceInner {
@@ -1351,6 +1339,14 @@ impl BlockTreeServiceInner {
     /// the poison scenario both are wall-clock-paced across the same boundary, and
     /// the request can only carry canonical seeds up to `c_step` regardless — the
     /// VDF thread appends the free-running tail `(c_step, live_step]` itself.
+    ///
+    /// This is the DEEP-reorg half of fork-related VDF correctness — an out-of-band
+    /// cure after a reorg has already crossed a divergent boundary. The SHALLOW-reorg
+    /// half is prevention inside the VDF loop:
+    /// [`irys_vdf::vdf::is_reset_boundary_blocked`] holds the loop below any
+    /// unconfirmed boundary so the buffer is never poisoned there in the first place.
+    /// Two homes because they need different information; see
+    /// `design/docs/vdf-reset-seed-confirmation-gate.md`.
     fn maybe_reanchor_vdf_after_reorg(&self, canonical_tip: &IrysBlockHeader, reorg: &ReorgEvent) {
         // Only reorgs past the migration depth can leave the buffer poisoned:
         // shallower ones stay inside the confirmed window, where the VDF loop's
@@ -1377,16 +1373,18 @@ impl BlockTreeServiceInner {
         let crossing_step = c_step.max(old_fork_tip_step);
 
         // Below the first divergent boundary the forks share every rotation block,
-        // so the buffers already agree and no heal is needed.
-        let first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency);
-        if crossing_step < first_divergent_boundary {
+        // so the buffers already agree and no heal is needed. The boundary geometry
+        // and this crossing predicate are pure VDF consensus math owned by
+        // `irys-vdf`; the block tree only supplies the step numbers it read from the
+        // reorg event.
+        if !reorg_crossed_divergent_boundary(lca_step, crossing_step, reset_frequency) {
             return;
         }
 
         info!(
             c_step,
             lca_step,
-            first_divergent_boundary,
+            first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency),
             "Deep reorg crossed a divergent VDF reset boundary; queuing a seed-buffer re-anchor"
         );
         // Mark the buffer suspect BEFORE publishing the request, so recall-range
@@ -1889,40 +1887,6 @@ mod tests {
         let result: ValidationResult = PreValidationError::BlockSignatureInvalid.into();
         assert!(matches!(result, ValidationResult::Invalid(_)));
         assert_eq!(result.metric_label(), "invalid");
-    }
-
-    /// The deep-reorg re-anchor gate's divergent-boundary math.
-    /// `first_divergent_boundary` must return the FIRST reset boundary whose
-    /// rotation block (at `B - reset_frequency`) lies strictly after the fork
-    /// point — the first boundary at which the two forks can fold different reset
-    /// seeds. The invariants pin the off-by-one exactly: this boundary's rotation
-    /// block is past the LCA, and the previous boundary's is not.
-    #[rstest]
-    #[case::lca_on_boundary(0, 5, 10)]
-    #[case::lca_just_after_boundary(6, 5, 15)]
-    #[case::lca_one_short_of_boundary(9, 5, 15)]
-    #[case::lca_exactly_on_second_boundary(10, 5, 20)]
-    #[case::reset_frequency_one(7, 1, 9)]
-    fn first_divergent_boundary_is_first_unshared_rotation(
-        #[case] lca_step: u64,
-        #[case] reset_frequency: u64,
-        #[case] expected: u64,
-    ) {
-        let boundary = first_divergent_boundary(lca_step, reset_frequency);
-        assert_eq!(boundary, expected);
-
-        // Its rotation block (boundary - reset_frequency) is strictly after the
-        // fork point: the forks fold different seeds here.
-        assert!(
-            boundary - reset_frequency > lca_step,
-            "the boundary's rotation block must be strictly after the LCA"
-        );
-        // The PREVIOUS boundary's rotation block (boundary - 2*reset_frequency) is
-        // at or before the fork point, so this really is the FIRST divergent one.
-        assert!(
-            boundary - 2 * reset_frequency <= lca_step,
-            "the previous boundary's rotation block must not be after the LCA"
-        );
     }
 
     /// The seeds stage records its label through `granular_metric_label`. This

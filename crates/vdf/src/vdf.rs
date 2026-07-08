@@ -540,6 +540,13 @@ fn apply_reanchor(
 /// and is inherently reorg- and startup-safe: `confirmed_global_step_number` only advances
 /// as blocks migrate, so it cannot be fooled by a fork-loser block briefly at the tip, by
 /// a seed re-pinned across a reorg, or by a freshly started node's tip.
+///
+/// This is the SHALLOW-reorg half of fork-related VDF correctness — prevention inside the
+/// loop. The DEEP-reorg half is an out-of-band cure:
+/// `BlockTreeServiceInner::maybe_reanchor_vdf_after_reorg` re-anchors the buffer once a reorg
+/// has already crossed a divergent boundary (see `reorg_crossed_divergent_boundary`). Two
+/// homes because they need different information; see
+/// `design/docs/vdf-reset-seed-confirmation-gate.md`.
 #[must_use]
 pub fn is_reset_boundary_blocked(
     next_global_step: u64,
