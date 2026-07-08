@@ -392,6 +392,7 @@ fn drain_reanchor_requests(
                         "VDF re-anchor request could not be applied; buffer stays poisoned until \
                          the next deep-reorg gate or a node restart: {e:?}"
                     );
+                    metrics::record_vdf_reanchor_applied("builder_rejected");
                     continue;
                 }
             };
@@ -408,6 +409,7 @@ fn drain_reanchor_requests(
                     "VDF re-anchor failed to swap the buffer; buffer stays poisoned until the \
                      next deep-reorg gate or a node restart: {e:?}"
                 );
+                metrics::record_vdf_reanchor_applied("swap_failed");
                 continue;
             }
         }
@@ -428,6 +430,7 @@ fn drain_reanchor_requests(
         // earlier would let it reconstruct from the still-poisoned seeds (and no
         // second event would ever correct it).
         broadcast_mining_service.broadcast_reanchored();
+        metrics::record_vdf_reanchor_applied("applied");
         info!(
             canonical_step = request.canonical_step,
             live_step,

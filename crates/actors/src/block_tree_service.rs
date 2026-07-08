@@ -1225,6 +1225,7 @@ impl BlockTreeServiceInner {
                                         canonical_seed: arc_block.vdf_limiter_info.seed,
                                         next_reset_seed: arc_block.vdf_limiter_info.next_seed,
                                     });
+                                    metrics::record_vdf_reanchor_request("ok");
                                 }
                                 Err(e) => {
                                     error!(
@@ -1233,6 +1234,7 @@ impl BlockTreeServiceInner {
                                         canonical_step,
                                         "PARTITION RECOVERY: could not assemble canonical VDF window for re-anchor; buffer stays poisoned until the next deep-reorg gate or a node restart (recall-range fork-local recompute still guards validation): {e:?}",
                                     );
+                                    metrics::record_vdf_reanchor_request("err");
                                 }
                             }
                         } else {

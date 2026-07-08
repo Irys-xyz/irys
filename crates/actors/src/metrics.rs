@@ -36,6 +36,7 @@ irys_utils::define_metrics! {
     counter CHAIN_SYNC_BLOCK_REJECTED("irys.chain_sync.block_rejected_total", "Chain-sync block rejections by reason (labelled)");
     counter BLOCK_PRODUCTION_LOOKUP_FAILED("irys.block_production.lookup_failed_total", "Block-production canonical DB lookup failures by site (labelled). Currently observed: tx_selector silently skips affected publish candidates.");
     counter CACHE_TXID_SCRUB_FAILED("irys.cache.txid_scrub_failed_total", "CachedDataRoot.txid_set scrub batches that returned Err. Visible signal that stale tombstones may pin CDRs until the next scrub trigger.");
+    counter VDF_REANCHOR_REQUESTS("irys.block_tree.vdf_reanchor_requests_total", "In-process VDF re-anchor requests from the partition-recovery gate by result (labelled): ok = canonical window built and request sent to the VDF thread; err = window build failed and the buffer stays poisoned until the next deep-reorg gate or a node restart");
 
     histogram PREVALIDATION_DURATION_MS(
         "irys.validation.prevalidation_duration_ms",
@@ -124,6 +125,10 @@ pub(crate) fn record_reorg() {
 
 pub(crate) fn record_reorg_depth(depth: u64) {
     REORG_DEPTH.record(depth, &[]);
+}
+
+pub(crate) fn record_vdf_reanchor_request(result: &'static str) {
+    VDF_REANCHOR_REQUESTS.add(1, &[KeyValue::new("result", result)]);
 }
 
 pub(crate) fn record_canonical_tip_height(height: u64) {
