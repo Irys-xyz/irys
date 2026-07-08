@@ -155,7 +155,10 @@ async fn heavy_publish_gate_skips_reorg_band_submit_row() -> eyre::Result<()> {
 
     let tip = node.get_canonical_chain_height().await;
     let floor = tip - config.consensus_config().block_tree_depth;
-    assert!(floor >= 1, "finalized floor must be positive (tip={tip})");
+    // The geometry below derives control_height = floor - 1 and reads its
+    // parent at floor - 2, so floor >= 2 is the minimum that keeps every
+    // height subtraction non-negative.
+    assert!(floor >= 2, "finalized floor must be >= 2 (tip={tip})");
     let band_height = floor + 1; // inside the reorg-mutable band, above the cap
     let control_height = floor - 1; // finalized, at/below the cap
 

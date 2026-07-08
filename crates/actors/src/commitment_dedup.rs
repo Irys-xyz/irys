@@ -349,4 +349,56 @@ mod tests {
         );
         Ok(())
     }
+
+    // Near genesis the floor saturates: `block_tree_depth >= height` clamps
+    // both the walk floor and the finalized cap to 0. The walk then owns the
+    // entire `[0, height)` range, so it — not the finalized lookup — must
+    // still flag an in-window inclusion, the double `saturating_sub` must not
+    // underflow, and a never-included commitment must not be flagged.
+    #[test]
+    fn saturated_floor_near_genesis_still_flags_replay() -> eyre::Result<()> {
+        use irys_database::tables::MigratedBlockHashes;
+        use irys_database::{batch_set_commitment_tx_included_height, insert_block_header};
+        use reth_db::transaction::DbTxMut as _;
+
+        let genesis = signed_genesis();
+        let commitment = signed_commitment();
+        let cid = commitment.id();
+        // b1 first-includes C at height 1; the candidate at height 2 replays it
+        // with block_tree_depth >> height, so floor = 0 and cap = 0. The
+        // inclusion metadata is present but sits ABOVE the saturated cap — the
+        // walk (resolving b1 via its DB fallback) is the only path that may
+        // decide.
+        let b1 = child_with_commitments(&genesis, 1, vec![cid]);
+        let b2 = child_with_commitments(&b1, 2, vec![cid]);
+
+        let cache = BlockTree::new(&genesis, ConsensusConfig::testing());
+        let block_tree = BlockTreeReadGuard::new(Arc::new(RwLock::new(cache)));
+        let (_tmp, db) = test_db();
+
+        db.update_eyre(|tx| {
+            // The saturated walk descends all the way to height 0, and once it
+            // falls back to the DB (at b1) it stays there — so genesis must be
+            // resolvable from the DB too, as in production.
+            insert_block_header(tx, &genesis)?;
+            insert_block_header(tx, &b1)?;
+            tx.put::<MigratedBlockHashes>(1, b1.block_hash)?;
+            batch_set_commitment_tx_included_height(tx, std::iter::once(&cid), 1)?;
+            Ok(())
+        })?;
+
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[commitment], 100)?;
+        assert_eq!(
+            result,
+            Some(cid),
+            "an in-window inclusion must still be flagged when the floor saturates to 0"
+        );
+
+        // Control: saturation must not manufacture a false positive for a
+        // commitment included nowhere.
+        let fresh = signed_commitment();
+        let result = find_replayed_commitment(&block_tree, &db, &b2, &[fresh], 100)?;
+        assert_eq!(result, None);
+        Ok(())
+    }
 }
