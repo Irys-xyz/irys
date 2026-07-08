@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783459742449,
+  "lastUpdate": 1783501071724,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8143,6 +8143,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "603958f6004ca6e562d3433cd007ac9317e7c013",
+          "message": "fix(consensus): fork-safe canonical metadata lookups + reorg-floor prevalidation cap (#1464)\n\n* fix(consensus): fail loud on a non-advancing block-index probe\n\nThe find_block_range probe loop advances by setting the next offset to\nthe resolved block's cumulative total. A well-formed index guarantees\nthat total exceeds the probed offset (the offset lies within the block),\nbut a corrupted index could return a total at or below it — leaving the\nloop spinning forever instead of surfacing the fault. Guard the\ninvariant with ensure! naming the ledger, the resolved height, and both\noffsets so corruption errors out load-bearing paths instead of hanging\nblock production.\n\n* fix(consensus): cap the promotion-prevalidation DB fallback at the reorg floor\n\nThe Searching{Publish} fallback in data_txs_are_valid capped\ncanonical_submit_height / canonical_promoted_height at parent_height.\nMetadata+MBH rows exist down to migration depth, so rows in the\nreorg-mutable band (tip - block_tree_depth, tip - block_migration_depth]\ncould decide validity — but those rows describe the node's LOCAL chain,\nnot the candidate's branch. On a fork deeper than the migration depth, a\nsibling-branch-only Submit inclusion in the band satisfies the\nprior-Submit requirement on nodes that saw it while others reject with\nPublishTxMissingPriorSubmit (false-accept), and a local-branch-only\npromotion makes an honest fork block fail PublishTxAlreadyIncluded\n(false-reject) — either way the network diverges.\n\nCap both lookups at block.height - block_tree_depth. The by-hash walk\n(prior_inclusion_walk_depth >= block_tree_depth) already resolves every\nin-window inclusion on the candidate's own branch, so walk + capped\nfallback cover [0, block.height) with no gap: finalized heights\nby-height, the reorg window by-hash. The old comment claimed any\ninclusion reaching the fallback was below the reorg floor — true only\nfor the candidate's branch; the cap is what enforces it for node-local\nrows.\n\nAdd a band-cap regression pinning the invariant the fallback relies on:\na canonical, content-valid row inside the band is visible at the parent\ncap but excluded at the reorg-floor cap. A unit test of the full\ndata_txs_are_valid fallback arm would require a bespoke harness (no\nexisting one) and a multi-node band-fork integration test is out of\nscope here; the cap semantics are covered at unit level.\n\n* test(chain): seed content-verified canonical priors in the prevalidation fallback fixtures\n\nThe content check in the canonical metadata lookups made hint-only\nfixtures resolve to None: a hint is only canonical if the block MBH\nnames actually carries the tx. A content-verified prior must also sit\nbelow the inclusion-history walk window, or the walk itself resolves it\nand the fallback arm under test never fires. Rebuild the fixtures on a\nheight-3 chain with a fabricated finalized prior at height 1.\n\n* fix(consensus): cap the promotion-prevalidation fallback strictly below the walk window\n\nThe inclusive floor cap trusted a boundary height where a node-local\nsibling row could survive a missed scrub; since Searching state means\nthe walk found nothing on the candidate's branch in-window, a fallback\nanswer there is never a true positive, so the strictly-below cap removes\nthe exposure with zero coverage loss and matches the expiry-side\nfallback.\n\n* test(chain): pin the promotion-fallback cap's exclusion side end-to-end\n\nThe existing fixtures pass under a loosened cap, so they cannot catch a\nregression toward trusting in-window node-local rows; this fixture seeds a\ncontent-verified row inside the walk window and asserts it never decides\nvalidity.\n\n* style(chain-tests): regroup a hex literal into equal-size digit groups for clippy\n\n* fix(consensus): dedup producer tx selection against the full parent ancestry\n\nThe publish/commitment dedup folds filtered the parent's canonical\nancestry to `Onchain` entries only. The validator dedups against the\nparent ancestry by hash regardless of `ChainState`\n(`commitment_dedup::ancestor_commitment_tx_ids`, `data_txs_are_valid`'s\ninclusion walk), so during reorg replay a transiently-`Validated`\nin-window ancestor was dropped from the producer's sets while the\nvalidator still saw it — letting the producer re-select a tx and mint a\nblock peers reject as a duplicate commitment / double-publish.\n\n`get_canonical_chain` builds its chain by walking `previous_block_hash`\nfrom the max-difficulty tip, so every entry in the truncated `canonical`\nslice is a genuine ancestor of the block being produced. Deduping against\nall of them, regardless of chain state, is what keeps the producer\nsymmetric with the validator; an ancestor that later rolls back takes the\nparent with it, so the attempt is on a doomed branch that self-corrects.\nSkipping non-`Onchain` entries is only safe in `lookup_via_block_tree`,\nwhich has a by-hash slow-path fallback the dedup folds lack.\n\nAlso correct the `canonical_*_height` docstring: the content check proves\ninclusion on this node's canonical chain, and `Some(h)` is only\nbranch-agnostic below the reorg floor, since `MigratedBlockHashes` is\nnode-local within the reorg window.",
+          "timestamp": "2026-07-08T09:39:36+01:00",
+          "tree_id": "af52de41a0b5c90d532ede0b94973e8248674d0d",
+          "url": "https://github.com/Irys-xyz/irys/commit/603958f6004ca6e562d3433cd007ac9317e7c013"
+        },
+        "date": 1783501069593,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012654,
+            "range": "± 0.000161",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.129765,
+            "range": "± 0.008831",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.29923,
+            "range": "± 0.138772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.336879,
+            "range": "± 0.200358",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076092,
+            "range": "± 0.001452",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.040532,
+            "range": "± 7.193767",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1014.966571,
+            "range": "± 36.889525",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.137896,
+            "range": "± 0.009158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1374.505597,
+            "range": "± 7.903091",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1801.677542,
+            "range": "± 15.832204",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034505,
+            "range": "± 0.001447",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.13668,
+            "range": "± 1.958125",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.862314,
+            "range": "± 1.196494",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000121,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
