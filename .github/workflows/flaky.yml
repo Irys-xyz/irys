@@ -83,19 +83,25 @@ jobs:
 
           START_TIME=$(date +%s)
           set +e
-          cargo xtask flaky --clean \
+          # --json emits the report to stdout wrapped in sentinel lines; tee so we
+          # can both stream to the CI log and extract the machine-readable payload.
+          cargo xtask flaky --clean --json \
             -i ${{ env.ITERATIONS }} \
             --stress-iterations ${{ env.STRESS_ITERATIONS }} \
             -y ${{ env.ISOLATION_ITERATIONS }} \
-            -f ${{ env.TOLERABLE_FAILURES }}
-          EXIT_CODE=$?
+            -f ${{ env.TOLERABLE_FAILURES }} 2>&1 | tee flaky-test-results/run-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
 
-          # Locate the most recent flaky report directory produced by the run.
+          # Extract the sentinel-wrapped JSON payload (authoritative; no path glob).
+          sed -n '/<<<FLAKY_REPORT_JSON_BEGIN>>>/{n;p;}' flaky-test-results/run-output.log \
+            > flaky-test-results/report.json || true
+
+          # Copy the human report + isolation logs from the run's report directory.
           REPORT_DIR="$(ls -dt .target/nextest-monitor/flaky/*/ target/nextest-monitor/flaky/*/ 2>/dev/null | head -1)"
           if [ -n "$REPORT_DIR" ] && [ -f "${REPORT_DIR}report.md" ]; then
             cp "${REPORT_DIR}report.md" flaky-test-results/report.md
-            cp "${REPORT_DIR}report.json" flaky-test-results/report.json 2>/dev/null || true
+            [ -s flaky-test-results/report.json ] || cp "${REPORT_DIR}report.json" flaky-test-results/report.json 2>/dev/null || true
             # Preserve per-test isolation logs for debugging.
             tar -czf flaky-test-results/isolation-logs.tar.gz -C "$REPORT_DIR" phase3-isolation 2>/dev/null || true
           else
@@ -143,6 +149,7 @@ jobs:
             flaky-test-results/summary.md
             flaky-test-results/report.md
             flaky-test-results/report.json
+            flaky-test-results/run-output.log
             flaky-test-results/isolation-logs.tar.gz
           retention-days: ${{ env.RETENTION_DAYS }}
 

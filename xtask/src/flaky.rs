@@ -52,6 +52,8 @@ pub struct FlakyOptions {
     pub tolerable_failures: usize,
     /// `RUST_LOG` value to set during the isolation phase (for richer logs).
     pub isolation_log: Option<String>,
+    /// Emit the machine-readable report to stdout (sentinel-wrapped) on completion.
+    pub json: bool,
     /// Passthrough args forwarded to the phase-1 nextest invocation.
     pub args: Vec<String>,
 }
@@ -694,8 +696,24 @@ fn write_reports(
     let md_path = run_dir.join("report.md");
     fs::write(&md_path, render_markdown(&report))?;
 
+    // When requested, emit the report to stdout for downstream tooling (CI).
+    // The phases stream lots of nextest output to stdout, so the payload is
+    // wrapped in unambiguous sentinel lines and printed as a single compact
+    // line. Extract with e.g.:
+    //   sed -n "/$JSON_BEGIN/{n;p;}" <log>
+    if opts.json {
+        println!("{JSON_BEGIN}");
+        println!("{}", serde_json::to_string(&report)?);
+        println!("{JSON_END}");
+    }
+
     Ok((json_path, md_path))
 }
+
+/// Sentinel lines bracketing the machine-readable JSON payload on stdout.
+/// Kept distinctive so tooling can extract the payload amid nextest output.
+pub const JSON_BEGIN: &str = "<<<FLAKY_REPORT_JSON_BEGIN>>>";
+pub const JSON_END: &str = "<<<FLAKY_REPORT_JSON_END>>>";
 
 fn render_markdown(report: &Report) -> String {
     let mut s = String::new();

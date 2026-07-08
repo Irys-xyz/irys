@@ -189,6 +189,9 @@ enum Commands {
         /// `RUST_LOG` value to set during the isolation phase (for richer logs)
         #[clap(long)]
         isolation_log: Option<String>,
+        /// Emit the machine-readable report to stdout (sentinel-wrapped) for CI/tooling
+        #[clap(long, default_value_t = false)]
+        json: bool,
         /// Accepted for backwards-compat; reports are always saved
         #[clap(short, long, default_value_t = false, hide = true)]
         save: bool,
@@ -865,6 +868,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             no_isolation,
             tolerable_failures,
             isolation_log,
+            json,
             save: _,
             args,
         } => {
@@ -880,6 +884,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     no_isolation,
                     tolerable_failures,
                     isolation_log,
+                    json,
                     args,
                 },
             )?;
