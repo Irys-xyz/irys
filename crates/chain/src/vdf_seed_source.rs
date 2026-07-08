@@ -42,14 +42,19 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
 /// lookup so the genesis / shallow / deep / capacity-boundary cases are
 /// unit-testable without a database.
 ///
-/// Behaviour is identical to the legacy `create_state` replay, including the
-/// **`capacity + 1`** case: when `capacity` steps are exhausted within a
-/// height-1 block the loop still advances to the genesis block and
-/// unconditionally prepends its seed, so the returned window can hold
-/// `capacity + 1` seeds. `first_step` is derived as `global_step -
-/// ordered_seeds.len() + 1` (matching `VdfState::get_steps`), which yields the
-/// one-based genesis contract (`{1, 1, [genesis.steps[0]]}` for a genesis-only
-/// chain).
+/// Behaviour matches the legacy `create_state` replay, including the
+/// **`capacity + 1`** case: when `capacity` steps are exhausted exactly at the
+/// oldest step of a height-1 block the loop still advances to the genesis block
+/// and prepends its seed, so the returned window can hold `capacity + 1` seeds.
+/// The one divergence from the legacy replay is that the genesis prepend is
+/// guarded for contiguity: a height-1 block holding MORE than `capacity` steps
+/// is only partially consumed, and the legacy unconditional prepend would
+/// record the genesis seed under the wrong step number (unreachable with
+/// production capacities, which exceed any single block's step count, but the
+/// pure function is correct for all inputs). `first_step` is derived as
+/// `global_step - ordered_seeds.len() + 1` (matching `VdfState::get_steps`),
+/// which yields the one-based genesis contract (`{1, 1, [genesis.steps[0]]}`
+/// for a genesis-only chain).
 fn replay_vdf_seeds(
     latest_block_hash: BlockHash,
     capacity: usize,
@@ -61,7 +66,6 @@ fn replay_vdf_seeds(
     let mut steps_remaining = capacity;
 
     while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
         for step in block.vdf_limiter_info.steps.0.iter().rev() {
             seeds.push_front(Seed(*step));
             steps_remaining -= 1;
@@ -69,12 +73,20 @@ fn replay_vdf_seeds(
                 break;
             }
         }
-        // get the previous block
         block = get_header(&block.previous_block_hash);
     }
 
     if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+        // Prepend the genesis anchor only when the window is contiguous with it:
+        // the window's oldest step must sit immediately above the genesis step.
+        // A height-1 block holding more than `capacity` steps is only partially
+        // consumed (its oldest steps are skipped), and prepending across that
+        // gap would record the genesis seed under the wrong step number.
+        let consumed = u64::try_from(seeds.len()).expect("seed window length fits in u64");
+        let oldest_step = global_step_number.saturating_sub(consumed) + 1;
+        if oldest_step == block.vdf_limiter_info.global_step_number.saturating_add(1) {
+            seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
+        }
     }
 
     let seed_count = u64::try_from(seeds.len()).expect("seed window length fits in u64");
@@ -185,5 +197,25 @@ mod tests {
             bootstrap.ordered_seeds,
             VecDeque::from(vec![Seed(h(1)), Seed(h(2)), Seed(h(3)), Seed(h(4))]),
         );
+    }
+
+    /// A height-1 block holding MORE than `capacity` steps is only partially
+    /// consumed (the newest `capacity` steps); the genesis seed is not
+    /// contiguous with that window and must NOT be prepended — the legacy
+    /// unconditional prepend recorded it under the wrong step number.
+    #[test]
+    fn height_one_exceeding_capacity_skips_genesis_anchor() {
+        let genesis = header(h(0), H256::zero(), 0, 1, &[h(1)]);
+        let block1 = header(h(10), h(0), 1, 4, &[h(2), h(3), h(4)]);
+        let bootstrap = replay_vdf_seeds(block1.block_hash, 2, reader(vec![genesis, block1]));
+
+        assert_eq!(bootstrap.global_step, 4);
+        // Newest `capacity` steps only — steps 3 and 4. Prepending genesis here
+        // would have labelled it step 2 and dropped the real step 2 seed.
+        assert_eq!(
+            bootstrap.ordered_seeds,
+            VecDeque::from(vec![Seed(h(3)), Seed(h(4))])
+        );
+        assert_eq!(bootstrap.first_step, 3);
     }
 }
