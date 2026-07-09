@@ -46,28 +46,40 @@ impl ReanchorSignals {
     }
 
     /// Current re-anchor generation. `0` until the first applied heal.
+    ///
+    /// `Acquire` pairs with the `Release`/`AcqRel` stores in
+    /// [`Self::record_heal_applied`]: a reader that observes generation `N`
+    /// also observes the buffer rewrite that happened under the VDF write lock
+    /// immediately before that store (and cannot treat pre-heal seeds as
+    /// generation-`N`-validated).
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Applied-heal transition: invalidate steps stamped under older
     /// generations and mark the buffer trustworthy again. `run_vdf` only.
+    ///
+    /// Must be called **after** `reanchor_seeds` under/after the write lock.
+    /// `AcqRel`/`Release` publish the heal so concurrent validators with
+    /// `Acquire` loads cannot observe a new generation against a pre-heal
+    /// buffer (and cannot re-poison via stale-stamped FF).
     pub(crate) fn record_heal_applied(&self) {
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        self.buffer_suspect.store(false, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.buffer_suspect.store(false, Ordering::Release);
     }
 
     /// Mark the seed buffer suspect (a re-anchor request is pending). Called by
     /// the block-tree gate BEFORE it queues the request, so validation observes
-    /// the flag no later than the heal.
+    /// the flag no later than the heal. `Release` pairs with
+    /// [`Self::is_buffer_suspect`]'s `Acquire`.
     pub fn mark_buffer_suspect(&self) {
-        self.buffer_suspect.store(true, Ordering::Relaxed);
+        self.buffer_suspect.store(true, Ordering::Release);
     }
 
     /// Whether a queued re-anchor has not yet been applied. While true, the
     /// seed buffer must not be treated as authoritative.
     pub fn is_buffer_suspect(&self) -> bool {
-        self.buffer_suspect.load(Ordering::Relaxed)
+        self.buffer_suspect.load(Ordering::Acquire)
     }
 }
 
