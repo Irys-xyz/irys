@@ -2,10 +2,34 @@ irys_utils::define_metrics! {
     meter: "irys-vdf";
 
     gauge VDF_GLOBAL_STEP("irys.vdf.global_step_number", "Current VDF global step number");
+    gauge VDF_BUFFER_SUSPECT(
+        "irys.vdf.buffer_suspect",
+        "Whether the VDF seed buffer is marked suspect pending a re-anchor heal (1=yes, 0=no)"
+    );
+    counter VDF_REANCHOR_HEALED(
+        "irys.vdf.reanchor_healed_total",
+        "Number of in-place VDF seed-buffer heals successfully applied"
+    );
+    counter VDF_REANCHOR_SKIPPED(
+        "irys.vdf.reanchor_skipped_total",
+        "Number of VDF re-anchor requests skipped without rewriting the buffer"
+    );
 }
 
 pub fn record_vdf_global_step(step: u64) {
     VDF_GLOBAL_STEP.record(step, &[]);
+}
+
+pub fn record_buffer_suspect(suspect: bool) {
+    VDF_BUFFER_SUSPECT.record(u64::from(suspect), &[]);
+}
+
+pub fn record_reanchor_healed() {
+    VDF_REANCHOR_HEALED.add(1, &[]);
+}
+
+pub fn record_reanchor_skipped() {
+    VDF_REANCHOR_SKIPPED.add(1, &[]);
 }
 
 // VDF_MINING_ENABLED keeps its original "irys-chain" instrumentation scope (an

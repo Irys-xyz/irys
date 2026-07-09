@@ -158,7 +158,15 @@ pub fn run_vdf<B: BlockProvider>(
                 // Buffer untouched; the suspect flag stays set, so the
                 // block-tree gate re-sends a fresh request from the next
                 // canonical tip (no broadcast — miners keep their rotation).
-                ReanchorOutcome::Skipped => {}
+                // Free-run remains paused while suspect so live_step cannot
+                // race further past the second-boundary skip condition.
+                ReanchorOutcome::Skipped => {
+                    metrics::record_reanchor_skipped();
+                    warn!(
+                        vdf.global_step_number = global_step_number,
+                        "VDF re-anchor skipped; buffer remains suspect until a fresher tip heals"
+                    );
+                }
                 ReanchorOutcome::PoisonedLock => return,
             }
             continue;

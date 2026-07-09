@@ -66,6 +66,8 @@ impl ReanchorSignals {
     pub(crate) fn record_heal_applied(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.buffer_suspect.store(false, Ordering::Release);
+        crate::metrics::record_buffer_suspect(false);
+        crate::metrics::record_reanchor_healed();
     }
 
     /// Mark the seed buffer suspect (a re-anchor request is pending). Called by
@@ -74,6 +76,7 @@ impl ReanchorSignals {
     /// [`Self::is_buffer_suspect`]'s `Acquire`.
     pub fn mark_buffer_suspect(&self) {
         self.buffer_suspect.store(true, Ordering::Release);
+        crate::metrics::record_buffer_suspect(true);
     }
 
     /// Whether a queued re-anchor has not yet been applied. While true, the
