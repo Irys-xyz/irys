@@ -298,9 +298,25 @@ pub fn run_vdf<B: BlockProvider>(
             confirmed_global_step_number,
         );
 
-        // if mining disabled, wait 200ms and continue loop i.e. check again
-        if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed) || is_too_far_ahead {
-            if is_too_far_ahead {
+        // Free-running steps while the buffer is suspect would (a) mine on
+        // minority-fork seeds and (b) push `live_step` further past the
+        // second-boundary skip in `apply_reanchor`, making heals harder to land.
+        // Pause local production until a heal clears the flag; FF of validated
+        // peer steps still runs above and is generation-stamped.
+        let buffer_suspect = reanchor_signals.is_buffer_suspect();
+
+        // if mining disabled, buffer suspect, or gated at a reset boundary —
+        // wait and continue (re-check re-anchor / FF first next iteration).
+        if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
+            || buffer_suspect
+            || is_too_far_ahead
+        {
+            if buffer_suspect {
+                debug!(
+                    vdf.global_step_number = global_step_number,
+                    "VDF free-run paused: seed buffer suspect pending re-anchor heal"
+                );
+            } else if is_too_far_ahead {
                 // Rate-limit: an expected multi-block park would otherwise log every 200ms.
                 let now = Instant::now();
                 let throttled = last_boundary_gate_warning

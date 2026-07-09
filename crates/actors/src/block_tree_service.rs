@@ -1406,15 +1406,26 @@ impl BlockTreeServiceInner {
             first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency),
             "Deep reorg crossed a divergent VDF reset boundary; queuing a seed-buffer re-anchor"
         );
-        // Mark the buffer suspect BEFORE publishing the request, so recall-range
-        // validation stops trusting the buffer no later than the heal. The flag
-        // stays set until `run_vdf` applies a heal — if it SKIPS this request
-        // (e.g. the tail would cross a second, unpinned boundary), the retry in
-        // `on_block_validation_finished` re-sends from every new canonical tip.
+        // Mark the buffer suspect BEFORE publishing the request. This order is
+        // load-bearing:
+        //   1. Validation must stop trusting the buffer no later than the heal
+        //      can apply (and `run_vdf` pauses free-running steps while suspect).
+        //   2. `record_heal_applied` CLEARS suspect — if we marked after
+        //      `try_send`, a fast heal could clear first and a late mark would
+        //      stick the flag true forever with no applied heal to clear it.
+        // The flag stays set until `run_vdf` applies a heal. If this request is
+        // SKIPped (e.g. tail would cross a second unpinned boundary) or the
+        // queue fails, tip-advance retries re-send from every new canonical tip.
         self.service_senders
             .vdf_reanchor_signals
             .mark_buffer_suspect();
-        self.send_reanchor_request(canonical_tip);
+        if !self.send_reanchor_request(canonical_tip) {
+            warn!(
+                c_step,
+                "VDF re-anchor not queued after marking buffer suspect; \
+                 tip-advance path will retry while suspect remains set"
+            );
+        }
     }
 
     /// Build and publish a [`ReanchorRequest`] from `canonical_tip`. Split from
@@ -1422,7 +1433,9 @@ impl BlockTreeServiceInner {
     /// can re-send a FRESH request on each canonical advance without re-running
     /// the reorg gating (the suspect flag already encodes that a qualifying
     /// reorg happened and no heal has applied yet).
-    fn send_reanchor_request(&self, canonical_tip: &IrysBlockHeader) {
+    ///
+    /// Returns `true` when a request was published to the VDF thread.
+    fn send_reanchor_request(&self, canonical_tip: &IrysBlockHeader) -> bool {
         let c_step = canonical_tip.vdf_limiter_info.global_step_number;
 
         // Build the canonical seed window [c_step - capacity + 1, c_step] from the
@@ -1440,7 +1453,7 @@ impl BlockTreeServiceInner {
                 want_start,
                 "VDF re-anchor skipped: canonical seed window unavailable (ancestry below DB)"
             );
-            return;
+            return false;
         };
 
         let canonical_seeds: VecDeque<Seed> = window.0.into_iter().map(Seed).collect();
@@ -1452,6 +1465,7 @@ impl BlockTreeServiceInner {
         };
         if self.service_senders.vdf_reanchor.try_send(request) {
             info!(c_step, "Queued a VDF seed-buffer re-anchor request");
+            true
         } else {
             // Latest-value channel: publishing only fails when the receiver is
             // gone, i.e. the VDF thread is not running (shutdown in progress).
@@ -1459,6 +1473,7 @@ impl BlockTreeServiceInner {
                 c_step,
                 "VDF re-anchor channel closed (VDF thread not running); heal not queued"
             );
+            false
         }
     }
 
