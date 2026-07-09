@@ -669,10 +669,7 @@ mod epoch_block_filtering {
     async fn slow_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
-        // This test submits V1/V2 commitments BEFORE activation, so it needs the
-        // wider pre-activation window to survive slow node startup under parallel
-        // load (the 10s ACTIVATION_DELAY_SECS can be exceeded by startup alone).
-        let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),

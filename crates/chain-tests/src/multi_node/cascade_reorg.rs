@@ -161,47 +161,26 @@ async fn slow_heavy_cascade_reorg_reinjects_term_ledger_txs() -> eyre::Result<()
         .wait_until_height(base_height + 3, seconds_to_wait)
         .await?;
 
-    // Verify orphaned term txs are back in the mempool. Reinjection happens
-    // asynchronously when the mempool service handles the reorg event on its own task,
-    // so it can lag the reorg notification the test awaited above. Poll until both
-    // reappear rather than sampling once — the single check raced under parallel load.
-    let one_year_id = one_year_tx.header.id;
-    let thirty_day_id = thirty_day_tx.header.id;
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(seconds_to_wait as u64);
-    let mempool_txs = loop {
-        let canonical_tip = genesis_node
-            .get_canonical_chain()
-            .last()
-            .expect("canonical chain should have a tip")
-            .block_hash();
-        let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
-        let has_both = mempool_txs
-            .one_year_tx
-            .iter()
-            .any(|tx| tx.id == one_year_id)
-            && mempool_txs
-                .thirty_day_tx
-                .iter()
-                .any(|tx| tx.id == thirty_day_id);
-        if has_both || std::time::Instant::now() >= deadline {
-            break mempool_txs;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    };
+    // Verify orphaned term txs are back in the mempool
+    let canonical_tip = genesis_node
+        .get_canonical_chain()
+        .last()
+        .expect("canonical chain should have a tip")
+        .block_hash();
+    let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
 
     assert!(
         mempool_txs
             .one_year_tx
             .iter()
-            .any(|tx| tx.id == one_year_id),
+            .any(|tx| tx.id == one_year_tx.header.id),
         "expected OneYear orphan tx to be reinjected into mempool"
     );
     assert!(
         mempool_txs
             .thirty_day_tx
             .iter()
-            .any(|tx| tx.id == thirty_day_id),
+            .any(|tx| tx.id == thirty_day_tx.header.id),
         "expected ThirtyDay orphan tx to be reinjected into mempool"
     );
 

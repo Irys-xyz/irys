@@ -25,12 +25,6 @@ pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),
     Difficulty(BroadcastDifficultyUpdate),
     PartitionsExpiration(BroadcastPartitionsExpiration),
-    /// The VDF was re-anchored (deep partition recovery rewound and rebuilt the step buffer at a
-    /// lower global step). Partition miners must discard their stateful efficient-sampling
-    /// recall-range rotation and rebuild it from the re-anchored steps on the next seed; otherwise
-    /// they mine recall ranges computed from the old, now-discarded lineage (which then fail
-    /// validation). Carries no payload — the reset is unconditional.
-    Reanchored,
 }
 
 #[derive(Debug)]
@@ -109,16 +103,6 @@ impl MiningBus {
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
         debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
-    }
-
-    /// Notify all subscribers that the VDF re-anchored (partition recovery) so they reset any
-    /// step-derived state — specifically partition mining's efficient-sampling recall-range
-    /// rotation, which is stateful and would otherwise carry the pre-re-anchor lineage forward.
-    pub fn send_reanchor(&self) -> usize {
-        info!(
-            "Broadcast Mining: VDF re-anchored; signalling partition miners to reset recall-range state"
-        );
-        self.send_event(Arc::new(MiningBroadcastEvent::Reanchored))
     }
 }
 

@@ -12,7 +12,7 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::{ValidationError, build_fork_local_step_view, is_seed_data_valid},
+    block_validation::{ValidationError, is_seed_data_valid},
     mempool_guard::MempoolReadGuard,
     metrics,
     services::ServiceSenders,
@@ -74,20 +74,6 @@ pub enum VdfValidationResult {
 pub(crate) struct VdfStageBParentMissing {
     pub parent_hash: BlockHash,
 }
-
-/// Sentinel error returned from `ensure_vdf_is_valid` when the previous VDF step from the
-/// live buffer is either unavailable OR MISMATCHES the block's claim, AND the block's own
-/// fork-local lineage view cannot be built to cross-check it — because an ancestor was
-/// transiently evicted from the block tree (a depth-prune / reorg / partition-recovery
-/// re-anchor race), or a concurrent re-anchor rewound the live buffer below the step. The
-/// bare absence/mismatch is not proof of invalidity in this window (the live buffer may be
-/// mid-re-anchor) and we could not obtain the authoritative lineage value, so this must
-/// requeue rather than panic (never-mislabel rule) or be peer-attributed as `Invalid`.
-/// Downcast in `PreemptibleVdfTask::execute` and converted to
-/// `VdfValidationResult::Cancelled` (the peer-innocent requeue lane).
-#[derive(Debug, thiserror::Error)]
-#[error("VDF previous-step fork-local view unavailable (ancestor eviction race); requeue")]
-pub(crate) struct VdfPrevStepForkViewUnavailable;
 
 /// Sentinel error returned from `ensure_vdf_is_valid` when a `spawn_blocking`
 /// task in Stage B or Stage C/D resolves as a `JoinError` (thread panic or
@@ -1003,75 +989,31 @@ impl ValidationServiceInner {
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
-        // Read the previous step from the local buffer as a FAST PATH (`None` if absent).
-        // `wait_for_step` above returned once `global_step >= prev_output_step_number`, so
-        // normally the step is present and equals the block's claim. It can be absent or
-        // stale in a narrow window — a partition-recovery VDF re-anchor REPLACING the buffer
-        // at a lower `global_step` (a backward rewind) between the wait and this read. We
-        // treat "absent" and "present-but-mismatched" identically below: both fall through to
-        // the authoritative fork-local cross-check, so a transient rewind needs no re-wait and
-        // never mislabels (no `panic!`, no `Invalid`). Mirrors the recall-range seam.
-        let stored_previous_step = self.vdf_state.get_step(prev_output_step_number).ok();
+        // Unreachable in practice: `wait_for_step` above only returns Ok once
+        // `global_step >= prev_output_step_number`, so the step is in the seed
+        // buffer. The buffer can in principle have trimmed past
+        // `prev_output_step_number` if a canonical-tip update advanced
+        // `minimum_step_to_keep` during the sub-millisecond window after
+        // `wait_for_step` returned — but the buffer's capacity is at minimum
+        // `max_allowed_vdf_fork_steps` (≥60k for production), so trimming
+        // requires ~60k steps of canonical advancement in that window. That
+        // doesn't happen.
+        //
+        // If it ever does fire, the panic is intentional. We must not
+        // downgrade this to an `Invalid` result — see the never-mislabel
+        // rule documented at the `resume_unwind` site in the select loop
+        // and in design/docs/vdf-validation-stall-detection.md.
+        let stored_previous_step = self
+            .vdf_state
+            .get_step(prev_output_step_number)
+            .expect("to get the step, since we've just waited for it");
 
-        // Verify the block's claimed previous VDF output equals the step our node holds at that
-        // index. The live buffer can transiently be absent or disagree during a partition-recovery
-        // VDF re-anchor: the re-anchor is signalled at reorg-detect time but APPLIED asynchronously by
-        // the VDF supervisor, so a canonical straggler block whose previous step lands on a reset
-        // boundary that the still-poisoned (pre-swap) buffer holds with the minority-fork value
-        // would be rejected here as terminally `Invalid` — even though it is honest and would
-        // validate once the swap lands. There is no retry: the verdict is terminal, peer-attributed
-        // (`vdf_terminal_finalize_via`), and the gossip-seen cache dedups a re-gossip, so the
-        // recovering node would permanently fail to adopt the canonical tip block that arrived in
-        // the window. Resolve the previous step from a fork-local view of the block's OWN lineage
-        // (its ancestors in the block tree, where the new canonical parent is already present) and
-        // accept iff THAT matches the block's claim. A value that mismatches the block's actual
-        // canonical ancestry is still a genuine consensus rejection. Mirrors the recall-range
-        // fork-local fallback and confines fork-aware step resolution to `build_fork_local_view`.
-        if stored_previous_step != Some(vdf_info.prev_output) {
-            let fork_local = build_fork_local_step_view(
-                block,
-                &self.config.consensus,
-                &self.block_tree_guard,
-                &self.db,
-            )
-            .and_then(|view| view.get_step(prev_output_step_number));
-            match fork_local {
-                Ok(canonical_prev) if canonical_prev == vdf_info.prev_output => {
-                    debug!(
-                        vdf.prev_output_step_number = prev_output_step_number,
-                        ?stored_previous_step,
-                        "ensure_vdf_is_valid: live buffer prev step absent or mismatched (poisoned/rewound pre-re-anchor buffer); fork-local lineage view matches the block's claim — accepting"
-                    );
-                }
-                Ok(canonical_prev) => eyre::bail!(
-                    "vdf output is not equal to the saved step with the same index {:?}, got {:?} (fork-local lineage view: {:?})",
-                    stored_previous_step,
-                    vdf_info.prev_output,
-                    canonical_prev,
-                ),
-                Err(err) => {
-                    // The live buffer was absent or mismatched, and we could not build an
-                    // authoritative fork-local cross-check: an ancestor is absent from BOTH the
-                    // block tree and the DB (depth-prune / reorg / in-flight re-anchor race). A
-                    // SUCCESSFUL build always covers `prev_output_step_number` — the view is sized
-                    // to include it (see `build_fork_local_step_view`) — so the only `Err` here is
-                    // a build failure. This is "no verdict", NOT proof of invalidity, so the bare
-                    // mismatch must NOT be peer-attributed as `Invalid`: that would permanently
-                    // reject an honest canonical block in the re-anchor window — the exact failure
-                    // this fork-local check exists to prevent. (A resolvable-but-disagreeing step
-                    // is the separate `Ok(_) => bail` arm above, which IS a terminal reject.) It
-                    // uses the peer-innocent Cancelled lane; on retry the re-anchor has typically
-                    // landed (live buffer matches, so this branch is skipped) or the ancestry is
-                    // present (fork-local view then yields a definitive accept/reject).
-                    warn!(
-                        custom.error = ?err,
-                        vdf.prev_output_step_number = prev_output_step_number,
-                        "ensure_vdf_is_valid: no authoritative fork-local prev-step cross-check (view unbuildable: ancestor absent from tree and db); requeuing instead of failing terminally"
-                    );
-                    return Err(VdfPrevStepForkViewUnavailable.into());
-                }
-            }
-        }
+        ensure!(
+            stored_previous_step == vdf_info.prev_output,
+            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
+            stored_previous_step,
+            vdf_info.prev_output,
+        );
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = vdf_config.reset_frequency as u64;

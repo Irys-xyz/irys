@@ -11,13 +11,9 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
-async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
+async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
     // settings
-    // Node restart + resync is heavy; under parallel-CI load the default 10s budget is
-    // too tight for the post-restart wait_until_height calls (a contended restart can
-    // exceed it — solo runs already land at ~9.8s). 30s keeps margin without masking a
-    // real regression; the slow_ prefix also lifts the nextest terminate cap to 180s.
-    let max_seconds = 30;
+    let max_seconds = 10;
 
     //setup config
     let mut config = NodeConfig::testing();

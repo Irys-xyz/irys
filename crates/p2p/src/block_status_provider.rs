@@ -8,7 +8,7 @@ use tracing::debug;
 use {
     irys_testing_utils::IrysBlockHeaderTestExt as _,
     irys_types::{
-        ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig, U256, irys::IrysSigner,
+        ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig, irys::IrysSigner,
     },
     std::sync::{Arc, RwLock},
     tracing::warn,
@@ -494,20 +494,13 @@ impl BlockStatusProvider {
 }
 
 impl BlockProvider for BlockStatusProvider {
-    fn canonical_vdf_snapshot(&self, step_number: u64) -> Option<CanonicalVdfSnapshot> {
+    fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
         let binding = self.block_tree_read_guard.read();
-        let tip = binding.get_latest_canonical_entry();
-        let reset_seed_for_step = binding
-            .canonical_entry_at_or_below_step(step_number)
-            .map(|entry| entry.header().vdf_limiter_info.next_seed)
-            // If `step_number` predates the earliest cached canonical entry, preserve the prior
-            // tip-seed fallback rather than synthesizing a new policy here.
-            .unwrap_or(tip.header().vdf_limiter_info.next_seed);
+        let entry = binding.get_latest_canonical_entry();
         Some(CanonicalVdfSnapshot {
-            vdf_info: tip.header().vdf_limiter_info.clone(),
+            vdf_info: entry.header().vdf_limiter_info.clone(),
             confirmed_global_step_number: binding
                 .confirmed_canonical_step(self.block_migration_depth),
-            reset_seed_for_step,
         })
     }
 }
@@ -537,10 +530,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_vdf_snapshot_reports_confirmed_step() {
+    fn latest_canonical_vdf_info_reports_confirmed_step() {
         let (provider, genesis, _tmp) = mock_provider();
         let snap = provider
-            .canonical_vdf_snapshot(genesis.vdf_limiter_info.global_step_number)
+            .latest_canonical_vdf_info()
             .expect("a canonical snapshot");
         // Genesis is the only (and deepest) canonical block, so it is the confirmed tip
         // regardless of `block_migration_depth`.
@@ -551,59 +544,6 @@ mod tests {
         assert_eq!(
             snap.vdf_info.global_step_number,
             genesis.vdf_limiter_info.global_step_number
-        );
-        assert_eq!(snap.reset_seed_for_step, genesis.vdf_limiter_info.next_seed);
-    }
-
-    #[test]
-    fn canonical_vdf_snapshot_uses_seed_for_requested_step_not_tip() {
-        let (provider, genesis, _tmp) = mock_provider();
-        let consensus = NodeConfig::testing().consensus_config();
-        let mut chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &consensus);
-        chain[0].previous_cumulative_diff = genesis.cumulative_diff;
-        chain[0].cumulative_diff = genesis.cumulative_diff + U256::from(1);
-        chain[0].vdf_limiter_info.global_step_number = 15;
-        chain[0].vdf_limiter_info.next_seed = H256::repeat_byte(0x11);
-        chain[1].previous_cumulative_diff = chain[0].cumulative_diff;
-        chain[1].cumulative_diff = chain[0].cumulative_diff + U256::from(1);
-        chain[1].vdf_limiter_info.global_step_number = 35;
-        chain[1].vdf_limiter_info.next_seed = H256::repeat_byte(0x22);
-
-        provider.add_block_mock_to_the_tree(&chain[0]);
-        provider.add_block_mock_to_the_tree(&chain[1]);
-        provider
-            .block_tree_read_guard
-            .write()
-            .mark_block_as_validation_scheduled(&chain[0].block_hash)
-            .expect("schedule validation for first block");
-        provider
-            .block_tree_read_guard
-            .write()
-            .mark_block_as_valid(&chain[0].block_hash)
-            .expect("mark first block valid");
-        provider
-            .block_tree_read_guard
-            .write()
-            .mark_block_as_validation_scheduled(&chain[1].block_hash)
-            .expect("schedule validation for second block");
-        provider
-            .block_tree_read_guard
-            .write()
-            .mark_block_as_valid(&chain[1].block_hash)
-            .expect("mark second block valid");
-
-        let snap = provider
-            .canonical_vdf_snapshot(20)
-            .expect("snapshot should resolve");
-
-        assert_eq!(
-            snap.vdf_info.global_step_number, 35,
-            "tip info should still come from the latest canonical block"
-        );
-        assert_eq!(
-            snap.reset_seed_for_step,
-            H256::repeat_byte(0x11),
-            "requested step 20 must use the seed from the last block ending at or before 20, not the tip seed"
         );
     }
 

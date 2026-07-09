@@ -749,27 +749,6 @@ impl BlockTree {
             .expect("canonical chain must always have an entry in it")
     }
 
-    /// The canonical block with the GREATEST `global_step_number <= step` — i.e. the last block
-    /// whose VDF range ENDS at or before `step`. Found by binary search over the cached canonical
-    /// chain (ordered oldest→newest, so `global_step_number` is monotonic). Searches in place (no
-    /// chain clone); only the matched entry's `Arc` is cloned.
-    ///
-    /// NB: this is deliberately NOT "the block whose range *covers* `step`". A single block can
-    /// SPAN a reset boundary (its range straddles a multiple of `reset_frequency`), and such a
-    /// block's `next_seed` targets the boundary ABOVE its range — the wrong seed for a boundary
-    /// INSIDE its range. The block ending at or before `step` is the one whose `next_seed` pins the
-    /// reset seed for the next boundary above `step` (the boundary the VDF crosses when it is at
-    /// `step`). Returns `None` only when `step` is below the earliest cached block.
-    #[must_use]
-    pub fn canonical_entry_at_or_below_step(&self, step: u64) -> Option<BlockTreeEntry> {
-        let (chain, _) = &self.longest_chain_cache;
-        // chain is ascending by global_step_number; partition_point gives the count of entries with
-        // global_step_number <= step, so idx-1 is the last such entry.
-        let idx = chain
-            .partition_point(|entry| entry.header().vdf_limiter_info.global_step_number <= step);
-        chain.get(idx.checked_sub(1)?).cloned()
-    }
-
     /// Global step number of the most recent canonical block confirmed past reorg risk —
     /// the deepest block that is both `Onchain` and at least `depth` blocks below the tip.
     /// Used by the VDF reset-boundary gate so the loop never applies a seed pinned by a
@@ -2938,74 +2917,6 @@ mod tests {
         assert_eq!(cache.confirmed_canonical_step(1), 20);
         // The `depth` floor still reaches deeper than the non-onchain skip.
         assert_eq!(cache.confirmed_canonical_step(2), 10);
-    }
-
-    /// Regression for the per-boundary VDF seed lookup: the provider must resolve the canonical
-    /// block whose VDF range ENDS at or before the requested step, not the block whose range merely
-    /// covers it. A later canonical block can span the step while its `next_seed` targets a higher
-    /// boundary, so returning it would pin the wrong reset seed.
-    #[test]
-    fn canonical_entry_at_or_below_step_returns_last_entry_ending_at_or_before_step() {
-        let comm_cache = Arc::new(CommitmentSnapshot::default());
-
-        let mut b1 = random_block(U256::from(1));
-        b1.vdf_limiter_info.global_step_number = 15;
-        b1.test_sign();
-        let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
-
-        let mut b2 = random_block(U256::from(2));
-        b2.vdf_limiter_info.global_step_number = 35;
-        let mut b2 = extend_chain(b2, &b1);
-        cache
-            .add_block(
-                &seal_block(&mut b2),
-                comm_cache.clone(),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-            )
-            .unwrap();
-        cache
-            .add_common(
-                b2.block_hash,
-                &seal_block(&mut b2),
-                comm_cache,
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot(),
-                ChainState::Validated(BlockState::ValidBlock),
-            )
-            .unwrap();
-        cache.mark_tip(&b2.block_hash).unwrap();
-
-        assert!(
-            cache.canonical_entry_at_or_below_step(14).is_none(),
-            "a step below the earliest cached block must return None"
-        );
-        assert_eq!(
-            cache
-                .canonical_entry_at_or_below_step(15)
-                .expect("exact step should resolve")
-                .header()
-                .block_hash,
-            b1.block_hash
-        );
-        assert_eq!(
-            cache
-                .canonical_entry_at_or_below_step(20)
-                .expect("between blocks should resolve")
-                .header()
-                .block_hash,
-            b1.block_hash,
-            "step 20 lies below b2's end step, so the lookup must not return the covering block"
-        );
-        assert_eq!(
-            cache
-                .canonical_entry_at_or_below_step(35)
-                .expect("tip step should resolve")
-                .header()
-                .block_hash,
-            b2.block_hash
-        );
-        assert!(cache.canonical_entry_at_or_below_step(0).is_none());
     }
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
