@@ -191,6 +191,16 @@ impl PreemptibleVdfTask {
                     VdfValidationResult::ParentMissing {
                         parent_hash: parent_missing.parent_hash,
                     }
+                // An in-place re-anchor healed the seed buffer mid-validation:
+                // the batches were validated against the pre-heal buffer, so the
+                // send refused to fast-forward them. Peer-innocent — requeue and
+                // revalidate against the healed buffer (never Invalid).
+                } else if e
+                    .downcast_ref::<irys_vdf::VdfReanchorGenerationChanged>()
+                    .is_some()
+                {
+                    metrics::record_validation_cancellation("vdf_reanchor_generation_changed");
+                    VdfValidationResult::Cancelled
                 } else {
                     match e.downcast_ref::<WaitForStepError>() {
                         Some(WaitForStepError::Cancelled) => {

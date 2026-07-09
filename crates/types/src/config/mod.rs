@@ -464,16 +464,35 @@ pub struct CombinedConfigInner {
 
 impl From<&NodeConfig> for VdfConfig {
     fn from(value: &NodeConfig) -> Self {
-        let consensus = value.consensus_config().vdf;
+        // Exhaustive destructuring of both source structs: adding a field to
+        // either `VdfConsensusConfig` or `VdfNodeConfig` without wiring it here
+        // becomes a compile error, not a silent drop (the previous field-by-field
+        // merge silently dropped `core_pinning`).
+        let VdfConsensusConfig {
+            reset_frequency,
+            num_checkpoints_in_vdf_step,
+            max_allowed_vdf_fork_steps,
+            sha_1s_difficulty,
+        } = value.consensus_config().vdf;
+        // `value.vdf` is borrowed through `&NodeConfig`; all its fields are `Copy`,
+        // so ref-destructure and copy out (no clone).
+        let VdfNodeConfig {
+            parallel_verification_thread_limit,
+            core_pinning,
+            throttle,
+            progress_timeout_secs,
+            validation_batch_size,
+        } = &value.vdf;
         Self {
-            parallel_verification_thread_limit: value.vdf.parallel_verification_thread_limit,
-            reset_frequency: consensus.reset_frequency,
-            num_checkpoints_in_vdf_step: consensus.num_checkpoints_in_vdf_step,
-            max_allowed_vdf_fork_steps: consensus.max_allowed_vdf_fork_steps,
-            sha_1s_difficulty: consensus.sha_1s_difficulty,
-            throttle: value.vdf.throttle,
-            progress_timeout_secs: value.vdf.progress_timeout_secs,
-            validation_batch_size: value.vdf.validation_batch_size,
+            reset_frequency,
+            parallel_verification_thread_limit: *parallel_verification_thread_limit,
+            num_checkpoints_in_vdf_step,
+            max_allowed_vdf_fork_steps,
+            sha_1s_difficulty,
+            throttle: *throttle,
+            progress_timeout_secs: *progress_timeout_secs,
+            validation_batch_size: *validation_batch_size,
+            core_pinning: *core_pinning,
         }
     }
 }
@@ -540,6 +559,9 @@ pub struct VdfConfig {
 
     /// See `VdfNodeConfig::validation_batch_size`.
     pub validation_batch_size: usize,
+
+    /// See `VdfNodeConfig::core_pinning`. Controls VDF-thread CPU pinning.
+    pub core_pinning: CorePinning,
 }
 
 impl VdfConfig {

@@ -22,13 +22,14 @@
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     RecallRangeError, SubmitPayloadError, ValidationCancelReason, ValidationError,
-    commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
+    commitment_txs_are_valid, data_txs_are_valid, poa_is_valid, recall_recall_range_is_valid,
+    shadow_transactions_are_valid, submit_payload_to_reth,
 };
 use crate::metrics;
 use crate::validation_service::ValidationServiceInner;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, SealedBlock, SystemLedger, UnixTimestampMs};
+use irys_vdf::verify::is_seed_data_valid;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -474,6 +475,14 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.config.consensus,
                 &self.service_inner.vdf_state,
+                &self.service_inner.block_tree_guard,
+                &self.service_inner.db,
+                // While a re-anchor is pending the buffer is not authoritative
+                // in either direction; force the fork-local window.
+                self.service_inner
+                    .service_senders
+                    .vdf_reanchor_signals
+                    .is_buffer_suspect(),
             )
             .await;
             metrics::record_validation_stage_duration_ms(
@@ -901,11 +910,14 @@ impl BlockValidationTask {
                         return capture_stage_result(&seeds_captures, result);
                     }
                 };
-            let outcome = is_seed_data_valid(
+            let outcome: ValidationResult = match is_seed_data_valid(
                 self.sealed_block.header(),
                 previous_block,
                 vdf_reset_frequency,
-            );
+            ) {
+                Ok(()) => ValidationResult::Valid,
+                Err(e) => ValidationError::SeedDataInvalid(e.to_string()).into(),
+            };
             metrics::record_validation_stage_duration_ms(
                 "seeds",
                 started.elapsed().as_secs_f64() * 1000.0,

@@ -5,7 +5,6 @@ use eyre::Context as _;
 use irys_types::block_production::Seed;
 use irys_types::{H256, H256List, U256, VDFLimiterInfo, VdfConfig};
 use openssl::sha;
-pub use rayon;
 use rayon::prelude::*;
 use sha2::compress256;
 use sha2::digest::generic_array::GenericArray;
@@ -16,6 +15,13 @@ pub mod metrics;
 pub mod state;
 pub mod vdf;
 pub mod vdf_utils;
+pub mod verify;
+
+pub use vdf_utils::{
+    ReanchorReceiver, ReanchorRequest, ReanchorSignals, VdfFastForwardSender,
+    VdfReanchorGenerationChanged, VdfReanchorSender, fast_forward_channel,
+    first_divergent_boundary, reanchor_channel, reorg_crossed_divergent_boundary,
+};
 
 const SHA256_IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -338,10 +344,24 @@ pub const fn step_number_to_salt_number(config: &VdfConfig, step_number: u64) ->
 pub struct VdfStep {
     pub step: H256,
     pub global_step_number: u64,
+    /// The re-anchor generation this step was validated under (stamped by
+    /// [`vdf_utils::VdfFastForwardSender`]). `run_vdf` drops a step whose
+    /// generation is older than the buffer's current one: it predates an
+    /// in-place re-anchor and must not replay onto the healed buffer. `0` for
+    /// steps produced before any re-anchor.
+    pub generation: u64,
 }
 
 pub trait MiningBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64);
+
+    /// Signal that the VDF seed buffer was re-anchored in place after a deep
+    /// reorg (values rewritten, step counter unchanged — see
+    /// [`state::VdfState::reanchor_seeds`]). Miners must discard any recall-range
+    /// rotation derived from the pre-heal (poisoned) seeds and rebuild it from
+    /// the healed buffer; a value-only rewrite leaves the step *numbers*
+    /// consecutive, so the gap-driven reconstruction never triggers on its own.
+    fn broadcast_reanchored(&self);
 }
 
 /// Runs the VDF, starting with the testnet config's step count, calibrating the iterations between runs to get to ~1s/step - returning the value once `runs` runs are complete

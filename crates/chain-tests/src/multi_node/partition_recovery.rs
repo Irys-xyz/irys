@@ -575,3 +575,138 @@ async fn post_tx_with_chunks(
     );
     Ok(tx)
 }
+
+/// End-to-end (DEFERRED — timing-fragile): a deep reorg that crosses a VDF reset
+/// boundary must heal the minority node's in-place-poisoned seed buffer via the
+/// `maybe_reanchor_vdf_after_reorg` gate → `apply_reanchor` path, so the node
+/// converges to canonical AND keeps mining blocks the network accepts.
+///
+/// Marked `#[ignore]`: every prior session deferred this for the same reason.
+/// Crossing the *divergent* reset boundary needs both forks to run many VDF steps
+/// past the fork point, and a divergent fork approaches the reset-boundary
+/// confirmation gate (#1447) where the local VDF parks; natural (autonomous PoA)
+/// mining tolerates the parking, but the wall-clock/step pacing needed to reliably
+/// land a cross-boundary reorg without wedging is intricate and flaky in CI. The
+/// heal itself is covered deterministically elsewhere: `apply_reanchor` unit tests
+/// (incl. the tip-on-boundary skip), the `first_divergent_boundary` / re-anchor
+/// gate tests, and the fast-forward generation-drop test. This e2e is the
+/// (fragile) full-stack confirmation, kept here as an executable specification.
+#[test_log::test(tokio::test)]
+#[ignore = "timing-fragile cross-boundary reorg; heal covered by unit + gate tests"]
+async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> {
+    let seconds_to_wait = 60;
+    let block_migration_depth: u32 = 1;
+    // Small reset frequency so a boundary is crossed within a modest fork length,
+    // yet comfortably above the confirmation lag (migration_depth = 1) so the
+    // reset-boundary gate does not permanently park the loop.
+    let reset_frequency = 6;
+
+    let mut genesis_config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = block_migration_depth;
+        c.vdf.reset_frequency = reset_frequency;
+        c.epoch.num_blocks_in_epoch = 2;
+        c.chunk_size = 32;
+        c.num_chunks_in_partition = 10;
+        c.num_chunks_in_recall_range = 2;
+        c.num_partitions_per_slot = 1;
+        c.num_partitions_per_term_ledger_slot = 1;
+        c.entropy_packing_iterations = 1_000;
+        c.genesis.initial_packed_partitions = Some(5.0);
+    });
+    genesis_config.storage.num_writes_before_sync = 1;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_test = IrysNodeTest::new_genesis(genesis_config.clone());
+    StorageSubmodulesConfig::load_for_test(genesis_test.cfg.base_directory.clone(), 10)?;
+    let genesis = genesis_test
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis.testing_peer_with_signer(&peer_signer);
+    let peer_test = IrysNodeTest::new(peer_config);
+    StorageSubmodulesConfig::load_for_test(peer_test.cfg.base_directory.clone(), 10)?;
+    let peer = peer_test
+        .start_and_wait_for_packing("PEER", seconds_to_wait)
+        .await;
+
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    peer.stop_mining();
+
+    // Shared base: both nodes agree on a common ancestor (the fork point / LCA).
+    for h in 1..=2_u64 {
+        genesis.mine_block().await?;
+        let block = genesis.get_block_by_height(h).await?;
+        peer.wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+    genesis.wait_for_packing(seconds_to_wait).await;
+    peer.wait_for_packing(seconds_to_wait).await;
+    let fork_height = 2_u64;
+
+    // Partition; each node mines its own fork past the first divergent reset
+    // boundary (~2 * reset_frequency VDF steps past the fork point).
+    genesis.gossip_disable();
+    peer.gossip_disable();
+    peer.node_ctx.start_mining()?;
+    peer.wait_for_packing(seconds_to_wait).await;
+
+    let fork_len = (reset_frequency as u64) * 2 + 2;
+    for _ in 0..fork_len {
+        let _ = genesis.mine_block_without_gossip().await?;
+    }
+    genesis
+        .wait_until_height(fork_height + fork_len, seconds_to_wait)
+        .await?;
+
+    let mut peer_fork_blocks = Vec::new();
+    for _ in 0..(fork_len + 1) {
+        let (block, _payload, _txs) = peer.mine_block_without_gossip().await?;
+        peer_fork_blocks.push(block);
+    }
+    let peer_height = fork_height + fork_len + 1;
+
+    // Reconnect; gossip the peer's longer fork → deep, boundary-crossing reorg on
+    // genesis, firing the re-anchor gate.
+    genesis.gossip_enable();
+    peer.gossip_enable();
+    IrysNodeTest::announce_between(&genesis, &peer).await?;
+    for block in &peer_fork_blocks {
+        peer.gossip_block_to_peers(block)?;
+        genesis
+            .wait_for_block(&block.block_hash, seconds_to_wait)
+            .await?;
+    }
+    genesis
+        .wait_until_height(peer_height, seconds_to_wait)
+        .await?;
+
+    // Convergence: genesis adopted the canonical (peer) tip.
+    let genesis_tip = genesis.get_block_by_height(peer_height).await?;
+    let peer_tip = peer.get_block_by_height(peer_height).await?;
+    assert_eq!(
+        genesis_tip.block_hash, peer_tip.block_hash,
+        "genesis must converge to the canonical tip after the boundary-crossing reorg"
+    );
+
+    // The heal is observable: genesis mines a block the peer ADOPTS AS CANONICAL,
+    // which requires genesis's post-reorg VDF buffer to produce valid recall ranges
+    // again (a poisoned buffer would yield a block the peer rejects). Waiting for
+    // the header alone would only prove presence in the peer's block tree, so
+    // assert canonical adoption: the peer's canonical chain advances to the new
+    // height AND resolves to the same block hash.
+    genesis.node_ctx.start_mining()?;
+    genesis.mine_block().await?;
+    let next = genesis.get_block_by_height(peer_height + 1).await?;
+    peer.wait_until_height(peer_height + 1, seconds_to_wait)
+        .await?;
+    let peer_next = peer.get_block_by_height(peer_height + 1).await?;
+    assert_eq!(
+        peer_next.block_hash, next.block_hash,
+        "the peer must adopt the healed miner's block as canonical, not merely hold its header"
+    );
+    info!("genesis mined a canonical block after re-anchor; peer adopted it as canonical");
+
+    Ok(())
+}

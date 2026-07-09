@@ -25,6 +25,10 @@ pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),
     Difficulty(BroadcastDifficultyUpdate),
     PartitionsExpiration(BroadcastPartitionsExpiration),
+    /// The VDF seed buffer was re-anchored to canonical in place after a deep
+    /// reorg. Carries no payload — the step numbers are unchanged, so miners
+    /// only need to rebuild their recall-range rotation from the healed buffer.
+    Reanchored,
 }
 
 #[derive(Debug)]
@@ -104,6 +108,12 @@ impl MiningBus {
         debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
+
+    /// Notify subscribers that the VDF buffer was re-anchored to canonical.
+    pub fn send_reanchored(&self) -> usize {
+        info!("Broadcasting VDF re-anchor: miners rebuild recall-range rotation");
+        self.send_event(Arc::new(MiningBroadcastEvent::Reanchored))
+    }
 }
 
 /// A MiningBroadcaster implementation backed by the Tokio-native MiningBus.
@@ -133,5 +143,9 @@ impl From<MiningBus> for MiningBusBroadcaster {
 impl MiningBroadcaster for MiningBusBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64) {
         let _ = self.bus.send_seed(seed, checkpoints, global_step);
+    }
+
+    fn broadcast_reanchored(&self) {
+        let _ = self.bus.send_reanchored();
     }
 }

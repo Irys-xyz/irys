@@ -21,7 +21,7 @@ use irys_types::{
     NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion,
     RethPeerInfo, SealedBlock,
 };
-use irys_vdf::state::{VdfState, VdfStateReadonly};
+use irys_vdf::state::{VdfController, VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
@@ -59,7 +59,9 @@ struct MockedServices {
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     service_senders: ServiceSenders,
-    is_vdf_mining_enabled: Arc<AtomicBool>,
+    /// Single controller over the shared mining flag (same `Arc` as the mocked
+    /// `VdfState`), built once here instead of re-wrapped at every call site.
+    vdf_controller: VdfController,
 }
 
 impl MockedServices {
@@ -118,8 +120,13 @@ impl MockedServices {
         let mempool_state = AtomicMempoolState::new(state);
         let mempool_stub = MempoolStub::new(tx, mempool_state);
 
-        let vdf_state_readonly =
-            VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
+        let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
+        let vdf_controller = VdfController::new(&is_vdf_mining_enabled);
+        let vdf_state_readonly = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(
+            0,
+            0,
+            is_vdf_mining_enabled,
+        ))));
 
         let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
@@ -128,9 +135,7 @@ impl MockedServices {
                     Some(traced_step) => {
                         let (step, _parent_span) = traced_step.into_parts();
                         debug!("Received VDF step: {:?}", step);
-                        let state = vdf_state.into_inner_cloned();
-                        let mut lock = state.write().unwrap();
-                        lock.global_step = step.global_step_number;
+                        vdf_state.test_set_step(step.global_step_number);
                     }
                     None => {
                         debug!("VDF receiver channel closed");
@@ -155,7 +160,7 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
-            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
+            vdf_controller,
         }
     }
 }
@@ -172,7 +177,7 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled: _,
+        vdf_controller: _,
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -242,7 +247,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled,
+        vdf_controller,
     } = MockedServices::new(&config);
 
     // Create three blocks in a chain: block1 -> block2 -> block3
@@ -326,7 +331,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        vdf_controller,
         tokio::runtime::Handle::current(),
     );
 
@@ -413,7 +418,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled,
+        vdf_controller,
     } = MockedServices::new(&config);
 
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
@@ -511,7 +516,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        vdf_controller,
         tokio::runtime::Handle::current(),
     );
 
@@ -626,7 +631,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled: _,
+        vdf_controller: _,
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -717,7 +722,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled,
+        vdf_controller,
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
@@ -779,7 +784,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_pool.clone(),
         data_handler,
         None,
-        is_vdf_mining_enabled,
+        vdf_controller,
         tokio::runtime::Handle::current(),
     );
 
@@ -893,7 +898,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
-        is_vdf_mining_enabled: _,
+        vdf_controller: _,
     } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service

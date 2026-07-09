@@ -12,12 +12,11 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::{ValidationError, is_seed_data_valid},
+    block_validation::ValidationError,
     mempool_guard::MempoolReadGuard,
     metrics,
     services::ServiceSenders,
 };
-use eyre::ensure;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache,
     chain_sync_state::ChainSyncState,
@@ -27,9 +26,8 @@ use irys_types::{
     BlockHash, Config, IrysBlockHeader, SealedBlock, SendTraced as _, TokioServiceHandle, Traced,
     app_state::DatabaseProvider,
 };
-use irys_vdf::rayon;
 use irys_vdf::state::{VdfStateReadonly, vdf_step_batch_is_valid};
-use irys_vdf::vdf_utils::fast_forward_validated_steps;
+use irys_vdf::verify::is_seed_data_valid;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::{
     Arc, Mutex,
@@ -962,12 +960,23 @@ impl ValidationServiceInner {
         let prev_output_step_number = first_step_number.saturating_sub(1);
         let progress_timeout = Duration::from_secs(vdf_config.progress_timeout_secs);
         let validation_batch_size = self.clamped_validation_batch_size();
+        // Capture the re-anchor generation BEFORE any validation work. Every
+        // fast-forwarded batch below is stamped with this captured value; if an
+        // in-place heal lands mid-validation, the send observes the newer
+        // generation and aborts with `VdfReanchorGenerationChanged`, routing the
+        // whole task to the requeue lane — steps validated against the pre-heal
+        // buffer can never replay onto the healed one. The final catch-up wait
+        // watches the same capture (see below): a heal landing after the send
+        // check but before `run_vdf` drains leaves the queued steps silently
+        // dropped as stale, and only the wait can observe that.
+        let vdf_ff = self.service_senders.vdf_fast_forward.clone();
+        let captured_generation = vdf_ff.current_generation();
 
         info!(
             vdf.first_step_number = first_step_number,
             vdf.global_step_number = vdf_info.global_step_number,
             vdf.prev_output_step_number = prev_output_step_number,
-            vdf.local_step = self.vdf_state.read().global_step,
+            vdf.local_step = self.vdf_state.current_step(),
             "ensure_vdf_is_valid: entered"
         );
 
@@ -989,31 +998,16 @@ impl ValidationServiceInner {
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
         wait_result?;
 
-        // Unreachable in practice: `wait_for_step` above only returns Ok once
-        // `global_step >= prev_output_step_number`, so the step is in the seed
-        // buffer. The buffer can in principle have trimmed past
-        // `prev_output_step_number` if a canonical-tip update advanced
-        // `minimum_step_to_keep` during the sub-millisecond window after
-        // `wait_for_step` returned — but the buffer's capacity is at minimum
-        // `max_allowed_vdf_fork_steps` (≥60k for production), so trimming
-        // requires ~60k steps of canonical advancement in that window. That
-        // doesn't happen.
-        //
-        // If it ever does fire, the panic is intentional. We must not
-        // downgrade this to an `Invalid` result — see the never-mislabel
-        // rule documented at the `resume_unwind` site in the select loop
-        // and in design/docs/vdf-validation-stall-detection.md.
-        let stored_previous_step = self
-            .vdf_state
-            .get_step(prev_output_step_number)
-            .expect("to get the step, since we've just waited for it");
-
-        ensure!(
-            stored_previous_step == vdf_info.prev_output,
-            "vdf output is not equal to the saved step with the same index {:?}, got {:?}",
-            stored_previous_step,
-            vdf_info.prev_output,
-        );
+        // Previous-step continuity is NOT re-checked against the local seed
+        // buffer here. The real invariant — that this block's `prev_output`
+        // equals its parent's `output` — is enforced block-rootedly by
+        // `prev_output_is_valid` (crates/vdf/src/verify.rs) inside the mandatory
+        // `prevalidate_block` pass, which runs before this task. Comparing
+        // `prev_output` against the *buffer* instead would additionally reject a
+        // canonical block whose steps diverge from a poisoned local buffer after
+        // a deep reorg across a VDF reset boundary — a false rejection layered on
+        // an invariant already proven. `wait_for_step` above is kept as the
+        // liveness/sync gate (and its never-mislabel stall detection).
 
         // Stage B: validate seeds against parent (early guard before heavy VDF work)
         let vdf_reset_frequency = vdf_config.reset_frequency as u64;
@@ -1035,13 +1029,7 @@ impl ValidationServiceInner {
             let previous_block = lookup_stage_b_parent(&self.block_tree_guard, block)?;
             let block_header = block.clone();
             match tokio::task::spawn_blocking(move || {
-                ensure!(
-                    matches!(
-                        is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency),
-                        crate::block_tree_service::ValidationResult::Valid
-                    ),
-                    "Seed data is invalid"
-                );
+                is_seed_data_valid(&block_header, &previous_block, vdf_reset_frequency)?;
                 Ok::<(), eyre::Report>(())
             })
             .await
@@ -1061,7 +1049,6 @@ impl ValidationServiceInner {
 
         // Stage C/D: validate VDF steps in bounded batches and fast-forward
         // each validated prefix immediately.
-        let vdf_ff = self.service_senders.vdf_fast_forward.clone();
         let total_batches = vdf_info.steps.len().div_ceil(validation_batch_size);
         for (batch_index, batch_steps) in vdf_info.steps.0.chunks(validation_batch_size).enumerate()
         {
@@ -1134,13 +1121,14 @@ impl ValidationServiceInner {
                 vdf.batch_end_step = batch_end_step_number,
                 "ensure_vdf_is_valid: enqueueing validated VDF batch for fast-forward"
             );
-            fast_forward_validated_steps(
-                batch_start_step_number,
-                batch_steps,
-                &vdf_ff,
-                progress_timeout,
-            )
-            .await?;
+            vdf_ff
+                .send_validated_batch(
+                    batch_start_step_number,
+                    batch_steps,
+                    progress_timeout,
+                    captured_generation,
+                )
+                .await?;
         }
 
         record_vdf_task_progress(
@@ -1154,12 +1142,22 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: waiting for fast-forward to reach block end"
         );
         let final_wait_started = Instant::now();
+        // Generation-aware wait: if a heal applied after `send_validated_batch`'s
+        // check but before `run_vdf` drained the channel, the batch above was
+        // dropped as stale and this step may never arrive through fast-forward.
+        // Without the watch that race dead-ends — a paused/FF-driven VDF freezes
+        // into the `Stalled` never-mislabel panic, a free-running one keeps the
+        // progress check alive until the live counter walks the whole backlog.
+        // The generation abort routes to the same `VdfReanchorGenerationChanged`
+        // → `Cancelled` requeue lane as the send-side check.
         let final_wait_result = self
             .vdf_state
-            .wait_for_step(
+            .wait_for_step_or_reanchor(
                 vdf_info.global_step_number,
                 Arc::clone(&cancel),
                 progress_timeout,
+                &self.service_senders.vdf_reanchor_signals,
+                captured_generation,
             )
             .await;
         metrics::record_vdf_step_wait_duration_ms(
@@ -1383,7 +1381,7 @@ mod tests {
             .num_threads(2)
             .build()
             .expect("thread pool");
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Traced<VdfStep>>(4);
+        let (tx, mut rx, _signals) = irys_vdf::fast_forward_channel();
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
 
         vdf_step_batch_is_valid(
@@ -1397,7 +1395,8 @@ mod tests {
         )
         .expect("valid prefix should be accepted");
 
-        fast_forward_validated_steps(1, &vdf_info.steps.0[..1], &tx, Duration::from_secs(1))
+        let captured = tx.current_generation();
+        tx.send_validated_batch(1, &vdf_info.steps.0[..1], Duration::from_secs(1), captured)
             .await
             .expect("validated prefix should fast-forward");
         let (ff_step, _span) = rx

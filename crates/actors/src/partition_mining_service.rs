@@ -13,8 +13,8 @@ use irys_domain::{ChunkType, StorageModule};
 use irys_efficient_sampling::{Ranges, num_recall_ranges_in_partition};
 use irys_storage::ii;
 use irys_types::{
-    AtomicVdfStepNumber, Config, H256List, LedgerChunkOffset, PartitionChunkOffset,
-    PartitionChunkRange, SendTraced as _, TokioServiceHandle, U256,
+    Config, H256List, LedgerChunkOffset, PartitionChunkOffset, PartitionChunkRange,
+    SendTraced as _, TokioServiceHandle, U256,
     block_production::{Seed, SolutionContext},
     partition_chunk_offset_ie, u256_from_le_bytes,
 };
@@ -55,7 +55,16 @@ pub struct PartitionMiningServiceInner {
     difficulty: U256,
     ranges: Ranges,
     steps_guard: VdfStateReadonly,
-    atomic_global_step_number: AtomicVdfStepNumber,
+}
+
+/// Fresh recall-range rotation state sized for the partition.
+fn fresh_ranges(config: &irys_types::ConsensusConfig) -> Ranges {
+    Ranges::new(
+        num_recall_ranges_in_partition(config)
+            .try_into()
+            .expect("Recall ranges number exceeds usize representation"),
+    )
+    .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig")
 }
 
 impl PartitionMiningServiceInner {
@@ -65,7 +74,6 @@ impl PartitionMiningServiceInner {
         storage_module: Arc<StorageModule>,
         start_mining: bool,
         steps_guard: VdfStateReadonly,
-        atomic_global_step_number: AtomicVdfStepNumber,
         initial_difficulty: U256,
     ) -> Self {
         Self {
@@ -74,14 +82,8 @@ impl PartitionMiningServiceInner {
             storage_module,
             should_mine: start_mining,
             difficulty: initial_difficulty,
-            ranges: Ranges::new(
-                num_recall_ranges_in_partition(&config.consensus)
-                    .try_into()
-                    .expect("Recall ranges number exceeds usize representation"),
-            )
-            .expect("num_recall_ranges_in_partition is always > 0 for a valid ConsensusConfig"),
+            ranges: fresh_ranges(&config.consensus),
             steps_guard,
-            atomic_global_step_number,
         }
     }
 
@@ -147,6 +149,18 @@ impl PartitionMiningServiceInner {
                 );
             }
         }
+    }
+
+    /// React to an in-place VDF re-anchor after a deep reorg. The seed buffer's
+    /// VALUES were rewritten to canonical while the step numbers stayed the same
+    /// (see `VdfState::reanchor_seeds`), so the recall-range rotation cached in
+    /// `self.ranges` is now derived from poisoned seeds. Because the step numbers
+    /// remain consecutive, `get_recall_range`'s gap-driven reconstruction never
+    /// fires on its own — so reset the rotation to a fresh state here, forcing the
+    /// next seed to reconstruct it from the healed buffer.
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn handle_reanchored(&mut self) {
+        self.ranges = fresh_ranges(&self.config.consensus);
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -303,9 +317,7 @@ impl PartitionMiningServiceInner {
             return;
         }
 
-        let current_step = self
-            .atomic_global_step_number
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let current_step = self.steps_guard.current_step();
 
         debug!(
             "Mining partition {} with seed {:?} step number {} current step {}",
@@ -458,6 +470,9 @@ impl PartitionMiningService {
                             }
                             MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
                                 self.state.handle_partitions_expiration(list);
+                            }
+                            MiningBroadcastEvent::Reanchored => {
+                                self.state.handle_reanchored();
                             }
                         },
                         None => {
