@@ -203,12 +203,18 @@ pub fn run_vdf<B: BlockProvider>(
                 // rule) before its blocks are ever validated/fast-forwarded, so the FF path needs
                 // no gate. Full mechanism, the deep-reorg bound, the admission guards, and the
                 // invariant relied upon: design/docs/vdf-reset-seed-confirmation-gate.md.
+                // Seed for the boundary we are about to cross after storing this step:
+                // look up the block ending at or before (proposed_step - 1), not the tip.
+                // Tip-only next_seed is wrong when local is behind the tip across a reset
+                // window (partition recovery / catch-up).
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,
-                }) = block_provider.latest_canonical_vdf_info()
+                    reset_seed_for_step,
+                }) = block_provider
+                    .canonical_vdf_snapshot(proposed_ff_step.global_step_number.saturating_sub(1))
                 {
-                    next_reset_seed = vdf_info.next_seed;
+                    next_reset_seed = reset_seed_for_step;
                     canonical_global_step_number = vdf_info.global_step_number;
                 }
 
@@ -257,9 +263,12 @@ pub fn run_vdf<B: BlockProvider>(
         if let Some(CanonicalVdfSnapshot {
             vdf_info,
             confirmed_global_step_number: confirmed_step,
-        }) = block_provider.latest_canonical_vdf_info()
+            reset_seed_for_step,
+        }) = block_provider.canonical_vdf_snapshot(global_step_number)
         {
-            next_reset_seed = vdf_info.next_seed;
+            // Per-step seed: the reset seed pinned for the next boundary above
+            // `global_step_number`, not always the tip's next_seed.
+            next_reset_seed = reset_seed_for_step;
             canonical_global_step_number = vdf_info.global_step_number;
             confirmed_global_step_number = confirmed_step;
             debug!(
@@ -638,11 +647,12 @@ mod tests {
     }
 
     impl BlockProvider for MockBlockProvider {
-        fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
+        fn canonical_vdf_snapshot(&self, _step_number: u64) -> Option<CanonicalVdfSnapshot> {
             Some(CanonicalVdfSnapshot {
                 vdf_info: self.0.vdf_limiter_info.clone(),
                 // The mock holds a single block, so the tip is also the confirmed tip.
                 confirmed_global_step_number: self.0.vdf_limiter_info.global_step_number,
+                reset_seed_for_step: self.0.vdf_limiter_info.next_seed,
             })
         }
     }
@@ -1316,11 +1326,13 @@ mod tests {
         }
     }
     impl BlockProvider for ControllableBlockProvider {
-        fn latest_canonical_vdf_info(&self) -> Option<CanonicalVdfSnapshot> {
+        fn canonical_vdf_snapshot(&self, _step_number: u64) -> Option<CanonicalVdfSnapshot> {
             let g = self.0.lock().unwrap();
             Some(CanonicalVdfSnapshot {
                 vdf_info: g.0.clone(),
                 confirmed_global_step_number: g.1,
+                // Single-block mock: tip next_seed is the only seed available.
+                reset_seed_for_step: g.0.next_seed,
             })
         }
     }
