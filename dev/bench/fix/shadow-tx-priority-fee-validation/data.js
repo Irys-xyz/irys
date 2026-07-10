@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783535397358,
+  "lastUpdate": 1783701119433,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8683,6 +8683,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "9182fd2bfdb02cacfda8156a30c8dd35efbdd8a3",
+          "message": "fix(consensus): pin shadow-tx priority fees to generator-expected tips",
+          "timestamp": "2026-07-08T18:11:43Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1478/commits/9182fd2bfdb02cacfda8156a30c8dd35efbdd8a3"
+        },
+        "date": 1783701118004,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011927,
+            "range": "± 0.000054",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119391,
+            "range": "± 0.00152",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.213163,
+            "range": "± 0.032937",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.915338,
+            "range": "± 0.155662",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078914,
+            "range": "± 0.00045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 764.012269,
+            "range": "± 18.338497",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.839347,
+            "range": "± 4.280995",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117061,
+            "range": "± 0.000503",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1170.638072,
+            "range": "± 51.002693",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1696.387671,
+            "range": "± 179.794839",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033183,
+            "range": "± 0.000747",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 211.821514,
+            "range": "± 3.566015",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 276.382115,
+            "range": "± 12.915349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000149,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
