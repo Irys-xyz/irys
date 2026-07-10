@@ -321,8 +321,35 @@ impl VdfStateReadonly {
         cancel: Arc<AtomicU8>,
         progress_timeout: std::time::Duration,
     ) -> eyre::Result<()> {
-        self.wait_for_step_inner(desired_step_number, cancel, progress_timeout, None)
+        self.wait_for_step_inner(desired_step_number, cancel, progress_timeout, None, None)
             .await
+    }
+
+    /// [`Self::wait_for_step`], but heal-aware: while the seed buffer is suspect
+    /// (a re-anchor is queued or its tail recompute is running on the VDF thread),
+    /// the step counter legitimately freezes, so the progress deadline is held
+    /// open rather than escalating into the never-mislabel `Stalled` panic.
+    ///
+    /// Unlike [`Self::wait_for_step_or_reanchor`] this does NOT abort on a
+    /// generation change — it is for waiters that only need liveness (e.g. the
+    /// Stage A previous-step wait, whose real invariant is re-checked
+    /// block-rootedly), so a heal that lands mid-wait is transparent and the wait
+    /// simply completes once the counter reaches the step.
+    pub async fn wait_for_step_or_suspect(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        signals: &ReanchorSignals,
+    ) -> eyre::Result<()> {
+        self.wait_for_step_inner(
+            desired_step_number,
+            cancel,
+            progress_timeout,
+            Some(signals),
+            None,
+        )
+        .await
     }
 
     /// [`Self::wait_for_step`], additionally aborting with
@@ -350,17 +377,26 @@ impl VdfStateReadonly {
             desired_step_number,
             cancel,
             progress_timeout,
-            Some((signals, captured_generation)),
+            Some(signals),
+            Some(captured_generation),
         )
         .await
     }
 
+    /// Shared implementation of the step waits.
+    ///
+    /// `signals`, when present, makes the progress deadline heal-aware: while the
+    /// buffer is suspect the counter freeze is expected, so the stall timer is
+    /// held open instead of firing. `captured_generation`, when present,
+    /// additionally aborts with [`VdfReanchorGenerationChanged`] once a heal
+    /// bumps the generation past the captured value (the requeue lane).
     async fn wait_for_step_inner(
         &self,
         desired_step_number: u64,
         cancel: Arc<AtomicU8>,
         progress_timeout: std::time::Duration,
-        reanchor_watch: Option<(&ReanchorSignals, u64)>,
+        signals: Option<&ReanchorSignals>,
+        captured_generation: Option<u64>,
     ) -> eyre::Result<()> {
         use tokio::time::Instant;
 
@@ -382,8 +418,9 @@ impl VdfStateReadonly {
             // Checked before the success return: a generation change means the
             // steps this waiter depends on were validated against a pre-heal
             // buffer, so the whole task must requeue and revalidate — even if
-            // the counter has meanwhile reached the desired step.
-            if let Some((signals, captured)) = reanchor_watch {
+            // the counter has meanwhile reached the desired step. Only the
+            // generation-aware callers pass `captured_generation`.
+            if let (Some(signals), Some(captured)) = (signals, captured_generation) {
                 let current = signals.generation();
                 if current != captured {
                     warn!(
@@ -403,8 +440,21 @@ impl VdfStateReadonly {
                 return Ok(());
             }
 
-            if current_step > last_observed_step {
+            // A re-anchor heal in progress legitimately freezes the counter: local
+            // free-run is paused while the buffer is suspect and the VDF thread is
+            // busy recomputing the healed tail (up to ~2*reset_frequency steps at
+            // ~1 s/step). That is controlled liveness, not a dead writer — so while
+            // the buffer is suspect, hold the progress deadline open instead of
+            // letting it escalate into the never-mislabel `Stalled` panic. Once the
+            // heal applies the counter resumes (and the generation check above
+            // requeues the generation-aware waiter). The stall detector still fires
+            // normally whenever the buffer is NOT suspect, preserving the guard
+            // against a genuinely dead VDF writer thread.
+            let advanced = current_step > last_observed_step;
+            if advanced {
                 last_observed_step = current_step;
+            }
+            if advanced || signals.is_some_and(ReanchorSignals::is_buffer_suspect) {
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
                 return Err(WaitForStepError::Stalled {
@@ -1295,6 +1345,80 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    /// Regression (never-mislabel false positive): a deep-reorg re-anchor heal
+    /// legitimately freezes the step counter for the whole tail recompute — which
+    /// at production `reset_frequency` can run far longer than `progress_timeout`.
+    /// While the buffer is suspect the heal-aware wait must NOT escalate the frozen
+    /// counter into the `Stalled` error (which the validation task turns into a
+    /// process-aborting panic); it must ride out the heal and complete once the
+    /// buffer heals and the counter reaches the step.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_or_suspect_rides_out_a_heal_longer_than_the_timeout() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(Arc::clone(&inner));
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        // A re-anchor is queued: buffer suspect, local stepping paused.
+        signals.mark_buffer_suspect();
+        let progress_timeout = std::time::Duration::from_secs(15);
+
+        // The heal takes far longer than `progress_timeout`; only when it applies
+        // does the counter jump to the block's end.
+        let healer = {
+            let inner = Arc::clone(&inner);
+            let signals = signals.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+                inner
+                    .write()
+                    .unwrap()
+                    .global_step
+                    .store(200, Ordering::Relaxed);
+                signals.record_heal_applied();
+            })
+        };
+
+        let result = readonly
+            .wait_for_step_or_suspect(200, Arc::clone(&cancel), progress_timeout, &signals)
+            .await;
+
+        healer.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "a suspect buffer must suppress the stall panic across a long heal, got: {result:?}"
+        );
+    }
+
+    /// The suppression is scoped to the suspect window only: with a clean buffer a
+    /// genuinely frozen counter must still surface `Stalled`, preserving the
+    /// dead-VDF-writer guard.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_or_suspect_still_stalls_when_buffer_is_clean() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        // Buffer NOT suspect — a frozen counter is a real stall.
+
+        let result = readonly
+            .wait_for_step_or_suspect(
+                200,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+            )
+            .await;
+
+        let err = result.expect_err("a clean-buffer stall must still bail");
+        assert!(
+            matches!(
+                err.downcast_ref::<WaitForStepError>(),
+                Some(WaitForStepError::Stalled { .. })
+            ),
+            "must be a Stalled error, got: {err}"
+        );
     }
 
     /// SSOT invariant: after N sequential `store_step` calls the owned atomic

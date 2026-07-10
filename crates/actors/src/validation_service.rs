@@ -987,12 +987,19 @@ impl ValidationServiceInner {
             "ensure_vdf_is_valid: waiting for previous step"
         );
         let wait_started = Instant::now();
+        // Heal-aware wait: a deep-reorg re-anchor legitimately freezes the step
+        // counter for the duration of the tail recompute (up to ~2*reset_frequency
+        // steps). Suppress the never-mislabel `Stalled` panic while the buffer is
+        // suspect — this stage only needs liveness (its real invariant,
+        // `prev_output == parent.output`, was proven block-rootedly in
+        // `prevalidate_block`), so a heal landing mid-wait is transparent.
         let wait_result = self
             .vdf_state
-            .wait_for_step(
+            .wait_for_step_or_suspect(
                 prev_output_step_number,
                 Arc::clone(&cancel),
                 progress_timeout,
+                &self.service_senders.vdf_reanchor_signals,
             )
             .await;
         metrics::record_vdf_step_wait_duration_ms(wait_started.elapsed().as_secs_f64() * 1000.0);
