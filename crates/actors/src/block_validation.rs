@@ -5002,6 +5002,15 @@ type ActualShadowTx = (ShadowTransaction, u128);
 ///    producer keeps a valid packet but inflates the envelope tip to drain the
 ///    fee-payer. EL charges that tip as raw wei before packet execution; without
 ///    this check the tip was producer-controlled and not consensus-pinned.
+///
+/// # Hardfork follow-up (do not drop this check lightly)
+///
+/// This is an **interim soft-fork** pin of a dual-channel fee model: the tip
+/// still lives on the EIP-1559 envelope, not in the borsh packet. Removing or
+/// bypassing the tip equality re-opens funds theft. The structural fix is a
+/// future hardfork that embeds the fee in the packet (e.g. shadow V2) so CL
+/// packet equality alone is SSOT — see
+/// `design/docs/shadow-tx-priority-fee-in-packet-hardfork.md`.
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn validate_shadow_transactions_match(
     actual: impl Iterator<Item = eyre::Result<ActualShadowTx>>,
@@ -5046,6 +5055,8 @@ fn validate_shadow_transactions_match(
 
         // Consensus tip: must equal the generator's `transaction_fee` (honest
         // producer path sets compose(..., metadata.transaction_fee)).
+        // INTERIM: dual channel (envelope tip). Do not remove without the
+        // hardfork in design/docs/shadow-tx-priority-fee-in-packet-hardfork.md.
         ensure!(
             actual_priority_fee == expected.transaction_fee,
             "Shadow transaction priority fee mismatch at idx {}. expected {}, got {}",
