@@ -66,11 +66,11 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 /// Production helper that pauses VDF mining for the duration of a sync and
 /// restores the pre-sync state afterwards.
 ///
-/// **Last-writer-wins** (deliberately preserved — changing it is a functional
-/// change, out of scope; see design plan §2): the sync snapshots the enabled
-/// flag, disables mining, then on `restore` re-applies the SNAPSHOT. A
-/// concurrent `stop_vdf()` during the sync window is therefore overwritten on
-/// restore. Reason-aware pause semantics are future work.
+/// The restore is compare-and-swap guarded: `begin` snapshots the enabled flag
+/// and force-disables mining for the window; on drop the snapshot is re-applied
+/// only while the flag is still disabled (the value `begin` wrote). A concurrent
+/// enable during the sync window therefore survives the restore, while an
+/// aborted or panicking sync task still cannot leave mining stuck disabled.
 struct VdfSyncPause {
     vdf_controller: VdfController,
     was_mining_enabled_before_sync: bool,
@@ -80,19 +80,20 @@ impl VdfSyncPause {
     /// Snapshot the mining flag and disable mining for the sync window.
     fn begin(vdf_controller: VdfController) -> Self {
         debug!("Sync task: Disabling VDF mining before starting sync");
-        let was_mining_enabled_before_sync = vdf_controller.is_enabled();
-        // Always disable mining for the sync window, regardless of the snapshot,
-        // so a concurrent enable is overwritten by the pause (last-writer-wins).
-        vdf_controller.stop();
+        // Snapshot and disable in one atomic step — a separate load-then-store
+        // would lose an enable landing between the two. The CAS-guarded restore
+        // in `Drop` re-applies the snapshot only while no one has re-enabled
+        // mining in between.
+        let was_mining_enabled_before_sync = vdf_controller.swap_enabled(false);
         Self {
             vdf_controller,
             was_mining_enabled_before_sync,
         }
     }
 
-    /// Restore the pre-sync mining state (last-writer-wins). Consumes the guard;
-    /// the snapshot write-back happens in `Drop`, so it also runs if the sync
-    /// task panics or is aborted before reaching this call.
+    /// Restore the pre-sync mining state (compare-and-swap guarded). Consumes the
+    /// guard; the snapshot write-back happens in `Drop`, so it also runs if the
+    /// sync task panics or is aborted before reaching this call.
     fn restore(self) {
         debug!(
             enabled = self.was_mining_enabled_before_sync,
@@ -103,11 +104,14 @@ impl VdfSyncPause {
 
 impl Drop for VdfSyncPause {
     fn drop(&mut self) {
-        // Always write the snapshot back, including the `false` case, so a
-        // concurrent enable during sync does not survive the restore — and so an
-        // aborted or panicking sync task cannot leave mining stuck disabled.
-        self.vdf_controller
-            .set_enabled(self.was_mining_enabled_before_sync);
+        // Restore the pre-sync snapshot, but only while mining is still disabled
+        // — the value `begin` wrote. A concurrent enable during the sync window
+        // leaves the flag `true`, so this CAS fails and the enable survives; the
+        // aborted/panicking-task hole stays closed because the CAS still fires
+        // (writing the snapshot) when nobody else wrote in between.
+        let _ = self
+            .vdf_controller
+            .compare_exchange_enabled(false, self.was_mining_enabled_before_sync);
     }
 }
 
@@ -327,7 +331,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 )
                 .await;
 
-                // Restore the pre-sync mining state (last-writer-wins).
+                // Restore the pre-sync mining state (compare-and-swap guarded).
                 vdf_sync_pause.restore();
 
                 is_sync_task_spawned.store(false, Ordering::Relaxed);
@@ -1955,10 +1959,11 @@ mod tests {
     }
     use irys_types::BlockHash;
 
-    /// Pins the (deliberately preserved) last-writer-wins pause/restore via the
+    /// Pins the CAS-guarded pause/restore for a *pre-sync enabled* window via the
     /// production `VdfSyncPause` helper: sync snapshots the enabled flag,
     /// disables mining, then restores the SNAPSHOT. A concurrent disable during
-    /// the window is intentionally overwritten on restore.
+    /// the window is still overwritten on restore (the CAS sees the flag `false`
+    /// and re-enables to the snapshot).
     #[test]
     fn sync_pause_restore_is_last_writer_wins() {
         use std::sync::atomic::AtomicBool;
@@ -2000,6 +2005,33 @@ mod tests {
         assert!(
             controller.is_enabled(),
             "Drop alone must restore the pre-sync snapshot"
+        );
+    }
+
+    /// The fix target: a concurrent enable during a *disabled* sync window must
+    /// survive the restore. `begin` snapshots `false` and disables; an external
+    /// `start_mining()` re-enables mid-sync; the CAS-guarded restore must leave
+    /// the flag enabled instead of clobbering it back to the snapshot.
+    #[test]
+    fn sync_pause_restore_preserves_concurrent_enable_when_snapshot_disabled() {
+        use std::sync::atomic::AtomicBool;
+
+        let mining = Arc::new(AtomicBool::new(false));
+        let controller = VdfController::new(&mining);
+
+        // Begin: snapshot (false) + disable for the sync window.
+        let pause = VdfSyncPause::begin(controller.clone());
+        assert!(!controller.is_enabled(), "begin() disables mining");
+
+        // Concurrent start_mining() during sync — must NOT be lost on restore.
+        controller.start();
+
+        // Restore (sync end): the CAS fails because the flag is now `true`, so
+        // the concurrent enable survives instead of reverting to the snapshot.
+        pause.restore();
+        assert!(
+            controller.is_enabled(),
+            "concurrent enable during a disabled sync window survives the CAS-guarded restore"
         );
     }
 

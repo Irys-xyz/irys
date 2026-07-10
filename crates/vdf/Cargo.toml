@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-# Exposes a narrow VDF-state mutation handle (`VdfStateReadonly::test_set_step`)
-# for downstream crates' tests (e.g. irys-p2p). Production code must never
-# enable this.
+# Exposes narrow test mutation handles (`VdfStateReadonly::test_set_step`,
+# `ReanchorSignals::test_record_heal_applied`) for downstream crates' tests
+# (e.g. irys-p2p, irys-actors). Production code must never enable this.
 test-utils = []
 
 [dependencies]

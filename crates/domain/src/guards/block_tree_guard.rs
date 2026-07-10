@@ -20,6 +20,14 @@ impl BlockTreeReadGuard {
         self.block_tree_cache.read().unwrap()
     }
 
+    /// Non-blocking accessor for the `block_tree` cache: `None` when the lock
+    /// is write-held (or poisoned) instead of blocking. For callers that must
+    /// never wait on the tree while holding another lock — blocking there can
+    /// invert an established lock order and deadlock.
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, BlockTree>> {
+        self.block_tree_cache.try_read().ok()
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     /// Accessor method to get a write guard for the `block_tree` cache
     pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, BlockTree> {

@@ -2,10 +2,12 @@ use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::submodule::db::{get_data_root_infos_for_data_root, get_path_hashes_by_offset};
 use irys_domain::ChunkType;
+use irys_storage::ii;
 use irys_types::{
     BoundedFee, DataLedger, DataTransaction, H256, LedgerChunkOffset, NodeConfig,
     PartitionChunkOffset, UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
 };
+use irys_vdf::first_divergent_boundary;
 use tracing::info;
 
 /// Tests that network partition recovery is surgical: shared data from the common
@@ -23,7 +25,7 @@ use tracing::info;
 ///   - Re-indexed offsets 3–5: peer's unique data_roots present after re-migration
 ///   - Supply state matches new canonical chain
 #[test_log::test(tokio::test)]
-async fn heavy4_network_partition_recovery() -> eyre::Result<()> {
+async fn heavy4_slow_network_partition_recovery() -> eyre::Result<()> {
     let seconds_to_wait = 30;
     // migration_depth=1 so that 2+ orphaned fork blocks trigger recovery
     let block_migration_depth: u32 = 1;
@@ -584,14 +586,21 @@ async fn post_tx_with_chunks(
 /// Marked `#[ignore]`: this is a heavy, full-stack, multi-node spec (two nodes,
 /// packing, autonomous mining across a reset window) that is TIMING-FRAGILE and
 /// so unsuitable as a CI gate — under load it can exceed the nextest budget
-/// while the post-reorg boundary-crossing blocks validate. Run it standalone
-/// (`--run-ignored all`, ideally on a quiet machine); it converges in ~15-20s
-/// when it is not starved. The re-anchor mechanism itself is covered
-/// DETERMINISTICALLY by faster tests that DO gate CI — `apply_reanchor` unit
-/// tests (incl. the tip-on-boundary skip), the `first_divergent_boundary` /
-/// re-anchor gate tests, the fast-forward generation-drop test, and the
-/// heal-aware `wait_for_step_or_suspect` stall tests — so this remains an
-/// opt-in executable specification rather than a required check.
+/// while the post-reorg boundary-crossing blocks validate (an observed
+/// standalone run at the default 60s budget parked at the reset-boundary
+/// confirmation gate (#1447) and was killed). Run it standalone
+/// (`--run-ignored all`, ideally on a quiet machine). The re-anchor mechanism
+/// itself is covered
+/// DETERMINISTICALLY by faster tests that DO gate CI — the
+/// `reanchored_event_rebuilds_recall_ranges_from_corrected_buffer` unit test
+/// (the `handle_reanchored` recall-range rebuild; the one-line `Reanchored`
+/// dispatch arm in the service loop is pinned by the exhaustive match, not by
+/// a test),
+/// `apply_reanchor` unit tests (incl. the tip-on-boundary skip), the
+/// `first_divergent_boundary` / re-anchor gate tests, the fast-forward
+/// generation-drop test, and the heal-aware `wait_for_step_or_suspect` stall
+/// tests — so this remains an opt-in executable specification rather than a
+/// required check.
 ///
 /// Config note: the fork is driven toward a VDF STEP target, not a fixed block
 /// count. The reset-boundary confirmation gate (#1447) parks the loop at a
@@ -668,14 +677,25 @@ async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> 
     peer.wait_for_packing(seconds_to_wait).await;
 
     let rf = reset_frequency as u64;
-    let fork_point_step = genesis.node_ctx.vdf_steps_guard.current_step();
-    let first_divergent_boundary = (fork_point_step / rf + 1) * rf;
+    // The boundary at which the forks can pin DIFFERENT reset seeds, per the
+    // production divergence rule (`irys_vdf::first_divergent_boundary`): the
+    // seed folded at boundary `B` is pinned by the rotation block at `B - rf`,
+    // so the first fork-local boundary sits two windows above the LCA. Derived
+    // from the shared fork block's own step (the gate's `lca_step`) — boundaries
+    // below it fold seeds pinned by shared blocks, so crossing only those can
+    // never poison a buffer, and asserting on them would compare identical data.
+    let lca_step = genesis
+        .get_block_by_height(fork_height)
+        .await?
+        .vdf_limiter_info
+        .global_step_number;
+    let divergence_boundary = first_divergent_boundary(lca_step, rf);
     // Cross just PAST the first divergent boundary — not a full window. The
     // confirmation-gate lag (canonical tip - confirmed step) grows with fork
     // length; running deep into the next window lets that lag exceed `rf` and
     // permanently park the loop. A short fork that clears the boundary by a small
     // margin pins the divergent reset seed while keeping the lag bounded.
-    let target_step = first_divergent_boundary + rf / 4;
+    let target_step = divergence_boundary + rf / 4;
 
     // Genesis fork: mine until its VDF passes the target.
     let mut genesis_height = fork_height;
@@ -738,6 +758,58 @@ async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> 
             >= 1,
         "the boundary-crossing reorg must have triggered at least one VDF re-anchor heal on genesis"
     );
+
+    // Assertion A: the heal is CORRECT, not merely fired. Genesis's re-anchored VDF
+    // buffer over the boundary-crossing range must equal the canonical chain's steps;
+    // the generation bump above proves the gate ran, this proves the healed CONTENT
+    // matches canonical (a wrong reset seed would re-step divergent values here).
+    // Seeds fold into the hash AFTER the boundary step is stored, so divergent
+    // values start at `boundary + 1` — the compared block must carry at least
+    // one step strictly past the boundary or the comparison is vacuous. The
+    // left bound admits `first == boundary + 1` because the confirmation gate
+    // parks mining AT boundaries, so a fork block ending exactly on the
+    // boundary (with the divergent steps opening the NEXT block) is a common
+    // geometry.
+    let boundary_block = peer_fork_blocks
+        .iter()
+        .find(|b| {
+            b.vdf_limiter_info.first_step_number() <= divergence_boundary + 1
+                && divergence_boundary < b.vdf_limiter_info.global_step_number
+        })
+        .expect("a canonical fork block must carry steps past the divergent reset boundary");
+    let first = boundary_block.vdf_limiter_info.first_step_number();
+    let last = boundary_block.vdf_limiter_info.global_step_number;
+    let expected_steps = &boundary_block.vdf_limiter_info.steps.0;
+    // The re-anchor lands asynchronously relative to adoption and genesis's step
+    // counter may already have run past `last` on its poisoned lineage, so poll the
+    // actual heal condition (the boundary range matching canonical) under one read
+    // guard and only fail on a PERSISTENT mismatch after the full timeout.
+    let mut recovered_steps = Vec::new();
+    let mut healed = false;
+    for _ in 0..(seconds_to_wait * 20) {
+        let snapshot = {
+            let guard = genesis.node_ctx.vdf_steps_guard.read();
+            (guard.current_step() >= last)
+                .then(|| guard.get_steps(ii(first, last)).ok())
+                .flatten()
+        };
+        if let Some(steps) = snapshot {
+            recovered_steps = steps.0;
+            if &recovered_steps == expected_steps {
+                healed = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        healed,
+        "after re-anchor, genesis's VDF steps over the boundary-crossing range \
+         [{first}..={last}] never converged to the canonical chain's steps (last \
+         observed: {recovered_steps:?}, expected: {expected_steps:?}); a persistent \
+         mismatch means the re-anchor did not heal the recovered range"
+    );
+    info!("Assertion A passed: recovered VDF buffer matches canonical across the reset boundary");
 
     // The heal is observable: genesis mines a block the peer ADOPTS AS CANONICAL,
     // which requires genesis's post-reorg VDF buffer to produce valid recall ranges

@@ -23,10 +23,14 @@ pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 ///   began; `run_vdf` drops steps stamped older than current, so steps
 ///   validated against a pre-heal buffer can never replay onto the healed one.
 /// - **suspect**: set by the block-tree gate when it queues a [`ReanchorRequest`]
-///   (the buffer may hold minority-fork seeds); cleared by `run_vdf` when a heal
-///   applies. While set, recall-range validation must not trust the buffer in
-///   EITHER direction, and the gate re-sends a fresh request from every new
-///   canonical tip (the retry source for a skipped heal).
+///   (the buffer may hold minority-fork seeds), re-asserted by `run_vdf` as it
+///   consumes a request (so a heal whose request was queued while the PREVIOUS
+///   heal — whose completion cleared the flag — was still recomputing still
+///   runs suspect-marked); cleared by `run_vdf` when a heal applies. While set,
+///   recall-range validation must not trust the buffer in EITHER direction,
+///   and the gate re-sends a fresh request from every new canonical tip,
+///   backstopped by the block-tree watchdog tick (the retry sources for a
+///   skipped heal).
 ///
 /// Mutation is sealed: only `run_vdf` (in-crate) can bump the generation or
 /// clear the suspect flag. Marking suspect is public — the only external writer
@@ -70,10 +74,11 @@ impl ReanchorSignals {
         crate::metrics::record_reanchor_healed();
     }
 
-    /// Mark the seed buffer suspect (a re-anchor request is pending). Called by
-    /// the block-tree gate BEFORE it queues the request, so validation observes
-    /// the flag no later than the heal. `Release` pairs with
-    /// [`Self::is_buffer_suspect`]'s `Acquire`.
+    /// Mark the seed buffer suspect (a re-anchor request is pending or about to
+    /// run). Called by the block-tree gate BEFORE it queues the request, so
+    /// validation observes the flag no later than the heal — and by `run_vdf`
+    /// as it consumes a request, so a heal never runs with the flag clear.
+    /// `Release` pairs with [`Self::is_buffer_suspect`]'s `Acquire`.
     pub fn mark_buffer_suspect(&self) {
         self.buffer_suspect.store(true, Ordering::Release);
         crate::metrics::record_buffer_suspect(true);
@@ -83,6 +88,17 @@ impl ReanchorSignals {
     /// seed buffer must not be treated as authoritative.
     pub fn is_buffer_suspect(&self) -> bool {
         self.buffer_suspect.load(Ordering::Acquire)
+    }
+}
+
+/// TEST-ONLY mutation handle, mirroring `VdfStateReadonly::test_set_step`:
+/// lets downstream crates' tests (the actors watchdog lifecycle tests) drive
+/// the applied-heal transition without a running `run_vdf` thread.
+#[cfg(any(test, feature = "test-utils"))]
+impl ReanchorSignals {
+    /// Forward to the sealed [`Self::record_heal_applied`].
+    pub fn test_record_heal_applied(&self) {
+        self.record_heal_applied();
     }
 }
 

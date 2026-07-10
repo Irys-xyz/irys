@@ -66,7 +66,7 @@ use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
     ReanchorReceiver, ReanchorSignals, VdfStep,
     state::{AtomicVdfState, VdfController, VdfStateReadonly},
-    vdf::run_vdf,
+    vdf::{reset_applied_anchor_hash, run_vdf},
     vdf_sha,
 };
 use reth::{
@@ -2181,6 +2181,17 @@ impl IrysNode {
         shutdown_token: CancellationToken,
     ) -> CancellationToken {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
+        // Fold the anchor step's own reset boundary into the (raw) buffer hash if it lands on one,
+        // so run_vdf's first step continues the canonical lineage rather than mis-stepping local
+        // mining until it heals (finding #5). The boundary seed is `latest_block`'s OWN `seed`: when
+        // a block's step range contains a reset boundary, `set_seeds` pins that boundary's entropy in
+        // `seed` (while `next_seed` targets the next one). A no-op when the anchor is off a boundary.
+        let initial_hash = reset_applied_anchor_hash(
+            config.vdf.reset_frequency as u64,
+            global_step_number,
+            initial_hash,
+            latest_block.vdf_limiter_info.seed,
+        );
         let span = tracing::Span::current();
         // Cancelled when the VDF thread exits for any reason (clean exit,
         // poisoned-lock graceful return, or panic via Drop unwind). The

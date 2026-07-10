@@ -497,9 +497,10 @@ impl VdfStateReadonly {
 /// single `Arc<AtomicBool>` (same allocation as `VdfState.is_vdf_mining_enabled`
 /// and the read handle).
 ///
-/// Last-writer-wins semantics: the toggles are plain `Relaxed` stores with no
-/// compare-and-swap (see the chain-sync pause/restore in `chain_sync.rs`, which
-/// is deliberately preserved as last-writer-wins).
+/// The plain `start`/`stop`/`set_enabled` toggles are `Relaxed` stores with
+/// last-writer-wins; `compare_exchange_enabled` adds a guarded write used by the
+/// chain-sync pause/restore in `chain_sync.rs` so a concurrent enable during a
+/// sync window is not clobbered.
 #[derive(Debug, Clone)]
 pub struct VdfController {
     is_vdf_mining_enabled: Arc<AtomicBool>,
@@ -520,14 +521,34 @@ impl VdfController {
         self.is_vdf_mining_enabled.store(false, Ordering::Relaxed);
     }
 
-    /// Set the mining flag to an explicit value (used by the chain-sync
-    /// pause/restore and `IrysNodeCtx::vdf_state`).
+    /// Set the mining flag to an explicit value (used by
+    /// `IrysNodeCtx::vdf_state`).
     pub fn set_enabled(&self, enabled: bool) {
         self.is_vdf_mining_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn is_enabled(&self) -> bool {
         self.is_vdf_mining_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Atomically set the mining flag to `new` and return the previous value.
+    /// The chain-sync pause uses this to snapshot-and-disable in one step, so
+    /// an enable landing between a separate load and store cannot be lost.
+    pub fn swap_enabled(&self, new: bool) -> bool {
+        self.is_vdf_mining_enabled.swap(new, Ordering::Relaxed)
+    }
+
+    /// Compare-and-swap the mining flag: store `new` only while the current
+    /// value is still `current`, returning `Err(actual)` if another writer
+    /// changed it first. The chain-sync pause/restore uses this so a concurrent
+    /// enable during the sync window is not clobbered by the restore.
+    pub fn compare_exchange_enabled(&self, current: bool, new: bool) -> Result<bool, bool> {
+        self.is_vdf_mining_enabled.compare_exchange(
+            current,
+            new,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
     }
 }
 

@@ -486,3 +486,117 @@ impl PartitionMiningService {
         info!("Partition mining service stopped");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_domain::StorageModuleInfo;
+    use irys_testing_utils::utils::TempDirBuilder;
+    use irys_types::{
+        ConsensusConfig, ConsensusOptions, H256, NodeConfig, partition::PartitionAssignment,
+    };
+    use irys_vdf::state::VdfState;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicBool;
+
+    /// The consumer half of the in-process VDF re-anchor: `handle_reanchored` — the
+    /// one-line dispatch target of `MiningBroadcastEvent::Reanchored` in the service
+    /// loop — must reset the efficient-sampling rotation so the next recall-range
+    /// query REBUILDS from the (corrected) step buffer instead of continuing the
+    /// rotation derived from the poisoned seeds. The producer half (buffer swap,
+    /// broadcast-after-swap ordering) is pinned in `irys-vdf`, which cannot reach
+    /// this wiring.
+    #[test]
+    fn reanchored_event_rebuilds_recall_ranges_from_corrected_buffer() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                // 10 / 2 -> a 5-range rotation
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let partition_hash = H256::repeat_byte(0x77);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+
+        // Step buffer holding the "poisoned" steps 1..=3.
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        for step in 1..=3_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0xA0 + step as u8)), step);
+        }
+
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            storage_module,
+            false,
+            VdfStateReadonly::new(Arc::clone(&vdf_state)),
+            U256::zero(),
+        );
+
+        // Prime the rotation across the poisoned era (consecutive-step fast path).
+        for step in 1..=3_u64 {
+            inner.test_get_recall_range(step, H256::repeat_byte(step as u8), partition_hash);
+        }
+        assert_eq!(inner.ranges.last_step_num, 3);
+
+        // The VDF thread re-anchors the buffer in place (steps 1..=3 rewritten onto
+        // canonical seeds) and then broadcasts `Reanchored`.
+        let corrected: Vec<H256> = (1..=3_u8).map(|n| H256::repeat_byte(0xB0 + n)).collect();
+        vdf_state
+            .write()
+            .unwrap()
+            .reanchor_seeds(corrected.iter().copied().map(Seed).collect());
+
+        inner.handle_reanchored();
+        assert_eq!(
+            inner.ranges.last_step_num, 0,
+            "handle_reanchored must reset the rotation (fresh_ranges) to force a rebuild"
+        );
+
+        // The next query must reconstruct from the corrected buffer: byte-for-byte the
+        // recall range a fresh rotation fed the corrected steps [1, 3] would make.
+        let seed4 = H256::repeat_byte(0x04);
+        let got = inner.test_get_recall_range(4, seed4, partition_hash);
+
+        let mut expected_ranges = Ranges::new(5).expect("5 recall ranges");
+        expected_ranges
+            .reconstruct(&H256List(corrected), &partition_hash)
+            .expect("reconstruct from corrected steps");
+        let expected = expected_ranges
+            .get_recall_range(4, &seed4, &partition_hash)
+            .expect("expected pick");
+
+        assert_eq!(
+            got,
+            u64::try_from(expected).expect("range fits in u64"),
+            "post-reanchor recall range must equal a rebuild from the corrected steps"
+        );
+        assert_eq!(inner.ranges.last_step_num, 4);
+    }
+}

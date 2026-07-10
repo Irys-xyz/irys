@@ -322,6 +322,26 @@ fn sanitize(name: &str) -> String {
     name.replace(['/', '\\', ':', ' '], "_")
 }
 
+/// Build the exit-status-guarded script for a teed nextest invocation. The
+/// caller reads pass/fail from the wrapper stats, not the exit code, so
+/// nextest's own non-signal exits are swallowed — any test failing (its
+/// everyday non-zero) and, an accepted gap, internal errors below 128 such as
+/// a runtime panic's 101. Two failures must still surface, read from
+/// `PIPESTATUS` so neither can mask the other: a tee failure (the on-disk log
+/// is gone — loud before this helper existed, and it must stay loud) and a
+/// signal death of the nextest process (OOM-kill, segfault — reported as
+/// 128+signal), the crash class that used to report a false "no flaky tests".
+fn build_teed_script(inner: &str, quoted_log: &str) -> String {
+    // PIPESTATUS is captured in ONE array assignment: it is reset by every
+    // simple command, so a second `s1=${PIPESTATUS[1]}` read would see the
+    // FIRST assignment's status, not the pipeline's.
+    format!(
+        "{inner} 2>&1 | tee {quoted_log}; ps=(\"${{PIPESTATUS[@]}}\"); \
+         if [ \"${{ps[1]}}\" -ne 0 ]; then exit \"${{ps[1]}}\"; fi; \
+         if [ \"${{ps[0]}}\" -ge 128 ]; then exit \"${{ps[0]}}\"; fi; exit 0"
+    )
+}
+
 /// Run a nextest invocation that streams to the terminal *and* tees to a log
 /// file, with the given wrapper output base and env. Test failures are expected
 /// and do not abort — pass/fail is read from the wrapper stats afterwards.
@@ -338,8 +358,9 @@ fn run_teed(
     let inner = format!("cargo {}", quoted.join(" "));
     let quoted_log = shell_quote(&log_path.to_string_lossy());
     // tee exits 0, so a failing test suite won't surface as an error here — we
-    // intentionally read results from the wrapper stats instead.
-    let full = format!("{inner} 2>&1 | tee {quoted_log}");
+    // intentionally read results from the wrapper stats instead. See
+    // `build_teed_script` for the two cases that must still surface.
+    let full = build_teed_script(&inner, &quoted_log);
 
     remove_ring_env_vars(cmd!(sh, "bash -c {full}"))
         .env("RUST_BACKTRACE", "1")
@@ -1220,5 +1241,59 @@ mod tests {
             parse_tests_from(&failures).unwrap(),
             vec!["c::z".to_string()]
         );
+    }
+
+    #[rstest]
+    #[case::success("exit 0", 0)]
+    #[case::ordinary_test_failure("exit 100", 0)]
+    #[case::boundary_below("exit 127", 0)]
+    #[case::boundary_at("exit 128", 128)]
+    // `sh -c 'kill -9 $$'` self-signals a child process, so the pipeline's
+    // first stage dies by signal (128+9) portably — `$BASHPID` would need
+    // bash >= 4 and silently degrades on macOS's stock 3.2.
+    #[case::signal_death("sh -c 'kill -9 $$'", 137)]
+    fn build_teed_script_status(#[case] inner: &str, #[case] want_status: i32) {
+        let script = build_teed_script(inner, "/dev/null");
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(want_status));
+    }
+
+    /// A tee failure must stay loud even when nextest itself succeeded: the
+    /// on-disk log is the run's only durable transcript, and pre-helper the
+    /// pipe's exit status was tee's — this pins that visibility against the
+    /// helper's swallow-below-128 rule.
+    #[test]
+    fn build_teed_script_surfaces_tee_failure() {
+        let dir = irys_testing_utils::TempDirBuilder::new().build();
+        let missing = dir.path().join("no-such-dir").join("output.log");
+        let script = build_teed_script("exit 0", &shell_quote(&missing.to_string_lossy()));
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "tee cannot open the log path, so its failure must propagate"
+        );
+    }
+
+    #[test]
+    fn build_teed_script_still_tees_output() {
+        let dir = irys_testing_utils::TempDirBuilder::new().build();
+        let log = dir.path().join("output.log");
+        let script = build_teed_script("echo hello", &shell_quote(&log.to_string_lossy()));
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(0));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "hello");
     }
 }

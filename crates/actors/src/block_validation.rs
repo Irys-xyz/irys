@@ -1502,7 +1502,7 @@ impl ValidationError {
 ///
 /// `first_step_number` computes `global_step_number - steps.len() + 1` with raw
 /// subtraction. The workspace release profile enables `overflow-checks`, so a
-/// block whose declared step count exceeds `global_step_number + 1` would PANIC
+/// block whose declared step count exceeds `global_step_number` would PANIC
 /// there (aborting the node — a remote DoS, since a peer can self-sign such a
 /// block and gossip it) instead of returning. Reject the malformed block before
 /// any `first_step_number` call. An honest block never carries more steps than
@@ -1511,9 +1511,9 @@ fn vdf_step_count_is_consistent(
     global_step_number: u64,
     step_count: u64,
 ) -> Result<(), PreValidationError> {
-    if step_count > global_step_number.saturating_add(1) {
+    if step_count > global_step_number {
         return Err(PreValidationError::VDFCheckpointsInvalid(format!(
-            "VDF step count {step_count} exceeds global step number {global_step_number} + 1"
+            "VDF step count {step_count} exceeds global step number {global_step_number}"
         )));
     }
     Ok(())
@@ -3505,6 +3505,10 @@ pub async fn recall_recall_range_is_valid(
         .map_err(RecallRangeError::Mismatch)
     };
 
+    // Degraded-mode path: buffer suspect after a deep-reorg heal, so this walks the block's own
+    // ancestry (header/DB reads), not re-hashing — same per-step hash as the fast path.
+    // Accepted: rare trigger, cleared within roughly one heal cycle by the free-run pause.
+    // Watch: correlated DB pressure with the block-tree window rebuild on the same reorg event.
     if buffer_suspect {
         info!(
             block.hash = %block.block_hash,
@@ -7015,12 +7019,24 @@ mod tests {
         assert!(vdf_step_count_is_consistent(5, 100).is_err());
         // Honest blocks: fewer steps than the global step number.
         assert!(vdf_step_count_is_consistent(100, 10).is_ok());
-        // Boundary: steps.len() == global + 1 is the largest non-underflowing count.
-        assert!(vdf_step_count_is_consistent(9, 10).is_ok());
-        // One past the boundary underflows and must be rejected.
+        // Largest valid count: steps.len() == global_step_number gives
+        // first_step_number 1 (steps are 1-based; genesis step 0 is the seed).
+        assert!(vdf_step_count_is_consistent(10, 10).is_ok());
+        // Boundary: steps.len() == global_step_number + 1 makes the inner
+        // `global_step_number - steps.len()` subtraction underflow (first step 0
+        // is not a real step), so it must be rejected.
+        assert!(matches!(
+            vdf_step_count_is_consistent(9, 10),
+            Err(PreValidationError::VDFCheckpointsInvalid(_))
+        ));
+        // Two past the boundary underflows further and must be rejected.
         assert!(vdf_step_count_is_consistent(9, 11).is_err());
-        // Degenerate global step 0 with a single step must not underflow.
-        assert!(vdf_step_count_is_consistent(0, 1).is_ok());
+        // Degenerate global step 0 with a single step underflows (0 - 1); a real
+        // block never carries global step 0, so it must be rejected.
+        assert!(matches!(
+            vdf_step_count_is_consistent(0, 1),
+            Err(PreValidationError::VDFCheckpointsInvalid(_))
+        ));
     }
 
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:

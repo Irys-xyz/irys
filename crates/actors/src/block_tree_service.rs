@@ -157,6 +157,11 @@ pub struct BlockTreeServiceInner {
     /// crossing once the CONFIRMED step reaches `boundary - reset_frequency`),
     /// so block-derived step numbers alone under-detect a poisoned buffer.
     vdf_state: VdfStateReadonly,
+    /// Dedupe key `(canonical tip hash, live VDF step)` of the last re-anchor
+    /// request the buffer-suspect watchdog published; reset when suspect
+    /// clears. See [`Self::retry_vdf_reanchor_if_suspect`] for why re-firing
+    /// on unchanged inputs is forbidden.
+    vdf_reanchor_watchdog_last_sent: Option<(BlockHash, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +209,14 @@ enum DiscardKind {
 /// under 256 KB and far exceeds any plausible burst of soft-internal
 /// discards in a single block window. See the field doc for full rationale.
 const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
+
+/// Cadence of the VDF re-anchor watchdog tick in `BlockTreeService::start`.
+/// 30 s matches the VDF loop's own parked-state warning rhythm
+/// (`BOUNDARY_GATE_WARN_INTERVAL`): far above the tick's cost (an atomic load
+/// while not suspect; a capacity-deep window walk at most once per input-state
+/// change while suspect), far below any horizon at which an operator could
+/// react to the wedge it exists to break.
+const VDF_REANCHOR_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Emit the discard log line at the correct level for the given `DiscardKind`.
 ///
@@ -370,6 +383,7 @@ impl BlockTreeService {
                         ),
                         lifecycle_timestamps,
                         vdf_state,
+                        vdf_reanchor_watchdog_last_sent: None,
                     },
                 };
                 if let Err(e) = block_tree_service.start().await {
@@ -394,6 +408,14 @@ impl BlockTreeService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 
+        // VDF re-anchor watchdog: the suspect buffer's message-driven retry
+        // sources all need an inbound canonical block, so on a quiet network a
+        // skipped heal would otherwise have no retry at all. Rationale, cure
+        // scope, and the never-clears-suspect rule live on
+        // `retry_vdf_reanchor_if_suspect`.
+        let mut vdf_reanchor_watchdog = tokio::time::interval(VDF_REANCHOR_WATCHDOG_INTERVAL);
+        vdf_reanchor_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 biased;
@@ -402,6 +424,11 @@ impl BlockTreeService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block tree service");
                     break;
+                }
+                // At most one tick per interval, so despite the biased order
+                // this cannot starve the message arm below.
+                _ = vdf_reanchor_watchdog.tick() => {
+                    self.inner.retry_vdf_reanchor_if_suspect();
                 }
                 // Handle messages
                 traced = self.msg_rx.recv() => {
@@ -1220,11 +1247,12 @@ impl BlockTreeServiceInner {
                 // Re-anchor retry: a queued heal the VDF thread SKIPPED (e.g.
                 // its tail would have crossed a second, unpinned reset
                 // boundary) leaves the buffer suspect with no reorg to re-fire
-                // the gate — re-anchor requests have no other source. Re-send a
-                // fresh request from every new canonical tip until a heal
-                // applies and clears the flag; the fresher `c_step` clears the
-                // skip condition. The reorg branch above already sent for this
-                // block, so skip the duplicate there.
+                // the gate. Re-send a fresh request from every new canonical
+                // tip until a heal applies and clears the flag; the fresher
+                // `c_step` clears the skip condition. On a quiet network the
+                // watchdog tick in `start` backstops this path (see
+                // `retry_vdf_reanchor_if_suspect`). The reorg branch above
+                // already sent for this block, so skip the duplicate there.
                 if !reorg_occurred
                     && self
                         .service_senders
@@ -1415,7 +1443,8 @@ impl BlockTreeServiceInner {
         //      stick the flag true forever with no applied heal to clear it.
         // The flag stays set until `run_vdf` applies a heal. If this request is
         // SKIPped (e.g. tail would cross a second unpinned boundary) or the
-        // queue fails, tip-advance retries re-send from every new canonical tip.
+        // queue fails, tip-advance retries re-send from every new canonical tip
+        // and the service watchdog re-evaluates on a timer for quiet networks.
         self.service_senders
             .vdf_reanchor_signals
             .mark_buffer_suspect();
@@ -1442,6 +1471,14 @@ impl BlockTreeServiceInner {
         // canonical tip's own ancestry so the healed buffer keeps its full fork
         // depth. The walk must fall through to the DB below the in-memory tree — a
         // capacity-deep window reaches far past the cached canonical tail.
+        //
+        // The window MUST span the full VDF capacity, never merely the reorg
+        // depth: `VdfState::reanchor_seeds` REPLACES the whole seed buffer with
+        // this window (plus the recomputed free-running tail), so the window
+        // length becomes the post-heal validatable VDF range. Bounding the walk
+        // to the reorg depth would shrink that range below capacity and leave
+        // deep recall-range validation reporting steps unavailable until the
+        // buffer refilled at ~1 step/s.
         let capacity = calc_capacity(&self.config) as u64;
         let want_start = c_step.saturating_sub(capacity.saturating_sub(1)).max(1);
         let block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&self.cache));
@@ -1474,6 +1511,82 @@ impl BlockTreeServiceInner {
                 "VDF re-anchor channel closed (VDF thread not running); heal not queued"
             );
             false
+        }
+    }
+
+    /// Watchdog tick: while the seed buffer is suspect, re-evaluate the
+    /// re-anchor retry from CURRENT state. The message-driven retry sources
+    /// (the reorg gate and the tip-advance re-send) both need an inbound
+    /// canonical block, so on a quiet network a skipped heal — or a request
+    /// that never queued because the seed window was unavailable — would
+    /// otherwise have no retry source at all.
+    ///
+    /// The tick only ever re-fires the existing safe path
+    /// ([`Self::send_reanchor_request`]); it never clears the suspect flag
+    /// (only an applied heal may — `ReanchorSignals::record_heal_applied`).
+    /// It re-publishes only when the request-shaping inputs `(tip hash, live
+    /// step)` changed since its last publish: `apply_reanchor`'s outcome is
+    /// deterministic in those inputs, so an identical request could only skip
+    /// identically — or re-run the heal that just applied, which the suspect
+    /// re-mark in `run_vdf` would extend into a self-sustaining heal loop.
+    ///
+    /// Scope: this cures the input-changed wedge classes (fork fast-forward
+    /// advancing the live step, a fresher tip whose original publish failed,
+    /// and failed publishes, which never arm the dedupe and so retry every
+    /// tick). A deterministic skip whose inputs never move — e.g. the
+    /// second-boundary skip on a fully quiet network — cannot be cured by
+    /// re-sending an identical request; only an inbound block moves it. The
+    /// tick's job there is visibility: the warn + counter below fire once per
+    /// input state, and the suspect gauge stays raised.
+    fn retry_vdf_reanchor_if_suspect(&mut self) {
+        if !self
+            .service_senders
+            .vdf_reanchor_signals
+            .is_buffer_suspect()
+        {
+            // A heal applied (or no re-anchor was ever queued): disarm, so a
+            // FUTURE suspect episode starting from coincidentally identical
+            // inputs still fires.
+            self.vdf_reanchor_watchdog_last_sent = None;
+            return;
+        }
+
+        // Clone the tip header and drop the guard BEFORE re-entering the
+        // cache: `send_reanchor_request` takes its own read locks for the
+        // ancestry walk, and a queued writer between the two would deadlock a
+        // nested read.
+        let canonical_tip = match self.cache.read() {
+            Ok(cache) => cache.get_block(&cache.tip).cloned(),
+            Err(_) => {
+                error!(
+                    "block tree cache read lock poisoned in the VDF re-anchor watchdog; skipping tick"
+                );
+                return;
+            }
+        };
+        let Some(canonical_tip) = canonical_tip else {
+            error!("canonical tip missing from cache in the VDF re-anchor watchdog; skipping tick");
+            return;
+        };
+
+        let inputs = (canonical_tip.block_hash, self.vdf_state.current_step());
+        if self.vdf_reanchor_watchdog_last_sent == Some(inputs) {
+            debug!(
+                c_step = canonical_tip.vdf_limiter_info.global_step_number,
+                live_step = inputs.1,
+                "VDF buffer still suspect; watchdog inputs unchanged, awaiting fresher state"
+            );
+            return;
+        }
+
+        warn!(
+            c_step = canonical_tip.vdf_limiter_info.global_step_number,
+            live_step = inputs.1,
+            "VDF buffer suspect with no message-driven retry; watchdog re-firing the re-anchor request"
+        );
+        metrics::record_vdf_reanchor_watchdog_retry();
+        if self.send_reanchor_request(&canonical_tip) {
+            self.vdf_reanchor_watchdog_last_sent = Some(inputs);
         }
     }
 
@@ -2232,6 +2345,7 @@ mod tests {
                 ),
                 lifecycle_timestamps: Arc::new(BlockTreeLifecycleTimestamps::default()),
                 vdf_state,
+                vdf_reanchor_watchdog_last_sent: None,
             };
 
             Self {
@@ -2539,6 +2653,257 @@ mod tests {
         assert_eq!(req.c_step, 21, "the freshest request wins");
         let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
         assert_eq!(sent, fresh_steps);
+    }
+
+    /// Seed a block into the cache AND make it the canonical tip, so the
+    /// buffer-suspect watchdog (which reads `cache.tip`) observes it. Mirrors
+    /// [`DiscardHarness::insert_block_in_cache`] but drives the block all the
+    /// way to `Onchain` via `mark_tip`. `cumulative_diff` must exceed the tip
+    /// it replaces (the mock genesis carries 5000) or `mark_tip` refuses to
+    /// move the canonical pointer. The block chains directly off the harness
+    /// genesis; its own VDF steps are left intact so the re-anchor window
+    /// resolves from the header alone.
+    fn make_cache_tip(
+        h: &mut DiscardHarness,
+        mut tip: IrysBlockHeader,
+        cumulative_diff: u64,
+    ) -> IrysBlockHeader {
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+        tip.previous_block_hash = h.genesis_hash;
+        tip.height = 1;
+        tip.cumulative_diff = irys_types::U256::from(cumulative_diff);
+        // `test_sign()` derives `block_hash` from the header content; keep the
+        // signed hash so the watchdog's `(tip hash, live step)` dedupe key is a
+        // real, content-distinct value.
+        tip.test_sign();
+
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(tip.clone()),
+            BlockTransactions::default(),
+        ));
+        let ema = EmaSnapshot::genesis(sealed.header());
+
+        let mut cache = h.inner.cache.write().expect("cache lock for tip seed");
+        cache
+            .add_block(
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                ema,
+            )
+            .expect("seed cache with tip block");
+        // Production flow: add_block → mark_block_as_validation_scheduled →
+        // mark_block_as_valid → mark_tip.
+        cache
+            .mark_block_as_validation_scheduled(&tip.block_hash)
+            .expect("mark ValidationScheduled for tip block");
+        cache
+            .mark_block_as_valid(&tip.block_hash)
+            .expect("mark Valid for tip block");
+        assert!(
+            cache.mark_tip(&tip.block_hash).expect("mark_tip"),
+            "the seeded block must become the canonical tip"
+        );
+        tip
+    }
+
+    /// The watchdog is inert while the buffer is not suspect: it publishes
+    /// nothing and leaves the dedupe state disarmed.
+    #[test]
+    fn watchdog_retry_does_nothing_while_buffer_not_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        h.inner.retry_vdf_reanchor_if_suspect();
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a not-suspect tick must not publish a re-anchor request"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "a not-suspect tick must leave the dedupe state disarmed"
+        );
+    }
+
+    /// While suspect, the watchdog re-fires the re-anchor exactly once per
+    /// distinct `(canonical tip hash, live step)`: it reads the CACHE tip
+    /// through the real `send_reanchor_request`, suppresses a byte-identical
+    /// second tick, and re-fires when the canonical tip changes.
+    #[test]
+    fn watchdog_retry_fires_once_per_input_state_while_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (tip1_hdr, tip1_steps) = canonical_tip(20, H256::repeat_byte(0x99));
+        make_cache_tip(&mut h, tip1_hdr, 6000);
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+
+        // Tick 1: fresh inputs → read the cache tip and publish.
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("the first suspect tick must publish a re-anchor request");
+        assert_eq!(
+            req.c_step, 20,
+            "the request must anchor at the cache tip's step"
+        );
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(
+            sent, tip1_steps,
+            "the watchdog must ship the cache tip's own canonical window"
+        );
+
+        // Tick 2: identical inputs → suppressed (no new value on the channel).
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            !h.vdf_reanchor_rx.has_changed().unwrap(),
+            "an identical-inputs tick must not re-publish"
+        );
+
+        // A fresher canonical tip changes the dedupe key → the watchdog re-fires
+        // (only the tip hash moves; the live step stays 0).
+        let (tip2_hdr, _) = canonical_tip(21, H256::repeat_byte(0x98));
+        make_cache_tip(&mut h, tip2_hdr, 7000);
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a changed tip must re-fire the watchdog");
+        assert_eq!(
+            req.c_step, 21,
+            "the re-fire must anchor at the new canonical tip's step"
+        );
+    }
+
+    /// A publish that fails (the seed window is unavailable) must leave the
+    /// watchdog UNARMED, so the next tick retries the build rather than
+    /// deduping against a request that never shipped.
+    #[test]
+    fn watchdog_retry_does_not_arm_on_failed_publish() {
+        let mut h = DiscardHarness::new();
+
+        // The cache tip is the synthetic genesis: global step 0, no steps, so
+        // `build_fork_local_step_window` (want_start 1 > want_end 0) yields None
+        // and `send_reanchor_request` returns false.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+
+        h.inner.retry_vdf_reanchor_if_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a failed publish must not place a request on the channel"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "a failed publish must leave the watchdog armed for the next tick"
+        );
+    }
+
+    /// After an applied heal clears suspect, the watchdog disarms; a fresh
+    /// suspect episode with byte-identical inputs still re-fires. The disarm
+    /// reset is exactly what stops the dedupe from swallowing the new episode.
+    #[test]
+    fn watchdog_retry_rearms_after_a_heal_clears_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (tip_hdr, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        make_cache_tip(&mut h, tip_hdr, 6000);
+
+        // Episode 1: suspect → the tick publishes.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_some(),
+            "the first suspect episode must publish"
+        );
+
+        // A heal applies (the only legitimate clear) → the next tick disarms.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .test_record_heal_applied();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            !h.vdf_reanchor_rx.has_changed().unwrap(),
+            "a not-suspect tick must not publish"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "clearing suspect must disarm the watchdog dedupe"
+        );
+
+        // Episode 2: suspect again with identical inputs must still re-fire.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a fresh suspect episode must re-fire even with identical inputs");
+        assert_eq!(req.c_step, 20);
+    }
+
+    /// The re-anchor window MUST clamp to `[c_step - capacity + 1, c_step]`
+    /// (length == capacity), never the reorg depth and never `[1, c_step]`:
+    /// the heal wholesale-replaces the seed buffer with this window, so its
+    /// length is the post-heal validatable VDF range.
+    #[test]
+    fn send_reanchor_request_window_clamps_to_capacity() {
+        // calc_capacity = max(num_chunks_in_partition / num_chunks_in_recall_range,
+        // max_allowed_vdf_fork_steps) = max(8, 8) = 8.
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.vdf.max_allowed_vdf_fork_steps = 8;
+            cc.num_chunks_in_partition = 8;
+            cc.num_chunks_in_recall_range = 1;
+        });
+
+        // c_step 20 > capacity 8, so the window must clamp, not run [1, 20].
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        h.inner.send_reanchor_request(&tip);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("send_reanchor_request must publish a request");
+        assert_eq!(req.c_step, 20);
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        let expected: Vec<H256> = (13..=20).map(H256::from_low_u64_be).collect();
+        assert_eq!(
+            sent, expected,
+            "window must clamp to [c_step-capacity+1, c_step] = [13,20], length == capacity 8, NOT reorg depth and NOT [1,20]"
+        );
+        assert_eq!(sent.len(), 8);
     }
 
     /// SoftInternal discard path must record (block_hash, reason) into the

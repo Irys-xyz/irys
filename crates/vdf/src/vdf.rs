@@ -124,6 +124,13 @@ pub fn run_vdf<B: BlockProvider>(
         if reanchor_receiver.has_changed().unwrap_or(false)
             && let Some(request) = reanchor_receiver.borrow_and_update().clone()
         {
+            // Re-assert suspect before healing. A request queued while a prior
+            // heal was mid-recompute is only consumed AFTER that heal's
+            // `record_heal_applied` cleared the flag; without this re-mark the
+            // second heal would freeze the counter with the stall suppression
+            // in `wait_for_step_inner` disarmed, escalating a live validation
+            // wait into the never-mislabel panic.
+            reanchor_signals.mark_buffer_suspect();
             match apply_reanchor(
                 request,
                 config,
@@ -438,6 +445,25 @@ pub fn process_reset(
     } else {
         hash
     }
+}
+
+/// Fold the reset-boundary entropy into a VDF ANCHOR hash before it seeds [`run_vdf`].
+///
+/// The step buffer stores RAW step outputs — `process_reset` applies the reset fold to the carried
+/// hash only AFTER a step is stored (the loop tail), and fast-forward stores values verbatim. So a
+/// hash read back from the buffer via `get_last_step_and_seed` at (re-)anchor time is unfolded. When
+/// the anchor `step` is itself a reset boundary, the first `vdf_sha` for `step + 1` must run on the
+/// hash WITH boundary `step`'s reset folded in, or that first step diverges from the canonical
+/// lineage. This is rare (only when the anchor lands exactly on a boundary) and non-safety
+/// (validation recomputes from each block's own seed), but it mis-steps local mining until it heals.
+///
+/// `seed` is boundary `step`'s reset seed: the anchoring block's OWN `vdf_limiter_info.seed`. When a
+/// block's step range contains a reset boundary, `IrysBlockHeader::set_seeds` pins that boundary's
+/// entropy in `seed` (while `next_seed` targets the NEXT boundary above the block — what the loop
+/// applies going forward). A no-op when `step` is not a boundary.
+#[must_use]
+pub fn reset_applied_anchor_hash(reset_frequency: u64, step: u64, hash: H256, seed: H256) -> H256 {
+    process_reset(step, hash, reset_frequency, seed)
 }
 
 /// Outcome of an [`apply_reanchor`] attempt.
@@ -1134,6 +1160,129 @@ mod tests {
             steps.0,
             vec![fresh_seed],
             "the stale-generation step must be dropped, so the fresh seed wins"
+        );
+
+        shutdown_token.cancel();
+        handle.join().unwrap();
+    }
+
+    /// A re-anchor request consumed AFTER a prior heal cleared the suspect flag
+    /// must itself run suspect-marked. `run_vdf` clears the flag on an applied
+    /// heal, so a request queued while that heal was still recomputing arrives
+    /// with the flag already clear; the consume-time re-mark is what keeps the
+    /// following heal (or a deterministic skip) from running unmarked and
+    /// disarming the stall suppression in `wait_for_step_inner` — the path that
+    /// escalates a live validation wait into the never-mislabel panic. A skip
+    /// never sets the flag, so the second request (its tip ahead of the live
+    /// step) can only leave the buffer suspect via that re-mark.
+    #[tokio::test]
+    async fn consuming_a_reanchor_request_re_marks_the_buffer_suspect() {
+        // Bounded poll over a flag the VDF thread flips from another OS thread;
+        // bails rather than hangs so a regression surfaces as a test failure.
+        async fn poll_until(mut cond: impl FnMut() -> bool, msg: &str) {
+            for _ in 0..200 {
+                if cond() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("timed out after 5s waiting for: {msg}");
+        }
+
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 5;
+        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Poisoned buffer parked at live_step 8, values a distinct sentinel.
+        let live_step = 8_u64;
+        let mut state = crate::state::VdfState::new(
+            1_000,
+            live_step,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        state.seeds = vec![Seed(H256::repeat_byte(0xEE)); live_step as usize].into();
+        let vdf_state: crate::state::AtomicVdfState = Arc::new(std::sync::RwLock::new(state));
+
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let (reanchor_tx, reanchor_rx) = crate::reanchor_channel();
+        let (_ff_tx, ff_rx) = mpsc::channel::<Traced<VdfStep>>(16);
+
+        // Mining stays DISABLED: the parked loop still polls the re-anchor
+        // channel each ~200ms, which is all this test drives.
+        let chain_sync_state = ChainSyncState::new(false, false);
+        let shutdown_token = CancellationToken::new();
+        let handle = std::thread::spawn({
+            let config = config.clone();
+            let vdf_state = vdf_state.clone();
+            let reanchor_signals = signals.clone();
+            let chain_sync_state = chain_sync_state.clone();
+            let shutdown_token = shutdown_token.clone();
+            move || {
+                run_vdf(
+                    &config.vdf,
+                    live_step,
+                    H256::zero(),
+                    H256::zero(),
+                    ff_rx,
+                    reanchor_rx,
+                    reanchor_signals,
+                    MockMining,
+                    vdf_state,
+                    MockBlockProvider::new(),
+                    chain_sync_state,
+                    shutdown_token,
+                )
+            }
+        });
+
+        // (1) Mirror the gate: mark suspect, then queue a request whose tip
+        // sits exactly at the live step — an empty tail, so it heals at once.
+        signals.mark_buffer_suspect();
+        let heal_request = crate::vdf_utils::ReanchorRequest {
+            canonical_seeds: (1..=live_step)
+                .map(|i| Seed(H256::from_low_u64_be(i)))
+                .collect(),
+            c_step: live_step,
+            seed: H256::repeat_byte(0x33),
+            next_seed: H256::repeat_byte(0x22),
+        };
+        assert!(
+            reanchor_tx.try_send(heal_request),
+            "VDF receiver must be live"
+        );
+        poll_until(|| signals.generation() == 1, "the healing request to apply").await;
+        assert!(
+            !signals.is_buffer_suspect(),
+            "an applied heal must clear the suspect flag"
+        );
+
+        // (2) Queue a request the thread must SKIP: its tip is ahead of the
+        // live step (`c_step > live_step`), a deterministic skip that never
+        // sets the flag. Consumed only after (1) cleared suspect, so the flag
+        // can return solely via the consume-time re-mark under test.
+        let skip_c_step = live_step + 2;
+        let skip_request = crate::vdf_utils::ReanchorRequest {
+            canonical_seeds: (1..=skip_c_step)
+                .map(|i| Seed(H256::from_low_u64_be(i)))
+                .collect(),
+            c_step: skip_c_step,
+            seed: H256::repeat_byte(0x33),
+            next_seed: H256::repeat_byte(0x22),
+        };
+        assert!(
+            reanchor_tx.try_send(skip_request),
+            "VDF receiver must be live"
+        );
+        poll_until(
+            || signals.is_buffer_suspect(),
+            "consuming a re-anchor request to re-mark the buffer suspect",
+        )
+        .await;
+        assert_eq!(
+            signals.generation(),
+            1,
+            "a skipped re-anchor must not apply a heal"
         );
 
         shutdown_token.cancel();
@@ -1966,6 +2115,68 @@ mod tests {
                 "the buffer must be untouched on a shutdown abort"
             );
         }
+    }
+
+    /// Regression for finding #5: a VDF anchor hash read back from the (raw) step buffer must have
+    /// its OWN reset boundary folded in before it seeds the loop. The buffer stores raw step values
+    /// (the reset fold is applied to the carried hash only AFTER a step is stored), so an anchor
+    /// hash from `get_last_step_and_seed` is unfolded. When the anchor step is a reset boundary,
+    /// `reset_applied_anchor_hash` folds boundary K's seed (the anchoring block's own `seed`); the
+    /// first forward step (K+1) then matches the canonical lineage. Skipping the fold (the #5 bug)
+    /// mis-steps the first range.
+    #[test]
+    fn anchor_hash_folds_its_own_reset_boundary_before_seeding_the_loop() {
+        let mut node_config = NodeConfig::testing();
+        node_config.consensus.get_mut().vdf.reset_frequency = 4;
+        let config = Config::new_with_random_peer_id(node_config);
+        let reset_frequency = config.vdf.reset_frequency as u64;
+
+        let raw_anchor = H256::repeat_byte(0xA1); // buffer's raw step-8 value
+        let boundary_seed = H256::repeat_byte(0xB2); // boundary 8's seed (the anchoring block's `seed`)
+
+        // Anchor exactly on boundary 8: the raw hash must be folded with the boundary seed.
+        let folded = reset_applied_anchor_hash(reset_frequency, 8, raw_anchor, boundary_seed);
+        assert_eq!(
+            folded,
+            apply_reset_seed(raw_anchor, boundary_seed),
+            "anchoring on a reset boundary must fold the boundary seed into the hash"
+        );
+        assert_ne!(
+            folded, raw_anchor,
+            "the fold must change the hash on a boundary"
+        );
+
+        // Anchor off a boundary (step 9): the hash is used as-is.
+        assert_eq!(
+            reset_applied_anchor_hash(reset_frequency, 9, raw_anchor, boundary_seed),
+            raw_anchor,
+            "anchoring off a boundary must leave the hash untouched"
+        );
+
+        // The fold is load-bearing: the next VDF step computed from the folded vs raw anchor differs,
+        // so skipping it diverges step K+1 from the canonical lineage.
+        let salt = U256::from(step_number_to_salt_number(&config.vdf, 8));
+        let mut checkpoints = vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
+        let mut next_from_folded = folded;
+        vdf_sha(
+            salt,
+            &mut next_from_folded,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        let mut next_from_raw = raw_anchor;
+        vdf_sha(
+            salt,
+            &mut next_from_raw,
+            config.vdf.num_checkpoints_in_vdf_step,
+            config.vdf.num_iterations_per_checkpoint(),
+            &mut checkpoints,
+        );
+        assert_ne!(
+            next_from_folded, next_from_raw,
+            "folding boundary K's seed changes step K+1 — skipping it (finding #5) mis-steps the loop"
+        );
     }
 
     mod process_reset_props {
