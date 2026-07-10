@@ -2221,7 +2221,6 @@ mod tests {
         let config = Config::new_with_random_peer_id(node_config);
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
-        // Fully contained ranges convert to partition-relative offsets.
         let full = storage_module
             .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(20, 39)))?;
         assert_eq!(full, PartitionChunkRange(partition_chunk_offset_ii!(0, 19)));

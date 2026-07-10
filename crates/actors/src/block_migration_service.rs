@@ -484,12 +484,10 @@ impl BlockMigrationService {
                 let modules = get_overlapped_storage_modules(storage_modules_guard, *ledger, range);
 
                 for module in modules {
-                    // `modules` merely overlap `range`: an orphaned range that
-                    // spans a slot boundary lies partly outside each module, so
-                    // clip it to the module's own ledger range before
-                    // converting (as `index_transaction_data` does), otherwise
-                    // partially covered modules are skipped and their orphaned
-                    // offsets never unassigned.
+                    // `modules` merely overlap `range`: clip to each module's own
+                    // ledger range before converting (as `index_transaction_data`
+                    // does), otherwise partially covered modules are skipped and
+                    // their orphaned offsets never unassigned.
                     let Ok(module_range) = module.get_storage_module_ledger_offsets() else {
                         continue;
                     };
@@ -2016,7 +2014,6 @@ mod tests {
 
         svc.recover_from_network_partition(0)?;
 
-        // The orphaned block is gone from the index.
         {
             let index = svc.block_index_guard.read();
             assert_eq!(index.num_blocks(), 1);
