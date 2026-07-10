@@ -3480,9 +3480,14 @@ pub async fn recall_recall_range_is_valid(
         reset_step_number, global_step_number
     );
 
-    let recall_offset =
-        (block.poa.partition_chunk_offset as u64 / config.num_chunks_in_recall_range) as usize;
-    let num_ranges = irys_efficient_sampling::num_recall_ranges_in_partition(config) as usize;
+    let recall_offset = usize::try_from(
+        u64::from(block.poa.partition_chunk_offset) / config.num_chunks_in_recall_range,
+    )
+    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall offset too large")))?;
+    let num_ranges = usize::try_from(irys_efficient_sampling::num_recall_ranges_in_partition(
+        config,
+    ))
+    .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large")))?;
 
     // Authoritative re-check from the block's own canonical ancestry, used
     // whenever the buffer cannot be trusted (suspect window or mismatch).

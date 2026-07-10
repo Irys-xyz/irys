@@ -200,7 +200,8 @@ impl VdfState {
         );
         // Keep the retained-depth floor consistent with the (unchanged) counter
         // so future `store_step`s trim against the same capacity window.
-        self.minimum_step_to_keep = self.current_step().saturating_sub(self.capacity as u64);
+        let capacity = u64::try_from(self.capacity).expect("VDF capacity must fit in u64");
+        self.minimum_step_to_keep = self.current_step().saturating_sub(capacity);
         self.seeds = corrected;
         // Trim the oldest seeds down to capacity: the canonical window plus the
         // recomputed free-running tail can exceed it, and `store_step`'s

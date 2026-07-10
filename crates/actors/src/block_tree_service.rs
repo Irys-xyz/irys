@@ -1395,11 +1395,14 @@ impl BlockTreeServiceInner {
         // Only reorgs past the migration depth can leave the buffer poisoned:
         // shallower ones stay inside the confirmed window, where the VDF loop's
         // reset-boundary gate already held it to canonical seeds.
-        if reorg.old_fork.len() <= self.config.consensus.block_migration_depth as usize {
+        let migration_depth = usize::try_from(self.config.consensus.block_migration_depth)
+            .expect("block_migration_depth must fit in usize");
+        if reorg.old_fork.len() <= migration_depth {
             return;
         }
 
-        let reset_frequency = self.config.consensus.vdf.reset_frequency as u64;
+        let reset_frequency = u64::try_from(self.config.consensus.vdf.reset_frequency)
+            .expect("VDF reset_frequency must fit in u64");
         if reset_frequency == 0 {
             return;
         }

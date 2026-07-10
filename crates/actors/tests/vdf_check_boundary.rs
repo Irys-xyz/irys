@@ -26,11 +26,21 @@ fn vdf_check_functions_are_centralised_in_irys_vdf() {
     }
 
     // Each consumer must reach the checks through the irys_vdf::verify facade.
-    // Match the module path and the symbol separately so a grouped import
+    // Match the actual CALL shape — a direct `irys_vdf::verify::<symbol>(` call, or
+    // a facade import plus a bare `<symbol>(` call — so a grouped import
     // (`use irys_vdf::verify::{is_seed_data_valid, prev_output_is_valid};`) still
-    // passes — only a local redefinition or a non-facade path should fail.
-    let reaches_via_facade =
-        |src: &str, symbol: &str| src.contains("irys_vdf::verify") && src.contains(symbol);
+    // passes while a stray mention in a comment can no longer mask a deleted call.
+    let reaches_via_facade = |src: &str, symbol: &str| {
+        let direct_call = format!("irys_vdf::verify::{symbol}(");
+        let single_import = format!("use irys_vdf::verify::{symbol}");
+        let grouped_import = "use irys_vdf::verify::{";
+        let call = format!("{symbol}(");
+
+        src.contains(&direct_call)
+            || ((src.contains(&single_import)
+                || (src.contains(grouped_import) && src.contains(symbol)))
+                && src.contains(&call))
+    };
     assert!(
         reaches_via_facade(BLOCK_VALIDATION, "is_seed_data_valid"),
         "block_validation.rs must reach is_seed_data_valid via the irys_vdf::verify facade"
