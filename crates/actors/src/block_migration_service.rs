@@ -500,12 +500,19 @@ impl BlockMigrationService {
                             continue;
                         }
                     };
-                    // UFCS: importing `InclusiveInterval` module-wide breaks
-                    // inference on `PartitionChunkRange`, which implements the
-                    // trait for two point types.
+                    // Fully qualified method call: importing `InclusiveInterval`
+                    // module-wide breaks inference on `PartitionChunkRange`,
+                    // which implements the trait for two point types.
                     let Some(overlap) =
                         nodit::InclusiveInterval::intersection(&module_range, range)
                     else {
+                        warn!(
+                            module_id = module.id,
+                            ?ledger,
+                            ?range,
+                            ?module_range,
+                            "skipping storage module: orphaned range no longer overlaps during rollback"
+                        );
                         continue;
                     };
                     // The clipped range is contained by construction, so this
