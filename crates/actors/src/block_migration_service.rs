@@ -488,8 +488,17 @@ impl BlockMigrationService {
                     // ledger range before converting (as `index_transaction_data`
                     // does), otherwise partially covered modules are skipped and
                     // their orphaned offsets never unassigned.
-                    let Ok(module_range) = module.get_storage_module_ledger_offsets() else {
-                        continue;
+                    let module_range = match module.get_storage_module_ledger_offsets() {
+                        Ok(r) => r,
+                        Err(err) => {
+                            warn!(
+                                module_id = module.id,
+                                ?ledger,
+                                %err,
+                                "skipping storage module with no ledger offsets during rollback"
+                            );
+                            continue;
+                        }
                     };
                     // UFCS: importing `InclusiveInterval` module-wide breaks
                     // inference on `PartitionChunkRange`, which implements the
@@ -499,9 +508,19 @@ impl BlockMigrationService {
                     else {
                         continue;
                     };
+                    // The clipped range is contained by construction, so this
+                    // only fails if the module's assignment changed mid-loop.
                     let partition_range = match module.make_range_partition_relative(overlap) {
                         Ok(r) => r,
-                        Err(_) => continue,
+                        Err(err) => {
+                            warn!(
+                                module_id = module.id,
+                                ?ledger,
+                                %err,
+                                "skipping storage module: clipped range conversion failed during rollback"
+                            );
+                            continue;
+                        }
                     };
 
                     // Clear offset index entries and data_root mappings for orphaned txs
