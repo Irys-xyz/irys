@@ -5019,6 +5019,91 @@ mod shadow_tx_priority_fee_match_tests {
             .expect_err("wrong packet must be rejected");
         assert!(err.to_string().contains("Shadow transaction mismatch"));
     }
+
+    /// Legacy / non-dynamic-fee envelopes expose `max_priority_fee_per_gas() == None`.
+    /// The extraction path in `shadow_transactions_are_valid` must normalize that to
+    /// tip `0` via `unwrap_or(0)` so fee-less expected txs (refunds, block reward)
+    /// still match, while nonzero expected fees reject.
+    #[test]
+    fn legacy_envelope_none_priority_fee_normalizes_to_zero() {
+        use alloy_consensus::{
+            EthereumTxEnvelope, SignableTransaction as _, TxEip4844, TxLegacy, TxType,
+        };
+        use irys_reth::shadow_tx::{
+            SHADOW_TX_DESTINATION_ADDR, detect_and_decode, encode_prefixed_input,
+        };
+        use reth::primitives::transaction::signature::Signature;
+        use reth::revm::primitives::TxKind;
+        use reth_ethereum_primitives::TransactionSigned;
+
+        let packet = stake_packet(0);
+        let legacy = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21_000,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: AlloyU256::ZERO,
+            input: encode_prefixed_input(&packet),
+        };
+        // Signature is not recovered in this unit path; we only exercise fee + decode.
+        let signed: TransactionSigned = EthereumTxEnvelope::<TxEip4844>::Legacy(
+            legacy.into_signed(Signature::test_signature()),
+        );
+
+        assert_eq!(
+            signed.tx_type(),
+            TxType::Legacy,
+            "fixture must be a legacy envelope"
+        );
+        assert!(
+            signed.max_priority_fee_per_gas().is_none(),
+            "legacy envelopes have no max_priority_fee_per_gas field"
+        );
+
+        // Same normalization as the extraction closure in shadow_transactions_are_valid.
+        let priority_fee = signed.max_priority_fee_per_gas().unwrap_or(0);
+        assert_eq!(priority_fee, 0, "None tip must normalize to 0");
+
+        // Envelope still carries a decodable shadow packet (not rejected as non-shadow).
+        let decoded = detect_and_decode(&signed)
+            .expect("decode must succeed")
+            .expect("legacy shadow destination+prefix must be detected as shadow");
+        assert_eq!(decoded, packet);
+
+        let header = header_with_solution(solution_hash());
+
+        // Expected tip 0 → accept after normalization.
+        let expected_zero = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 0,
+        };
+        assert!(
+            validate_shadow_transactions_match(
+                std::iter::once(Ok((decoded.clone(), priority_fee))),
+                std::iter::once(expected_zero),
+                &header,
+            )
+            .is_ok(),
+            "legacy None tip normalizing to 0 must match expected transaction_fee 0"
+        );
+
+        // Expected nonzero tip → reject (cannot skim by smuggling a legacy envelope).
+        let expected_nonzero = ShadowMetadata {
+            shadow_tx: packet,
+            transaction_fee: 1_000_000_000,
+        };
+        let err = validate_shadow_transactions_match(
+            std::iter::once(Ok((decoded, priority_fee))),
+            std::iter::once(expected_nonzero),
+            &header,
+        )
+        .expect_err("legacy tip 0 must not satisfy a nonzero expected fee");
+        assert!(
+            err.to_string().contains("priority fee mismatch"),
+            "error should name the fee mismatch, got: {err}"
+        );
+    }
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
