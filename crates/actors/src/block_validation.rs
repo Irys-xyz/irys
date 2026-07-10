@@ -1498,6 +1498,27 @@ impl ValidationError {
     }
 }
 
+/// Guards [`VDFLimiterInfo::first_step_number`] against arithmetic underflow.
+///
+/// `first_step_number` computes `global_step_number - steps.len() + 1` with raw
+/// subtraction. The workspace release profile enables `overflow-checks`, so a
+/// block whose declared step count exceeds `global_step_number + 1` would PANIC
+/// there (aborting the node — a remote DoS, since a peer can self-sign such a
+/// block and gossip it) instead of returning. Reject the malformed block before
+/// any `first_step_number` call. An honest block never carries more steps than
+/// its global step number, so this rejects only crafted/corrupt inputs.
+fn vdf_step_count_is_consistent(
+    global_step_number: u64,
+    step_count: u64,
+) -> Result<(), PreValidationError> {
+    if step_count > global_step_number.saturating_add(1) {
+        return Err(PreValidationError::VDFCheckpointsInvalid(format!(
+            "VDF step count {step_count} exceeds global step number {global_step_number} + 1"
+        )));
+    }
+    Ok(())
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -1553,6 +1574,14 @@ pub async fn prevalidate_block(
     // block's own claimed salt, accepting a block that skipped intervening VDF steps
     // and so defeating the sequential-work guarantee. Header-rooted, so it stays
     // poison-safe: it never consults the local seed buffer.
+    //
+    // SECURITY: reject a block whose declared step count would underflow
+    // `first_step_number()` (see `vdf_step_count_is_consistent`) BEFORE that call.
+    // (`.saturating_sub(1)` below only clamps the RESULT, not the inner subtraction.)
+    vdf_step_count_is_consistent(
+        block.vdf_limiter_info.global_step_number,
+        block.vdf_limiter_info.steps.len() as u64,
+    )?;
     let claimed_prev_step = block.vdf_limiter_info.first_step_number().saturating_sub(1);
     let parent_step = previous_block.vdf_limiter_info.global_step_number;
     if claimed_prev_step != parent_step {
@@ -6974,6 +7003,24 @@ mod tests {
             proofs: None,
             required_proof_count: None,
         }
+    }
+
+    /// Regression (remote DoS): a crafted gossip block declaring more VDF steps
+    /// than its `global_step_number` must be rejected by `prevalidate_block`'s
+    /// guard, not underflow `first_step_number()` into a node-aborting panic.
+    #[test]
+    fn vdf_step_count_guard_rejects_underflowing_block() {
+        // Attacker's block: global_step_number 5 but 100 declared steps —
+        // `first_step_number` would compute 5 - 100 + 1 and panic.
+        assert!(vdf_step_count_is_consistent(5, 100).is_err());
+        // Honest blocks: fewer steps than the global step number.
+        assert!(vdf_step_count_is_consistent(100, 10).is_ok());
+        // Boundary: steps.len() == global + 1 is the largest non-underflowing count.
+        assert!(vdf_step_count_is_consistent(9, 10).is_ok());
+        // One past the boundary underflows and must be rejected.
+        assert!(vdf_step_count_is_consistent(9, 11).is_err());
+        // Degenerate global step 0 with a single step must not underflow.
+        assert!(vdf_step_count_is_consistent(0, 1).is_ok());
     }
 
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
