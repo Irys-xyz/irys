@@ -100,4 +100,106 @@ mod tests {
         }
         assert!(found, "irys.vdf.mining_enabled must be exported");
     }
+
+    /// The re-anchor observability trio must reach the exporter with stable
+    /// names, the "irys-vdf" scope, and the right instrument kinds — dashboards
+    /// and alerts key on these strings, so a silent rename or kind change is a
+    /// monitoring outage, not a compile error. Same nextest isolation caveat as
+    /// above.
+    #[test]
+    fn reanchor_metrics_preserve_name_scope_type_and_description() {
+        let exporter = InMemoryMetricExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        global::set_meter_provider(provider.clone());
+
+        record_buffer_suspect(true);
+        record_reanchor_healed();
+        record_reanchor_skipped();
+        provider.force_flush().expect("flush metrics");
+
+        let resource_metrics = exporter.get_finished_metrics().expect("collected metrics");
+
+        let mut found_suspect = false;
+        let mut found_healed = false;
+        let mut found_skipped = false;
+        for rm in &resource_metrics {
+            for scope in rm.scope_metrics() {
+                for metric in scope.metrics() {
+                    match metric.name() {
+                        "irys.vdf.buffer_suspect" => {
+                            found_suspect = true;
+                            assert_eq!(scope.scope().name(), "irys-vdf");
+                            assert_eq!(
+                                metric.description(),
+                                "Whether the VDF seed buffer is marked suspect pending a re-anchor heal (1=yes, 0=no)"
+                            );
+                            match metric.data() {
+                                AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+                                    let point = gauge
+                                        .data_points()
+                                        .next()
+                                        .expect("one recorded gauge data point");
+                                    assert_eq!(
+                                        point.value(),
+                                        1,
+                                        "suspect=true must record as gauge value 1"
+                                    );
+                                }
+                                _ => panic!("irys.vdf.buffer_suspect must be a u64 gauge"),
+                            }
+                        }
+                        "irys.vdf.reanchor_healed_total" => {
+                            found_healed = true;
+                            assert_eq!(scope.scope().name(), "irys-vdf");
+                            assert_eq!(
+                                metric.description(),
+                                "Number of in-place VDF seed-buffer heals successfully applied"
+                            );
+                            match metric.data() {
+                                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                                    let point = sum
+                                        .data_points()
+                                        .next()
+                                        .expect("one recorded counter data point");
+                                    assert_eq!(point.value(), 1);
+                                }
+                                _ => panic!("irys.vdf.reanchor_healed_total must be a u64 counter"),
+                            }
+                        }
+                        "irys.vdf.reanchor_skipped_total" => {
+                            found_skipped = true;
+                            assert_eq!(scope.scope().name(), "irys-vdf");
+                            assert_eq!(
+                                metric.description(),
+                                "Number of VDF re-anchor requests skipped without rewriting the buffer"
+                            );
+                            match metric.data() {
+                                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                                    let point = sum
+                                        .data_points()
+                                        .next()
+                                        .expect("one recorded counter data point");
+                                    assert_eq!(point.value(), 1);
+                                }
+                                _ => {
+                                    panic!("irys.vdf.reanchor_skipped_total must be a u64 counter")
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(found_suspect, "irys.vdf.buffer_suspect must be exported");
+        assert!(
+            found_healed,
+            "irys.vdf.reanchor_healed_total must be exported"
+        );
+        assert!(
+            found_skipped,
+            "irys.vdf.reanchor_skipped_total must be exported"
+        );
+    }
 }

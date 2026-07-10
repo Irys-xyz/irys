@@ -49,6 +49,31 @@ fn vdf_check_functions_are_centralised_in_irys_vdf() {
     );
 }
 
+/// The step-count guard is the sole gate between network data and
+/// `first_step_number()`'s saturated nonsense value for malformed counts (and,
+/// historically, an abort-class underflow). Every other caller runs after
+/// prevalidation or on trusted ancestors, so if a refactor drops this call
+/// from `prevalidate_block`, a crafted step count flows into continuity and
+/// seed maths unchecked — pin the call here.
+#[test]
+fn prevalidate_block_calls_vdf_step_count_is_consistent() {
+    const BLOCK_VALIDATION: &str = include_str!("../src/block_validation.rs");
+    let start = BLOCK_VALIDATION
+        .find("pub async fn prevalidate_block")
+        .expect("prevalidate_block must exist in block_validation.rs");
+    let rest = &BLOCK_VALIDATION[start + "pub async fn prevalidate_block".len()..];
+    let end = rest.find("\npub ").unwrap_or(rest.len());
+    // Match the CALL shape (name + opening paren): comments in the body
+    // mention the guard by name, so a bare-substring check could pass with
+    // the call deleted.
+    assert!(
+        rest[..end].contains("vdf_step_count_is_consistent("),
+        "prevalidate_block must call vdf_step_count_is_consistent: it is the only \
+         guard between gossip data and first_step_number's saturated value for \
+         malformed step counts."
+    );
+}
+
 /// Tier 1b guard: `validation_service.rs` deleted the buffer-based previous-step
 /// continuity check (`ensure!(stored_previous_step == vdf_info.prev_output)`),
 /// relying instead on the block-rooted `prev_output_is_valid` running inside the

@@ -779,11 +779,23 @@ impl InnerCacheTask {
             // doomed entry a little longer is harmless, deleting a live one is
             // not.
             let tree_set: HashSet<H256> = {
-                let Some(tree) = self.block_tree_guard.try_read() else {
-                    debug!(
-                        "block tree lock write-held during the txid scrub; deferring this attempt"
-                    );
-                    return Ok(TxidScrubAttempt::Deferred);
+                let tree = match self.block_tree_guard.try_read() {
+                    Ok(tree) => tree,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        debug!(
+                            "block tree lock write-held during the txid scrub; deferring this attempt"
+                        );
+                        return Ok(TxidScrubAttempt::Deferred);
+                    }
+                    // A poisoned tree lock is a node fault, not contention:
+                    // deferring would spin the retry loop forever behind a
+                    // misleading "write-held" log. Surface it through the
+                    // worker's `PruneTxidsCompleted(Err(..))` path instead.
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err(eyre::eyre!(
+                            "block tree lock poisoned during the txid scrub"
+                        ));
+                    }
                 };
                 let (canonical, _) = tree.get_canonical_chain();
                 drop(tree);

@@ -171,12 +171,19 @@ impl PartitionMiningServiceInner {
         partition_hash: &irys_types::H256,
     ) -> eyre::Result<u64> {
         let next_ranges_step = self.ranges.last_step_num + 1; // next consecutive step expected to be calculated by ranges
-        if next_ranges_step >= step {
-            debug!("Step {} already processed or next consecutive one", step);
+        // Fast path ONLY for the exact next consecutive step. Anything else — `step` AHEAD of the
+        // iterator (a gap) OR BEHIND it (a VDF re-anchor rewound the steps below the iterator's
+        // stateful rotation position, e.g. partition-recovery) — must rebuild the rotation rather
+        // than advance it. The previous `>=` fast-pathed every `step <= last_step_num + 1`, which
+        // silently computed a WRONG recall range after a re-anchor rewind (the rotation state was
+        // for a higher, now-discarded step), making the node mine blocks whose recall range no
+        // longer matches its (re-anchored) VDF steps.
+        if next_ranges_step == step {
+            debug!("Step {} is the next consecutive step", step);
         } else {
             debug!(
-                "Non consecutive step {} may need to reconstruct ranges",
-                step
+                "Non consecutive step {} (iterator at {}) may need to reconstruct ranges",
+                step, self.ranges.last_step_num
             );
             // calculate the nearest step lower or equal to step where recall ranges are reinitialized, as this is the step from where ranges will be recalculated
             let reset_step = self.ranges.reset_step(step);
@@ -184,13 +191,17 @@ impl PartitionMiningServiceInner {
                 "Near reset step is {} num recall ranges in partition {}",
                 reset_step, self.ranges.num_recall_ranges_in_partition
             );
-            let start = if reset_step > next_ranges_step {
+            // Reinitialize when the iterator cannot incrementally reach `step` from
+            // `next_ranges_step`: either the reset boundary is past where the iterator is (a
+            // forward gap across a boundary), or the iterator is AHEAD of `step` (a backward
+            // re-anchor rewind — its rotation must be rebuilt from the boundary, not advanced).
+            let start = if reset_step > next_ranges_step || step < next_ranges_step {
                 debug!(
-                    "Step {} is too far ahead of last processed step {}, reinitializing ranges ...",
+                    "Step {} not incrementally reachable from last processed step {}, reinitializing ranges ...",
                     step, self.ranges.last_step_num
                 );
                 self.ranges.reinitialize();
-                self.ranges.last_step_num = reset_step - 1; // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
+                self.ranges.last_step_num = reset_step.saturating_sub(1); // advance last step number calculated by ranges to (reset_step - 1), so ranges next step will be reset_step line
                 reset_step
             } else {
                 next_ranges_step
@@ -598,5 +609,87 @@ mod tests {
             "post-reanchor recall range must equal a rebuild from the corrected steps"
         );
         assert_eq!(inner.ranges.last_step_num, 4);
+    }
+
+    /// A step BEHIND the rotation iterator must rebuild the rotation rather
+    /// than fast-path it. The pre-fix `>=` guard fast-pathed every
+    /// `step <= last_step_num + 1`, silently computing a recall range from
+    /// rotation state that belonged to a later step; the oracle here is a
+    /// second service that only ever stepped consecutively to the queried
+    /// step, so any stale-state answer mismatches it.
+    #[test]
+    fn behind_step_rebuilds_rotation_instead_of_fast_pathing() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                num_chunks_in_recall_range: 2,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let partition_hash = H256::repeat_byte(0x77);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        for step in 1..=3_u64 {
+            vdf_state
+                .write()
+                .unwrap()
+                .store_step(Seed(H256::repeat_byte(0xA0 + step as u8)), step);
+        }
+
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            Arc::clone(&storage_module),
+            false,
+            VdfStateReadonly::new(Arc::clone(&vdf_state)),
+            U256::zero(),
+        );
+        for step in 1..=3_u64 {
+            inner.test_get_recall_range(step, H256::repeat_byte(step as u8), partition_hash);
+        }
+        assert_eq!(inner.ranges.last_step_num, 3);
+
+        // Oracle: an identical service that only ever reached step 2
+        // consecutively — the correct answer for (2, seed) by construction.
+        let (oracle_senders, _oracle_receivers) = ServiceSenders::new();
+        let mut oracle = PartitionMiningServiceInner::new(
+            &config,
+            oracle_senders,
+            storage_module,
+            false,
+            VdfStateReadonly::new(Arc::clone(&vdf_state)),
+            U256::zero(),
+        );
+        oracle.test_get_recall_range(1, H256::repeat_byte(0x01), partition_hash);
+        let expected = oracle.test_get_recall_range(2, H256::repeat_byte(0x02), partition_hash);
+
+        let got = inner.test_get_recall_range(2, H256::repeat_byte(0x02), partition_hash);
+        assert_eq!(
+            got, expected,
+            "a behind-the-iterator step must rebuild the rotation, not answer from stale state"
+        );
     }
 }

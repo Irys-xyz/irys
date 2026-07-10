@@ -1498,15 +1498,16 @@ impl ValidationError {
     }
 }
 
-/// Guards [`VDFLimiterInfo::first_step_number`] against arithmetic underflow.
+/// Guards [`VDFLimiterInfo::first_step_number`] against a malformed step count.
 ///
-/// `first_step_number` computes `global_step_number - steps.len() + 1` with raw
-/// subtraction. The workspace release profile enables `overflow-checks`, so a
-/// block whose declared step count exceeds `global_step_number` would PANIC
-/// there (aborting the node — a remote DoS, since a peer can self-sign such a
-/// block and gossip it) instead of returning. Reject the malformed block before
-/// any `first_step_number` call. An honest block never carries more steps than
-/// its global step number, so this rejects only crafted/corrupt inputs.
+/// A block whose declared step count exceeds `global_step_number` has no valid
+/// first step (it would sit below genesis). `first_step_number` saturates that
+/// case to 0 rather than panicking — defence in depth against an abort-class
+/// underflow on network data — but the saturated 0 is a nonsense step number
+/// that must never reach continuity or seed maths, so this guard rejects the
+/// block before any `first_step_number` call. An honest block never carries
+/// more steps than its global step number; this rejects only crafted/corrupt
+/// inputs.
 fn vdf_step_count_is_consistent(
     global_step_number: u64,
     step_count: u64,
@@ -3463,7 +3464,7 @@ impl RecallRangeError {
 /// Residual (accepted): a block crafted against this node's poisoned window
 /// can still fast-path in the gap before the reorg gate marks the buffer
 /// suspect. It costs the attacker a fully valid mined block and yields one
-/// transient orphan on one node; see `claude/2026-07-03-001` finding F1.
+/// transient orphan on one node.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
@@ -7011,28 +7012,28 @@ mod tests {
 
     /// Regression (remote DoS): a crafted gossip block declaring more VDF steps
     /// than its `global_step_number` must be rejected by `prevalidate_block`'s
-    /// guard, not underflow `first_step_number()` into a node-aborting panic.
+    /// guard — `first_step_number()` saturates such counts to the nonsense step
+    /// number 0, which must never reach continuity or seed maths.
     #[test]
     fn vdf_step_count_guard_rejects_underflowing_block() {
-        // Attacker's block: global_step_number 5 but 100 declared steps —
-        // `first_step_number` would compute 5 - 100 + 1 and panic.
+        // Attacker's block: global_step_number 5 but 100 declared steps — its
+        // first step would sit far below genesis.
         assert!(vdf_step_count_is_consistent(5, 100).is_err());
         // Honest blocks: fewer steps than the global step number.
         assert!(vdf_step_count_is_consistent(100, 10).is_ok());
         // Largest valid count: steps.len() == global_step_number gives
         // first_step_number 1 (steps are 1-based; genesis step 0 is the seed).
         assert!(vdf_step_count_is_consistent(10, 10).is_ok());
-        // Boundary: steps.len() == global_step_number + 1 makes the inner
-        // `global_step_number - steps.len()` subtraction underflow (first step 0
-        // is not a real step), so it must be rejected.
+        // Boundary: steps.len() == global_step_number + 1 puts the first step
+        // at 0, which is not a real step, so it must be rejected.
         assert!(matches!(
             vdf_step_count_is_consistent(9, 10),
             Err(PreValidationError::VDFCheckpointsInvalid(_))
         ));
-        // Two past the boundary underflows further and must be rejected.
+        // Two past the boundary must also be rejected.
         assert!(vdf_step_count_is_consistent(9, 11).is_err());
-        // Degenerate global step 0 with a single step underflows (0 - 1); a real
-        // block never carries global step 0, so it must be rejected.
+        // Degenerate global step 0 with a single step also claims first step 0;
+        // a real block never carries global step 0, so it must be rejected.
         assert!(matches!(
             vdf_step_count_is_consistent(0, 1),
             Err(PreValidationError::VDFCheckpointsInvalid(_))

@@ -585,12 +585,14 @@ async fn post_tx_with_chunks(
 ///
 /// Marked `#[ignore]`: this is a heavy, full-stack, multi-node spec (two nodes,
 /// packing, autonomous mining across a reset window) that is TIMING-FRAGILE and
-/// so unsuitable as a CI gate — under load it can exceed the nextest budget
+/// so unsuitable as a PR gate — under load it can exceed the nextest budget
 /// while the post-reorg boundary-crossing blocks validate (an observed
 /// standalone run at the default 60s budget parked at the reset-boundary
-/// confirmation gate (#1447) and was killed). Run it standalone
-/// (`--run-ignored all`, ideally on a quiet machine). The re-anchor mechanism
-/// itself is covered
+/// confirmation gate (#1447) and was killed; the `slow_` prefix now grants the
+/// 180s budget). It DOES run automatically: the scheduled `heavy-nightly`
+/// workflow executes it daily via `--run-ignored all` with a name filter. Run
+/// it standalone the same way, ideally on a quiet machine. The re-anchor
+/// mechanism itself is covered
 /// DETERMINISTICALLY by faster tests that DO gate CI — the
 /// `reanchored_event_rebuilds_recall_ranges_from_corrected_buffer` unit test
 /// (the `handle_reanchored` recall-range rebuild; the one-line `Reanchored`
@@ -612,8 +614,8 @@ async fn post_tx_with_chunks(
 /// first divergent boundary — the confirmation lag grows with fork length, so a
 /// short fork keeps it below `reset_frequency` and avoids a permanent park.
 #[test_log::test(tokio::test)]
-#[ignore = "heavy full-stack multi-node spec; re-anchor mechanism covered by unit + gate tests"]
-async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> {
+#[ignore = "timing-fragile full-stack spec; PR lane covers via unit + gate tests, nightly lane runs it"]
+async fn slow_heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> {
     let seconds_to_wait = 60;
     let block_migration_depth: u32 = 1;
     // Reset window must comfortably outspan the harness's steps-per-block, else the
@@ -828,6 +830,9 @@ async fn heavy_vdf_reanchor_after_boundary_crossing_reorg() -> eyre::Result<()> 
         "the peer must adopt the healed miner's block as canonical, not merely hold its header"
     );
     info!("genesis mined a canonical block after re-anchor; peer adopted it as canonical");
+
+    genesis.stop().await;
+    peer.stop().await;
 
     Ok(())
 }

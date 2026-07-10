@@ -109,6 +109,15 @@ impl Drop for VdfSyncPause {
         // leaves the flag `true`, so this CAS fails and the enable survives; the
         // aborted/panicking-task hole stays closed because the CAS still fires
         // (writing the snapshot) when nobody else wrote in between.
+        //
+        // Accepted residual: a concurrent STOP during an enabled-snapshot window
+        // is indistinguishable from `begin`'s own disable (both leave `false`),
+        // so this restore re-enables over it. The only production stop-writer is
+        // node shutdown, whose VDF thread is already exiting via its token, so
+        // the re-enable is inert. Distinguishing the two would need a write
+        // generation co-located with the flag itself (ad-hoc `VdfController::new`
+        // callers share only the `AtomicBool`) — a `VdfState` restructure not
+        // warranted for an inert race.
         let _ = self
             .vdf_controller
             .compare_exchange_enabled(false, self.was_mining_enabled_before_sync);

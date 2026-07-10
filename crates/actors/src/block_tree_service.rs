@@ -1479,7 +1479,7 @@ impl BlockTreeServiceInner {
         // to the reorg depth would shrink that range below capacity and leave
         // deep recall-range validation reporting steps unavailable until the
         // buffer refilled at ~1 step/s.
-        let capacity = calc_capacity(&self.config) as u64;
+        let capacity = u64::try_from(calc_capacity(&self.config)).expect("capacity fits in u64");
         let want_start = c_step.saturating_sub(capacity.saturating_sub(1)).max(1);
         let block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&self.cache));
         let resolve = |hash: &H256| resolve_header_tree_or_db(&block_tree_guard, &self.db, hash);
