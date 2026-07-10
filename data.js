@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783535397358,
+  "lastUpdate": 1783715818382,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8683,6 +8683,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f5b7794757bb04a94b4202b20641a6df01a82b57",
+          "message": "fix(consensus): validate data ledger total_chunks in prevalidation (#1475)\n\nRecompute each ledger's cumulative total_chunks as parent total +\nchunks_added(included txs) and reject TotalChunksMismatch when the\nsigned header value diverges. Mirrors the existing tx_root integrity\ncheck so a peer cannot inflate/deflate capacity, expiry write-windows,\nor PoA bounds while keeping a valid tx_root.",
+          "timestamp": "2026-07-10T13:21:04-07:00",
+          "tree_id": "5532691390f4881b33ecafa8cd88269c76d80a66",
+          "url": "https://github.com/Irys-xyz/irys/commit/f5b7794757bb04a94b4202b20641a6df01a82b57"
+        },
+        "date": 1783715817187,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015162,
+            "range": "± 0.000351",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153106,
+            "range": "± 0.007555",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.55778,
+            "range": "± 0.025052",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 9.924174,
+            "range": "± 0.985775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078804,
+            "range": "± 0.000411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 768.99628,
+            "range": "± 25.036984",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.647252,
+            "range": "± 6.691705",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120425,
+            "range": "± 0.001185",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1221.511502,
+            "range": "± 81.896759",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1563.641657,
+            "range": "± 9.323097",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034184,
+            "range": "± 0.000879",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.223417,
+            "range": "± 0.976013",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.206265,
+            "range": "± 1.577454",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
