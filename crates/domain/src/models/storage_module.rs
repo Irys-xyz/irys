@@ -1690,11 +1690,23 @@ impl StorageModule {
     /// Internal utility function to take a ledger relative range and make it
     /// Partition relative (relative to the partition assigned to the
     /// StorageModule)
+    ///
+    /// Errors if `chunk_range` is not fully contained in this module's ledger
+    /// range: the offset subtraction would otherwise underflow (range starting
+    /// below the module) or yield offsets past the partition end (range ending
+    /// above it). Callers holding a merely overlapping range must intersect it
+    /// with [`Self::get_storage_module_ledger_offsets`] first.
     pub fn make_range_partition_relative(
         &self,
         chunk_range: LedgerChunkRange,
     ) -> eyre::Result<PartitionChunkRange> {
         let storage_module_range = self.get_storage_module_ledger_offsets()?;
+        eyre::ensure!(
+            storage_module_range.contains_interval(&chunk_range),
+            "chunk_range {:?} is not contained in the storage module's ledger range {:?}; intersect it with the module range first",
+            chunk_range,
+            storage_module_range
+        );
         let start = chunk_range.start() - storage_module_range.start();
         let end = chunk_range.end() - storage_module_range.start();
         Ok(PartitionChunkRange(ii(
@@ -2178,6 +2190,63 @@ mod tests {
             let module_intervals = ints.clone().into_iter().collect::<Vec<_>>();
             assert_eq!(file_intervals, module_intervals);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn make_range_partition_relative_rejects_ranges_outside_the_module() -> eyre::Result<()> {
+        // Slot 1 with 20 chunks per partition: ledger offsets [20, 39].
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                slot_index: Some(1),
+                ..PartitionAssignment::default()
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 19), "hdd0-test".into())],
+        }];
+
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("range_partition_relative_test")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 20,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Fully contained ranges convert to partition-relative offsets.
+        let full = storage_module
+            .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(20, 39)))?;
+        assert_eq!(full, PartitionChunkRange(partition_chunk_offset_ii!(0, 19)));
+        let inner = storage_module
+            .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(25, 30)))?;
+        assert_eq!(
+            inner,
+            PartitionChunkRange(partition_chunk_offset_ii!(5, 10))
+        );
+
+        // A range starting below the module used to underflow the offset
+        // subtraction and panic; it must error instead.
+        assert!(
+            storage_module
+                .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(10, 25)))
+                .is_err()
+        );
+
+        // A range ending above the module used to silently produce offsets
+        // past the partition end; it must error instead.
+        assert!(
+            storage_module
+                .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(25, 45)))
+                .is_err()
+        );
 
         Ok(())
     }
