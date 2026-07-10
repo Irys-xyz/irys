@@ -275,7 +275,13 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
 ///    spanning tx was written (full retention honored, not premature) — while the
 ///    tail slot 1 is still ALIVE (its last write was E_b). The spanning tx's two
 ///    slots expire at different times; the head governs the tx's readable life.
-/// 4. At E_b + 4: the tail slot 1 also expires.
+/// 4. At E_b + 4: the tail slot 1 STILL does not expire — it is the partially
+///    written frontier slot (15/20 chunks), and only fully-written slots may
+///    expire: chunk offsets are cumulative, so expiring the frontier slot would
+///    strand every tx later appended into its remainder (non-promotable forever,
+///    never settled).
+/// 5. Epoch E_c: 5 more chunks fill slot 1 exactly (total 20). A full
+///    `epoch_length` after that write, at E_c + 4, slot 1 finally expires.
 ///
 /// Without the last-write fix slot 0 would keep its genesis `last_height` and be
 /// expired well before E_a + 4 — so this test fails on `master`.
@@ -453,7 +459,10 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         "first-unexpired ThirtyDay slot should be 1 (head expired, tail alive)"
     );
 
-    // --- Check 2 @ E_b + 4: the tail slot 1 also expires. ---
+    // --- Check 2 @ E_b + 4: the tail slot 1 is the partially written frontier
+    //     slot (15/20 chunks), so it must NOT expire even a full window after
+    //     its last write — future appends land in its remainder, and expiring
+    //     it would strand them (non-promotable forever, never settled). ---
     let tail_expiry = epoch_b + expiry_blocks;
     while ctx.get_canonical_chain_height().await < tail_expiry {
         ctx.mine_block().await?;
@@ -461,14 +470,69 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
     let (_, _, _, s1_exp_late, _, first_unexpired_late) =
         thirty_day_slots(&ctx, tail_expiry).await?;
     assert!(
-        s1_exp_late,
-        "tail slot 1 must expire epoch_length after its last write \
-         (E_b+{expiry_blocks}={tail_expiry})"
+        !s1_exp_late,
+        "the partially written frontier slot 1 must NOT expire at \
+         E_b+{expiry_blocks}={tail_expiry} — only fully-written slots may expire"
+    );
+    assert_eq!(
+        first_unexpired_late, 1,
+        "first-unexpired ThirtyDay slot should stay 1 while the frontier slot \
+         remains partially written (got {first_unexpired_late})"
+    );
+
+    // --- Batch 3 @ E_c: 2 + 3 chunks fill slot 1 exactly (chunks 15-19,
+    //     total 20). Because slot 1 never expired, the touch refreshes its
+    //     expiry clock to E_c. ---
+    for (marker, bytes) in [(101_u8, 64_usize), (102, 96)] {
+        let mut tx_data = vec![9_u8; bytes];
+        tx_data[0] = marker;
+        let price = ctx
+            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
+            .await?;
+        let tx = signer.create_transaction_with_fees(
+            tx_data,
+            ctx.get_anchor().await?,
+            DataLedger::ThirtyDay,
+            BoundedFee::new(price.term_fee),
+            None,
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        ctx.ingest_data_tx(tx.header.clone()).await?;
+        ctx.wait_for_mempool(tx.header.id, 30).await?;
+    }
+    let h3 = ctx.mine_block().await?.height;
+    let epoch_c = next_epoch_boundary(h3);
+    while ctx.get_canonical_chain_height().await < epoch_c {
+        ctx.mine_block().await?;
+    }
+    let (_, _, s1_la_c, s1_exp_c, _, _) = thirty_day_slots(&ctx, epoch_c).await?;
+    assert!(
+        !s1_exp_c,
+        "slot 1 must still be alive at its fill epoch E_c"
+    );
+    assert_eq!(
+        s1_la_c, epoch_c,
+        "surviving as the frontier slot lets the fill refresh slot 1's clock to \
+         E_c={epoch_c}"
+    );
+
+    // --- Check 3 @ E_c + 4: now fully written, slot 1 expires a full window
+    //     after its last write. ---
+    let tail_expiry = epoch_c + expiry_blocks;
+    while ctx.get_canonical_chain_height().await < tail_expiry {
+        ctx.mine_block().await?;
+    }
+    let (_, _, _, s1_exp_final, _, first_unexpired_final) =
+        thirty_day_slots(&ctx, tail_expiry).await?;
+    assert!(
+        s1_exp_final,
+        "once fully written, tail slot 1 must expire epoch_length after its \
+         last write (E_c+{expiry_blocks}={tail_expiry})"
     );
     assert!(
-        first_unexpired_late > 1,
-        "first-unexpired ThirtyDay slot should advance past 1 once the tail \
-         expires (got {first_unexpired_late})"
+        first_unexpired_final > 1,
+        "first-unexpired ThirtyDay slot should advance past 1 once the filled \
+         tail expires (got {first_unexpired_final})"
     );
 
     ctx.stop().await;
@@ -832,7 +896,10 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
 /// 3. Epoch E: post another (unpromoted) tx into slot 0 -> touch rescues it.
 ///    Assert the epoch block at E has ZERO TermFeeReward and ZERO PermFeeRefund:
 ///    the rescued slot is neither settled nor refunded.
-/// 4. Epoch E + 4: slot 0 (last write E) finally recycles -> the deferred
+/// 4. Epoch F: post a tx that fills slot 0 exactly (10/10 chunks). Only
+///    fully-written slots may recycle — a partially written frontier slot stays
+///    live so later appends never land in an expired slot.
+/// 5. Epoch F + 4: slot 0 (last write F) finally recycles -> the deferred
 ///    PermFeeRefund for its unpromoted txs lands here.
 #[test_log::test(tokio::test)]
 async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<()> {
@@ -939,9 +1006,38 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         "rescued Submit slot must not emit a PermFeeRefund at its (skipped) expiry epoch E={e}"
     );
 
-    // Phase B: when the slot ACTUALLY recycles (E + window), the deferred refund
+    // Fill slot 0 exactly (chunks 7-9; total 10/10) in epoch F: only a
+    // fully-written slot may recycle, and the fill refreshes its clock to F.
+    let anchor = ctx.get_anchor().await?;
+    let tx3 = ctx
+        .post_data_tx(anchor, vec![3_u8; 3 * chunk_size as usize], &signer)
+        .await;
+    ctx.wait_for_mempool(tx3.header.id, 30).await?;
+    let f = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < f {
+        ctx.mine_block().await?;
+    }
+
+    // The fill must have landed: slot 0 survived the rescue window and its
+    // expiry clock now counts from F — otherwise the recycle assertion below
+    // would fail obliquely.
+    {
+        let block = ctx.get_block_by_height(f).await?;
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snapshot = tree
+            .get_epoch_snapshot(&block.block_hash)
+            .expect("epoch snapshot should exist");
+        let slot0 = &snapshot.ledgers.get_slots(DataLedger::Submit)[0];
+        assert!(!slot0.is_expired, "slot 0 must still be alive at F={f}");
+        assert_eq!(
+            slot0.last_height, f,
+            "the fill must refresh slot 0's expiry clock to F={f}"
+        );
+    }
+
+    // Phase B: when the slot ACTUALLY recycles (F + window), the deferred refund
     // for its unpromoted txs lands — proving the refund was deferred, not lost.
-    let recycle = e + window;
+    let recycle = f + window;
     while ctx.get_canonical_chain_height().await < recycle {
         ctx.mine_block().await?;
     }
@@ -949,7 +1045,7 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
     assert!(
         refunds_at_recycle >= 1,
         "deferred PermFeeRefund for the unpromoted txs must land when slot 0 \
-         actually recycles at E+{window}={recycle} (got {refunds_at_recycle})"
+         actually recycles at F+{window}={recycle} (got {refunds_at_recycle})"
     );
 
     ctx.stop().await;
