@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783715818382,
+  "lastUpdate": 1783798424645,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8791,6 +8791,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "81128607c548c5de8195909b9ecf948ca759916c",
+          "message": "feat(api): add GET /v1/mempool/txs pending transaction list (#1480)\n\n* feat(api): add GET /v1/mempool/txs pending transaction list\n\nExpose light metadata for unconfirmed mempool data and commitment txs so clients can list pending ids that match block ledgers and GET /v1/tx/{id}, without changing /v1/mempool/status.\n\n* style: cargo fmt\n\n* fix(api): harden mempool txs list and tighten docs\n\nInclude pending pledges, add after_id cursor paging with 400 on bad ids, pass chunk_size directly, drop flaky timing asserts, and keep comments/docs concise.\n\n* fix(api): page mempool data and commitment lists independently\n\nReplace the shared after_id bound with an opaque dual-list cursor so truncated pages do not skip or duplicate txs across lists. Document next_cursor semantics and add mixed-type paging coverage.",
+          "timestamp": "2026-07-11T12:18:51-07:00",
+          "tree_id": "76c9c7b4ef7e8786d323e2129589b108f25093fa",
+          "url": "https://github.com/Irys-xyz/irys/commit/81128607c548c5de8195909b9ecf948ca759916c"
+        },
+        "date": 1783798423489,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015389,
+            "range": "± 0.000629",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.156146,
+            "range": "± 0.007071",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.57459,
+            "range": "± 0.0695",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.470509,
+            "range": "± 0.490856",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083053,
+            "range": "± 0.000966",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 817.743266,
+            "range": "± 28.051606",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 980.608857,
+            "range": "± 15.691822",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120805,
+            "range": "± 0.0016",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1221.561576,
+            "range": "± 76.262878",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1569.459047,
+            "range": "± 10.943496",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03425,
+            "range": "± 0.001746",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.920506,
+            "range": "± 1.182325",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.800883,
+            "range": "± 0.928796",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
