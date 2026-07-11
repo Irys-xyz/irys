@@ -773,7 +773,7 @@ impl InnerCacheTask {
             // `recover_from_network_partition` truncates the block index
             // inside a consensus-DB write txn (tree-write, then writer-lock).
             // A blocking `read()` here (writer-lock, then tree-read) would
-            // complete that AB-BA cycle and deadlock the node. On contention
+            // complete that lock-order inversion and deadlock the node. On contention
             // this attempt reports `Deferred` and the retry loop above re-runs
             // it once the empty txn has released the writer lock — keeping a
             // doomed entry a little longer is harmless, deleting a live one is
@@ -3338,8 +3338,8 @@ mod tests {
     // tree. While the tree lock is write-held (as `on_block_validation_finished`
     // does across its deep-reorg branch, which itself opens a consensus-DB write
     // txn), the attempt must report Deferred with nothing written — not block on
-    // the tree while holding the MDBX writer lock, which would complete an AB-BA
-    // deadlock. Holding the write guard on THIS thread makes `try_read` fail
+    // the tree while holding the MDBX writer lock, which would complete a
+    // lock-order inversion deadlock. Holding the write guard on THIS thread makes `try_read` fail
     // deterministically without any deadlock.
     #[tokio::test]
     async fn defers_scrub_attempt_while_tree_lock_is_write_held() -> eyre::Result<()> {
