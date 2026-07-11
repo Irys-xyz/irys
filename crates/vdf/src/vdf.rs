@@ -115,21 +115,11 @@ pub fn run_vdf<B: BlockProvider>(
             break;
         }
 
-        // VDF re-anchor: after a deep reorg the block-tree gate ships canonical
-        // seeds to heal a buffer poisoned across a reset boundary. We rewrite the
-        // buffer's VALUES in place and leave the counter forward (see
-        // `VdfState::reanchor_seeds`), then continue stepping from the new tip.
-        // The watch channel holds only the newest request, so a burst of deep
-        // reorgs coalesces to the freshest canonical window by construction.
+        // Latest-value re-anchor: rewrite buffer values, leave counter forward.
         if reanchor_receiver.has_changed().unwrap_or(false)
             && let Some(request) = reanchor_receiver.borrow_and_update().clone()
         {
-            // Re-assert suspect before healing. A request queued while a prior
-            // heal was mid-recompute is only consumed AFTER that heal's
-            // `record_heal_applied` cleared the flag; without this re-mark the
-            // second heal would freeze the counter with the stall suppression
-            // in `wait_for_step_inner` disarmed, escalating a live validation
-            // wait into the never-mislabel panic.
+            // Re-mark suspect: a prior heal may have cleared the flag mid-queue.
             reanchor_signals.mark_buffer_suspect();
             match apply_reanchor(
                 request,
@@ -143,13 +133,7 @@ pub fn run_vdf<B: BlockProvider>(
                     new_hash,
                     new_next_seed,
                 } => {
-                    // Bump the fast-forward generation and clear the suspect
-                    // flag. Any step stamped with an older generation was
-                    // validated against the pre-heal buffer and is dropped by
-                    // the check in the fast-forward loop below — a precise
-                    // barrier, not an indiscriminate drain: post-heal steps
-                    // (current generation) are still applied, so an in-flight
-                    // validation waiting on its own steps is not stranded.
+                    // Bump generation + clear suspect; stale-stamped FF steps drop.
                     reanchor_signals.record_heal_applied();
                     hash = new_hash;
                     next_reset_seed = new_next_seed;
@@ -157,9 +141,7 @@ pub fn run_vdf<B: BlockProvider>(
                         vdf.global_step_number = global_step_number,
                         "VDF buffer re-anchored to canonical after deep reorg"
                     );
-                    // Step numbers are unchanged, so nothing else prompts miners to
-                    // discard rotation derived from the poisoned seeds — tell them to
-                    // rebuild from the healed buffer.
+                    // Notify miners: step numbers unchanged but seeds were healed.
                     broadcast_mining_service.broadcast_reanchored();
                 }
                 // Buffer untouched; the suspect flag stays set, so the
@@ -182,10 +164,7 @@ pub fn run_vdf<B: BlockProvider>(
         // check for VDF fast forward step
         while let Ok(traced_ff_step) = fast_forward_receiver.try_recv() {
             let (proposed_ff_step, _entered) = traced_ff_step.into_inner();
-            // Drop a step stamped with an older re-anchor generation: it was
-            // validated against a buffer that has since been re-anchored in place,
-            // so replaying it could re-poison the healed buffer. The sender re-emits
-            // it under the current generation when the block requeues.
+            // Drop steps validated against a pre-heal buffer.
             if proposed_ff_step.generation < reanchor_signals.generation() {
                 debug!(
                     vdf.ff_step = proposed_ff_step.global_step_number,
@@ -201,27 +180,8 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number, proposed_ff_step.step
                 );
 
-                // The confirmed-step reset-boundary gate (see `is_reset_boundary_blocked`)
-                // intentionally does NOT apply on the fast-forward path, so the snapshot's
-                // `confirmed_global_step_number` is discarded here. FF replays the steps of a
-                // block already under validation into the shared step buffer verbatim; it never
-                // runs the loop ahead, so it cannot reproduce the #1447 run-ahead bug (the local
-                // loop applying a reset seed pinned by a still-forkable block).
-                //
-                // A residual, *theoretical* concern remains: the step buffer is a single
-                // append-only sequence and validation rejects a block whose steps disagree with
-                // it, so a competing fork whose post-boundary steps differ could — if validated
-                // first — make the canonical block be rejected. Reaching that requires a reorg
-                // ~one reset window deep (where the boundary's reset seed is pinned), far deeper
-                // than `block_migration_depth`. Such a fork is already refused at p2p block-pool
-                // admission (`PartOfAPrunedFork`, plus the block tree's no-reorg-past-migration
-                // rule) before its blocks are ever validated/fast-forwarded, so the FF path needs
-                // no gate. Full mechanism, the deep-reorg bound, the admission guards, and the
-                // invariant relied upon: design/docs/vdf-reset-seed-confirmation-gate.md.
-                // Seed for the boundary we are about to cross after storing this step:
-                // look up the block ending at or before (proposed_step - 1), not the tip.
-                // Tip-only next_seed is wrong when local is behind the tip across a reset
-                // window (partition recovery / catch-up).
+                // FF path is not gated by is_reset_boundary_blocked (replays
+                // validated steps only). Per-step reset seed, not tip next_seed.
                 if let Some(CanonicalVdfSnapshot {
                     vdf_info,
                     confirmed_global_step_number: _,
@@ -281,8 +241,6 @@ pub fn run_vdf<B: BlockProvider>(
             reset_seed_for_step,
         }) = block_provider.canonical_vdf_snapshot(global_step_number)
         {
-            // Per-step seed: the reset seed pinned for the next boundary above
-            // `global_step_number`, not always the tip's next_seed.
             next_reset_seed = reset_seed_for_step;
             canonical_global_step_number = vdf_info.global_step_number;
             confirmed_global_step_number = confirmed_step;
@@ -296,32 +254,15 @@ pub fn run_vdf<B: BlockProvider>(
             );
         }
 
-        // Reset-boundary gate (see `is_reset_boundary_blocked`): do not cross the upcoming
-        // boundary until the CONFIRMED chain (block_migration_depth deep) has reached the
-        // rotation point, so the seed applied at the boundary was pinned by a block that can
-        // no longer be reorged. Gating on the confirmed step is what prevents the run-ahead
-        // seed poisoning of issue #1447.
-        //
-        // Fail closed: always gate on the confirmed step, never the (still-forkable) canonical
-        // tip. The cost is run-ahead budget equal to the confirmation lag (canonical_step -
-        // confirmed_step ≈ block_migration_depth blocks), which is negligible against a
-        // production reset window — so honest mining keeps its head room while the full
-        // confirmation guarantee holds unconditionally.
         let is_too_far_ahead = is_reset_boundary_blocked(
             global_step_number + 1,
             vdf_reset_frequency,
             confirmed_global_step_number,
         );
 
-        // Free-running steps while the buffer is suspect would (a) mine on
-        // minority-fork seeds and (b) push `live_step` further past the
-        // second-boundary skip in `apply_reanchor`, making heals harder to land.
-        // Pause local production until a heal clears the flag; FF of validated
-        // peer steps still runs above and is generation-stamped.
+        // Pause free-run while suspect; FF of validated steps still runs above.
         let buffer_suspect = reanchor_signals.is_buffer_suspect();
 
-        // if mining disabled, buffer suspect, or gated at a reset boundary —
-        // wait and continue (re-check re-anchor / FF first next iteration).
         if !is_mining_enabled.load(std::sync::atomic::Ordering::Relaxed)
             || buffer_suspect
             || is_too_far_ahead
@@ -481,28 +422,9 @@ enum ReanchorOutcome {
     PoisonedLock,
 }
 
-/// Apply a [`ReanchorRequest`]: overwrite the seed buffer with the canonical
-/// window `[floor, c_step]`, recompute the free-running tail `(c_step, live_step]`
-/// from the canonical tip seed (mirroring the main loop's step derivation), and
-/// install it via `VdfState::reanchor_seeds` — leaving the step counter forward
-/// at `live_step`.
-///
-/// Fold schedule for the recompute (each fold seed must be pinned by a canonical
-/// block at or before the tip):
-/// - at `c_step` itself, when it sits on a reset boundary: the tip's `seed`
-///   (the first post-tip block starts at `c_step + 1`, contains no boundary
-///   step, and so carries the tip's `seed` forward per `calculate_seeds`);
-/// - at the FIRST boundary strictly after `c_step`: the tip's `next_seed`
-///   (that boundary's rotation block sits at `B - reset_frequency <= c_step`);
-/// - at the SECOND boundary after `c_step`: no canonical block has pinned the
-///   fold seed yet (its rotation block lies strictly past the tip), so the
-///   request is [`ReanchorOutcome::Skipped`] rather than folded speculatively.
-///   The gate re-sends with a fresher `c_step` on the next canonical advance.
-///
-/// The tail recompute is sequential (~1 s/step at production difficulty) and
-/// runs on the VDF thread, so it honours `shutdown_token`: a cancellation
-/// mid-recompute aborts to [`ReanchorOutcome::Skipped`] BEFORE the buffer
-/// write, keeping shutdown prompt instead of stalling it into the watchdog.
+/// Apply a re-anchor: write canonical `[floor, c_step]`, recompute free-run
+/// tail to `live_step`. Skips if the tail would need a second unpinned boundary
+/// fold, or on shutdown mid-recompute.
 #[must_use]
 fn apply_reanchor(
     request: ReanchorRequest,
@@ -520,8 +442,6 @@ fn apply_reanchor(
     } = request;
     let reset_frequency = config.reset_frequency as u64;
 
-    // Guard against an unusable request rather than corrupt the buffer: an empty
-    // window, or a canonical tip somehow ahead of the free-running counter.
     let Some(tip_seed) = canonical_seeds.back().map(|s| s.0) else {
         warn!(
             c_step,
@@ -536,10 +456,7 @@ fn apply_reanchor(
         );
         return ReanchorOutcome::Skipped;
     }
-    // The tail may fold at most ONE boundary past the tip (see the fn doc). The
-    // second boundary after `c_step` is `(c_step / rf + 2) * rf` whether or not
-    // `c_step` sits on a boundary itself; reaching it means folding a seed no
-    // canonical block has pinned.
+    // At most one boundary fold past the tip (second is unpinned).
     if reset_frequency != 0 {
         let second_boundary_after_tip = (c_step / reset_frequency)
             .saturating_add(2)
@@ -555,17 +472,9 @@ fn apply_reanchor(
         }
     }
 
-    // Recompute the free-running tail `(c_step, live_step]` exactly as the main
-    // loop would: salt(step-1) -> vdf_sha -> store the pre-reset value -> fold at
-    // boundaries per the schedule in the fn doc. `running` tracks the seed fed
-    // into the NEXT step (post-reset), matching `hash` in the loop. When `c_step`
-    // sits on a boundary this first fold uses the tip's `seed`; off-boundary it
-    // is a no-op and the argument is ignored.
+    // Free-run tail: same salt → vdf_sha → boundary fold as the main loop.
     let mut running = process_reset(c_step, tip_seed, reset_frequency, seed);
     for step in (c_step + 1)..=live_step {
-        // Abort BEFORE the buffer write: plain `Skipped` semantics — the
-        // suspect flag stays set and the gate re-sends from the next canonical
-        // tip if the node comes back before shutdown completes.
         if shutdown_token.is_cancelled() {
             warn!(
                 c_step,
@@ -594,35 +503,15 @@ fn apply_reanchor(
         }
     }
 
-    // `running` is the post-reset seed at `live_step` — the hash the loop needs to
-    // compute `live_step + 1`. Adopt the canonical reset seed for future steps.
     ReanchorOutcome::Healed {
         new_hash: running,
         new_next_seed: next_seed,
     }
 }
 
-/// Returns `true` when the VDF loop must NOT yet cross the upcoming reset boundary.
-///
-/// The reset seed applied at boundary `B` is pinned by a rotation block at step
-/// `B - reset_frequency`. The loop may cross `B` only once the CONFIRMED chain — the
-/// canonical chain truncated to `block_migration_depth` deep, reported as
-/// `confirmed_global_step_number` — has itself reached that rotation point. Crossing then
-/// implies the rotation block is at least `block_migration_depth` blocks deep and so safe
-/// from reorg, which is exactly what prevents the run-ahead seed poisoning of issue #1447.
-///
-/// Gating on the confirmed step (rather than the canonical tip, the original behaviour)
-/// folds the old "readiness" check and the confirmation requirement into one comparison,
-/// and is inherently reorg- and startup-safe: `confirmed_global_step_number` only advances
-/// as blocks migrate, so it cannot be fooled by a fork-loser block briefly at the tip, by
-/// a seed re-pinned across a reorg, or by a freshly started node's tip.
-///
-/// This is the SHALLOW-reorg half of fork-related VDF correctness — prevention inside the
-/// loop. The DEEP-reorg half is an out-of-band cure:
-/// `BlockTreeServiceInner::maybe_reanchor_vdf_after_reorg` re-anchors the buffer once a reorg
-/// has already crossed a divergent boundary (see `reorg_crossed_divergent_boundary`). Two
-/// homes because they need different information; see
-/// `design/docs/vdf-reset-seed-confirmation-gate.md`.
+/// True if free-run must not yet cross the next reset boundary.
+/// Requires the confirmed (migrated) step to have reached `B - reset_frequency`.
+/// See `design/docs/vdf-reset-seed-confirmation-gate.md`.
 #[must_use]
 pub fn is_reset_boundary_blocked(
     next_global_step: u64,
@@ -1166,15 +1055,6 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// A re-anchor request consumed AFTER a prior heal cleared the suspect flag
-    /// must itself run suspect-marked. `run_vdf` clears the flag on an applied
-    /// heal, so a request queued while that heal was still recomputing arrives
-    /// with the flag already clear; the consume-time re-mark is what keeps the
-    /// following heal (or a deterministic skip) from running unmarked and
-    /// disarming the stall suppression in `wait_for_step_inner` — the path that
-    /// escalates a live validation wait into the never-mislabel panic. A skip
-    /// never sets the flag, so the second request (its tip ahead of the live
-    /// step) can only leave the buffer suspect via that re-mark.
     #[tokio::test]
     async fn consuming_a_reanchor_request_re_marks_the_buffer_suspect() {
         // Bounded poll over a flag the VDF thread flips from another OS thread;

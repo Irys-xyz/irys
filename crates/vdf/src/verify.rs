@@ -1,17 +1,8 @@
-//! Pure, stateless VDF check functions.
-//!
-//! These join the existing VDF validators (`last_step_checkpoints_is_valid`,
-//! `vdf_step_batch_is_valid`) to give `irys-vdf` one verification surface. They
-//! return `eyre::Result<()>`; the actor validation layer maps the result back to
-//! its own `ValidationResult` / `PreValidationError` types at the call sites,
-//! preserving the exact error variant, message, and metric label.
+//! Pure, stateless VDF header checks (`eyre::Result`; actors map to their errors).
 
 use irys_types::IrysBlockHeader;
 
 /// Validate a block's VDF `seed` / `next_seed` against its parent.
-///
-/// Recomputes the expected seed pair from the parent header and the reset
-/// frequency and compares it to the block's embedded seeds.
 #[tracing::instrument(level = "trace", skip_all)]
 pub fn is_seed_data_valid(
     block_header: &IrysBlockHeader,

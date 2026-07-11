@@ -14,27 +14,9 @@ use tokio::time::{Duration, timeout};
 /// this channel between each ~1s SHA step, so a healthy consumer never fills it.
 pub const VDF_FAST_FORWARD_CHANNEL_CAPACITY: usize = 4_096;
 
-/// Shared re-anchor signals: the heal generation counter and the buffer-suspect
-/// flag, one allocation pair shared by the fast-forward sender, `run_vdf`, the
-/// block-tree re-anchor gate, and recall-range validation.
-///
-/// - **generation**: bumped by `run_vdf` on every APPLIED heal. Fast-forward
-///   steps are stamped with the generation captured when their validation
-///   began; `run_vdf` drops steps stamped older than current, so steps
-///   validated against a pre-heal buffer can never replay onto the healed one.
-/// - **suspect**: set by the block-tree gate when it queues a [`ReanchorRequest`]
-///   (the buffer may hold minority-fork seeds), re-asserted by `run_vdf` as it
-///   consumes a request (so a heal whose request was queued while the PREVIOUS
-///   heal — whose completion cleared the flag — was still recomputing still
-///   runs suspect-marked); cleared by `run_vdf` when a heal applies. While set,
-///   recall-range validation must not trust the buffer in EITHER direction,
-///   and the gate re-sends a fresh request from every new canonical tip,
-///   backstopped by the block-tree watchdog tick (the retry sources for a
-///   skipped heal).
-///
-/// Mutation is sealed: only `run_vdf` (in-crate) can bump the generation or
-/// clear the suspect flag. Marking suspect is public — the only external writer
-/// is the gate, and a spurious mark merely costs a slower validation path.
+/// Shared re-anchor generation + buffer-suspect flag (FF senders, `run_vdf`,
+/// block-tree gate, recall-range validation). Generation bumps on applied heal;
+/// suspect is set while a heal is pending/running.
 #[derive(Debug, Clone)]
 pub struct ReanchorSignals {
     generation: Arc<AtomicU64>,
@@ -49,24 +31,12 @@ impl ReanchorSignals {
         }
     }
 
-    /// Current re-anchor generation. `0` until the first applied heal.
-    ///
-    /// `Acquire` pairs with the `Release`/`AcqRel` stores in
-    /// [`Self::record_heal_applied`]: a reader that observes generation `N`
-    /// also observes the buffer rewrite that happened under the VDF write lock
-    /// immediately before that store (and cannot treat pre-heal seeds as
-    /// generation-`N`-validated).
+    /// Current re-anchor generation (`0` until first applied heal). Acquire.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// Applied-heal transition: invalidate steps stamped under older
-    /// generations and mark the buffer trustworthy again. `run_vdf` only.
-    ///
-    /// Must be called **after** `reanchor_seeds` under/after the write lock.
-    /// `AcqRel`/`Release` publish the heal so concurrent validators with
-    /// `Acquire` loads cannot observe a new generation against a pre-heal
-    /// buffer (and cannot re-poison via stale-stamped FF).
+    /// After `reanchor_seeds`: bump generation and clear suspect (`run_vdf` only).
     pub(crate) fn record_heal_applied(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.buffer_suspect.store(false, Ordering::Release);
@@ -74,40 +44,26 @@ impl ReanchorSignals {
         crate::metrics::record_reanchor_healed();
     }
 
-    /// Mark the seed buffer suspect (a re-anchor request is pending or about to
-    /// run). Called by the block-tree gate BEFORE it queues the request, so
-    /// validation observes the flag no later than the heal — and by `run_vdf`
-    /// as it consumes a request, so a heal never runs with the flag clear.
-    /// `Release` pairs with [`Self::is_buffer_suspect`]'s `Acquire`.
+    /// Mark buffer untrusted (gate before queue; `run_vdf` on consume). Release.
     pub fn mark_buffer_suspect(&self) {
         self.buffer_suspect.store(true, Ordering::Release);
         crate::metrics::record_buffer_suspect(true);
     }
 
-    /// Whether a queued re-anchor has not yet been applied. While true, the
-    /// seed buffer must not be treated as authoritative.
+    /// True while a re-anchor is pending/running — do not trust the seed buffer.
     pub fn is_buffer_suspect(&self) -> bool {
         self.buffer_suspect.load(Ordering::Acquire)
     }
 }
 
-/// TEST-ONLY mutation handle, mirroring `VdfStateReadonly::test_set_step`:
-/// lets downstream crates' tests (the actors watchdog lifecycle tests) drive
-/// the applied-heal transition without a running `run_vdf` thread.
 #[cfg(any(test, feature = "test-utils"))]
 impl ReanchorSignals {
-    /// Forward to the sealed [`Self::record_heal_applied`].
     pub fn test_record_heal_applied(&self) {
         self.record_heal_applied();
     }
 }
 
-/// Sentinel error from [`VdfFastForwardSender::send_validated_batch`]: the
-/// re-anchor generation changed between validation start and send, so the batch
-/// was validated against a since-healed buffer and must not be replayed.
-/// Downcast by the validation service and routed to the requeue lane
-/// (`VdfValidationResult::Cancelled`) — the block revalidates against the
-/// healed buffer; this is never block-invalidity evidence.
+/// Generation changed mid-validation; batch must revalidate (not invalid).
 #[derive(Debug, thiserror::Error)]
 #[error(
     "VDF re-anchor generation changed during validation (captured {captured}, current {current}); batch dropped for revalidation"
@@ -117,13 +73,7 @@ pub struct VdfReanchorGenerationChanged {
     pub current: u64,
 }
 
-/// Sending half of the VDF fast-forward channel.
-///
-/// Nominal newtype over `Sender<Traced<VdfStep>>` that exposes only
-/// [`Self::send_validated_batch`]. Steps pushed through it must already be
-/// validated, or explicitly trusted by the sync path (`skip_vdf_validation`); the
-/// type makes the raw `Sender` (which carries no such invariant) unreachable
-/// outside this crate.
+/// Fast-forward send half: only validated (or sync-trusted) steps.
 #[derive(Debug, Clone)]
 pub struct VdfFastForwardSender {
     sender: Sender<Traced<VdfStep>>,
@@ -131,22 +81,13 @@ pub struct VdfFastForwardSender {
 }
 
 impl VdfFastForwardSender {
-    /// Re-anchor generation to capture BEFORE validating the steps a batch will
-    /// carry; pass it back to [`Self::send_validated_batch`].
+    /// Capture before validation; pass into [`Self::send_validated_batch`].
     pub fn current_generation(&self) -> u64 {
         self.signals.generation()
     }
 
-    /// Replay a contiguous batch of VDF steps into local state. The steps must
-    /// already be validated, or explicitly trusted by the sync path. Delegates to
-    /// [`fast_forward_validated_steps`] (same tracing span and fail-stop
-    /// semantics), stamping each step with `captured_generation` — the value the
-    /// caller read via [`Self::current_generation`] BEFORE validation began.
-    ///
-    /// Fails with [`VdfReanchorGenerationChanged`] if a heal applied since the
-    /// capture: the steps were validated against the pre-heal buffer and must be
-    /// revalidated, not replayed. Even if a heal lands between this check and
-    /// the send, the steps carry the stale stamp and `run_vdf` drops them.
+    /// Replay a pre-validated step batch, stamped with `captured_generation`.
+    /// Fails with [`VdfReanchorGenerationChanged`] if a heal applied since capture.
     pub async fn send_validated_batch(
         &self,
         start_step_number: u64,
@@ -173,10 +114,7 @@ impl VdfFastForwardSender {
     }
 }
 
-/// Create the bounded VDF fast-forward channel. Returns the sender, the receiver
-/// (consumed by `run_vdf`), and the shared [`ReanchorSignals`]: senders stamp
-/// the generation onto each step and `run_vdf` bumps it on every applied
-/// re-anchor, so steps in flight across a heal are dropped rather than replayed.
+/// Bounded VDF fast-forward channel + shared [`ReanchorSignals`].
 pub fn fast_forward_channel() -> (
     VdfFastForwardSender,
     Receiver<Traced<VdfStep>>,
@@ -194,39 +132,21 @@ pub fn fast_forward_channel() -> (
     )
 }
 
-/// A request to heal the VDF seed buffer to canonical after a deep reorg,
-/// WITHOUT moving the step counter. Built by the block-tree gate (which holds the
-/// canonical chain) and applied by `run_vdf` under its write guard.
+/// Heal the seed buffer to canonical without moving the step counter.
 #[derive(Debug, Clone)]
 pub struct ReanchorRequest {
-    /// Canonical seed values for `[c_step - canonical_seeds.len() + 1, c_step]`,
-    /// oldest first. These overwrite the poisoned buffer over that range.
+    /// Canonical seeds for `[c_step - len + 1, c_step]`, oldest first.
     pub canonical_seeds: VecDeque<Seed>,
-    /// The highest step for which a canonical seed is supplied (the canonical
-    /// tip). `run_vdf` recomputes the free-running tail `(c_step, live_step]`
-    /// locally from `canonical_seeds`' last value.
+    /// Canonical tip step; free-running tail is recomputed to `live_step`.
     pub c_step: u64,
-    /// The canonical tip's `seed` — the reset seed folded at `c_step` itself
-    /// when `c_step` sits exactly on a reset boundary (the first post-tip block
-    /// starts at `c_step + 1`, contains no boundary step of its own, and so
-    /// carries the tip's `seed` forward as its fold value per
-    /// `calculate_seeds`). Ignored when `c_step` is off-boundary.
+    /// Tip `seed` (fold value when `c_step` is on a reset boundary).
     pub seed: H256,
-    /// The canonical `next_seed` to fold at the FIRST reset boundary strictly
-    /// after `c_step` (its rotation block is at or before the canonical tip).
-    /// Later boundaries are unpinned — `apply_reanchor` refuses to fold them.
+    /// `next_seed` for the first boundary strictly after `c_step`.
     pub next_seed: H256,
 }
 
-/// The first VDF reset boundary at which two forks that split at `lca_step` can
-/// fold DIFFERENT reset seeds. The seed applied at boundary `B` is pinned by the
-/// rotation block at step `B - reset_frequency`, so the forks diverge only once
-/// that rotation block lies strictly after the fork point: `B - reset_frequency >
-/// lca_step`. The smallest such multiple of `reset_frequency` is
-/// `(lca_step / reset_frequency + 2) * reset_frequency`. Below it the forks share
-/// every rotation block, their VDF buffers agree, and no re-anchor is needed.
-///
-/// `reset_frequency` must be non-zero (the caller guards this).
+/// First reset boundary where forks splitting at `lca_step` can fold different seeds.
+/// `reset_frequency` must be non-zero.
 #[must_use]
 pub fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
     (lca_step / reset_frequency)
@@ -234,13 +154,7 @@ pub fn first_divergent_boundary(lca_step: u64, reset_frequency: u64) -> u64 {
         .saturating_mul(reset_frequency)
 }
 
-/// Whether a reorg that split at `lca_step` and drove the local VDF as far as
-/// `crossing_step` (the furthest either fork ran past the fork point) crossed a
-/// *divergent* reset boundary — i.e. may have left the seed buffer poisoned and
-/// in need of a re-anchor. Below [`first_divergent_boundary`] the forks share
-/// every rotation block, so their buffers already agree and no heal is needed.
-///
-/// `reset_frequency` must be non-zero (the caller guards this).
+/// True if progress to `crossing_step` past `lca_step` may have poisoned the buffer.
 #[must_use]
 pub fn reorg_crossed_divergent_boundary(
     lca_step: u64,
@@ -250,31 +164,20 @@ pub fn reorg_crossed_divergent_boundary(
     crossing_step >= first_divergent_boundary(lca_step, reset_frequency)
 }
 
-/// Receiving half of the VDF re-anchor channel, consumed by `run_vdf`.
-///
-/// A `watch` receiver: the channel holds only the LATEST request, so a burst of
-/// deep reorgs coalesces to the newest window by construction — no bounded
-/// queue that could drop the freshest request on overflow.
+/// Latest-value re-anchor channel (coalesces to newest request).
 pub type ReanchorReceiver = watch::Receiver<Option<ReanchorRequest>>;
 
-/// Sending half of the VDF re-anchor channel. Owned by `irys-vdf`; the block-tree
-/// gate holds the sender, `run_vdf` consumes the [`ReanchorReceiver`].
 #[derive(Debug, Clone)]
 pub struct VdfReanchorSender(watch::Sender<Option<ReanchorRequest>>);
 
 impl VdfReanchorSender {
-    /// Non-blocking publish from the synchronous block-tree reorg handler.
-    /// Latest-value semantics: a newer request REPLACES any unconsumed older
-    /// one (each later request carries a fresher canonical window). Returns
-    /// `false` only when the receiver is gone (VDF thread not running).
+    /// Non-blocking publish; replaces any unconsumed request. `false` if VDF is down.
     #[must_use]
     pub fn try_send(&self, request: ReanchorRequest) -> bool {
         self.0.send(Some(request)).is_ok()
     }
 }
 
-/// Create the VDF re-anchor channel. The gate holds the [`VdfReanchorSender`];
-/// `run_vdf` consumes the [`ReanchorReceiver`].
 pub fn reanchor_channel() -> (VdfReanchorSender, ReanchorReceiver) {
     let (tx, rx) = watch::channel(None);
     (VdfReanchorSender(tx), rx)
@@ -358,12 +261,7 @@ mod tests {
     use rstest::rstest;
     use std::time::Duration;
 
-    /// The deep-reorg re-anchor gate's divergent-boundary math.
-    /// `first_divergent_boundary` must return the FIRST reset boundary whose
-    /// rotation block (at `B - reset_frequency`) lies strictly after the fork
-    /// point — the first boundary at which the two forks can fold different reset
-    /// seeds. The invariants pin the off-by-one exactly: this boundary's rotation
-    /// block is past the LCA, and the previous boundary's is not.
+    /// Off-by-one pins for [`first_divergent_boundary`].
     #[rstest]
     #[case::lca_on_boundary(0, 5, 10)]
     #[case::lca_just_after_boundary(6, 5, 15)]

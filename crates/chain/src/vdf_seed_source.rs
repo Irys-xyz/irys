@@ -31,22 +31,9 @@ impl VdfSeedSource for DbVdfSeedSource<'_> {
     }
 }
 
-/// Pure replay of the VDF seed history, parameterised over the block-header
-/// lookup so the genesis / shallow / deep / capacity-boundary cases are
-/// unit-testable without a database.
-///
-/// Behaviour matches the legacy `create_state` replay, including the
-/// **`capacity + 1`** case: when `capacity` steps are exhausted EXACTLY at the
-/// height-1 block's boundary the loop still advances to the genesis block and
-/// prepends its seed, so the returned window can hold `capacity + 1` seeds.
-/// The prepend is guarded, not unconditional: when the capacity cut lands
-/// strictly INSIDE the height-1 block (a suffix of its steps consumed), the
-/// walk also ends on genesis, but prepending would fabricate a gap over the
-/// skipped steps and shift `first_step` off by their count — so the anchor is
-/// added only when the collected window actually abuts it (front at global
-/// step 2). `first_step` is derived as `global_step - ordered_seeds.len() + 1`
-/// (matching `VdfState::get_steps`), which yields the one-based genesis
-/// contract (`{1, 1, [genesis.steps[0]]}` for a genesis-only chain).
+/// Replay VDF seeds via `get_header` (testable without DB). May return
+/// `capacity + 1` seeds when the capacity cut lands exactly on the height-1
+/// boundary (genesis prepend only if the window abuts step 2).
 fn replay_vdf_seeds(
     latest_block_hash: BlockHash,
     capacity: usize,
@@ -58,10 +45,6 @@ fn replay_vdf_seeds(
     let mut steps_remaining = capacity;
 
     while steps_remaining > 0 && block.height > 0 {
-        // Fail fast on a non-contiguous seed history: a block's steps must bridge
-        // cleanly from its parent's global step. The downstream `create_state`
-        // contract only re-checks the derived arithmetic, not the actual step
-        // numbers, so a hole here would otherwise install a mis-mapped window.
         let prev = get_header(&block.previous_block_hash);
         let step_count =
             u64::try_from(block.vdf_limiter_info.steps.0.len()).expect("step count fits in u64");
@@ -88,8 +71,6 @@ fn replay_vdf_seeds(
     }
 
     if block.height == 0 {
-        // One-based genesis contract: the genesis anchor carries exactly its
-        // single step at global step 1.
         assert_eq!(
             block.vdf_limiter_info.global_step_number, 1,
             "genesis anchor must sit at VDF global step 1",
@@ -99,11 +80,7 @@ fn replay_vdf_seeds(
             1,
             "genesis anchor must carry exactly one VDF step",
         );
-        // Prepend only when the collected window abuts the anchor (its front is
-        // global step 2). The walk also lands on genesis when the capacity cut
-        // stops strictly inside the height-1 block — there the front is a later
-        // step, and prepending would splice the genesis seed under a gap and
-        // mis-map every `first_step`-derived lookup by the skipped count.
+        // Prepend genesis only when the window abuts step 2 (no fabricated gap).
         let steps_collected = u64::try_from(seeds.len()).expect("seed window length fits in u64");
         let window_first_step = global_step_number - steps_collected + 1;
         if window_first_step == 2 {

@@ -639,41 +639,9 @@ impl InnerCacheTask {
         Ok(())
     }
 
-    /// Spawns a background thread to remove specific txids from `CachedDataRoot.txid_set` entries.
-    ///
-    /// Called when the mempool prunes expired txs or the reorg handler observes
-    /// a failed orphan re-ingress.  In both cases the *decision to scrub* is
-    /// made on stale state (either pre-TTL or pre-reorg-cleanup); by the time
-    /// this task runs the world may have moved on — most importantly, the tx
-    /// may have been re-confirmed by a new block that arrived in the gap.
-    ///
-    /// `txid_set` is **authoritative state** (see [`CachedDataRoot::txid_set`]
-    /// docs).  Removing an entry whose tx has since been (re-)confirmed
-    /// would make the prune loop miss that confirmation's chunk-retention
-    /// constraint and evict the CDR before chunk migration completes,
-    /// destroying chunks that are still needed.  Per-txid recheck in
-    /// [`Self::prune_txids_from_cached_data_roots`] closes that race across
-    /// both confirmation states, keeping a txid if either holds:
-    ///   - `IrysDataTxMetadata[tx_id]` is `Some`: the tx is migrated
-    ///     (canonical metadata is written only at migration).
-    ///   - the tx_id appears in the canonical block-tree window: the tx is
-    ///     confirmed but not yet migrated, so no metadata row exists yet.
-    ///     Only the canonical chain counts — "(re-)confirmed" means on the
-    ///     branch this node currently follows.
-    /// Together they restore the pre-migration retention contract.
-    ///
-    /// Residual race the recheck does not close: a peer gossips the tx back
-    /// in during the scrub window and `cache_data_root` re-adds it to
-    /// `txid_set`, but the tx has NOT confirmed anywhere — no metadata row
-    /// and not in the canonical tree window.  The scrub would drop it.
-    /// Bounded by mempool TTL re-population and `cache_data_root` idempotency
-    /// on the next ingress.  Acceptable for the current architecture; revisit
-    /// if the mempool grows a strong "currently-pending" signal that can be
-    /// consulted from MDBX context.
-    ///
-    /// Uses a background thread (matching `spawn_pruning_task`) to avoid
-    /// blocking the actor loop.  Sends `PruneTxidsCompleted` when done so
-    /// the service can drive the queue.
+    /// Background scrub of `CachedDataRoot.txid_set` after mempool prune / reorg.
+    /// Keeps any txid that is migrated (`IrysDataTxMetadata`) or still in the
+    /// canonical tree window (confirmed but not yet migrated).
     fn spawn_prune_txids_task(&self, by_data_root: HashMap<H256, Vec<H256>>) {
         let clone = self.clone();
         std::thread::spawn(move || {
@@ -711,18 +679,8 @@ impl InnerCacheTask {
         });
     }
 
-    /// Scrub body for [`Self::spawn_prune_txids_task`]: removes the queued
-    /// txids from their `CachedDataRoot.txid_set` entries, keeping any that has
-    /// been (re-)confirmed since the scrub was queued. See that method's docs
-    /// for the full race rationale.
-    ///
-    /// Retries until an attempt lands: the batch is one-shot (the mempool sends
-    /// it on tx-removal and reorg events, with no later re-producer), so
-    /// dropping it when [`Self::try_prune_txids_once`] defers on block-tree
-    /// contention would leave stale `txid_set` entries pinning cached data
-    /// roots indefinitely. Each attempt commits its own (possibly empty) write
-    /// txn, so the MDBX writer lock is released between retries. Runs on the
-    /// scrub worker thread, where sleeping is harmless.
+    /// Retrying scrub body: one-shot batches must not be dropped on tree-lock
+    /// deferral (stale `txid_set` entries would pin data roots).
     fn prune_txids_from_cached_data_roots(
         &self,
         by_data_root: &HashMap<H256, Vec<H256>>,
@@ -747,37 +705,15 @@ impl InnerCacheTask {
         }
     }
 
-    /// One txid-scrub attempt inside a single write txn. Returns
-    /// [`TxidScrubAttempt::Deferred`] — having written nothing — when the
-    /// block-tree lock is write-held; the caller retries.
+    /// One scrub attempt; [`TxidScrubAttempt::Deferred`] if the tree is write-held.
     fn try_prune_txids_once(
         &self,
         by_data_root: &HashMap<H256, Vec<H256>>,
     ) -> eyre::Result<TxidScrubAttempt> {
         self.db.update_eyre(|db_tx| {
-            // Snapshot the txids carried by the canonical block-tree window AFTER
-            // the write txn has taken the MDBX writer lock, so the
-            // confirmed-but-unmigrated arm below is read at the same instant as
-            // the migrated arm (`get_data_tx_metadata` on `db_tx`). Capturing it
-            // before `update_eyre` would miss a tx (re-)confirmed while this task
-            // waited on the serialized writer lock: such a tx has no
-            // `IrysDataTxMetadata` row yet (written only at migration) and would
-            // be absent from a pre-wait snapshot, so both recheck arms would drop
-            // a live tx. Reading only the canonical chain scopes "(re-)confirmed"
-            // to the branch this node currently follows.
-            //
-            // The tree read MUST be non-blocking here. This closure holds the
-            // serialized MDBX writer lock, and `on_block_validation_finished`
-            // takes the two locks in the OPPOSITE order on its deep-reorg
-            // branch: it holds the tree WRITE lock while
-            // `recover_from_network_partition` truncates the block index
-            // inside a consensus-DB write txn (tree-write, then writer-lock).
-            // A blocking `read()` here (writer-lock, then tree-read) would
-            // complete that lock-order inversion and deadlock the node. On contention
-            // this attempt reports `Deferred` and the retry loop above re-runs
-            // it once the empty txn has released the writer lock — keeping a
-            // doomed entry a little longer is harmless, deleting a live one is
-            // not.
+            // Snapshot canonical tree txids after taking the MDBX writer lock
+            // (same instant as the metadata recheck). try_read only: blocking
+            // would invert lock order with deep-reorg (tree-write → DB write).
             let tree_set: HashSet<H256> = {
                 let tree = match self.block_tree_guard.try_read() {
                     Ok(tree) => tree,
@@ -3239,14 +3175,7 @@ mod tests {
         Ok(())
     }
 
-    // T4 (regression pin for the writer-lock-wait race): a tx (re-)confirmed
-    // in the canonical tree while the scrub is parked on the MDBX writer lock
-    // must be kept. The tree snapshot must be read inside the write txn (after
-    // the lock is held), so a confirmation landing during the wait is observed;
-    // a snapshot taken before `update_eyre` would freeze the tree ahead of the
-    // wait and wrongly scrub the tx. The test holds the global writer lock, so
-    // the scrub's in-closure tree read is ordered strictly after the tree
-    // mutation below — no sleeps, deterministic.
+    // T4: tx confirmed while scrub waits on MDBX writer lock must be kept.
     #[test]
     fn spares_txid_confirmed_during_writer_lock_wait() -> eyre::Result<()> {
         use irys_domain::{ChainState, CommitmentSnapshot, EpochSnapshot, dummy_ema_snapshot};
@@ -3334,13 +3263,7 @@ mod tests {
         Ok(())
     }
 
-    // T5 (deadlock guard): a single scrub attempt must be NON-BLOCKING on the
-    // tree. While the tree lock is write-held (as `on_block_validation_finished`
-    // does across its deep-reorg branch, which itself opens a consensus-DB write
-    // txn), the attempt must report Deferred with nothing written — not block on
-    // the tree while holding the MDBX writer lock, which would complete a
-    // lock-order inversion deadlock. Holding the write guard on THIS thread makes `try_read` fail
-    // deterministically without any deadlock.
+    // T5: try_read defers while the tree write lock is held (no lock-order inversion).
     #[tokio::test]
     async fn defers_scrub_attempt_while_tree_lock_is_write_held() -> eyre::Result<()> {
         // Stale by construction: not in the tree window, no metadata row — an
@@ -3391,11 +3314,7 @@ mod tests {
         Ok(())
     }
 
-    // T6 (batch survives contention): the retrying wrapper must carry a
-    // deferred one-shot batch through to completion once the tree lock frees —
-    // dropping it would leave stale `txid_set` entries with no later producer
-    // to re-send them. The worker thread parks on the retry loop while this
-    // thread holds the tree write lock, then completes after the drop.
+    // T6: retrying wrapper completes a deferred one-shot batch once the tree frees.
     #[test]
     fn retries_deferred_scrub_until_tree_lock_frees() -> eyre::Result<()> {
         let tx_z = H256::random();

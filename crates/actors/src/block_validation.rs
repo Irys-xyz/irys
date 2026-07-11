@@ -1513,16 +1513,7 @@ impl ValidationError {
     }
 }
 
-/// Guards [`VDFLimiterInfo::first_step_number`] against a malformed step count.
-///
-/// A block whose declared step count exceeds `global_step_number` has no valid
-/// first step (it would sit below genesis). `first_step_number` saturates that
-/// case to 0 rather than panicking — defence in depth against an abort-class
-/// underflow on network data — but the saturated 0 is a nonsense step number
-/// that must never reach continuity or seed maths, so this guard rejects the
-/// block before any `first_step_number` call. An honest block never carries
-/// more steps than its global step number; this rejects only crafted/corrupt
-/// inputs.
+/// Reject step counts that would underflow [`VDFLimiterInfo::first_step_number`].
 fn vdf_step_count_is_consistent(
     global_step_number: u64,
     step_count: u64,
@@ -1600,17 +1591,8 @@ pub async fn prevalidate_block(
         "prev_output_is_valid",
     );
 
-    // Check VDF step-number continuity: the block's first step must immediately
-    // follow the parent's last step. `prev_output_is_valid` above proves only the
-    // VALUE (block.prev_output == parent.output), not the step NUMBER — without it,
-    // the batch verifier would seed the block's first step from `prev_output` at the
-    // block's own claimed salt, accepting a block that skipped intervening VDF steps
-    // and so defeating the sequential-work guarantee. Header-rooted, so it stays
-    // poison-safe: it never consults the local seed buffer.
-    //
-    // SECURITY: reject a block whose declared step count would underflow
-    // `first_step_number()` (see `vdf_step_count_is_consistent`) BEFORE that call.
-    // (`.saturating_sub(1)` below only clamps the RESULT, not the inner subtraction.)
+    // Step-number continuity (prev_output only checks the hash value).
+    // Guard underflow before first_step_number().
     vdf_step_count_is_consistent(
         block.vdf_limiter_info.global_step_number,
         block.vdf_limiter_info.steps.len() as u64,
@@ -3568,30 +3550,11 @@ impl RecallRangeError {
     }
 }
 
-/// Returns Ok if the vdf recall range in the block is valid.
+/// Validate the block's VDF recall range.
 ///
-/// After a deep reorg across a VDF reset boundary the local seed buffer can be
-/// "poisoned" — it holds the minority fork's steps for the post-boundary range
-/// while the canonical block under validation carries the correct ones. The
-/// buffer is therefore never authoritative against a block: on a buffer
-/// MISMATCH we rebuild the step window from the block's OWN canonical ancestry
-/// (block tree, DB fallback) and re-check, rejecting only if it still
-/// mismatches; and while a re-anchor is pending (`buffer_suspect`) the buffer
-/// is not consulted at all — a poisoned buffer could otherwise falsely ACCEPT
-/// a block whose recall offset was crafted against this node's minority
-/// window. A missing ancestor yields a soft `StepsUnavailable` (requeue),
-/// never a hard reject.
-///
-/// The buffer fast path stays for the healthy case because the recall window
-/// is `[reset_step, block_step]` on the recall-range grid
-/// (`num_recall_ranges_in_partition`, ~189k steps on mainnet): rebuilding it
-/// from ancestry for every block is not viable, so the walk is reserved for
-/// suspect windows and buffer mismatches.
-///
-/// Residual (accepted): a block crafted against this node's poisoned window
-/// can still fast-path in the gap before the reorg gate marks the buffer
-/// suspect. It costs the attacker a fully valid mined block and yields one
-/// transient orphan on one node.
+/// Fast path: local seed buffer. On mismatch or `buffer_suspect`, rebuild the
+/// window from the block's ancestry (tree/DB) and re-check; missing ancestors
+/// → soft `StepsUnavailable`.
 pub async fn recall_recall_range_is_valid(
     block: &IrysBlockHeader,
     config: &ConsensusConfig,
@@ -3616,15 +3579,12 @@ pub async fn recall_recall_range_is_valid(
     ))
     .map_err(|_| RecallRangeError::StepsUnavailable(eyre::eyre!("recall range count too large")))?;
 
-    // Authoritative re-check from the block's own canonical ancestry, used
-    // whenever the buffer cannot be trusted (suspect window or mismatch).
+    // Ancestry rebuild when the local buffer cannot be trusted.
     let fork_local_check = |cause: String| -> Result<(), RecallRangeError> {
         let resolve = |hash: &H256| resolve_header_tree_or_db(block_tree_guard, db, hash);
         let Some(fork_steps) =
             build_fork_local_step_window(block, reset_step_number, global_step_number, resolve)
         else {
-            // Couldn't rebuild the window (an ancestor is unavailable). Treat
-            // as a local gap → requeue, never a hard reject.
             return Err(RecallRangeError::StepsUnavailable(eyre::eyre!(
                 "fork-local step window unavailable ({cause})"
             )));
@@ -3638,10 +3598,6 @@ pub async fn recall_recall_range_is_valid(
         .map_err(RecallRangeError::Mismatch)
     };
 
-    // Degraded-mode path: buffer suspect after a deep-reorg heal, so this walks the block's own
-    // ancestry (header/DB reads), not re-hashing — same per-step hash as the fast path.
-    // Accepted: rare trigger, cleared within roughly one heal cycle by the free-run pause.
-    // Watch: correlated DB pressure with the block-tree window rebuild on the same reorg event.
     if buffer_suspect {
         info!(
             block.hash = %block.block_hash,
@@ -3665,16 +3621,11 @@ pub async fn recall_recall_range_is_valid(
         return Ok(());
     };
 
-    // The buffer disagrees. Re-check from the block's own canonical ancestry —
-    // the buffer may be poisoned by a cross-boundary reorg while this canonical
-    // block is correct.
+    // Buffer mismatch — re-check from the block's own ancestry.
     fork_local_check(format!("buffer mismatch: {buffer_mismatch}"))
 }
 
-/// Resolve a block header by hash, preferring the in-memory block tree (which
-/// holds the un-migrated canonical tail) and falling back to the database for
-/// older, migrated history. Used to rebuild a fork-local VDF step window from a
-/// block's own canonical ancestry.
+/// Header by hash: block tree first, then DB.
 pub(crate) fn resolve_header_tree_or_db(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -3686,10 +3637,6 @@ pub(crate) fn resolve_header_tree_or_db(
     match db.view_eyre(|tx| block_header_by_hash(tx, hash, false)) {
         Ok(header) => header,
         Err(e) => {
-            // A DB read FAILURE is not a genuinely absent ancestor. Callers treat
-            // `None` as "unavailable → soft requeue", which is the right safe
-            // behaviour either way, but log the underlying error so a real MDBX/I-O
-            // fault is diagnosable instead of silently swallowed.
             tracing::warn!(
                 block.hash = %hash,
                 error = ?e,
@@ -3700,12 +3647,8 @@ pub(crate) fn resolve_header_tree_or_db(
     }
 }
 
-/// Rebuild the VDF step window `[want_start, want_end]` from a block's own
-/// canonical ancestry, so recall-range validation can re-check a canonical
-/// block whose steps disagree with a locally-poisoned seed buffer. `want_end`
-/// must equal the block's tip step (`vdf_limiter_info.global_step_number`).
-/// Walks parent pointers via `resolve`; returns `None` if an ancestor covering
-/// the window is unavailable (→ soft `StepsUnavailable`, requeue).
+/// Rebuild VDF steps `[want_start, want_end]` from the block's ancestry via `resolve`.
+/// `want_end` must be the block tip step. Returns `None` if an ancestor is missing.
 pub(crate) fn build_fork_local_step_window(
     block: &IrysBlockHeader,
     want_start: u64,
