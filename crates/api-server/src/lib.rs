@@ -187,6 +187,7 @@ pub fn routes() -> impl HttpServiceFactory {
             "/mempool/status",
             web::get().to(mempool::get_mempool_status),
         )
+        .route("/mempool/txs", web::get().to(mempool::get_mempool_txs))
         // Mining endpoint
         .route("/mining/info", web::get().to(mining::get_mining_info))
         // Supply endpoint

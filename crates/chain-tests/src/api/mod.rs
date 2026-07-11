@@ -5,6 +5,7 @@ mod commitment_anchor_window;
 mod external_api;
 mod hardfork_tests;
 mod ledger_offset_endpoint;
+mod mempool_txs;
 mod pricing_endpoint;
 mod supply_endpoint;
 mod tx;

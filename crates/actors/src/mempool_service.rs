@@ -936,6 +936,95 @@ impl AtomicMempoolState {
         }
     }
 
+    /// Snapshot of unconfirmed pending transactions for the public list API.
+    ///
+    /// Filters out txs that already carry confirmation metadata (`included_height`
+    /// / `promoted_height`) so the list matches "still awaiting inclusion".
+    /// Collects light metadata only (ids, sizes, roots) under a single read lock;
+    /// `limit` caps each returned list (callers should clamp to
+    /// [`MEMPOOL_TXS_MAX_LIMIT`]).
+    ///
+    /// Order is stable by transaction id (base58 `H256` byte order).
+    ///
+    /// Best-effort under contention: returns an empty list when the read lock
+    /// cannot be acquired (same pattern as `get_status`).
+    pub async fn get_pending_txs(
+        &self,
+        config: &NodeConfig,
+        chunk_ingress: &ChunkIngressState,
+        limit: usize,
+    ) -> MempoolPendingTxs {
+        let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
+        let chunk_size = config.consensus_config().chunk_size.max(1);
+
+        let state = match self.read().await {
+            Ok(g) => g,
+            Err(e) => {
+                warn!(
+                    ?e,
+                    "Mempool read lock contention; get_pending_txs returning empty"
+                );
+                return MempoolPendingTxs::empty(pending_chunks_count);
+            }
+        };
+
+        // Unconfirmed data txs only — confirmed ones stay in mempool for reorgs.
+        let mut data_txs: Vec<MempoolPendingDataTx> = state
+            .valid_submit_ledger_tx
+            .values()
+            .filter(|tx| {
+                tx.metadata().included_height.is_none() && tx.promoted_height().is_none()
+            })
+            .map(|tx| {
+                let byte_size = tx.data_size;
+                MempoolPendingDataTx {
+                    id: tx.id,
+                    byte_size,
+                    chunks: byte_size.div_ceil(chunk_size),
+                    data_root: tx.data_root,
+                    ledger_id: tx.ledger_id,
+                }
+            })
+            .collect();
+        data_txs.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut commitment_txs: Vec<MempoolPendingCommitmentTx> = state
+            .valid_commitment_tx
+            .values()
+            .flatten()
+            .filter(|tx| tx.metadata().included_height.is_none())
+            .map(|tx| MempoolPendingCommitmentTx {
+                id: tx.id(),
+                address: tx.signer(),
+            })
+            .collect();
+        commitment_txs.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let total_data_tx_count = data_txs.len();
+        let total_commitment_tx_count = commitment_txs.len();
+        let data_truncated = total_data_tx_count > limit;
+        let commitment_truncated = total_commitment_tx_count > limit;
+        let truncated = data_truncated || commitment_truncated;
+
+        if data_truncated {
+            data_txs.truncate(limit);
+        }
+        if commitment_truncated {
+            commitment_txs.truncate(limit);
+        }
+
+        MempoolPendingTxs {
+            data_tx_count: data_txs.len(),
+            commitment_tx_count: commitment_txs.len(),
+            data_txs,
+            commitment_txs,
+            pending_chunks_count,
+            truncated,
+            total_data_tx_count: truncated.then_some(total_data_tx_count),
+            total_commitment_tx_count: truncated.then_some(total_commitment_tx_count),
+        }
+    }
+
     pub async fn mark_fingerprint_as_invalid(&self, fingerprint: H256) {
         match self.write().await {
             Ok(mut g) => {
