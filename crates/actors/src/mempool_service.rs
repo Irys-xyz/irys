@@ -938,29 +938,29 @@ impl AtomicMempoolState {
 
     /// Unconfirmed pending txs for `GET /v1/mempool/txs`.
     ///
-    /// Omits confirmed metadata (`included_height` / `promoted_height`). Sorted
-    /// ascending by raw `H256` id; `after_id` returns ids strictly greater
-    /// (forward page). `chunk_size` derives `chunks` (clamped to ≥1). Best-effort
-    /// empty on lock contention (same as `get_status`).
+    /// Omits confirmed metadata (`included_height` / `promoted_height`). Each
+    /// list is sorted ascending by raw `H256` id and paged independently via
+    /// [`MempoolTxsCursor`]. `chunk_size` derives `chunks` (clamped to ≥1).
+    /// Best-effort empty on lock contention (same as `get_status`).
     pub async fn get_pending_txs(
         &self,
         chunk_size: u64,
         chunk_ingress: &ChunkIngressState,
         limit: usize,
-        after_id: Option<H256>,
+        cursor: MempoolTxsCursor,
     ) -> MempoolPendingTxs {
-        /// Sort/dedup by id, apply `after_id`, truncate to `limit`.
+        /// Sort/dedup by id, apply list-local `after`, truncate to `limit`.
         /// Returns `(page, full_unconfirmed_total, has_more)`.
         fn paginate_by_id<T>(
             mut items: Vec<T>,
             id_of: impl Fn(&T) -> H256,
-            after_id: Option<H256>,
+            after: Option<H256>,
             limit: usize,
         ) -> (Vec<T>, usize, bool) {
             items.sort_by_key(&id_of);
             items.dedup_by(|a, b| id_of(a) == id_of(b));
             let total = items.len();
-            if let Some(after) = after_id {
+            if let Some(after) = after {
                 items.retain(|t| id_of(t) > after);
             }
             let more = items.len() > limit;
@@ -1018,10 +1018,11 @@ impl AtomicMempoolState {
             .collect();
 
         let (data_txs, total_data_tx_count, data_more) =
-            paginate_by_id(data_txs, |t| t.id, after_id, limit);
+            paginate_by_id(data_txs, |t| t.id, cursor.after_data_id, limit);
         let (commitment_txs, total_commitment_tx_count, commitment_more) =
-            paginate_by_id(commitment_txs, |t| t.id, after_id, limit);
+            paginate_by_id(commitment_txs, |t| t.id, cursor.after_commitment_id, limit);
         let truncated = data_more || commitment_more;
+        let next_cursor = truncated.then(|| cursor.advance(&data_txs, &commitment_txs).encode());
 
         MempoolPendingTxs {
             data_tx_count: data_txs.len(),
@@ -1030,6 +1031,7 @@ impl AtomicMempoolState {
             commitment_txs,
             pending_chunks_count,
             truncated,
+            next_cursor,
             total_data_tx_count: truncated.then_some(total_data_tx_count),
             total_commitment_tx_count: truncated.then_some(total_commitment_tx_count),
         }

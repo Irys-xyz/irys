@@ -5,15 +5,15 @@
 ```http
 GET /v1/mempool/txs
 GET /v1/mempool/txs?limit=100
-GET /v1/mempool/txs?limit=100&after_id=<base58 H256>
+GET /v1/mempool/txs?limit=100&cursor=<next_cursor>
 ```
 
 Public, unauthenticated HTTP (same CORS model as `/v1/tip` and `/v1/mempool/status`).
 
-| Param      | Default | Cap   | Description |
-|------------|---------|-------|-------------|
-| `limit`    | `100`   | `500` | Max entries **per list** (`data_txs` and `commitment_txs`) |
-| `after_id` | —       | —     | Forward cursor: ids strictly after this base58 `H256`. Malformed → **400**. |
+| Param    | Default | Cap   | Description |
+|----------|---------|-------|-------------|
+| `limit`  | `100`   | `500` | Max entries **per list** (`data_txs` and `commitment_txs`) |
+| `cursor` | —       | —     | Opaque dual-list page token from a prior `next_cursor`. Malformed → **400**. |
 
 Related count-only endpoint (unchanged): `GET /v1/mempool/status`.
 
@@ -21,7 +21,7 @@ Related count-only endpoint (unchanged): `GET /v1/mempool/status`.
 
 - **Pending** = in this node’s mempool and unconfirmed (`included_height` /
   `promoted_height` unset). Includes out-of-order `pending_pledges`.
-- **Order**: ascending by raw `H256` bytes (not base58 string order).
+- **Order**: each list ascending by raw `H256` bytes (not base58 string order).
 - **Empty pool**: **200** with empty arrays / zero counts (never 404).
 - **Ids**: base58 `H256`, same as block ledger `txIds` and `GET /v1/tx/{id}`.
 
@@ -48,16 +48,28 @@ Related count-only endpoint (unchanged): `GET /v1/mempool/status`.
 }
 ```
 
-### Truncation / paging
+When `truncated` is true, also:
 
-When more unconfirmed txs remain after `after_id` + `limit`:
+```json
+{
+  "truncated": true,
+  "next_cursor": "v1.<data_id|_>.<commitment_id|_>",
+  "total_data_tx_count": 250,
+  "total_commitment_tx_count": 12
+}
+```
 
-- `truncated: true` — next page: `after_id=<last returned id for that list>`
-- array counts = returned lengths; `total_*_tx_count` = full unconfirmed totals
-- `truncated` is shared across both lists (true until both are fully paged)
+### Cursor semantics
 
-`after_id` filters **both** lists by the same id order. Prefer a high enough
-`limit` for simple pollers; use the cursor when you need the full set.
+- Data and commitment lists page **independently**. The cursor stores a separate
+  forward bound for each list (`after_data_id`, `after_commitment_id`).
+- Wire format: `v1.<data_base58|_>.<commitment_base58|_>` (`_` = no bound yet).
+- On each truncated page, `next_cursor` advances each side to the last id
+  returned in that list (keeps the prior bound if that list’s page was empty).
+- Client loop: request without `cursor` → while `truncated`, call again with
+  `cursor=<next_cursor>`. No duplicates or omissions across pages for either
+  list (IDs are strictly greater than that list’s bound).
+- Prefer a large enough `limit` for simple pollers; use `cursor` for full dumps.
 
 `pending_chunks_count` matches `/v1/mempool/status` (not truncated).
 
@@ -79,8 +91,13 @@ Full headers via `GET /v1/tx/{id}`.
 curl -sS "http://127.0.0.1:1984/v1/mempool/txs" | jq .
 curl -sS "http://127.0.0.1:1984/v1/mempool/txs?limit=50" | jq .
 
-last=$(curl -sS "http://127.0.0.1:1984/v1/mempool/txs?limit=50" | jq -r '.data_txs[-1].id')
-curl -sS "http://127.0.0.1:1984/v1/mempool/txs?limit=50&after_id=$last" | jq .
+# Page through a large pool
+cursor=$(curl -sS "http://127.0.0.1:1984/v1/mempool/txs?limit=50" | jq -r '.next_cursor // empty')
+while [ -n "$cursor" ]; do
+  resp=$(curl -sS "http://127.0.0.1:1984/v1/mempool/txs?limit=50&cursor=$cursor")
+  echo "$resp" | jq '{data: .data_tx_count, commit: .commitment_tx_count, truncated}'
+  cursor=$(echo "$resp" | jq -r '.next_cursor // empty')
+done
 
 curl -sS "http://127.0.0.1:1984/v1/mempool/status" \
   | jq '{data_tx_count, commitment_tx_count, pending_chunks_count}'

@@ -1,7 +1,7 @@
 use crate::ApiState;
 use actix_web::{HttpResponse, Result, web};
 use irys_actors::mempool_service::{
-    MEMPOOL_TXS_DEFAULT_LIMIT, MEMPOOL_TXS_MAX_LIMIT, MempoolPendingTxs,
+    MEMPOOL_TXS_DEFAULT_LIMIT, MEMPOOL_TXS_MAX_LIMIT, MempoolPendingTxs, MempoolTxsCursor,
 };
 use serde::Deserialize;
 
@@ -23,13 +23,13 @@ pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpRespon
 pub struct MempoolTxsQuery {
     /// Max entries per list (`data_txs` / `commitment_txs`). Default 100, cap 500.
     pub limit: Option<usize>,
-    /// Forward cursor (base58 `H256`): return ids strictly after this value.
-    pub after_id: Option<String>,
+    /// Opaque dual-list cursor from a prior `next_cursor` (`v1.<data|_>.<commit|_>`).
+    pub cursor: Option<String>,
 }
 
 /// GET /v1/mempool/txs — light unconfirmed pending-tx list (empty pool → 200 + `[]`).
 ///
-/// Use `?after_id=` when `truncated` is true. See `MempoolPendingTxs`.
+/// When `truncated`, continue with `?cursor=<next_cursor>`. See `MempoolPendingTxs`.
 pub async fn get_mempool_txs(
     state: web::Data<ApiState>,
     query: web::Query<MempoolTxsQuery>,
@@ -39,15 +39,14 @@ pub async fn get_mempool_txs(
         .unwrap_or(MEMPOOL_TXS_DEFAULT_LIMIT)
         .clamp(1, MEMPOOL_TXS_MAX_LIMIT);
 
-    let after_id = match query.after_id.as_deref() {
-        Some(s) => match irys_types::H256::from_base58_result(s) {
-            Ok(id) => Some(id),
+    let cursor = match query.cursor.as_deref() {
+        Some(s) => match MempoolTxsCursor::decode(s) {
+            Ok(c) => c,
             Err(e) => {
-                return Ok(HttpResponse::BadRequest()
-                    .body(format!("invalid after_id (expected base58 H256): {e}")));
+                return Ok(HttpResponse::BadRequest().body(format!("invalid cursor: {e}")));
             }
         },
-        None => None,
+        None => MempoolTxsCursor::default(),
     };
 
     let pending: MempoolPendingTxs = state
@@ -57,7 +56,7 @@ pub async fn get_mempool_txs(
             state.config.consensus.chunk_size,
             &state.chunk_ingress_state,
             limit,
-            after_id,
+            cursor,
         )
         .await;
     Ok(HttpResponse::Ok().json(pending))
@@ -83,6 +82,7 @@ mod tests {
         assert_eq!(object["truncated"], false);
         assert!(object.get("total_data_tx_count").is_none());
         assert!(object.get("total_commitment_tx_count").is_none());
+        assert!(object.get("next_cursor").is_none());
     }
 
     #[test]
@@ -104,18 +104,19 @@ mod tests {
             commitment_tx_count: 1,
             pending_chunks_count: 4,
             truncated: true,
+            next_cursor: Some("v1.a.b".to_owned()),
             total_data_tx_count: Some(250),
             total_commitment_tx_count: Some(10),
         };
         let json = serde_json::to_string(&body).expect("serialise");
         let parsed: MempoolPendingTxs = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(parsed, body);
-        // ids must be base58 strings in JSON (same as /v1/tx/{id})
         let value: serde_json::Value = serde_json::from_str(&json).expect("value");
         assert!(value["data_txs"][0]["id"].as_str().is_some());
         assert_eq!(value["data_txs"][0]["byte_size"], 512);
         assert_eq!(value["data_txs"][0]["chunks"], 1);
         assert_eq!(value["total_data_tx_count"], 250);
+        assert_eq!(value["next_cursor"], "v1.a.b");
     }
 
     #[test]
