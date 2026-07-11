@@ -93,10 +93,7 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
     assert_eq!(entry.data_root, tx.header.data_root);
 
     // 4. GET /v1/tx/{id} succeeds for a listed pending id.
-    let tx_resp = client
-        .get(format!("{base}/v1/tx/{tx_id}"))
-        .send()
-        .await?;
+    let tx_resp = client.get(format!("{base}/v1/tx/{tx_id}")).send().await?;
     assert_eq!(tx_resp.status(), StatusCode::OK);
     let fetched: IrysTransactionResponse = tx_resp.json().await?;
     match fetched {

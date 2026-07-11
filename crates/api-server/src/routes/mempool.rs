@@ -46,11 +46,7 @@ pub async fn get_mempool_txs(
     let pending: MempoolPendingTxs = state
         .mempool_guard
         .atomic_state()
-        .get_pending_txs(
-            &state.config.node_config,
-            &state.chunk_ingress_state,
-            limit,
-        )
+        .get_pending_txs(&state.config.node_config, &state.chunk_ingress_state, limit)
         .await;
     Ok(HttpResponse::Ok().json(pending))
 }

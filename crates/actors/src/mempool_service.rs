@@ -972,9 +972,7 @@ impl AtomicMempoolState {
         let mut data_txs: Vec<MempoolPendingDataTx> = state
             .valid_submit_ledger_tx
             .values()
-            .filter(|tx| {
-                tx.metadata().included_height.is_none() && tx.promoted_height().is_none()
-            })
+            .filter(|tx| tx.metadata().included_height.is_none() && tx.promoted_height().is_none())
             .map(|tx| {
                 let byte_size = tx.data_size;
                 MempoolPendingDataTx {
