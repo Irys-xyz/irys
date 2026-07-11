@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783798424645,
+  "lastUpdate": 1783812524972,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -8899,6 +8899,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000119,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab0d9f541e022e6a7279c1d2f4cfc0354f666067",
+          "message": "fix(consensus): pin shadow-tx priority fees to generator-expected tips (#1478)\n\n* fix(consensus): pin shadow-tx priority fees to generator-expected tips\n\nValidate each shadow transaction's EIP-1559 max_priority_fee_per_gas\nagainst ShadowMetadata.transaction_fee during shadow_transactions_are_valid.\n\nEL skims that raw-wei tip from the packet fee-payer to the miner before\npacket execution; CL previously only compared borsh packets, so a producer\ncould keep a valid packet and inflate the envelope tip to drain users.\nExpected metadata now retains the fee; match rejects tip inflation\n(including nonzero tips where zero is expected). Soft-fork-style check —\nwire format unchanged.\n\n* test(consensus): cover legacy shadow-tx envelope tip normalization\n\nAdd a unit test that builds a real TxLegacy shadow envelope (where\nmax_priority_fee_per_gas is None), asserts the same unwrap_or(0)\nnormalization used in shadow extraction, and checks validation accepts\nexpected fee 0 while rejecting a nonzero expected tip.",
+          "timestamp": "2026-07-11T16:13:48-07:00",
+          "tree_id": "f60d0d37cb7b29def72b695ef28fe4fe83989260",
+          "url": "https://github.com/Irys-xyz/irys/commit/ab0d9f541e022e6a7279c1d2f4cfc0354f666067"
+        },
+        "date": 1783812523858,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015453,
+            "range": "± 0.001509",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.151455,
+            "range": "± 0.005395",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.562144,
+            "range": "± 0.12409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.830469,
+            "range": "± 2.092108",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083689,
+            "range": "± 0.009459",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 833.82827,
+            "range": "± 22.581332",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1023.194062,
+            "range": "± 13.626421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126745,
+            "range": "± 0.00766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1235.181203,
+            "range": "± 55.540643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1567.396774,
+            "range": "± 150.026712",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035084,
+            "range": "± 0.000601",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.97287,
+            "range": "± 1.158647",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.371711,
+            "range": "± 1.401776",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
