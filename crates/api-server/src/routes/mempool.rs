@@ -21,19 +21,15 @@ pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpRespon
 /// Query params for `GET /v1/mempool/txs`.
 #[derive(Debug, Deserialize)]
 pub struct MempoolTxsQuery {
-    /// Max entries per list (`data_txs` and `commitment_txs` each).
-    /// Default: 100. Hard cap: 500.
+    /// Max entries per list (`data_txs` / `commitment_txs`). Default 100, cap 500.
     pub limit: Option<usize>,
+    /// Forward cursor (base58 `H256`): return ids strictly after this value.
+    pub after_id: Option<String>,
 }
 
-/// GET /v1/mempool/txs
+/// GET /v1/mempool/txs — light unconfirmed pending-tx list (empty pool → 200 + `[]`).
 ///
-/// Returns light metadata for **unconfirmed** pending mempool transactions
-/// (ids + sizes; not full headers). Suitable for frequent polling.
-///
-/// Empty mempool → 200 with empty arrays and zero counts (never 404).
-///
-/// See `MempoolPendingTxs` for truncation rules when the pool exceeds `limit`.
+/// Use `?after_id=` when `truncated` is true. See `MempoolPendingTxs`.
 pub async fn get_mempool_txs(
     state: web::Data<ApiState>,
     query: web::Query<MempoolTxsQuery>,
@@ -43,10 +39,26 @@ pub async fn get_mempool_txs(
         .unwrap_or(MEMPOOL_TXS_DEFAULT_LIMIT)
         .clamp(1, MEMPOOL_TXS_MAX_LIMIT);
 
+    let after_id = match query.after_id.as_deref() {
+        Some(s) => match irys_types::H256::from_base58_result(s) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                return Ok(HttpResponse::BadRequest()
+                    .body(format!("invalid after_id (expected base58 H256): {e}")));
+            }
+        },
+        None => None,
+    };
+
     let pending: MempoolPendingTxs = state
         .mempool_guard
         .atomic_state()
-        .get_pending_txs(&state.config.node_config, &state.chunk_ingress_state, limit)
+        .get_pending_txs(
+            state.config.consensus.chunk_size,
+            &state.chunk_ingress_state,
+            limit,
+            after_id,
+        )
         .await;
     Ok(HttpResponse::Ok().json(pending))
 }

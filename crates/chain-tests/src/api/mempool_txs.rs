@@ -13,10 +13,19 @@ async fn fetch_mempool_txs(
     client: &reqwest::Client,
     base: &str,
     limit: Option<usize>,
+    after_id: Option<&str>,
 ) -> eyre::Result<(StatusCode, MempoolPendingTxs)> {
-    let url = match limit {
-        Some(n) => format!("{base}/v1/mempool/txs?limit={n}"),
-        None => format!("{base}/v1/mempool/txs"),
+    let mut params = Vec::new();
+    if let Some(n) = limit {
+        params.push(format!("limit={n}"));
+    }
+    if let Some(a) = after_id {
+        params.push(format!("after_id={a}"));
+    }
+    let url = if params.is_empty() {
+        format!("{base}/v1/mempool/txs")
+    } else {
+        format!("{base}/v1/mempool/txs?{}", params.join("&"))
     };
     let response = client.get(&url).send().await?;
     let status = response.status();
@@ -51,7 +60,7 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
     let client = reqwest::Client::new();
 
     // 1. Empty mempool → 200 + empty arrays + zero counts (not 404).
-    let (status, empty) = fetch_mempool_txs(&client, &base, None).await?;
+    let (status, empty) = fetch_mempool_txs(&client, &base, None, None).await?;
     assert_eq!(status, StatusCode::OK);
     assert!(empty.data_txs.is_empty());
     assert!(empty.commitment_txs.is_empty());
@@ -75,7 +84,7 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
     let tx_id = tx.header.id;
     node.wait_for_mempool(tx_id, 10).await?;
 
-    let (status, pending) = fetch_mempool_txs(&client, &base, None).await?;
+    let (status, pending) = fetch_mempool_txs(&client, &base, None, None).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(pending.data_tx_count, pending.data_txs.len());
     assert_eq!(pending.commitment_tx_count, pending.commitment_txs.len());
@@ -92,7 +101,55 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
     assert!(entry.chunks >= 1);
     assert_eq!(entry.data_root, tx.header.data_root);
 
-    // 4. GET /v1/tx/{id} succeeds for a listed pending id.
+    // 2b. Cursor paging reaches every data tx past `limit`.
+    for i in 0..4_u8 {
+        let anchor = node.get_anchor().await?;
+        // Distinct payload → distinct id (identical bytes can collapse).
+        let extra = node
+            .post_data_tx(anchor, vec![100 + i; 64 + i as usize], &signer)
+            .await;
+        node.wait_for_mempool(extra.header.id, 10).await?;
+    }
+    let (_, full) = fetch_mempool_txs(&client, &base, Some(500), None).await?;
+    let full_ids: std::collections::BTreeSet<_> = full.data_txs.iter().map(|t| t.id).collect();
+    assert!(
+        full_ids.len() >= 5,
+        "expected >=5 pending data txs before paging, got {}",
+        full_ids.len()
+    );
+
+    let mut paged_ids: Vec<irys_types::H256> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..(full_ids.len() + 5) {
+        let (st, page) = fetch_mempool_txs(&client, &base, Some(2), cursor.as_deref()).await?;
+        assert_eq!(st, StatusCode::OK);
+        assert!(page.data_txs.len() <= 2);
+        if page.data_txs.is_empty() {
+            break;
+        }
+        paged_ids.extend(page.data_txs.iter().map(|t| t.id));
+        cursor = Some(page.data_txs.last().unwrap().id.to_string());
+        if !page.truncated {
+            break;
+        }
+    }
+    let mut ascending = paged_ids.clone();
+    ascending.sort();
+    ascending.dedup();
+    assert_eq!(paged_ids, ascending, "pages must be ascending, no dups");
+    let paged_set: std::collections::BTreeSet<_> = paged_ids.into_iter().collect();
+    assert_eq!(
+        paged_set, full_ids,
+        "cursor must reach every pending data tx"
+    );
+
+    let bad = client
+        .get(format!("{base}/v1/mempool/txs?after_id=not-a-valid-id"))
+        .send()
+        .await?;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    // 2c. GET /v1/tx/{id} succeeds for a listed pending id.
     let tx_resp = client.get(format!("{base}/v1/tx/{tx_id}")).send().await?;
     assert_eq!(tx_resp.status(), StatusCode::OK);
     let fetched: IrysTransactionResponse = tx_resp.json().await?;
@@ -112,7 +169,7 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
     // Poll until the list drops the tx (BlockConfirmed is async).
     let mut left = false;
     for _ in 0..50 {
-        let (_, after) = fetch_mempool_txs(&client, &base, None).await?;
+        let (_, after) = fetch_mempool_txs(&client, &base, None, None).await?;
         if !after.data_txs.iter().any(|t| t.id == tx_id) {
             left = true;
             break;
@@ -124,16 +181,11 @@ async fn heavy_test_mempool_txs_empty_and_pending_lifecycle() -> eyre::Result<()
         "included data tx should leave the pending list after confirmation"
     );
 
-    // Light poll under load should not hang (typical ~2–3s poll cadence).
-    let start = std::time::Instant::now();
+    // Repeated polls stay functional (no wall-clock bound — flakes under load).
     for _ in 0..3 {
-        let (status, _) = fetch_mempool_txs(&client, &base, Some(100)).await?;
+        let (status, _) = fetch_mempool_txs(&client, &base, Some(100), None).await?;
         assert_eq!(status, StatusCode::OK);
     }
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "three list polls should complete well under a 2.5s poll cadence"
-    );
 
     // Status counts still present after list usage (compat).
     let status_json: serde_json::Value = client

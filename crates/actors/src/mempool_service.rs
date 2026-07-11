@@ -936,26 +936,40 @@ impl AtomicMempoolState {
         }
     }
 
-    /// Snapshot of unconfirmed pending transactions for the public list API.
+    /// Unconfirmed pending txs for `GET /v1/mempool/txs`.
     ///
-    /// Filters out txs that already carry confirmation metadata (`included_height`
-    /// / `promoted_height`) so the list matches "still awaiting inclusion".
-    /// Collects light metadata only (ids, sizes, roots) under a single read lock;
-    /// `limit` caps each returned list (callers should clamp to
-    /// [`MEMPOOL_TXS_MAX_LIMIT`]).
-    ///
-    /// Order is stable by transaction id (base58 `H256` byte order).
-    ///
-    /// Best-effort under contention: returns an empty list when the read lock
-    /// cannot be acquired (same pattern as `get_status`).
+    /// Omits confirmed metadata (`included_height` / `promoted_height`). Sorted
+    /// ascending by raw `H256` id; `after_id` returns ids strictly greater
+    /// (forward page). `chunk_size` derives `chunks` (clamped to ≥1). Best-effort
+    /// empty on lock contention (same as `get_status`).
     pub async fn get_pending_txs(
         &self,
-        config: &NodeConfig,
+        chunk_size: u64,
         chunk_ingress: &ChunkIngressState,
         limit: usize,
+        after_id: Option<H256>,
     ) -> MempoolPendingTxs {
+        /// Sort/dedup by id, apply `after_id`, truncate to `limit`.
+        /// Returns `(page, full_unconfirmed_total, has_more)`.
+        fn paginate_by_id<T>(
+            mut items: Vec<T>,
+            id_of: impl Fn(&T) -> H256,
+            after_id: Option<H256>,
+            limit: usize,
+        ) -> (Vec<T>, usize, bool) {
+            items.sort_by_key(&id_of);
+            items.dedup_by(|a, b| id_of(a) == id_of(b));
+            let total = items.len();
+            if let Some(after) = after_id {
+                items.retain(|t| id_of(t) > after);
+            }
+            let more = items.len() > limit;
+            items.truncate(limit);
+            (items, total, more)
+        }
+
         let pending_chunks_count = chunk_ingress.pending_chunks_count().await;
-        let chunk_size = config.consensus_config().chunk_size.max(1);
+        let chunk_size = chunk_size.max(1);
 
         let state = match self.read().await {
             Ok(g) => g,
@@ -968,8 +982,8 @@ impl AtomicMempoolState {
             }
         };
 
-        // Unconfirmed data txs only — confirmed ones stay in mempool for reorgs.
-        let mut data_txs: Vec<MempoolPendingDataTx> = state
+        // Confirmed txs stay in mempool for reorgs — exclude them here.
+        let data_txs: Vec<MempoolPendingDataTx> = state
             .valid_submit_ledger_tx
             .values()
             .filter(|tx| tx.metadata().included_height.is_none() && tx.promoted_height().is_none())
@@ -984,32 +998,30 @@ impl AtomicMempoolState {
                 }
             })
             .collect();
-        data_txs.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let mut commitment_txs: Vec<MempoolPendingCommitmentTx> = state
+        // Include `pending_pledges` (out-of-order, still unconfirmed).
+        let commitment_txs: Vec<MempoolPendingCommitmentTx> = state
             .valid_commitment_tx
             .values()
             .flatten()
+            .chain(
+                state
+                    .pending_pledges
+                    .iter()
+                    .flat_map(|(_, inner)| inner.iter().map(|(_, tx)| tx)),
+            )
             .filter(|tx| tx.metadata().included_height.is_none())
             .map(|tx| MempoolPendingCommitmentTx {
                 id: tx.id(),
                 address: tx.signer(),
             })
             .collect();
-        commitment_txs.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let total_data_tx_count = data_txs.len();
-        let total_commitment_tx_count = commitment_txs.len();
-        let data_truncated = total_data_tx_count > limit;
-        let commitment_truncated = total_commitment_tx_count > limit;
-        let truncated = data_truncated || commitment_truncated;
-
-        if data_truncated {
-            data_txs.truncate(limit);
-        }
-        if commitment_truncated {
-            commitment_txs.truncate(limit);
-        }
+        let (data_txs, total_data_tx_count, data_more) =
+            paginate_by_id(data_txs, |t| t.id, after_id, limit);
+        let (commitment_txs, total_commitment_tx_count, commitment_more) =
+            paginate_by_id(commitment_txs, |t| t.id, after_id, limit);
+        let truncated = data_more || commitment_more;
 
         MempoolPendingTxs {
             data_tx_count: data_txs.len(),

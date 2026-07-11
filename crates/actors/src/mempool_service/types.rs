@@ -31,66 +31,48 @@ pub struct MempoolStatus {
     pub commitment_address_capacity_pct: f64,
 }
 
-/// Light metadata for a pending data transaction in the mempool list API.
-///
-/// IDs use the same base58 encoding as block ledger `txIds` and `GET /v1/tx/{id}`.
+/// Pending data-tx entry for `GET /v1/mempool/txs` (id matches ledger / `/v1/tx/{id}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MempoolPendingDataTx {
-    /// Transaction id (base58 `H256`).
     pub id: H256,
-    /// Declared payload size in bytes (`data_size`).
     pub byte_size: u64,
-    /// Number of chunks implied by `byte_size` and consensus `chunk_size`
-    /// (`byte_size.div_ceil(chunk_size)`).
+    /// `byte_size.div_ceil(chunk_size)`.
     pub chunks: u64,
-    /// Merkle root of the transaction data chunks.
     pub data_root: H256,
-    /// Destination ledger id (e.g. Submit / term ledgers).
     pub ledger_id: u32,
 }
 
-/// Light metadata for a pending commitment transaction in the mempool list API.
+/// Pending commitment-tx entry for `GET /v1/mempool/txs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MempoolPendingCommitmentTx {
-    /// Transaction id (base58 `H256`).
     pub id: H256,
-    /// Signer address.
     pub address: IrysAddress,
 }
 
-/// Response body for `GET /v1/mempool/txs`.
+/// `GET /v1/mempool/txs` response: unconfirmed txs only.
 ///
-/// Lists **unconfirmed** mempool transactions only (no `included_height` /
-/// `promoted_height` yet). Confirmed txs may still sit in mempool state for
-/// reorg handling; they are excluded so the list reflects txs still awaiting
-/// inclusion.
-///
-/// When `truncated` is true, `data_txs` / `commitment_txs` are capped by the
-/// request limit and `total_*_tx_count` carries the full unconfirmed totals.
-/// When not truncated, `data_tx_count` / `commitment_tx_count` match the array
-/// lengths (and equal the totals).
+/// When `truncated`, arrays are capped and `total_*_tx_count` holds full totals.
+/// Otherwise counts match array lengths.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MempoolPendingTxs {
     pub data_txs: Vec<MempoolPendingDataTx>,
     pub commitment_txs: Vec<MempoolPendingCommitmentTx>,
-    /// Number of data txs in `data_txs` (always equals `data_txs.len()`).
+    /// Always `data_txs.len()`.
     pub data_tx_count: usize,
-    /// Number of commitment txs in `commitment_txs` (always equals `commitment_txs.len()`).
+    /// Always `commitment_txs.len()`.
     pub commitment_tx_count: usize,
-    /// Pending chunk-ingress entries (same metric as `/v1/mempool/status`).
+    /// Same metric as `/v1/mempool/status`.
     pub pending_chunks_count: usize,
-    /// True when either list was cut short by the limit.
+    /// True when either list has more after the current page.
     pub truncated: bool,
-    /// Full unconfirmed data-tx count when `truncated` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_data_tx_count: Option<usize>,
-    /// Full unconfirmed commitment-tx count when `truncated` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_commitment_tx_count: Option<usize>,
 }
 
 impl MempoolPendingTxs {
-    /// Empty mempool response (HTTP 200, not 404).
+    /// Empty pool (HTTP 200, not 404).
     #[must_use]
     pub fn empty(pending_chunks_count: usize) -> Self {
         Self {
