@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783812524972,
+  "lastUpdate": 1783829456286,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9007,6 +9007,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "1bcd74bb187b37c634eee71da7fe795aeea0402d",
+          "message": "fix(consensus): only fully-written ledger slots may expire post-Cascade",
+          "timestamp": "2026-07-11T23:13:52Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1477/commits/1bcd74bb187b37c634eee71da7fe795aeea0402d"
+        },
+        "date": 1783829455170,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015036,
+            "range": "± 0.001158",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119275,
+            "range": "± 0.002515",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.196578,
+            "range": "± 0.023329",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.922632,
+            "range": "± 0.238563",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074776,
+            "range": "± 0.000407",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 745.19308,
+            "range": "± 2.714007",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.21053,
+            "range": "± 9.800757",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120563,
+            "range": "± 0.002581",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1308.599557,
+            "range": "± 94.427858",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1571.956136,
+            "range": "± 14.582792",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034693,
+            "range": "± 0.001375",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.889958,
+            "range": "± 1.214496",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.763202,
+            "range": "± 1.708476",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
