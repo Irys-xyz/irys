@@ -5,8 +5,9 @@ use crate::{
     block_producer::{calculate_chunks_added, ledger_expiry},
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowMetadata, ShadowTxGenerator},
 };
+use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
@@ -4737,7 +4738,9 @@ pub async fn shadow_transactions_are_valid(
 
     // 3. Extract shadow transactions from the beginning of the block lazily.
     // Per-item errors here (signer recovery, miner mismatch, malformed
-    // shadow tx) are payload-level → consensus.
+    // shadow tx) are payload-level → consensus. Also capture the EIP-1559
+    // envelope tip (`max_priority_fee_per_gas`) — EL skims that raw wei value
+    // from the packet fee-payer to the miner, so consensus must pin it.
     let txs_slice = &evm_block.body.transactions;
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
@@ -4747,14 +4750,16 @@ pub async fn shadow_transactions_are_valid(
             block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
         );
-        Ok(stx)
+        // Shadow txs are composed as EIP-1559; non-dynamic-fee envelopes have
+        // no priority tip → treat as 0 (must match expected fee 0).
+        let priority_fee = tx_ref.max_priority_fee_per_gas().unwrap_or(0);
+        Ok((stx, priority_fee))
     });
 
-    // 4. Generate expected shadow transactions. This call returns a
-    // typed `ValidationError`; local/runtime failures (eviction races,
-    // DB I/O, etc.) surface as `is_internal_failure` variants and are
-    // propagated unchanged, while peer-attributable structural failures
-    // (e.g. missing publish ledger) surface as `ShadowTransactionInvalid`.
+    // 4. Generate expected shadow transactions (packet + consensus tip fee).
+    // Typed `ValidationError`; local/runtime failures (eviction races, DB I/O)
+    // surface as `is_internal_failure` variants; peer-attributable structural
+    // failures surface as `ShadowTransactionInvalid`.
     let expected_txs = generate_expected_shadow_transactions(
         config,
         block_tree_guard,
@@ -4768,7 +4773,7 @@ pub async fn shadow_transactions_are_valid(
     )
     .await?;
 
-    // 5. Validate they match — any error here is a consensus mismatch.
+    // 5. Validate packets AND priority fees match — any error is consensus.
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
         .map_err(|e| reject(e.to_string()))?;
 
@@ -5026,7 +5031,7 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> Result<Vec<ShadowTransaction>, ValidationError> {
+) -> Result<Vec<ShadowMetadata>, ValidationError> {
     // Helpers: classify common failure shapes.
     let parent_hash = block.previous_block_hash;
     let parent_missing = || ValidationError::ParentBlockMissing {
@@ -5211,9 +5216,17 @@ async fn generate_expected_shadow_transactions(
     // epoch snapshot (pre-`touch_active_ledger_slots`) and cannot see the current
     // epoch's write. That is conservative (never a double-pay) and self-healing:
     // once the epoch `touch` bumps the slot's `last_height` it leaves the blocked
-    // set for the rest of the epoch, so at worst a promotion is delayed one block at
-    // the epoch boundary. Replaces the earlier cycle-math approximation — see
-    // NC-0042 §4b.
+    // set for the rest of the epoch. The delay this imposes is bounded but not
+    // always a single block: this set is recomputed every block from the *parent's*
+    // advancing Submit total, so a slot whose fully-written boundary is crossed by
+    // mid-epoch appends re-enters the blocked set as soon as the parent total passes
+    // it, while its `last_height` is not refreshed until the next epoch `touch`. A tx
+    // appended into a slot that completes mid-epoch can therefore be held
+    // non-promotable until that next epoch block — up to ~one epoch, not one block.
+    // The delay is still deterministic (a pure function of the parent header/snapshot,
+    // so every node agrees), cannot refund within the window (settlement is
+    // epoch-gated), and self-heals at the next epoch. Replaces the earlier cycle-math
+    // approximation — see NC-0042 §4b.
     //
     // This is a strict superset of the old same-block guard: a tx whose Submit
     // slot expires *at* this block (same-block epoch collision) and a tx whose
@@ -5305,7 +5318,9 @@ async fn generate_expected_shadow_transactions(
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
         let metadata = result.map_err(classify_shadow_tx_gen_err)?;
-        shadow_txs_vec.push(metadata.shadow_tx);
+        // Keep full metadata: `transaction_fee` is the consensus tip the
+        // producer must place on the EIP-1559 envelope (see match step).
+        shadow_txs_vec.push(metadata);
     }
 
     // Get final treasury balance after processing all transactions
@@ -5323,11 +5338,23 @@ async fn generate_expected_shadow_transactions(
     Ok(shadow_txs_vec)
 }
 
-/// Validates  the actual shadow transactions match the expected ones
+/// Actual shadow tx as observed in the EVM payload: borsh packet plus the
+/// EIP-1559 envelope tip EL will transfer from the fee-payer to the miner.
+type ActualShadowTx = (ShadowTransaction, u128);
+
+/// Validates that actual shadow transactions match the expected ones.
+///
+/// Compares:
+/// 1. Borsh packet equality (existing) — amount, target, refs, solution hash
+/// 2. **EIP-1559 `max_priority_fee_per_gas`** against
+///    [`ShadowMetadata::transaction_fee`] — closes the priority-fee skim where a
+///    producer keeps a valid packet but inflates the envelope tip to drain the
+///    fee-payer. EL charges that tip as raw wei before packet execution; without
+///    this check the tip was producer-controlled and not consensus-pinned.
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn validate_shadow_transactions_match(
-    actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
-    expected: impl Iterator<Item = ShadowTransaction>,
+    actual: impl Iterator<Item = eyre::Result<ActualShadowTx>>,
+    expected: impl Iterator<Item = ShadowMetadata>,
     block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
     // Verify solution hash matches the block
@@ -5341,13 +5368,13 @@ fn validate_shadow_transactions_match(
             tracing::warn!(?data, "shadow tx len mismatch");
             eyre::bail!("actual and expected shadow txs lens differ");
         };
-        let actual = actual?;
+        let (actual_packet, actual_priority_fee) = actual?;
 
         // Validate solution hash for all V1 transactions
         if let ShadowTransaction::V1 {
             packet: _,
             solution_hash,
-        } = &actual
+        } = &actual_packet
             && *solution_hash != expected_hash
         {
             eyre::bail!(
@@ -5359,15 +5386,199 @@ fn validate_shadow_transactions_match(
         }
 
         ensure!(
-            actual == expected,
+            actual_packet == expected.shadow_tx,
             "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
             idx,
-            expected,
-            actual
+            expected.shadow_tx,
+            actual_packet
+        );
+
+        // Consensus tip: must equal the generator's `transaction_fee` (honest
+        // producer path sets compose(..., metadata.transaction_fee)).
+        ensure!(
+            actual_priority_fee == expected.transaction_fee,
+            "Shadow transaction priority fee mismatch at idx {}. expected {}, got {}",
+            idx,
+            expected.transaction_fee,
+            actual_priority_fee
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod shadow_tx_priority_fee_match_tests {
+    use super::*;
+    use irys_reth::shadow_tx::{BalanceDecrement, TransactionPacket};
+    use reth::revm::primitives::U256 as AlloyU256;
+
+    fn solution_hash() -> H256 {
+        H256::repeat_byte(0xAB)
+    }
+
+    fn stake_packet(amount: u64) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: AlloyU256::from(amount),
+                target: Address::repeat_byte(0x11),
+                irys_ref: FixedBytes::repeat_byte(0x22),
+            }),
+            solution_hash().into(),
+        )
+    }
+
+    fn header_with_solution(solution: H256) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.solution_hash = solution;
+        h
+    }
+
+    #[test]
+    fn accepts_matching_packet_and_priority_fee() {
+        let packet = stake_packet(100);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 1_000_000_000,
+        };
+        let actual = std::iter::once(Ok((packet, 1_000_000_000_u128)));
+        let header = header_with_solution(solution_hash());
+        assert!(
+            validate_shadow_transactions_match(actual, std::iter::once(expected), &header).is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_inflated_priority_fee_with_valid_packet() {
+        // The skim attack: packet is exactly what consensus expects, but the
+        // EIP-1559 envelope tip is inflated to drain the fee-payer.
+        let packet = stake_packet(100);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 1_000_000_000,
+        };
+        let actual = std::iter::once(Ok((packet, 50_000_000_000_u128))); // inflated
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("inflated tip must be rejected");
+        assert!(
+            err.to_string().contains("priority fee mismatch"),
+            "error should name the fee mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_nonzero_fee_when_expected_is_zero() {
+        // Refunds / block-adjacent rewards expect tip 0; a nonzero tip is theft.
+        let packet = stake_packet(0);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 0,
+        };
+        let actual = std::iter::once(Ok((packet, 1_u128)));
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("nonzero tip when expected 0 must be rejected");
+        assert!(err.to_string().contains("priority fee mismatch"));
+    }
+
+    #[test]
+    fn still_rejects_packet_mismatch() {
+        let expected = ShadowMetadata {
+            shadow_tx: stake_packet(100),
+            transaction_fee: 1,
+        };
+        let actual = std::iter::once(Ok((stake_packet(999), 1_u128)));
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("wrong packet must be rejected");
+        assert!(err.to_string().contains("Shadow transaction mismatch"));
+    }
+
+    /// Legacy / non-dynamic-fee envelopes expose `max_priority_fee_per_gas() == None`.
+    /// The extraction path in `shadow_transactions_are_valid` must normalize that to
+    /// tip `0` via `unwrap_or(0)` so fee-less expected txs (refunds, block reward)
+    /// still match, while nonzero expected fees reject.
+    #[test]
+    fn legacy_envelope_none_priority_fee_normalizes_to_zero() {
+        use alloy_consensus::{
+            EthereumTxEnvelope, SignableTransaction as _, TxEip4844, TxLegacy, TxType,
+        };
+        use irys_reth::shadow_tx::{
+            SHADOW_TX_DESTINATION_ADDR, detect_and_decode, encode_prefixed_input,
+        };
+        use reth::primitives::transaction::signature::Signature;
+        use reth::revm::primitives::TxKind;
+        use reth_ethereum_primitives::TransactionSigned;
+
+        let packet = stake_packet(0);
+        let legacy = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21_000,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: AlloyU256::ZERO,
+            input: encode_prefixed_input(&packet),
+        };
+        // Signature is not recovered in this unit path; we only exercise fee + decode.
+        let signed: TransactionSigned = EthereumTxEnvelope::<TxEip4844>::Legacy(
+            legacy.into_signed(Signature::test_signature()),
+        );
+
+        assert_eq!(
+            signed.tx_type(),
+            TxType::Legacy,
+            "fixture must be a legacy envelope"
+        );
+        assert!(
+            signed.max_priority_fee_per_gas().is_none(),
+            "legacy envelopes have no max_priority_fee_per_gas field"
+        );
+
+        // Same normalization as the extraction closure in shadow_transactions_are_valid.
+        let priority_fee = signed.max_priority_fee_per_gas().unwrap_or(0);
+        assert_eq!(priority_fee, 0, "None tip must normalize to 0");
+
+        // Envelope still carries a decodable shadow packet (not rejected as non-shadow).
+        let decoded = detect_and_decode(&signed)
+            .expect("decode must succeed")
+            .expect("legacy shadow destination+prefix must be detected as shadow");
+        assert_eq!(decoded, packet);
+
+        let header = header_with_solution(solution_hash());
+
+        // Expected tip 0 → accept after normalization.
+        let expected_zero = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 0,
+        };
+        assert!(
+            validate_shadow_transactions_match(
+                std::iter::once(Ok((decoded.clone(), priority_fee))),
+                std::iter::once(expected_zero),
+                &header,
+            )
+            .is_ok(),
+            "legacy None tip normalizing to 0 must match expected transaction_fee 0"
+        );
+
+        // Expected nonzero tip → reject (cannot skim by smuggling a legacy envelope).
+        let expected_nonzero = ShadowMetadata {
+            shadow_tx: packet,
+            transaction_fee: 1_000_000_000,
+        };
+        let err = validate_shadow_transactions_match(
+            std::iter::once(Ok((decoded, priority_fee))),
+            std::iter::once(expected_nonzero),
+            &header,
+        )
+        .expect_err("legacy tip 0 must not satisfy a nonzero expected fee");
+        assert!(
+            err.to_string().contains("priority fee mismatch"),
+            "error should name the fee mismatch, got: {err}"
+        );
+    }
 }
 
 /// Validates that commitment transactions in a block are ordered correctly
