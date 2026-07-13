@@ -47,8 +47,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # keep build artifacts contained to this repo's workspace on the self-hosted runner
-  CARGO_TARGET_DIR: ${{ github.workspace }}/.target
 
 jobs:
   flaky-tests:
@@ -101,7 +99,7 @@ jobs:
             > flaky-test-results/report.json || true
 
           # Copy the human report + isolation logs from the run's report directory.
-          REPORT_DIR="$(ls -dt .target/nextest-monitor/flaky/*/ target/nextest-monitor/flaky/*/ 2>/dev/null | head -1)"
+          REPORT_DIR="$(ls -dt target/nextest-monitor/flaky/*/ 2>/dev/null | head -1)"
           if [ -n "$REPORT_DIR" ] && [ -f "${REPORT_DIR}report.md" ]; then
             cp "${REPORT_DIR}report.md" flaky-test-results/report.md
             [ -s flaky-test-results/report.json ] || cp "${REPORT_DIR}report.json" flaky-test-results/report.json 2>/dev/null || true
