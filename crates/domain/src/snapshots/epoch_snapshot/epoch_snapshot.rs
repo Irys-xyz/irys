@@ -511,9 +511,7 @@ impl EpochSnapshot {
     fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader, cascade_active: bool) {
         let epoch_height = new_epoch_block.height;
         // Same write-frontier inputs as `touch_active_ledger_slots`: the new
-        // epoch block's cumulative per-ledger totals. Post-Cascade a slot may
-        // only expire once it is fully written, so the write frontier can never
-        // sit inside an expired slot.
+        // epoch block's cumulative per-ledger totals.
         let expired_partitions: Vec<ExpiringPartitionInfo> = self.ledgers.expire_partitions(
             epoch_height,
             cascade_active,

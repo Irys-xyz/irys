@@ -48,6 +48,21 @@ fn fully_written_slot_count(total_chunks: u64, chunks_per_slot: u64) -> u64 {
     total_chunks.checked_div(chunks_per_slot).unwrap_or(0)
 }
 
+/// Post-Cascade slot-expiry gate shared by all three expiry scans
+/// (`get_expired_slot_indexes`, `get_all_expired_slot_indexes`,
+/// `Ledgers::get_perm_expiring_slots`): a slot may expire only once it is fully
+/// written — the write frontier has moved past it (`slot_index < fully_written`),
+/// which also implies it has been written at all. Pre-Cascade the gate is
+/// transparent so replay stays bit-identical to the allocation-anchored behavior.
+fn cascade_expiry_gate(
+    cascade_active: bool,
+    slot: &LedgerSlot,
+    slot_index: usize,
+    fully_written_slots: u64,
+) -> bool {
+    !cascade_active || (slot.has_been_written && (slot_index as u64) < fully_written_slots)
+}
+
 #[derive(Debug, Clone, Copy, Hash)]
 pub struct ExpiringPartitionInfo {
     pub partition_hash: PartitionHash,
@@ -142,9 +157,7 @@ impl TermLedger {
         let expiry_height = epoch_height - min_blocks;
         tracing::info!("Calculated expiry_height={}", expiry_height);
 
-        // Post-Cascade, only fully-written slots may expire — the slot holding
-        // the write frontier stays live so future appends never land in an
-        // expired slot (see `fully_written_slot_count`).
+        // Post-Cascade only fully-written slots may expire — see `cascade_expiry_gate`.
         let fully_written_slots = fully_written_slot_count(total_chunks, chunks_per_slot);
 
         // Collect indices of slots to expire
@@ -162,10 +175,7 @@ impl TermLedger {
                 tracing::warn!("Skipping slot {} (last slot)", slot_index);
                 continue;
             }
-            let written_ok = !cascade_active || slot.has_been_written;
-            let fully_written_ok = !cascade_active || (slot_index as u64) < fully_written_slots;
-            if written_ok
-                && fully_written_ok
+            if cascade_expiry_gate(cascade_active, slot, slot_index, fully_written_slots)
                 && slot.last_height <= expiry_height
                 && !slot.is_expired
             {
@@ -218,10 +228,23 @@ impl TermLedger {
             .iter()
             .enumerate()
             .filter(|(slot_index, slot)| {
+                // An already-recycled slot stays in the inclusive (non-promotability)
+                // set forever, independent of the post-Cascade fully-written gate.
+                // Without this, a slot expired+refunded pre-Cascade while only
+                // partially written would drop out of this set the moment Cascade
+                // activates (its frontier still sits inside it, so it is not
+                // fully written), making its already-refunded txs promotable again
+                // — refund + permanent storage. `is_expired` is only ever set by
+                // the expiry path and pre-Cascade expiry is prefix-ordered, so the
+                // set stays a contiguous prefix in practice; a hypothetical
+                // non-prefix pre-Cascade state trips `expired_submit_range`'s
+                // fail-loud guard rather than silently under-approximating.
+                if slot.is_expired {
+                    return true;
+                }
                 // Never expire the last slot in a ledger (matches get_expired_slot_indexes).
                 *slot_index != last_slot_index
-                    && (!cascade_active || slot.has_been_written)
-                    && (!cascade_active || (*slot_index as u64) < fully_written_slots)
+                    && cascade_expiry_gate(cascade_active, slot, *slot_index, fully_written_slots)
                     && slot.last_height <= expiry_height
             })
             .map(|(slot_index, _)| slot_index)
@@ -648,10 +671,7 @@ impl Ledgers {
             // safe for the perm ledger too. Publish offsets are cumulative like
             // the term ledgers', so the fully-written frontier rule applies the
             // same way (see `fully_written_slot_count`).
-            let written_ok = !cascade_active || slot.has_been_written;
-            let fully_written_ok = !cascade_active || (slot_index as u64) < fully_written_slots;
-            if written_ok
-                && fully_written_ok
+            if cascade_expiry_gate(cascade_active, slot, slot_index, fully_written_slots)
                 && slot.last_height <= expiry_height
                 && !slot.is_expired
             {
@@ -1397,6 +1417,35 @@ mod tests {
             ledgers.get_all_expired_term_slot_indexes(DataLedger::Submit, height, false, 15, 10),
             vec![0, 1],
             "pre-Cascade replay must keep the allocation-anchored expiry for partial slots"
+        );
+    }
+
+    /// Activation-boundary containment: a slot recycled while only partially
+    /// written (an allocation-anchored pre-Cascade expiry, per
+    /// `pre_cascade_partially_written_slot_still_expires`) must STAY in the
+    /// inclusive non-promotability set once Cascade activates. The fully-written
+    /// gate alone would drop it (its frontier still sits inside it), making its
+    /// already-refunded txs promotable again — refund + permanent storage. The
+    /// `is_expired` override keeps it in; without it, slot 1 disappears and the
+    /// set is just `[0]`.
+    #[test]
+    fn expired_partial_slot_stays_in_inclusive_set_post_cascade() {
+        let config = ConsensusConfig::testing();
+        let min_blocks = config.epoch.submit_ledger_epoch_length * config.epoch.num_blocks_in_epoch;
+
+        // Data [0, 15): slot 0 full, slot 1 holds the write frontier (5/10).
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 0, 15, 10, 50, true);
+        // The pre-Cascade epoch recycled the partially-written slot 1.
+        ledgers.slots_mut(DataLedger::Submit)[1].is_expired = true;
+
+        // Post-Cascade `fully_written_slots == 15/10 == 1`, so the gate excludes
+        // slot 1 — but `is_expired` keeps the already-recycled slot in the set.
+        let height = min_blocks + 100;
+        assert_eq!(
+            ledgers.get_all_expired_term_slot_indexes(DataLedger::Submit, height, true, 15, 10),
+            vec![0, 1],
+            "a slot recycled while partially written must remain non-promotable post-Cascade"
         );
     }
 
