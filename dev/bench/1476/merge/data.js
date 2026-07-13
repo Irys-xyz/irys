@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783812524972,
+  "lastUpdate": 1783952382200,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9007,6 +9007,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000114,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "63e6ccc064198b730a8e6bc502bef5dd6ca18c48",
+          "message": "fix: clip orphaned chunk ranges to storage module bounds in deep-reorg recovery",
+          "timestamp": "2026-07-11T23:13:52Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1476/commits/63e6ccc064198b730a8e6bc502bef5dd6ca18c48"
+        },
+        "date": 1783952380648,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012857,
+            "range": "± 0.00046",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.12614,
+            "range": "± 0.006002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.260824,
+            "range": "± 0.031753",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.202429,
+            "range": "± 0.755686",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083384,
+            "range": "± 0.001529",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 823.094696,
+            "range": "± 23.219851",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 988.856188,
+            "range": "± 22.186039",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120166,
+            "range": "± 0.001556",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1227.314198,
+            "range": "± 18.879509",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1582.376993,
+            "range": "± 96.245426",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.144568,
+            "range": "± 0.060275",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 322.6014,
+            "range": "± 43.323005",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 384.316027,
+            "range": "± 18.128844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000157,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
