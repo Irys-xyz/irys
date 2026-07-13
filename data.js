@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783812524972,
+  "lastUpdate": 1783968562963,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9006,6 +9006,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000114,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "37e3299a440abb28f769bc57c558f68622699d1a",
+          "message": "fix(consensus): only fully-written ledger slots may expire post-Cascade (#1477)\n\n* fix(consensus): only fully-written ledger slots may expire post-Cascade\n\nLedger chunk offsets are strictly cumulative and headroom slots are\npreallocated above the write frontier, so a partially-written frontier\nslot could expire during a full-term ingress stall (it is written, aged,\nand no longer the protected last slot once headroom exists). Any tx\nappended into the expired slot's remainder afterwards was charged but\npermanently non-promotable (the inclusive all-expired promotion filter\nnever re-admits the slot), never settled or refunded (the newly-expiring\nsettlement set fires exactly once per slot, before the tx existed), and\nits chunks never received partition assignments (slot needs skip expired\nslots) — stranding its term and perm fees and leaving the data unstored.\n\nPost-Cascade, slot-expiry eligibility now additionally requires the slot\nto be fully written: its entire chunk range at or below the ledger's\ncumulative total at the epoch block. This extends the frontier\nprotection the never-expire-the-last-slot rule was a proxy for to the\nslot the write head actually sits in, making \"no write ever lands in an\nexpired slot\" structural, and strengthens the contiguous-prefix\ninvariant the promotion filter's [0, range_end) assumption relies on.\nThe gate shares the cascade_active flag with the has_been_written\nfilter, so pre-Cascade replay stays bit-identical; chunks_per_slot == 0\nfails safe (nothing counts as fully written).\n\nThe recycle set, the fee-settlement set, and the promotion-blocked set\nall receive the same write-frontier inputs (per-ledger cumulative totals\nplus chunks-per-slot), so they cannot diverge. The trade-off is bounded\nand mirrors the last slot's existing semantics: a slot that never fills\nnever expires — its data stays live, promotable, and stored, and\nsettlement waits for the slot to fill.\n\nTwo chain-tests that pinned partial-slot recycling are re-pinned to the\nnew semantics: the partially-written frontier slot survives its stale\nwindow, a refill refreshes its expiry clock, and it recycles (settling\nits deferred refunds) a full term after the write that fills it.\n\n* fix: multiversion test flake\n\n* fix(consensus): keep pre-Cascade-expired slots in the inclusive expiry set\n\nAn already-recycled slot must stay in the inclusive non-promotability set\nregardless of the post-Cascade fully-written gate. Without this, a slot that\nexpired and was perm-fee refunded pre-Cascade while only partially written\nwould drop out of the set the moment Cascade activates (its write frontier\nstill sits inside it, so it is not fully written), letting its already-refunded\ntxs be promoted again — a refund plus permanent-storage double-pay. is_expired\nis only ever set by the expiry path and pre-Cascade expiry is prefix-ordered,\nso the set stays a contiguous prefix; a hypothetical non-prefix state trips the\nfail-loud contiguity guard rather than silently under-approximating.\n\nReview-driven cleanups (no behavior change):\n- extract the shared post-Cascade expiry gate into cascade_expiry_gate,\n  applied across all three expiry scans\n- correct the promotion-delay comment: a slot completed mid-epoch can be held\n  non-promotable until the next epoch, not just one block\n- hoist duplicated test scaffolding to module scope in the ledger_expiry tests\n- trim three restated comments",
+          "timestamp": "2026-07-13T19:26:37+01:00",
+          "tree_id": "94aaae204c3b3c3a6eb61c52a23c214a4c076042",
+          "url": "https://github.com/Irys-xyz/irys/commit/37e3299a440abb28f769bc57c558f68622699d1a"
+        },
+        "date": 1783968560799,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012591,
+            "range": "± 0.000469",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119512,
+            "range": "± 0.001376",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.247424,
+            "range": "± 0.044636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.338925,
+            "range": "± 0.410935",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077833,
+            "range": "± 0.001605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 767.632658,
+            "range": "± 27.847261",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.508818,
+            "range": "± 3.364004",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.125963,
+            "range": "± 0.002754",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.703878,
+            "range": "± 5.246177",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1636.118916,
+            "range": "± 98.977588",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.036201,
+            "range": "± 0.003244",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 216.347708,
+            "range": "± 3.512588",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 277.140028,
+            "range": "± 2.572495",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
