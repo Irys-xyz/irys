@@ -68,7 +68,7 @@ where
 
     fs::create_dir_all(&dump_base_path)?;
 
-    let dump_file_name = format!("accounts-{}.jsonl", &latest_reth_block);
+    let dump_file_name = format!("accounts-{}.jsonl", latest_reth_block);
 
     let dump_path = dump_base_path.join(&dump_file_name);
     let file = File::create(&dump_path)?;

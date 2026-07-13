@@ -171,10 +171,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
         for attempt in 1..20 {
             let response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data-start-offset",
-                    http_url, &id
-                ))
+                .get(format!("{}/v1/tx/{}/local/data-start-offset", http_url, id))
                 .send()
                 .await
                 .unwrap();

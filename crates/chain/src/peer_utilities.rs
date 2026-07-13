@@ -14,7 +14,7 @@ pub async fn client_request(url: &str) -> reqwest::Response {
 }
 
 pub async fn info_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/info")).await
+    client_request(&format!("{}{}", address, "/v1/info")).await
 }
 
 pub async fn block_index_endpoint_request(
@@ -24,21 +24,21 @@ pub async fn block_index_endpoint_request(
 ) -> reqwest::Response {
     client_request(&format!(
         "{}{}?height={}&limit={}",
-        &address, "/v1/block-index", &height, &limit
+        address, "/v1/block-index", height, limit
     ))
     .await
 }
 
 pub async fn chunk_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/chunk/ledger/0/0")).await
+    client_request(&format!("{}{}", address, "/v1/chunk/ledger/0/0")).await
 }
 
 pub async fn network_config_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/network/config")).await
+    client_request(&format!("{}{}", address, "/v1/network/config")).await
 }
 
 pub async fn peer_list_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/peer-list")).await
+    client_request(&format!("{}{}", address, "/v1/peer-list")).await
 }
 
 pub async fn fetch_genesis_block(
@@ -91,7 +91,7 @@ pub async fn fetch_txn(
             Ok(ok) => match ok.json::<IrysTransactionResponse>().await {
                 Ok(txn) => Some(txn),
                 Err(e) => {
-                    let msg = format!("Error reading body from {}: {}", &url, e);
+                    let msg = format!("Error reading body from {}: {}", url, e);
                     warn!(msg);
                     metrics::record_peer_fetch_error("txn_body_parse");
                     None
@@ -100,7 +100,7 @@ pub async fn fetch_txn(
             Err(e) => {
                 let msg = format!(
                     "Non-success from {}: {}",
-                    &url,
+                    url,
                     e.status().unwrap_or_default()
                 );
                 warn!(msg);

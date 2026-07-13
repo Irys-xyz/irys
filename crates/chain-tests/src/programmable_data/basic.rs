@@ -168,7 +168,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         // println!("slept");
         for attempt in 1..20 {
             let response = client
-                .get(format!("{}/v1/tx/{}", http_url, &id))
+                .get(format!("{}/v1/tx/{}", http_url, id))
                 .send()
                 .await;
 
@@ -226,10 +226,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
         for attempt in 1..20 {
             let response = client
-                .get(format!(
-                    "{}/v1/tx/{}/local/data-start-offset",
-                    http_url, &id
-                ))
+                .get(format!("{}/v1/tx/{}/local/data-start-offset", http_url, id))
                 .send()
                 .await;
 
@@ -302,7 +299,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     println!(
         "Original string: {}, stored string: {}",
-        &message, &stored_message
+        message, stored_message
     );
 
     assert_eq!(&message, &stored_message);

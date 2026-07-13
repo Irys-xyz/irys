@@ -21,7 +21,7 @@ pub(crate) async fn client_request(url: &str) -> reqwest::Response {
 }
 
 pub(crate) async fn info_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/info")).await
+    client_request(&format!("{}{}", address, "/v1/info")).await
 }
 
 pub(crate) async fn block_index_endpoint_request(
@@ -31,13 +31,13 @@ pub(crate) async fn block_index_endpoint_request(
 ) -> reqwest::Response {
     client_request(&format!(
         "{}{}?height={}&limit={}",
-        &address, "/v1/block-index", &height, &limit
+        address, "/v1/block-index", height, limit
     ))
     .await
 }
 
 pub(crate) async fn chunk_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/chunk/ledger/0/0")).await
+    client_request(&format!("{}{}", address, "/v1/chunk/ledger/0/0")).await
 }
 
 pub(crate) async fn price_endpoint_request(
@@ -50,9 +50,9 @@ pub(crate) async fn price_endpoint_request(
 }
 
 pub(crate) async fn network_config_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/network/config")).await
+    client_request(&format!("{}{}", address, "/v1/network/config")).await
 }
 
 pub(crate) async fn peer_list_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/peer-list")).await
+    client_request(&format!("{}{}", address, "/v1/peer-list")).await
 }

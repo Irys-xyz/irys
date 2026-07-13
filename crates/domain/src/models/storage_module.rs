@@ -244,7 +244,7 @@ pub fn get_atomic_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> eyre::Resul
     AtomicWriteFile::options()
         .read(true)
         .open(&path)
-        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", &path))
+        .wrap_err_with(|| format!("Failed to create or open atomic file for {:?}", path))
 }
 
 /// Defines how chunk data is processed and stored
@@ -997,7 +997,7 @@ impl StorageModule {
                     });
             }
             ChunkType::Uninitialized => {
-                for (offset, _) in pending.iter() {
+                for offset in pending.keys() {
                     let point_interval = ii(*offset, *offset);
                     let _ = set.cut(point_interval);
                 }

@@ -2235,7 +2235,7 @@ mod tests {
             )
             .await;
 
-        assert!(res.is_ok(), "unexpected error tracing tx {:?}", &res);
+        assert!(res.is_ok(), "unexpected error tracing tx {:?}", res);
 
         Ok(())
     }

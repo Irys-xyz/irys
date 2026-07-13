@@ -955,7 +955,7 @@ async fn get_publish_txs_and_proofs(
         }
 
         // Sort the resulting publish_txs & proofs
-        tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+        tx_headers.sort_by_key(|a| a.id);
 
         // Filter out any tx headers with the wrong data_size for this data_root
         tx_headers.retain(|tx| {
@@ -1430,11 +1430,7 @@ async fn get_data_txs(
         })?;
 
     let mut found_txs: Vec<Option<DataTransactionHeader>> = Vec::with_capacity(txids.len());
-    for ((tx_id, mempool_result), db_result) in txids
-        .iter()
-        .zip(mempool_results.into_iter())
-        .zip(db_results.into_iter())
-    {
+    for ((tx_id, mempool_result), db_result) in txids.iter().zip(mempool_results).zip(db_results) {
         let db_header = match db_result {
             Ok(header) => header,
             Err(e) => {

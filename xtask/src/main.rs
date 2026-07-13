@@ -696,7 +696,7 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             // note: can't parallelize due to locks on the build dir
             for package in workspace_packages {
                 let name = package.name.to_string();
-                println!("Cleaning {}", &name);
+                println!("Cleaning {}", name);
                 cmd!(sh, "cargo clean --package {name}").remove_and_run()?;
             }
         }

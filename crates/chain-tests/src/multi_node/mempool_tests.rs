@@ -794,9 +794,9 @@ async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     assert!(
         peer1_block_txids.contains(&txid),
         "block {} {} should include submit tx {}",
-        &peer1_block.block_hash,
-        &peer1_block.height,
-        &txid
+        peer1_block.block_hash,
+        peer1_block.height,
+        txid
     );
     assert!(peer1_block_txids.contains(&peer1_tx.header.id));
 

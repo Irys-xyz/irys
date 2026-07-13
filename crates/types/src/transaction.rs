@@ -1092,7 +1092,7 @@ mod tests {
         let serialized =
             serde_json::to_string_pretty(&original_header).expect("Failed to serialize");
 
-        println!("{}", &serialized);
+        println!("{}", serialized);
         // Deserialize the JSON back to DataTransactionHeader
         let deserialized: DataTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
@@ -1114,7 +1114,7 @@ mod tests {
         // Serialize the commitment tx to JSON
         let serialized = serde_json::to_string_pretty(&original_tx).expect("Failed to serialize");
 
-        println!("{}", &serialized);
+        println!("{}", serialized);
         // Deserialize the JSON back to a CommitmentTransaction
         let deserialized: CommitmentTransaction =
             serde_json::from_str(&serialized).expect("Failed to deserialize");

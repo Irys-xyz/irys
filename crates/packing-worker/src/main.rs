@@ -44,8 +44,7 @@ async fn main() -> eyre::Result<()> {
     match cli.command {
         Commands::Start {} => {
             let (_tx, rx) = channel::<irys_types::ShutdownReason>(1);
-            let addr: SocketAddr =
-                format!("{}:{}", &config.bind_addr, &config.bind_port).parse()?;
+            let addr: SocketAddr = format!("{}:{}", config.bind_addr, config.bind_port).parse()?;
             let listener = create_listener(addr)?;
             start_worker(config, listener, rx).await?
         }

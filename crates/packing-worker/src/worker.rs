@@ -78,7 +78,7 @@ mod tests {
             max_pending: NonZero::new(1).unwrap(),
         };
 
-        let addr: SocketAddr = format!("{}:{}", &config.bind_addr, &config.bind_port).parse()?;
+        let addr: SocketAddr = format!("{}:{}", config.bind_addr, config.bind_port).parse()?;
         let listener = create_listener(addr)?;
 
         let local_addr = listener.local_addr()?;
@@ -105,7 +105,7 @@ mod tests {
 
         let info = loop {
             // ensure we can GET /v1/
-            if let Ok(info_res) = client.get(format!("{}info", &base_url)).send().await {
+            if let Ok(info_res) = client.get(format!("{}info", base_url)).send().await {
                 break info_res.json::<PackingWorkerInfo>().await?;
             }
         };
@@ -141,7 +141,7 @@ mod tests {
         // while we're doing that, manually pack to make sure the returned values are correct
 
         let packed_bytes = client
-            .post(format!("{}pack", &base_url))
+            .post(format!("{}pack", base_url))
             .json(&request)
             .send()
             .await?

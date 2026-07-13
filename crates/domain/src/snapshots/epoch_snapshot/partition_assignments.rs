@@ -52,7 +52,7 @@ impl PartitionAssignments {
             .iter()
             .filter(|(_, a)| a.ledger_id == Some(DataLedger::Publish as u32))
             .collect();
-        publish_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
+        publish_assignments.sort_unstable_by_key(|(_, a1)| a1.slot_index);
 
         for (hash, assignment) in publish_assignments {
             let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
@@ -71,7 +71,7 @@ impl PartitionAssignments {
             .iter()
             .filter(|(_, a)| a.ledger_id == Some(DataLedger::Submit as u32))
             .collect();
-        submit_assignments.sort_unstable_by(|(_, a1), (_, a2)| a1.slot_index.cmp(&a2.slot_index));
+        submit_assignments.sort_unstable_by_key(|(_, a1)| a1.slot_index);
         for (hash, assignment) in submit_assignments {
             let ledger = DataLedger::try_from(assignment.ledger_id.unwrap()).unwrap();
             debug!(

@@ -590,7 +590,7 @@ pub(crate) fn validate_tx_signature<
             target = "invalid_tx_header_json",
             "Invalid tx: {:#}",
             &serde_json::to_string(&tx)
-                .unwrap_or_else(|e| format!("error serializing invalid tx: {}\n{:?}", &e, &tx))
+                .unwrap_or_else(|e| format!("error serializing invalid tx: {}\n{:?}", e, tx))
         );
         Err(TxIngressError::InvalidSignature(tx.signer()))
     }
@@ -2303,7 +2303,7 @@ impl MempoolState {
         let mut pruned: Vec<(H256, H256)> = Vec::new();
         let mut addresses_with_valid_stake: HashSet<IrysAddress> = HashSet::new();
 
-        for (_addr, txs) in self.valid_commitment_tx.iter() {
+        for txs in self.valid_commitment_tx.values() {
             for tx in txs {
                 if should_prune(tx) {
                     pruned.push((tx.id(), tx.anchor()));
@@ -2316,7 +2316,7 @@ impl MempoolState {
         // Pass 2: Identify txs to move to pending (Unstaked without pending Stake)
         let pruned_set: HashSet<H256> = pruned.iter().map(|(id, _)| *id).collect();
         let mut to_pending: Vec<CommitmentTransaction> = Vec::new();
-        for (_addr, txs) in self.valid_commitment_tx.iter() {
+        for txs in self.valid_commitment_tx.values() {
             for tx in txs {
                 if pruned_set.contains(&tx.id()) {
                     continue;

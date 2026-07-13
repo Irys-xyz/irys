@@ -26,7 +26,7 @@ fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
         assert!(
             tx.tx.is_signature_valid(),
             "signature should be valid for tx with ID {}",
-            &tx.tx.id()
+            tx.tx.id()
         )
     }
 
