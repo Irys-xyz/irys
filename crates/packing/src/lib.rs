@@ -146,7 +146,7 @@ pub fn capacity_pack_range_cuda_c(
 
     let blocks = config.blocks;
     let threads_per_block = config.threads_per_block;
-    println!("blocks: {}, threads: {}", &blocks, &threads_per_block);
+    println!("blocks: {}, threads: {}", blocks, threads_per_block);
 
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(

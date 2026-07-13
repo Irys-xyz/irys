@@ -87,12 +87,12 @@ pub fn main() {
                 if slice != &computed[..] {
                     eprintln!(
                         "chunk mismatch! {} {} {} {} {} {}",
-                        &pos,
+                        pos,
                         chunk_offset + pos,
-                        &start,
-                        &end,
-                        &slice.len(),
-                        &computed.len()
+                        start,
+                        end,
+                        slice.len(),
+                        computed.len()
                     )
                 }
             }
@@ -103,8 +103,8 @@ pub fn main() {
     for (count, times) in out {
         println!(
             "{} {:?} {}ms",
-            &count,
-            &times
+            count,
+            times
                 .iter()
                 .map(std::time::Duration::as_millis)
                 .collect::<Vec<_>>(),
