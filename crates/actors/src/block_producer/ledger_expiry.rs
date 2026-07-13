@@ -253,8 +253,9 @@ pub async fn calculate_expired_ledger_fees(
 /// epoch-lagging `is_cascade_active_for_epoch`) and `cascade_active_for_epoch`
 /// (gates whether the term ledgers settle at all). The ONLY legitimate difference —
 /// each ledger's cumulative `total_chunks` at this block — is supplied by
-/// `new_total_chunks`: the producer computes `parent + chunks_added`, the validator
-/// reads it straight from the header it is validating.
+/// `new_total_chunks`: the producer computes `parent + chunks_added`; the validator
+/// reads the same value from the header after prevalidation has checked it equals
+/// that formula.
 pub async fn calculate_all_expired_ledger_fees(
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,

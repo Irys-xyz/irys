@@ -2,11 +2,12 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::data_tx_validation::{DataTxStructuralDefect, data_tx_structural_defect};
 use crate::{
     block_ancestry::walk_ancestors_tree_then_db,
-    block_producer::ledger_expiry,
+    block_producer::{calculate_chunks_added, ledger_expiry},
     mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowMetadata, ShadowTxGenerator},
 };
+use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::ensure;
@@ -372,6 +373,19 @@ pub enum PreValidationError {
         recomputed: H256,
     },
 
+    /// The ledger's cumulative `total_chunks` does not equal
+    /// `parent.total_chunks + chunks_added(included txs)`. Producers write this field
+    /// from the same formula; without this check a peer can inflate/deflate the frontier
+    /// and still pass signature + `tx_root` validation.
+    #[error(
+        "total_chunks mismatch for ledger {ledger_id}: header {expected}, recomputed {recomputed}"
+    )]
+    TotalChunksMismatch {
+        ledger_id: u32,
+        expected: u64,
+        recomputed: u64,
+    },
+
     /// The PoA tx_path leaf does not equal the folded `(data_root, prefix_hash)` value of
     /// the recall chunk's owning transaction. The tx_path proof validated against the
     /// block's signed `tx_root`, so this means the owning tx's `data_root`/`prefix_hash`
@@ -612,6 +626,7 @@ impl PreValidationError {
             | Self::TooManyCommitmentTxs { .. }
             | Self::TooManyDataTxs { .. }
             | Self::TxRootMismatch { .. }
+            | Self::TotalChunksMismatch { .. }
             | Self::PoaTxRootLeafMismatch { .. }
             | Self::ZeroSizeDataTx { .. }
             | Self::PrefixSizeExceedsDataSize { .. }
@@ -721,6 +736,7 @@ impl PreValidationError {
             Self::InvalidEpochSnapshot { .. } => "invalid_epoch_snapshot",
             Self::TooManyDataTxs { .. } => "too_many_data_txs",
             Self::TxRootMismatch { .. } => "tx_root_mismatch",
+            Self::TotalChunksMismatch { .. } => "total_chunks_mismatch",
             Self::PoaTxRootLeafMismatch { .. } => "poa_tx_root_leaf_mismatch",
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
@@ -1498,6 +1514,23 @@ impl ValidationError {
     }
 }
 
+/// Expected cumulative `total_chunks` for a ledger at the candidate block:
+/// parent frontier + chunks contributed by this block's included txs.
+///
+/// Must stay byte-for-byte identical to the producer formula
+/// (`parent.total_chunks.saturating_add(calculate_chunks_added(...))`) so honest
+/// blocks pass and adversarial frontier inflation/deflation is rejected.
+fn expected_ledger_total_chunks(
+    parent: &IrysBlockHeader,
+    ledger: DataLedger,
+    txs: &[DataTransactionHeader],
+    chunk_size: u64,
+) -> u64 {
+    parent
+        .ledger_total_chunks(ledger)
+        .saturating_add(calculate_chunks_added(txs, chunk_size))
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -1793,14 +1826,20 @@ pub async fn prevalidate_block(
         });
     }
 
-    // Recompute each ledger's `tx_root` from the folded `(data_root, prefix_hash)` leaves
-    // of the included transactions and compare against the signed header value. This is
-    // what enforces `prefix_hash` (and `data_root`) through consensus: the block signature
-    // seals `tx_root`, so any tampering with a tx's `data_root`/`prefix_hash` relative to
-    // it changes the recomputed root and rejects the block. `ledger_txs` is in `dl.tx_ids`
-    // order (asserted by `validate_transactions` above), matching the order the fold uses.
-    // The empty-ledger case folds to `H256::zero()`, leaving pre-data-tx blocks unaffected.
-    // Uses `compute_tx_root` (root-only) to avoid building per-leaf proofs validation discards.
+    // Recompute each ledger's sealed integrity fields from the included txs and compare
+    // against the signed header:
+    //   * `tx_root` — merkle root of folded `(data_root, prefix_hash)` leaves. Any
+    //     tampering with a tx's `data_root`/`prefix_hash` relative to the signed root is
+    //     rejected here.
+    //   * `total_chunks` — cumulative chunk frontier = parent total + chunks contributed
+    //     by this block's txs (same formula the producer writes). Without this check a
+    //     peer can inflate/deflate capacity/expiry/PoA bounds while keeping a valid
+    //     `tx_root`.
+    // `ledger_txs` is in `dl.tx_ids` order (asserted by `validate_transactions` above),
+    // matching the order the fold uses. Empty ledgers fold to `H256::zero()` /
+    // `parent.total_chunks + 0`. Uses `compute_tx_root` (root-only) to avoid building
+    // per-leaf proofs validation discards.
+    let chunk_size = config.consensus.chunk_size;
     for dl in &block.data_ledgers {
         let ledger = DataLedger::try_from(dl.ledger_id).map_err(|_| {
             PreValidationError::InvalidLedgerId {
@@ -1846,6 +1885,15 @@ pub async fn prevalidate_block(
                 ledger_id: dl.ledger_id,
                 expected: dl.tx_root,
                 recomputed: recomputed_tx_root,
+            });
+        }
+        let recomputed_total_chunks =
+            expected_ledger_total_chunks(previous_block, ledger, ledger_txs, chunk_size);
+        if recomputed_total_chunks != dl.total_chunks {
+            return Err(PreValidationError::TotalChunksMismatch {
+                ledger_id: dl.ledger_id,
+                expected: dl.total_chunks,
+                recomputed: recomputed_total_chunks,
             });
         }
     }
@@ -2311,6 +2359,86 @@ mod prevalidation_error_classification_tests {
         assert!(
             !PreValidationError::VDFCheckpointsInvalid("bad".to_string()).is_internal_failure()
         );
+        let total_chunks_mismatch = PreValidationError::TotalChunksMismatch {
+            ledger_id: DataLedger::Submit as u32,
+            expected: 10,
+            recomputed: 5,
+        };
+        assert!(!total_chunks_mismatch.is_internal_failure());
+        assert_eq!(
+            total_chunks_mismatch.metric_reason(),
+            "total_chunks_mismatch"
+        );
+    }
+
+    /// Pure formula unit tests for the consensus total_chunks check — no full
+    /// prevalidate harness required.
+    mod expected_ledger_total_chunks_tests {
+        use super::*;
+
+        fn parent_with_submit_total(total_chunks: u64) -> IrysBlockHeader {
+            let mut header = IrysBlockHeader::new_mock_header();
+            header.data_ledgers[DataLedger::Submit as usize].total_chunks = total_chunks;
+            header.data_ledgers[DataLedger::Publish as usize].total_chunks = 0;
+            header
+        }
+
+        fn tx_with_data_size(data_size: u64) -> DataTransactionHeader {
+            let mut tx = DataTransactionHeader::default();
+            tx.data_size = data_size;
+            tx
+        }
+
+        #[test]
+        fn empty_ledger_preserves_parent_total() {
+            let parent = parent_with_submit_total(42);
+            let expected = expected_ledger_total_chunks(
+                &parent,
+                DataLedger::Submit,
+                &[],
+                /*chunk_size*/ 32,
+            );
+            assert_eq!(expected, 42);
+        }
+
+        #[test]
+        fn adds_chunks_from_included_txs() {
+            // chunk_size=32: a 64-byte tx → 2 chunks; a 33-byte tx → 2 chunks (ceil).
+            let parent = parent_with_submit_total(10);
+            let txs = vec![tx_with_data_size(64), tx_with_data_size(33)];
+            let expected = expected_ledger_total_chunks(
+                &parent,
+                DataLedger::Submit,
+                &txs,
+                /*chunk_size*/ 32,
+            );
+            assert_eq!(expected, 10 + 2 + 2);
+        }
+
+        #[test]
+        fn missing_parent_ledger_starts_from_zero() {
+            // Pre-Cascade parent has no OneYear entry → ledger_total_chunks = 0.
+            let parent = parent_with_submit_total(99);
+            assert_eq!(parent.ledger_total_chunks(DataLedger::OneYear), 0);
+            let txs = vec![tx_with_data_size(32)];
+            let expected = expected_ledger_total_chunks(
+                &parent,
+                DataLedger::OneYear,
+                &txs,
+                /*chunk_size*/ 32,
+            );
+            assert_eq!(expected, 1);
+        }
+
+        #[test]
+        fn mismatch_is_detectable() {
+            let parent = parent_with_submit_total(5);
+            let txs = vec![tx_with_data_size(32)];
+            let recomputed = expected_ledger_total_chunks(&parent, DataLedger::Submit, &txs, 32);
+            // Honest header would claim 6; inflated claim must not equal recomputed.
+            assert_ne!(recomputed, 100);
+            assert_eq!(recomputed, 6);
+        }
     }
 
     /// Every `ValidationCancelReason` is a local-side outcome and routes
@@ -4269,7 +4397,9 @@ pub async fn shadow_transactions_are_valid(
 
     // 3. Extract shadow transactions from the beginning of the block lazily.
     // Per-item errors here (signer recovery, miner mismatch, malformed
-    // shadow tx) are payload-level → consensus.
+    // shadow tx) are payload-level → consensus. Also capture the EIP-1559
+    // envelope tip (`max_priority_fee_per_gas`) — EL skims that raw wei value
+    // from the packet fee-payer to the miner, so consensus must pin it.
     let txs_slice = &evm_block.body.transactions;
     let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
@@ -4279,14 +4409,16 @@ pub async fn shadow_transactions_are_valid(
             block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
         );
-        Ok(stx)
+        // Shadow txs are composed as EIP-1559; non-dynamic-fee envelopes have
+        // no priority tip → treat as 0 (must match expected fee 0).
+        let priority_fee = tx_ref.max_priority_fee_per_gas().unwrap_or(0);
+        Ok((stx, priority_fee))
     });
 
-    // 4. Generate expected shadow transactions. This call returns a
-    // typed `ValidationError`; local/runtime failures (eviction races,
-    // DB I/O, etc.) surface as `is_internal_failure` variants and are
-    // propagated unchanged, while peer-attributable structural failures
-    // (e.g. missing publish ledger) surface as `ShadowTransactionInvalid`.
+    // 4. Generate expected shadow transactions (packet + consensus tip fee).
+    // Typed `ValidationError`; local/runtime failures (eviction races, DB I/O)
+    // surface as `is_internal_failure` variants; peer-attributable structural
+    // failures surface as `ShadowTransactionInvalid`.
     let expected_txs = generate_expected_shadow_transactions(
         config,
         block_tree_guard,
@@ -4300,7 +4432,7 @@ pub async fn shadow_transactions_are_valid(
     )
     .await?;
 
-    // 5. Validate they match — any error here is a consensus mismatch.
+    // 5. Validate packets AND priority fees match — any error is consensus.
     validate_shadow_transactions_match(actual_shadow_txs, expected_txs.into_iter(), block)
         .map_err(|e| reject(e.to_string()))?;
 
@@ -4558,7 +4690,7 @@ async fn generate_expected_shadow_transactions(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: BlockIndex,
     transactions: &BlockTransactions,
-) -> Result<Vec<ShadowTransaction>, ValidationError> {
+) -> Result<Vec<ShadowMetadata>, ValidationError> {
     // Helpers: classify common failure shapes.
     let parent_hash = block.previous_block_hash;
     let parent_missing = || ValidationError::ParentBlockMissing {
@@ -4628,12 +4760,13 @@ async fn generate_expected_shadow_transactions(
     // derived (parent epoch snapshot, validator-computed block height, local
     // block index, local mempool, local DB); the only candidate-header values
     // that flow in are the block's own timestamp (the Cascade gate) and each
-    // ledger's `total_chunks` (the write-window bound). Both are validated
-    // independently elsewhere, so here they merely SELECT which slots the fee
-    // calc settles — they cannot make the calc itself fail. The function
-    // produces what the validator EXPECTS the peer's shadow txs to look like;
-    // the peer-vs-expected comparison (where a divergence is attributed to the
-    // peer) happens downstream in `generate_expected_shadow_transactions`.
+    // ledger's `total_chunks` (the write-window bound). `total_chunks` is
+    // prevalidated against parent + included txs, so here it merely SELECTs
+    // which slots the fee calc settles — it cannot make the calc itself fail.
+    // The function produces what the validator EXPECTS the peer's shadow txs
+    // to look like; the peer-vs-expected comparison (where a divergence is
+    // attributed to the peer) happens downstream in
+    // `generate_expected_shadow_transactions`.
     //
     // Consequence: every failure path here is a node-side fault.
     //   - MDBX I/O failure (block-header / data-tx reads) → NodeFault.
@@ -4651,10 +4784,10 @@ async fn generate_expected_shadow_transactions(
     // that split; on audit it was speculative and the TODO was removed.)
     let expired_ledger_fees = if is_epoch_block {
         // `block.ledger_total_chunks(..)` is each ledger's cumulative total_chunks
-        // at this block, read straight from the header (the producer computed the
-        // identical value). Lets the fee calc exclude slots written this epoch —
-        // rescued by the last_height touch — so the settled set matches what
-        // actually recycles.
+        // at this block, read from the header after prevalidation confirmed it
+        // equals parent + chunks_added. Lets the fee calc exclude slots written
+        // this epoch — rescued by the last_height touch — so the settled set
+        // matches what actually recycles.
         //
         // Gate for the write-window exclusion: THIS block's own Cascade status —
         // the same value `perform_epoch_tasks` reads to gate the
@@ -4670,10 +4803,8 @@ async fn generate_expected_shadow_transactions(
             .consensus
             .hardforks
             .is_cascade_active_for_epoch(&parent_epoch_snapshot);
-        // Each ledger's cumulative `total_chunks` is read straight from the header
-        // being validated — the producer computed the identical value, so both
-        // settle the same expiring set. Shared with the producer so the
-        // Submit + Cascade-gated term-ledger settlement cannot drift between sides.
+        // Each ledger's cumulative `total_chunks` is read from the prevalidated
+        // header so producer and validator settle the identical expiring set.
         ledger_expiry::calculate_all_expired_ledger_fees(
             &parent_epoch_snapshot,
             &prev_block,
@@ -4838,7 +4969,9 @@ async fn generate_expected_shadow_transactions(
     let mut shadow_txs_vec = Vec::new();
     for result in shadow_tx_generator.by_ref() {
         let metadata = result.map_err(classify_shadow_tx_gen_err)?;
-        shadow_txs_vec.push(metadata.shadow_tx);
+        // Keep full metadata: `transaction_fee` is the consensus tip the
+        // producer must place on the EIP-1559 envelope (see match step).
+        shadow_txs_vec.push(metadata);
     }
 
     // Get final treasury balance after processing all transactions
@@ -4856,11 +4989,23 @@ async fn generate_expected_shadow_transactions(
     Ok(shadow_txs_vec)
 }
 
-/// Validates  the actual shadow transactions match the expected ones
+/// Actual shadow tx as observed in the EVM payload: borsh packet plus the
+/// EIP-1559 envelope tip EL will transfer from the fee-payer to the miner.
+type ActualShadowTx = (ShadowTransaction, u128);
+
+/// Validates that actual shadow transactions match the expected ones.
+///
+/// Compares:
+/// 1. Borsh packet equality (existing) — amount, target, refs, solution hash
+/// 2. **EIP-1559 `max_priority_fee_per_gas`** against
+///    [`ShadowMetadata::transaction_fee`] — closes the priority-fee skim where a
+///    producer keeps a valid packet but inflates the envelope tip to drain the
+///    fee-payer. EL charges that tip as raw wei before packet execution; without
+///    this check the tip was producer-controlled and not consensus-pinned.
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn validate_shadow_transactions_match(
-    actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
-    expected: impl Iterator<Item = ShadowTransaction>,
+    actual: impl Iterator<Item = eyre::Result<ActualShadowTx>>,
+    expected: impl Iterator<Item = ShadowMetadata>,
     block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
     // Verify solution hash matches the block
@@ -4874,13 +5019,13 @@ fn validate_shadow_transactions_match(
             tracing::warn!(?data, "shadow tx len mismatch");
             eyre::bail!("actual and expected shadow txs lens differ");
         };
-        let actual = actual?;
+        let (actual_packet, actual_priority_fee) = actual?;
 
         // Validate solution hash for all V1 transactions
         if let ShadowTransaction::V1 {
             packet: _,
             solution_hash,
-        } = &actual
+        } = &actual_packet
             && *solution_hash != expected_hash
         {
             eyre::bail!(
@@ -4892,15 +5037,199 @@ fn validate_shadow_transactions_match(
         }
 
         ensure!(
-            actual == expected,
+            actual_packet == expected.shadow_tx,
             "Shadow transaction mismatch at idx {}. expected {:?}, got {:?}",
             idx,
-            expected,
-            actual
+            expected.shadow_tx,
+            actual_packet
+        );
+
+        // Consensus tip: must equal the generator's `transaction_fee` (honest
+        // producer path sets compose(..., metadata.transaction_fee)).
+        ensure!(
+            actual_priority_fee == expected.transaction_fee,
+            "Shadow transaction priority fee mismatch at idx {}. expected {}, got {}",
+            idx,
+            expected.transaction_fee,
+            actual_priority_fee
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod shadow_tx_priority_fee_match_tests {
+    use super::*;
+    use irys_reth::shadow_tx::{BalanceDecrement, TransactionPacket};
+    use reth::revm::primitives::U256 as AlloyU256;
+
+    fn solution_hash() -> H256 {
+        H256::repeat_byte(0xAB)
+    }
+
+    fn stake_packet(amount: u64) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: AlloyU256::from(amount),
+                target: Address::repeat_byte(0x11),
+                irys_ref: FixedBytes::repeat_byte(0x22),
+            }),
+            solution_hash().into(),
+        )
+    }
+
+    fn header_with_solution(solution: H256) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.solution_hash = solution;
+        h
+    }
+
+    #[test]
+    fn accepts_matching_packet_and_priority_fee() {
+        let packet = stake_packet(100);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 1_000_000_000,
+        };
+        let actual = std::iter::once(Ok((packet, 1_000_000_000_u128)));
+        let header = header_with_solution(solution_hash());
+        assert!(
+            validate_shadow_transactions_match(actual, std::iter::once(expected), &header).is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_inflated_priority_fee_with_valid_packet() {
+        // The skim attack: packet is exactly what consensus expects, but the
+        // EIP-1559 envelope tip is inflated to drain the fee-payer.
+        let packet = stake_packet(100);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 1_000_000_000,
+        };
+        let actual = std::iter::once(Ok((packet, 50_000_000_000_u128))); // inflated
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("inflated tip must be rejected");
+        assert!(
+            err.to_string().contains("priority fee mismatch"),
+            "error should name the fee mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_nonzero_fee_when_expected_is_zero() {
+        // Refunds / block-adjacent rewards expect tip 0; a nonzero tip is theft.
+        let packet = stake_packet(0);
+        let expected = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 0,
+        };
+        let actual = std::iter::once(Ok((packet, 1_u128)));
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("nonzero tip when expected 0 must be rejected");
+        assert!(err.to_string().contains("priority fee mismatch"));
+    }
+
+    #[test]
+    fn still_rejects_packet_mismatch() {
+        let expected = ShadowMetadata {
+            shadow_tx: stake_packet(100),
+            transaction_fee: 1,
+        };
+        let actual = std::iter::once(Ok((stake_packet(999), 1_u128)));
+        let header = header_with_solution(solution_hash());
+        let err = validate_shadow_transactions_match(actual, std::iter::once(expected), &header)
+            .expect_err("wrong packet must be rejected");
+        assert!(err.to_string().contains("Shadow transaction mismatch"));
+    }
+
+    /// Legacy / non-dynamic-fee envelopes expose `max_priority_fee_per_gas() == None`.
+    /// The extraction path in `shadow_transactions_are_valid` must normalize that to
+    /// tip `0` via `unwrap_or(0)` so fee-less expected txs (refunds, block reward)
+    /// still match, while nonzero expected fees reject.
+    #[test]
+    fn legacy_envelope_none_priority_fee_normalizes_to_zero() {
+        use alloy_consensus::{
+            EthereumTxEnvelope, SignableTransaction as _, TxEip4844, TxLegacy, TxType,
+        };
+        use irys_reth::shadow_tx::{
+            SHADOW_TX_DESTINATION_ADDR, detect_and_decode, encode_prefixed_input,
+        };
+        use reth::primitives::transaction::signature::Signature;
+        use reth::revm::primitives::TxKind;
+        use reth_ethereum_primitives::TransactionSigned;
+
+        let packet = stake_packet(0);
+        let legacy = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 1,
+            gas_limit: 21_000,
+            to: TxKind::Call(*SHADOW_TX_DESTINATION_ADDR),
+            value: AlloyU256::ZERO,
+            input: encode_prefixed_input(&packet),
+        };
+        // Signature is not recovered in this unit path; we only exercise fee + decode.
+        let signed: TransactionSigned = EthereumTxEnvelope::<TxEip4844>::Legacy(
+            legacy.into_signed(Signature::test_signature()),
+        );
+
+        assert_eq!(
+            signed.tx_type(),
+            TxType::Legacy,
+            "fixture must be a legacy envelope"
+        );
+        assert!(
+            signed.max_priority_fee_per_gas().is_none(),
+            "legacy envelopes have no max_priority_fee_per_gas field"
+        );
+
+        // Same normalization as the extraction closure in shadow_transactions_are_valid.
+        let priority_fee = signed.max_priority_fee_per_gas().unwrap_or(0);
+        assert_eq!(priority_fee, 0, "None tip must normalize to 0");
+
+        // Envelope still carries a decodable shadow packet (not rejected as non-shadow).
+        let decoded = detect_and_decode(&signed)
+            .expect("decode must succeed")
+            .expect("legacy shadow destination+prefix must be detected as shadow");
+        assert_eq!(decoded, packet);
+
+        let header = header_with_solution(solution_hash());
+
+        // Expected tip 0 → accept after normalization.
+        let expected_zero = ShadowMetadata {
+            shadow_tx: packet.clone(),
+            transaction_fee: 0,
+        };
+        assert!(
+            validate_shadow_transactions_match(
+                std::iter::once(Ok((decoded.clone(), priority_fee))),
+                std::iter::once(expected_zero),
+                &header,
+            )
+            .is_ok(),
+            "legacy None tip normalizing to 0 must match expected transaction_fee 0"
+        );
+
+        // Expected nonzero tip → reject (cannot skim by smuggling a legacy envelope).
+        let expected_nonzero = ShadowMetadata {
+            shadow_tx: packet,
+            transaction_fee: 1_000_000_000,
+        };
+        let err = validate_shadow_transactions_match(
+            std::iter::once(Ok((decoded, priority_fee))),
+            std::iter::once(expected_nonzero),
+            &header,
+        )
+        .expect_err("legacy tip 0 must not satisfy a nonzero expected fee");
+        assert!(
+            err.to_string().contains("priority fee mismatch"),
+            "error should name the fee mismatch, got: {err}"
+        );
+    }
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
