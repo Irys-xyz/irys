@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -167,7 +167,7 @@ impl ClassificationConfig {
             rules: vec![
                 ClassificationRule {
                     name: "slow".to_string(),
-                    pattern: Regex::new(r".*slow_.*").unwrap(),
+                    pattern: Regex::new(".*slow_.*").unwrap(),
                     exclude: None,
                     threads_required: None,
                     timeout_ms: Some(180_000),
@@ -175,7 +175,7 @@ impl ClassificationConfig {
                 },
                 ClassificationRule {
                     name: "heavy".to_string(),
-                    pattern: Regex::new(r".*heavy_.*").unwrap(),
+                    pattern: Regex::new(".*heavy_.*").unwrap(),
                     exclude: None,
                     threads_required: Some(2),
                     timeout_ms: None,
@@ -183,7 +183,7 @@ impl ClassificationConfig {
                 },
                 ClassificationRule {
                     name: "heavy3".to_string(),
-                    pattern: Regex::new(r".*heavy3_.*").unwrap(),
+                    pattern: Regex::new(".*heavy3_.*").unwrap(),
                     exclude: None,
                     threads_required: Some(3),
                     timeout_ms: None,
@@ -191,7 +191,7 @@ impl ClassificationConfig {
                 },
                 ClassificationRule {
                     name: "heavy4".to_string(),
-                    pattern: Regex::new(r".*heavy4_.*").unwrap(),
+                    pattern: Regex::new(".*heavy4_.*").unwrap(),
                     exclude: None,
                     threads_required: Some(4),
                     timeout_ms: None,
@@ -240,7 +240,7 @@ impl ClassificationConfig {
     }
 
     /// Determine what classification a test SHOULD have based on actual usage.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn suggest_classification(
         &self,
         avg_cpu: Option<f64>,
@@ -564,7 +564,7 @@ fn aggregate_by_test(stats: &AggregatedStats) -> Vec<TestAggregation> {
             let max_peak_cpu = runs
                 .iter()
                 .map(|r| r.peak_cpu.unwrap_or(0.0))
-                .fold(0.0f64, f64::max);
+                .fold(0.0_f64, f64::max);
             let max_duration_ms = runs.iter().map(|r| r.duration_ms).max().unwrap_or(0);
 
             // Memory fields
@@ -1694,7 +1694,7 @@ fn print_memory_contention_summary(
                 let short = if name.len() > 60 {
                     format!("...{}", &name[name.len() - 57..])
                 } else {
-                    name.to_string()
+                    (*name).clone()
                 };
                 println!("    {} {}", format_rss(*rss), short);
             }
@@ -1855,7 +1855,7 @@ fn cmd_schedule(
             continue;
         }
 
-        let wall_clock = schedule.iter().map(|e| e.end_secs).fold(0.0f64, f64::max);
+        let wall_clock = schedule.iter().map(|e| e.end_secs).fold(0.0_f64, f64::max);
 
         // Build event timeline
         let mut events: Vec<(f64, i32)> = Vec::new(); // (time, delta_threads)
@@ -1869,7 +1869,7 @@ fn cmd_schedule(
         let mut current_slots: i32 = 0;
         let mut saturation_intervals: Vec<(f64, f64)> = Vec::new();
         let mut sat_start: Option<f64> = None;
-        let mut last_time = 0.0f64;
+        let mut last_time = 0.0_f64;
 
         // Also compute histogram
         let mut slot_seconds_by_level = BTreeMap::new();
@@ -1879,7 +1879,7 @@ fn cmd_schedule(
             if dt > 0.0 {
                 *slot_seconds_by_level
                     .entry(current_slots.min(available_threads as i32 + 1) as u32)
-                    .or_insert(0.0f64) += dt;
+                    .or_insert(0.0_f64) += dt;
             }
 
             if current_slots >= available_threads as i32 && sat_start.is_none() {
@@ -1919,7 +1919,7 @@ fn cmd_schedule(
 
         // Blame: for each test, compute how much of its runtime overlaps saturation
         for entry in &schedule {
-            let mut sat_overlap = 0.0f64;
+            let mut sat_overlap = 0.0_f64;
             for &(sat_s, sat_e) in &saturation_intervals {
                 let overlap_start = entry.start_secs.max(sat_s);
                 let overlap_end = entry.end_secs.min(sat_e);
@@ -1977,7 +1977,7 @@ fn cmd_schedule(
         let max_secs = slot_seconds_by_level
             .values()
             .copied()
-            .fold(0.0f64, f64::max);
+            .fold(0.0_f64, f64::max);
         for (&slots, &secs) in &slot_seconds_by_level {
             if secs < 0.5 {
                 continue;
@@ -2283,14 +2283,17 @@ fn print_cpu_chart(samples: &[CpuSample], allocation_threshold: f64) {
         return;
     }
 
-    let max_cpu = samples.iter().map(|s| s.cpu_threads).fold(0.0f64, f64::max);
+    let max_cpu = samples
+        .iter()
+        .map(|s| s.cpu_threads)
+        .fold(0.0_f64, f64::max);
     let chart_height = 10;
     let chart_width = 60.min(samples.len());
 
     let step = samples.len().div_ceil(chart_width);
     let downsampled: Vec<f64> = samples
         .chunks(step)
-        .map(|chunk| chunk.iter().map(|s| s.cpu_threads).fold(0.0f64, f64::max))
+        .map(|chunk| chunk.iter().map(|s| s.cpu_threads).fold(0.0_f64, f64::max))
         .collect();
 
     let scale = max_cpu.max(allocation_threshold * 1.2);

@@ -37,3 +37,6 @@ nix = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+
+[lints]
+workspace = true
