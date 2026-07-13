@@ -1,0 +1,52 @@
+name: Heavy Nightly Specs
+
+# Runs the ignored, timing-fragile full-stack specs that are too slow or too
+# load-sensitive to gate PRs, so their coverage still executes automatically.
+# Today that is the VDF re-anchor end-to-end spec — the only full-stack drive
+# of the deep-reorg heal path; its deterministic unit and gate tests run in the
+# PR lane, and this lane proves the assembled system nightly.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Daily at 4 AM UTC, after the flaky-detection run
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # keep build artifacts contained to this repo's workspace on the self-hosted runner
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.target
+
+jobs:
+  heavy-specs:
+    runs-on: [self-hosted, test-runner]
+    timeout-minutes: 60
+    # Scheduled runs only from master; manual dispatch from any branch.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.ref == 'refs/heads/master')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Run ignored heavy specs
+        shell: bash
+        run: |
+          # --run-ignored all + a name filter selects exactly the opted-in
+          # specs; the slow_ prefix in their names carries the 180s nextest
+          # kill budget from .config/nextest.toml.
+          cargo nextest run -p irys-chain-tests --run-ignored all --no-fail-fast \
+            -E 'test(slow_heavy_vdf_reanchor_after_boundary_crossing_reorg)'
