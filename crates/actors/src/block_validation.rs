@@ -3920,7 +3920,7 @@ mod recall_range_buffer_authority_tests {
         }
     }
 
-    /// The F1 node-split vector: a block whose recall offset matches the
+    /// The node-split vector: a block whose recall offset matches the
     /// POISONED buffer (but not the block's own ancestry) must be REJECTED
     /// while a re-anchor is pending — the fork-local window is authoritative,
     /// the buffer is not consulted.
@@ -3938,9 +3938,9 @@ mod recall_range_buffer_authority_tests {
             "fork-local disagreement is a consensus mismatch, got: {err:?}"
         );
 
-        // Documented residual (accepted, see the fn doc + review F1): outside
-        // the suspect window the buffer fast path would accept the same block.
-        // Pinned here so any change to that trade-off is a conscious one.
+        // Documented residual (accepted): outside the suspect window the
+        // buffer fast path would accept the same block. Pinned here so any
+        // change to that trade-off is a conscious one.
         f.run(false)
             .await
             .expect("outside the suspect window the buffer fast path accepts");
