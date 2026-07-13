@@ -818,10 +818,7 @@ impl BlockTree {
         let mut new_walk: Vec<Arc<SealedBlock>> = Vec::new();
         let mut new_hashes: HashSet<BlockHash> = HashSet::new();
         let mut cursor = new_tip;
-        loop {
-            let Some(entry) = self.blocks.get(&cursor) else {
-                break;
-            };
+        while let Some(entry) = self.blocks.get(&cursor) {
             new_hashes.insert(cursor);
             new_walk.push(Arc::clone(&entry.block));
             if entry.block.header().height == 0 {

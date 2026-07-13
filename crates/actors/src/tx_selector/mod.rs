@@ -815,22 +815,24 @@ pub async fn select_best_txs(
     let total_available = total_commitments_available + total_data_available;
     let total_selected = commitment_tx.len() + submit_tx.len();
 
-    if total_available > 0 {
-        const REJECTION_RATE_THRESHOLD: usize = 70;
-        let rejection_rate = ((total_available - total_selected) * 100) / total_available;
-        if rejection_rate > REJECTION_RATE_THRESHOLD {
-            warn!(
-                mempool_selected.rejection_rate = rejection_rate,
-                mempool_selected.total_available = total_available,
-                mempool_selected.total_selected = total_selected,
-                mempool_selected.commitments_available = total_commitments_available,
-                mempool_selected.commitments_selected = commitment_tx.len(),
-                mempool_selected.data_available = total_data_available,
-                mempool_selected.data_selected = submit_tx.len(),
-                mempool_selected.unfunded_addresses = unfunded_address.len(),
-                "High transaction rejection rate detected"
-            );
-        }
+    const REJECTION_RATE_THRESHOLD: usize = 70;
+    // `checked_div` yields `None` on an empty mempool (total_available == 0),
+    // skipping the warning — nothing to reject when there's nothing available.
+    if let Some(rejection_rate) =
+        ((total_available - total_selected) * 100).checked_div(total_available)
+        && rejection_rate > REJECTION_RATE_THRESHOLD
+    {
+        warn!(
+            mempool_selected.rejection_rate = rejection_rate,
+            mempool_selected.total_available = total_available,
+            mempool_selected.total_selected = total_selected,
+            mempool_selected.commitments_available = total_commitments_available,
+            mempool_selected.commitments_selected = commitment_tx.len(),
+            mempool_selected.data_available = total_data_available,
+            mempool_selected.data_selected = submit_tx.len(),
+            mempool_selected.unfunded_addresses = unfunded_address.len(),
+            "High transaction rejection rate detected"
+        );
     }
 
     // Return selected transactions grouped by type
