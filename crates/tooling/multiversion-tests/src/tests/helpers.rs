@@ -6,8 +6,16 @@ use crate::binary::ResolvedBinary;
 use crate::cluster::{ClusterSpec, NodeSpec};
 use crate::config::NodeRole;
 
-pub(super) const HEIGHT_TIMEOUT: Duration = Duration::from_secs(120);
-pub(super) const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(120);
+// These bound the post-action waits (chain height advancing, cluster
+// re-converging). The upgrade tests restart real node processes mid-run: after
+// a restart a node must resume its VDF and re-mine, or resync from peers before
+// it can catch back up to the tip. On a shared CI runner those steps contend
+// for CPU with the other node processes and can briefly stall, so the budget
+// has to cover a slow restart, not just steady-state block time. A wait returns
+// as soon as its condition holds, so a generous ceiling only costs wall-clock on
+// a genuinely stuck run — it does not slow the common case.
+pub(super) const HEIGHT_TIMEOUT: Duration = Duration::from_secs(240);
+pub(super) const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Shared run directory for all tests in this invocation.
 /// Set via `IRYS_RUN_ID` env var (xtask sets this to a timestamp).
