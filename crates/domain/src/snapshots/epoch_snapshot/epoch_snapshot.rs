@@ -510,8 +510,14 @@ impl EpochSnapshot {
     /// the expired partition hashes in the epoch snapshot.
     fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader, cascade_active: bool) {
         let epoch_height = new_epoch_block.height;
-        let expired_partitions: Vec<ExpiringPartitionInfo> =
-            self.ledgers.expire_partitions(epoch_height, cascade_active);
+        // Same write-frontier inputs as `touch_active_ledger_slots`: the new
+        // epoch block's cumulative per-ledger totals.
+        let expired_partitions: Vec<ExpiringPartitionInfo> = self.ledgers.expire_partitions(
+            epoch_height,
+            cascade_active,
+            |ledger| new_epoch_block.ledger_total_chunks(ledger),
+            self.config.consensus.num_chunks_in_partition,
+        );
 
         // Return early if there's no more work to do
         if expired_partitions.is_empty() {
@@ -1367,7 +1373,23 @@ impl EpochSnapshot {
         };
 
         self.ledgers
-            .get_expiring_partitions(epoch_height, cascade_active)
+            .get_expiring_partitions(
+                epoch_height,
+                cascade_active,
+                // LOCKSTEP with `expire_ledger_slots`: the target ledger uses the
+                // new epoch block's total. Other ledgers fall back to this
+                // (parent) snapshot's totals — their entries are discarded by the
+                // `ledger_id == ledger` filter below, so the fallback never
+                // reaches the returned set.
+                |l| {
+                    if l == ledger {
+                        new_total_chunks
+                    } else {
+                        self.epoch_block.ledger_total_chunks(l)
+                    }
+                },
+                chunks_per_slot,
+            )
             .into_iter()
             .filter(|info| info.ledger_id == ledger && !written_this_epoch(info.slot_index))
             .collect()
@@ -1379,14 +1401,23 @@ impl EpochSnapshot {
     /// refund pipeline), this is the set the NC-0042 publish-candidate filter and
     /// validator check key on: a tx is non-promotable for every block at-or-after
     /// its Submit slot's expiry. See `Ledgers::get_all_expired_term_slot_indexes`.
+    /// `total_chunks` is `ledger`'s cumulative chunk count at the block whose
+    /// view is being computed (callers pass the parent header's total — the same
+    /// value that bounds the expired chunk range).
     pub fn get_all_expired_term_slot_indexes(
         &self,
         ledger: DataLedger,
         epoch_height: u64,
         cascade_active: bool,
+        total_chunks: u64,
     ) -> Vec<usize> {
-        self.ledgers
-            .get_all_expired_term_slot_indexes(ledger, epoch_height, cascade_active)
+        self.ledgers.get_all_expired_term_slot_indexes(
+            ledger,
+            epoch_height,
+            cascade_active,
+            total_chunks,
+            self.config.consensus.num_chunks_in_partition,
+        )
     }
 
     pub fn get_first_unexpired_slot_index(&self, ledger_id: DataLedger) -> usize {

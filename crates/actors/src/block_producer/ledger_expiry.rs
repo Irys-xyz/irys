@@ -461,6 +461,7 @@ pub async fn expired_submit_tx_ids(
         DataLedger::Submit,
         block_height,
         cascade_active,
+        parent_block_header.ledger_total_chunks(DataLedger::Submit),
     );
     if slot_indexes.is_empty() {
         return Ok(std::collections::BTreeSet::new());
@@ -582,21 +583,24 @@ pub fn expired_submit_range(
     config: &Config,
     cascade_active: bool,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
+    let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
     let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
         DataLedger::Submit,
         block_height,
         cascade_active,
+        parent_total,
     );
     let Some(&max_expired_slot) = slot_indexes.iter().max() else {
         return Ok(None);
     };
 
-    // Expired Submit slots must be a prefix of the written data. Unwritten
-    // preallocated slots never expire, and Submit data is append-only, so once a
-    // higher slot has written data, later writes cannot return to keep a lower
-    // slot live while that higher written slot expires. If this guard ever fires,
-    // the promotion filter would over-approximate real expired txs and must fail
-    // loud rather than silently diverge.
+    // Expired Submit slots must be a prefix of the written data. Post-Cascade
+    // only fully-written slots expire (the write frontier's slot stays live),
+    // unwritten preallocated slots never expire, and Submit data is append-only,
+    // so once a higher slot has written data, later writes cannot return to keep
+    // a lower slot live while that higher written slot expires. If this guard
+    // ever fires, the promotion filter would over-approximate real expired txs
+    // and must fail loud rather than silently diverge.
     if let Some((i, &slot)) = slot_indexes
         .iter()
         .enumerate()
@@ -624,7 +628,6 @@ pub fn expired_submit_range(
     if p == 0 {
         eyre::bail!("num_chunks_in_partition must be non-zero for Submit-expiry range math");
     }
-    let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
     // `max_expired_slot` is a slot index (usize); the checked conversion documents
     // the invariant and `saturating_add` keeps the lone `+1` from wrapping.
     let max_expired_slot = u64::try_from(max_expired_slot)
@@ -1828,8 +1831,55 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_domain::StakeEntry;
-    use irys_types::{CommitmentStatus, DataTransactionHeaderV1};
+    use irys_domain::{CommitmentState, PartitionAssignments, StakeEntry};
+    use irys_types::{
+        CommitmentStatus, DataTransactionHeaderV1, H256List, NodeConfig, UnixTimestamp,
+        hardfork_config::Cascade,
+    };
+
+    /// Shared fixture: an otherwise-empty `EpochSnapshot` seeded from `config`.
+    fn empty_epoch_snapshot(config: &Config) -> EpochSnapshot {
+        EpochSnapshot {
+            ledgers: irys_database::Ledgers::new(&config.consensus, false),
+            partition_assignments: PartitionAssignments::new(),
+            all_active_partitions: Vec::new(),
+            unassigned_partitions: Vec::new(),
+            storage_submodules_config: None,
+            config: config.clone(),
+            commitment_state: CommitmentState::default(),
+            epoch_block: IrysBlockHeader::default(),
+            previous_epoch_block: None,
+            expired_partition_infos: None,
+            epoch_height: 0,
+        }
+    }
+
+    /// Shared fixture: a mock epoch-boundary header carrying only a Submit
+    /// `total_chunks` update (no txs of its own).
+    fn submit_epoch_header(height: u64, total_chunks: u64) -> IrysBlockHeader {
+        let mut h = IrysBlockHeader::new_mock_header();
+        h.height = height;
+        h.timestamp = irys_types::UnixTimestampMs::from_millis((height as u128) * 1000);
+        h.data_ledgers[DataLedger::Submit].total_chunks = total_chunks;
+        h.data_ledgers[DataLedger::Submit].tx_ids = H256List::new();
+        h
+    }
+
+    /// Shared fixture: a `Config` with Cascade active from genesis and small
+    /// chunk/partition sizes so tests can drive slot boundaries with tiny data sizes.
+    fn config_with_cascade() -> Config {
+        let mut node_config = NodeConfig::testing();
+        let consensus = node_config.consensus.get_mut();
+        consensus.chunk_size = 1;
+        consensus.num_chunks_in_partition = 10;
+        consensus.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length: 365,
+            thirty_day_epoch_length: 30,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+        Config::new_with_random_peer_id(node_config)
+    }
 
     #[test]
     fn test_aggregate_miner_fees_handles_duplicates() {
@@ -3446,40 +3496,14 @@ mod tests {
             IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
             set_data_tx_included_height, tables::IrysTables,
         };
-        use irys_domain::{
-            BlockIndex, BlockTree, BlockTreeReadGuard, CommitmentState, PartitionAssignments,
-        };
+        use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
         use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
         use irys_types::{
-            Config, ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, H256List, LedgerIndexItem, NodeConfig, UnixTimestamp,
-            app_state::DatabaseProvider, hardfork_config::Cascade,
+            ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
         };
         use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
         use std::sync::{Arc, RwLock};
-
-        fn config_with_cascade() -> Config {
-            let mut node_config = NodeConfig::testing();
-            let consensus = node_config.consensus.get_mut();
-            consensus.chunk_size = 1;
-            consensus.num_chunks_in_partition = 10;
-            consensus.hardforks.cascade = Some(Cascade {
-                activation_timestamp: UnixTimestamp::from_secs(0),
-                one_year_epoch_length: 365,
-                thirty_day_epoch_length: 30,
-                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
-            });
-            Config::new_with_random_peer_id(node_config)
-        }
-
-        fn submit_epoch_header(height: u64, total_chunks: u64) -> IrysBlockHeader {
-            let mut h = IrysBlockHeader::new_mock_header();
-            h.height = height;
-            h.timestamp = irys_types::UnixTimestampMs::from_millis((height as u128) * 1000);
-            h.data_ledgers[DataLedger::Submit].total_chunks = total_chunks;
-            h.data_ledgers[DataLedger::Submit].tx_ids = H256List::new();
-            h
-        }
 
         fn submit_chain_header(
             height: u64,
@@ -3511,19 +3535,7 @@ mod tests {
         //   h=3N..6N : no new data, so the touched/stale heights persist
         // At h=6N+1, slot 0 has expired, slot 1 is still live, and untouched
         // preallocated slots 2/3 must remain unexpired.
-        let mut epoch = EpochSnapshot {
-            ledgers: irys_database::Ledgers::new(&config.consensus, false),
-            partition_assignments: PartitionAssignments::new(),
-            all_active_partitions: Vec::new(),
-            unassigned_partitions: Vec::new(),
-            storage_submodules_config: None,
-            config: config.clone(),
-            commitment_state: CommitmentState::default(),
-            epoch_block: IrysBlockHeader::default(),
-            previous_epoch_block: None,
-            expired_partition_infos: None,
-            epoch_height: 0,
-        };
+        let mut epoch = empty_epoch_snapshot(&config);
         let mut epoch0 = submit_epoch_header(0, 0);
         epoch0.test_sign();
         epoch.perform_epoch_tasks(&None, &epoch0, vec![])?;
@@ -3544,7 +3556,7 @@ mod tests {
         }
 
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true),
+            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true, 19),
             vec![0],
             "canonical epoch processing must skip unwritten preallocated Submit slots"
         );
@@ -3755,27 +3767,12 @@ mod tests {
     /// would cause the filter to over-approximate real expired txs (NC-0042).
     #[test]
     fn expired_submit_range_bails_on_non_prefix_expired_set() {
-        use irys_domain::{CommitmentState, PartitionAssignments};
-        use irys_types::{Config, NodeConfig};
-
         // Default config: num_blocks_in_epoch=100, submit_ledger_epoch_length=5,
         // num_chunks_in_partition=10. min_blocks = 5 * 100 = 500.
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
 
-        let mut epoch = EpochSnapshot {
-            ledgers: irys_database::Ledgers::new(&config.consensus, false),
-            partition_assignments: PartitionAssignments::new(),
-            all_active_partitions: Vec::new(),
-            unassigned_partitions: Vec::new(),
-            storage_submodules_config: None,
-            config: config.clone(),
-            commitment_state: CommitmentState::default(),
-            epoch_block: IrysBlockHeader::default(),
-            previous_epoch_block: None,
-            expired_partition_infos: None,
-            epoch_height: 0,
-        };
+        let mut epoch = empty_epoch_snapshot(&config);
 
         // Allocate 4 Submit slots at height 1 (last_height=1 for all).
         // Slot 3 is the never-expiring last slot.
@@ -3811,7 +3808,12 @@ mod tests {
 
         // Sanity: fixture produces the non-prefix set before asserting the guard.
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, block_height, true),
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                block_height,
+                true,
+                3 * chunks_per_slot
+            ),
             vec![0, 2],
             "fixture must produce the non-prefix expired set {{0, 2}}"
         );
@@ -3826,5 +3828,93 @@ mod tests {
             err.to_string().contains("not a contiguous prefix"),
             "expected the NC-0042 contiguity guard message, got: {err}"
         );
+    }
+
+    /// The slot holding the write frontier must survive an idle Submit term.
+    /// Chunk offsets are strictly cumulative, so if the partially-written
+    /// frontier slot expired, every tx appended into its unwritten remainder
+    /// afterwards would be charged yet permanently non-promotable (its start
+    /// offset sits inside `[0, range_end)` forever) and never refunded (the
+    /// refund pipeline settles each slot exactly once, at expiry). Post-Cascade
+    /// only fully-written slots may expire, so the expired range can never
+    /// reach the frontier. Unlike `submit_expiry_skips_canonical_unwritten_slots`
+    /// (where the frontier slot is rescued by a later write refreshing its
+    /// clock), here ingress stalls for a full term and the fully-written rule is
+    /// the only thing keeping the frontier slot alive.
+    #[test]
+    fn submit_expiry_never_covers_the_partially_written_frontier_slot() -> eyre::Result<()> {
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+        let config = config_with_cascade();
+
+        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let blocks_per_cycle =
+            config.consensus.epoch.submit_ledger_epoch_length * num_blocks_in_epoch;
+
+        let mut epoch = empty_epoch_snapshot(&config);
+
+        // h=0: genesis. h=N: data [0, 18) lands — slot 0 full, slot 1 holds the
+        // write frontier (8/10), headroom slots preallocated above. Then ingress
+        // stalls: idle epochs at total 18 until a full term has passed since the
+        // last write.
+        let mut epoch0 = submit_epoch_header(0, 0);
+        epoch0.test_sign();
+        epoch.perform_epoch_tasks(&None, &epoch0, vec![])?;
+        let mut prev_epoch = epoch0;
+        for height in (num_blocks_in_epoch..=blocks_per_cycle + num_blocks_in_epoch)
+            .step_by(num_blocks_in_epoch as usize)
+        {
+            let mut next_epoch = submit_epoch_header(height, 18);
+            next_epoch.test_sign();
+            epoch.perform_epoch_tasks(&Some(prev_epoch.clone()), &next_epoch, vec![])?;
+            prev_epoch = next_epoch;
+        }
+
+        // Both written slots are a full term stale, but only the FULL slot 0 may
+        // expire; the frontier slot 1 must stay live.
+        let probe_height = blocks_per_cycle + num_blocks_in_epoch + 1;
+        assert_eq!(
+            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true, 18),
+            vec![0],
+            "the write frontier's slot must not expire during an ingress stall"
+        );
+        let slots = epoch.ledgers.get_slots(DataLedger::Submit);
+        assert!(slots[0].is_expired, "the fully-written slot 0 recycles");
+        assert!(!slots[1].is_expired, "the frontier slot 1 must survive");
+
+        // The non-promotability range must stop at slot 0's boundary: the next
+        // append (offset 18) lies outside it and stays promotable/settleable.
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.data_ledgers[DataLedger::Submit].total_chunks = 18;
+        let range = expired_submit_range(probe_height, &epoch, &parent, &config, true)?
+            .expect("slot 0 expired, so a range must exist");
+        assert_eq!(
+            range.range_end, 10,
+            "expired range must end at the last full slot's boundary, not the frontier"
+        );
+
+        // Ingress resumes: [18, 25) fills slot 1. Because it never expired, the
+        // touch refreshes its expiry clock instead of freezing it.
+        let resume_height = blocks_per_cycle + 2 * num_blocks_in_epoch;
+        let mut resume_epoch = submit_epoch_header(resume_height, 25);
+        resume_epoch.test_sign();
+        epoch.perform_epoch_tasks(&Some(prev_epoch), &resume_epoch, vec![])?;
+        let slots = epoch.ledgers.get_slots(DataLedger::Submit);
+        assert_eq!(
+            slots[1].last_height, resume_height,
+            "surviving the stall lets the refill refresh the frontier slot's clock"
+        );
+        assert_eq!(
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                resume_height + 1,
+                true,
+                25
+            ),
+            vec![0],
+            "the refilled slot stays out of the expired set for a fresh term"
+        );
+
+        Ok(())
     }
 }

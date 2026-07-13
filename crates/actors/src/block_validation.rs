@@ -4875,9 +4875,17 @@ async fn generate_expected_shadow_transactions(
     // epoch snapshot (pre-`touch_active_ledger_slots`) and cannot see the current
     // epoch's write. That is conservative (never a double-pay) and self-healing:
     // once the epoch `touch` bumps the slot's `last_height` it leaves the blocked
-    // set for the rest of the epoch, so at worst a promotion is delayed one block at
-    // the epoch boundary. Replaces the earlier cycle-math approximation — see
-    // NC-0042 §4b.
+    // set for the rest of the epoch. The delay this imposes is bounded but not
+    // always a single block: this set is recomputed every block from the *parent's*
+    // advancing Submit total, so a slot whose fully-written boundary is crossed by
+    // mid-epoch appends re-enters the blocked set as soon as the parent total passes
+    // it, while its `last_height` is not refreshed until the next epoch `touch`. A tx
+    // appended into a slot that completes mid-epoch can therefore be held
+    // non-promotable until that next epoch block — up to ~one epoch, not one block.
+    // The delay is still deterministic (a pure function of the parent header/snapshot,
+    // so every node agrees), cannot refund within the window (settlement is
+    // epoch-gated), and self-heals at the next epoch. Replaces the earlier cycle-math
+    // approximation — see NC-0042 §4b.
     //
     // This is a strict superset of the old same-block guard: a tx whose Submit
     // slot expires *at* this block (same-block epoch collision) and a tx whose
