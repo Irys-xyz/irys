@@ -2352,6 +2352,22 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
+    /// Polls [`Self::get_is_promoted`] until the tx reports promoted. The mempool applies a
+    /// block's promotions when it processes `BlockConfirmed`, which runs behind block production —
+    /// an instant read straight after `mine_block` races that update.
+    pub async fn wait_for_promotion(&self, tx_id: &H256, max_seconds: usize) -> eyre::Result<()> {
+        let max_seconds = coverage_adjusted_timeout(max_seconds);
+        for _ in 0..max_seconds {
+            if self.get_is_promoted(tx_id).await? {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(eyre::eyre!(
+            "tx {tx_id} not promoted to Publish after {max_seconds}s"
+        ))
+    }
+
     /// read storage tx from mempool (with DB fallback)
     pub async fn get_storage_tx_header_from_mempool(
         &self,
