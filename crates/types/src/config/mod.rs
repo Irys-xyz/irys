@@ -1373,6 +1373,14 @@ mod tests {
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
+
+        // Peer mode requires this pin (Config::validate).
+        assert_eq!(
+            consensus.expected_genesis_hash,
+            Some(H256::from_base58(
+                "2Pgf5vJvvFifTnyJy9gTg31Yba2HFh2hC6imqsmJqdF7"
+            ))
+        );
     }
 
     #[test]

@@ -782,9 +782,23 @@ impl IrysNode {
         let genesis_hash = genesis_block.block_hash;
         info!("Node starting with genesis hash: {}", genesis_hash);
 
-        // Genesis node: now that the genesis hash is known, set expected_genesis_hash
-        // so our consensus config hash matches peer nodes during P2P handshakes.
-        if self.config.consensus.expected_genesis_hash.is_none() {
+        // Once genesis is known, pin expected_genesis_hash for P2P handshakes.
+        // Pre-set pin must match built/loaded genesis (wrong network preset or DB).
+        if let Some(expected) = self.config.consensus.expected_genesis_hash {
+            eyre::ensure!(
+                genesis_hash == expected,
+                "genesis block hash {} does not match consensus.expected_genesis_hash {}; \
+                 this node's genesis (built or loaded from the database) belongs to a \
+                 different network than its consensus config — refusing to start",
+                genesis_hash,
+                expected,
+            );
+            info!(
+                "expected_genesis_hash already set to {}, consensus hash: {}",
+                expected,
+                self.config.consensus.keccak256_hash()
+            );
+        } else {
             info!(
                 "Setting expected_genesis_hash to {} (was None)",
                 genesis_hash
@@ -792,12 +806,6 @@ impl IrysNode {
             self.config = self.config.clone().with_expected_genesis_hash(genesis_hash);
             info!(
                 "Consensus config hash after update: {}",
-                self.config.consensus.keccak256_hash()
-            );
-        } else {
-            info!(
-                "expected_genesis_hash already set to {:?}, consensus hash: {}",
-                self.config.consensus.expected_genesis_hash,
                 self.config.consensus.keccak256_hash()
             );
         }
