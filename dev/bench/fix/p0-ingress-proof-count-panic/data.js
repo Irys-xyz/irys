@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784023108005,
+  "lastUpdate": 1784033543725,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9439,6 +9439,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "d45c6721b3fbe4473faeac8a9365ed1c5845c3d5",
+          "message": "[P0] Ingress-proof-count panic — steady-state remote node-crash DoS (0c / FC-core-B)",
+          "timestamp": "2026-07-14T09:42:52Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1514/commits/d45c6721b3fbe4473faeac8a9365ed1c5845c3d5"
+        },
+        "date": 1784033542597,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015228,
+            "range": "± 0.000414",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153496,
+            "range": "± 0.003386",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.696381,
+            "range": "± 0.069224",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.337778,
+            "range": "± 0.774598",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075661,
+            "range": "± 0.001588",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 757.12974,
+            "range": "± 6.840645",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 969.37113,
+            "range": "± 2.557986",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119917,
+            "range": "± 0.000341",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.721052,
+            "range": "± 2.855425",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1556.664633,
+            "range": "± 2.80462",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035092,
+            "range": "± 0.00088",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.271602,
+            "range": "± 2.578192",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.708252,
+            "range": "± 1.291413",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
