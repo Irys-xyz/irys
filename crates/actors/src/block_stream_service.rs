@@ -887,6 +887,16 @@ mod tests {
                 new_fork: Arc::new(vec![Arc::clone(&block_c)]),
             })
             .expect("reorg orphaning B");
+
+        // Restart here — between the reorg and the re-migration: the rebuilt de-dup state must
+        // mirror the live eviction, so the re-finalise below survives either path.
+        let (emitted, finalized) = rebuild_state(&handle.db).expect("rebuild");
+        assert!(
+            !finalized.contains(&block_b.header().block_hash),
+            "rebuild must evict the orphaned hash from the finalized de-dup"
+        );
+        assert!(emitted.contains(&block_c.header().block_hash));
+
         producer
             .handle_signal(BlockStreamSignal::Finalized(Arc::clone(&block_b)))
             .expect("re-finalize B after re-adoption");
@@ -902,14 +912,9 @@ mod tests {
             "the re-migrated orphan must re-emit finalized, not be de-dup-suppressed"
         );
 
-        // Restart: the rebuilt de-dup state must mirror the live eviction, so the re-finalise
-        // also survives a producer restart that happens between the reorg and the re-migration.
-        let (emitted, finalized) = rebuild_state(&handle.db).expect("rebuild");
-        assert!(
-            !finalized.contains(&block_b.header().block_hash),
-            "rebuild must evict the orphaned hash from the finalized de-dup"
-        );
-        assert!(emitted.contains(&block_c.header().block_hash));
+        // After the re-finalise is durable, a rebuild suppresses a further duplicate again.
+        let (_, finalized) = rebuild_state(&handle.db).expect("rebuild after re-finalise");
+        assert!(finalized.contains(&block_b.header().block_hash));
     }
 
     /// The CR-7 reconciliation: a `finalized` frame lost to a crash between the migration commit
