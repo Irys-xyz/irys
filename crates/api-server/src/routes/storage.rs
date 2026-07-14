@@ -5,6 +5,13 @@ use irys_domain::ChunkType;
 use irys_types::DataLedger;
 use serde::{Deserialize, Serialize};
 
+/// Route path templates registered in [`crate::routes`]. Placeholder names must match the
+/// serde-visible (camelCase) field names of the `Path`-extracted structs below — actix-web
+/// matches placeholders to struct fields by name, and a mismatch rejects the request with
+/// a "missing field" error before it reaches the handler.
+pub const INTERVALS_ROUTE: &str = "/storage/intervals/{ledger}/{slotIndex}/{chunkType}";
+pub const COUNTS_ROUTE: &str = "/storage/counts/{ledger}/{slotIndex}";
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageIntervalsParams {
@@ -144,4 +151,78 @@ pub async fn get_chunk_counts(
         data_chunks,
         packed_chunks,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::dev::{Service as _, ServiceResponse};
+    use actix_web::http::StatusCode;
+    use actix_web::{App, test, web};
+
+    // The real handlers need a full `ApiState`, which is too heavy to construct in a unit
+    // test. Mounting the shared route templates with stub handlers that use the same
+    // `Path` extractors still exercises what regressed: placeholder names resolving to the
+    // serde-visible field names of the param structs.
+    async fn echo_intervals(params: Path<StorageIntervalsParams>) -> Json<StorageIntervalsParams> {
+        Json(params.into_inner())
+    }
+
+    async fn echo_counts(params: Path<ChunkCountsParams>) -> Json<ChunkCountsParams> {
+        Json(params.into_inner())
+    }
+
+    async fn call(uri: &str) -> ServiceResponse {
+        let app = test::init_service(
+            App::new().service(
+                web::scope(crate::API_VERSION)
+                    .route(INTERVALS_ROUTE, web::get().to(echo_intervals))
+                    .route(COUNTS_ROUTE, web::get().to(echo_counts)),
+            ),
+        )
+        .await;
+        let req = test::TestRequest::get().uri(uri).to_request();
+        app.call(req).await.expect("route call failed")
+    }
+
+    async fn assert_extracted(uri: &str, expected: serde_json::Value) {
+        let resp = call(uri).await;
+        let status = resp.status();
+        let body = test::read_body(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "path extraction failed for {uri}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+        assert_eq!(parsed, expected, "extracted params drifted for {uri}");
+    }
+
+    #[actix_web::test]
+    async fn data_intervals_path_reaches_handler() {
+        assert_extracted(
+            "/v1/storage/intervals/OneYear/0/Data",
+            serde_json::json!({"ledger": "OneYear", "slotIndex": 0, "chunkType": "Data"}),
+        )
+        .await;
+    }
+
+    #[actix_web::test]
+    async fn entropy_intervals_path_reaches_handler() {
+        assert_extracted(
+            "/v1/storage/intervals/Submit/3/Entropy",
+            serde_json::json!({"ledger": "Submit", "slotIndex": 3, "chunkType": "Entropy"}),
+        )
+        .await;
+    }
+
+    #[actix_web::test]
+    async fn counts_path_reaches_handler() {
+        assert_extracted(
+            "/v1/storage/counts/OneYear/7",
+            serde_json::json!({"ledger": "OneYear", "slotIndex": 7}),
+        )
+        .await;
+    }
 }
