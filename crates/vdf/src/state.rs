@@ -1,16 +1,14 @@
+use crate::vdf_utils::{ReanchorSignals, VdfReanchorGenerationChanged};
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, warn_mismatches};
 use eyre::{bail, eyre};
-use irys_database::block_header_by_hash;
-use irys_domain::BlockIndex;
 use irys_efficient_sampling::num_recall_ranges_in_partition;
 use irys_types::{
-    Config, DatabaseProvider, H256, H256List, IrysBlockHeader, U256, VDFLimiterInfo, VdfConfig,
+    AtomicVdfStepNumber, Config, H256, H256List, U256, VDFLimiterInfo, VdfConfig,
     block_production::Seed,
 };
 use nodit::{InclusiveInterval as _, Interval, interval::ii};
 use rayon::prelude::*;
-use reth_db::Database as _;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::{
     collections::VecDeque,
     ops::Range,
@@ -33,16 +31,29 @@ pub enum WaitForStepError {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct VdfState {
-    /// last global step stored
-    pub global_step: u64,
+    /// Last global step stored — the single source of truth for the step
+    /// number. Held as an `Arc<AtomicU64>` so the mining hot path and the read
+    /// handle observe it WITHOUT taking the `RwLock` (same allocation, shared
+    /// by `VdfStateReadonly`). Private so the SSOT cannot be replaced after
+    /// construction; mutate via `store_step`/`set_canonical_step`, read via
+    /// `current_step`/`step_counter`.
+    ///
+    /// `Relaxed` is sufficient: every writer runs under the `RwLock` write
+    /// guard (`store_step`), which serialises writers; any reader that also
+    /// needs the seed deque re-takes the read lock, which provides the
+    /// happens-before edge. The bare counter only ever needs a coherent
+    /// scalar, not ordering against the deque.
+    global_step: AtomicVdfStepNumber,
     /// maximum number of seeds to store in seeds VecDeque
     pub capacity: usize,
     /// stored seeds
     pub seeds: VecDeque<Seed>,
-    /// whether the VDF thread is mining or paused
-    pub is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
+    /// whether the VDF thread is mining or paused. The single shared
+    /// allocation (same `Arc` as the `VdfController` and the read handle);
+    /// private so it cannot be swapped out after construction.
+    is_vdf_mining_enabled: Arc<AtomicBool>,
     /// global step from the latest canonical block
     global_step_from_the_latest_canonical_block: u64,
     /// minimum global step to keep in the seeds VecDeque
@@ -50,19 +61,32 @@ pub struct VdfState {
 }
 
 impl VdfState {
-    pub fn new(
-        capacity: usize,
-        global_step: u64,
-        is_vdf_mining_enabled: Option<Arc<AtomicBool>>,
-    ) -> Self {
+    pub fn new(capacity: usize, global_step: u64, is_vdf_mining_enabled: Arc<AtomicBool>) -> Self {
         Self {
-            global_step,
+            global_step: Arc::new(AtomicU64::new(global_step)),
             global_step_from_the_latest_canonical_block: global_step,
             minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
             capacity,
             is_vdf_mining_enabled,
         }
+    }
+
+    /// Lock-free read of the single source-of-truth step counter.
+    pub fn current_step(&self) -> u64 {
+        self.global_step.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle to the owned step counter (same allocation). Lets the read
+    /// handle observe the SSOT counter without taking the `RwLock`.
+    pub(crate) fn step_counter(&self) -> AtomicVdfStepNumber {
+        Arc::clone(&self.global_step)
+    }
+
+    /// Shared handle to the owned mining-enable flag (same allocation). Lets the
+    /// read handle / controller observe and toggle mining without the `RwLock`.
+    pub(crate) fn mining_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.is_vdf_mining_enabled)
     }
 
     pub fn set_canonical_step(&mut self, global_canonical_step: u64) {
@@ -76,7 +100,7 @@ impl VdfState {
 
     pub fn get_last_step_and_seed(&self) -> (u64, Seed) {
         (
-            self.global_step,
+            self.current_step(),
             self.seeds
                 .back()
                 .cloned()
@@ -85,24 +109,25 @@ impl VdfState {
     }
 
     pub fn store_step(&mut self, seed: Seed, global_step: u64) -> u64 {
-        if self.global_step >= global_step {
-            return self.global_step;
+        let current = self.current_step();
+        if current >= global_step {
+            return current;
         }
-        if self.global_step + 1 != global_step {
+        if current + 1 != global_step {
             // Gap path: previously panicked, now log and no-op so the VDF
             // loop catches up via normal stepping. Callers detect the no-op
-            // by observing the returned step == self.global_step.
+            // by observing the returned step == self.current_step().
             //
             // pop_front MUST stay in the sequential branch below — a stale
             // pop_front here silently shrinks the seed buffer on every gap
             // until `get_last_step_and_seed` panics on an empty deque.
             error!(
-                current = self.global_step,
+                current = current,
                 proposed = global_step,
-                gap = global_step.saturating_sub(self.global_step + 1),
+                gap = global_step.saturating_sub(current + 1),
                 "VDF state would have a gap; ignoring step (VDF will catch up via normal stepping)"
             );
-            return self.global_step;
+            return current;
         }
         // Saturating to usize::MAX means seeds.len() >= vdf_depth is always
         // false, so the buffer never trims in this edge case. Safe — only
@@ -113,22 +138,15 @@ impl VdfState {
             self.seeds.pop_front();
         }
         self.seeds.push_back(seed);
-        self.global_step += 1;
+        self.global_step.store(current + 1, Ordering::Relaxed);
         global_step
-    }
-
-    /// Called when local vdf thread generates a new step, or vdf step synced from another peer, and we want to increment vdf step state
-    pub fn increment_step(&mut self, seed: Seed) -> u64 {
-        let new_step = self.global_step + 1;
-        self.store_step(seed, new_step);
-        new_step
     }
 
     /// Get steps in the given global steps numbers Interval
     pub fn get_steps(&self, i: Interval<u64>) -> eyre::Result<H256List> {
         let vdf_steps_len = self.seeds.len() as u64;
 
-        let last_global_step = self.global_step;
+        let last_global_step = self.current_step();
 
         // first available global step should be at least one.
         // TODO: Should this instead panic! as something has gone very wrong?
@@ -159,50 +177,72 @@ impl VdfState {
         ))
     }
 
-    pub fn start_mining(&self) -> eyre::Result<()> {
-        self.is_vdf_mining_enabled
-            .as_ref()
-            .ok_or(eyre!("Mining state sender isn't set!"))?
-            .store(true, Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub fn stop_mining(&self) -> eyre::Result<()> {
-        self.is_vdf_mining_enabled
-            .as_ref()
-            .ok_or(eyre!("Mining state sender isn't set!"))?
-            .store(false, Ordering::Relaxed);
-        Ok(())
+    /// Replace the seed buffer with `corrected`; leave the step counter untouched.
+    /// Seeds must end at the current step (`get_steps` maps by counter).
+    pub fn reanchor_seeds(&mut self, corrected: VecDeque<Seed>) {
+        assert!(
+            !corrected.is_empty(),
+            "reanchor_seeds requires a non-empty canonical window"
+        );
+        let capacity = u64::try_from(self.capacity).expect("VDF capacity must fit in u64");
+        self.minimum_step_to_keep = self.current_step().saturating_sub(capacity);
+        self.seeds = corrected;
+        while self.seeds.len() > self.capacity {
+            self.seeds.pop_front();
+        }
     }
 }
 
 pub type AtomicVdfState = Arc<RwLock<VdfState>>;
 
-/// Wraps the internal Arc<`RwLock`<>> to make the reference readonly
+/// Read-only handle: lock-free `current_step` / mining flag; no writable escape
+/// in production (`test_set_step` is feature-gated).
+///
+/// ```compile_fail
+/// use irys_vdf::state::{VdfState, VdfStateReadonly};
+/// use std::sync::atomic::AtomicBool;
+/// use std::sync::{Arc, RwLock};
+///
+/// let mining = Arc::new(AtomicBool::new(false));
+/// let state = Arc::new(RwLock::new(VdfState::new(0, 0, mining)));
+/// let handle = VdfStateReadonly::new(state);
+/// let _writable = handle.into_inner_cloned();
+/// ```
 #[derive(Debug, Clone)]
-pub struct VdfStateReadonly(AtomicVdfState);
+pub struct VdfStateReadonly {
+    state: AtomicVdfState,
+    global_step: AtomicVdfStepNumber,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
+}
 
 impl VdfStateReadonly {
-    /// Creates a new `ReadGuard` for Ledgers
-    pub const fn new(state: Arc<RwLock<VdfState>>) -> Self {
-        Self(state)
+    pub fn new(state: AtomicVdfState) -> Self {
+        let (global_step, is_vdf_mining_enabled) = {
+            let guard = state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (guard.step_counter(), guard.mining_flag())
+        };
+        Self {
+            state,
+            global_step,
+            is_vdf_mining_enabled,
+        }
     }
 
-    pub fn into_inner_cloned(&self) -> AtomicVdfState {
-        self.0.clone()
+    /// Lock-free current global step (reads the owned atomic).
+    pub fn current_step(&self) -> u64 {
+        self.global_step.load(Ordering::Relaxed)
     }
 
-    /// Read access to internal steps queue.
-    ///
-    /// On `RwLock` poisoning (a prior writer panicked), recovers the inner
-    /// guard via `into_inner` and logs once at error level instead of
-    /// re-panicking. Readers cannot observably worsen a poisoned state, and
-    /// `run_vdf`'s shutdown handling already converts the underlying writer
-    /// panic into a controlled exit; surfacing a panic here would only
-    /// re-cascade through consensus-critical callers (mining, validation,
-    /// `wait_for_step`) whose only useful response is to drop work.
+    /// Lock-free mining-enabled read (reads the owned flag).
+    pub fn is_mining_enabled(&self) -> bool {
+        self.is_vdf_mining_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Read the seed buffer; recovers a poisoned lock instead of panicking.
     pub fn read(&self) -> RwLockReadGuard<'_, VdfState> {
-        self.0.read().unwrap_or_else(|poisoned| {
+        self.state.read().unwrap_or_else(|poisoned| {
             tracing::error!(
                 "VDF state RwLock poisoned by a prior writer panic; \
                  recovering inner guard for read-only access. The node \
@@ -227,25 +267,68 @@ impl VdfStateReadonly {
             .ok_or(eyre!("Step not found"))
     }
 
-    /// Wait until `desired_step_number` is reached.
-    ///
-    /// Polls `global_step` at 20 Hz, bailing if:
-    /// - the cancel signal is set (e.g., shutdown, preemption), or
-    /// - `global_step` does not advance for `progress_timeout`.
-    ///
-    /// The progress check guards against a dead/stuck VDF writer thread:
-    /// callers can wait for legitimately long step ranges, but a stalled
-    /// state surfaces as a typed error instead of an indefinite hang.
+    /// Wait until `desired_step_number`, or cancel / progress stall.
     pub async fn wait_for_step(
         &self,
         desired_step_number: u64,
         cancel: Arc<AtomicU8>,
         progress_timeout: std::time::Duration,
     ) -> eyre::Result<()> {
+        self.wait_for_step_inner(desired_step_number, cancel, progress_timeout, None, None)
+            .await
+    }
+
+    /// Like [`Self::wait_for_step`], but holds the stall timer open while the
+    /// buffer is suspect (heal freezes the counter). Does not abort on generation change.
+    pub async fn wait_for_step_or_suspect(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        signals: &ReanchorSignals,
+    ) -> eyre::Result<()> {
+        self.wait_for_step_inner(
+            desired_step_number,
+            cancel,
+            progress_timeout,
+            Some(signals),
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::wait_for_step`], aborting with [`VdfReanchorGenerationChanged`]
+    /// when generation moves past `captured_generation` (FF catch-up requeue path).
+    pub async fn wait_for_step_or_reanchor(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        signals: &ReanchorSignals,
+        captured_generation: u64,
+    ) -> eyre::Result<()> {
+        self.wait_for_step_inner(
+            desired_step_number,
+            cancel,
+            progress_timeout,
+            Some(signals),
+            Some(captured_generation),
+        )
+        .await
+    }
+
+    async fn wait_for_step_inner(
+        &self,
+        desired_step_number: u64,
+        cancel: Arc<AtomicU8>,
+        progress_timeout: std::time::Duration,
+        signals: Option<&ReanchorSignals>,
+        captured_generation: Option<u64>,
+    ) -> eyre::Result<()> {
         use tokio::time::Instant;
 
         let retries_per_second = 20;
-        let mut last_observed_step = self.read().global_step;
+        let mut last_observed_step = self.current_step();
         let mut last_progress_at = Instant::now();
         let mut attempts = 0_u32;
 
@@ -259,22 +342,37 @@ impl VdfStateReadonly {
                 return Err(WaitForStepError::Cancelled.into());
             }
 
-            let current_step = self.read().global_step;
+            // Checked before the success return: a generation change means the
+            // steps this waiter depends on were validated against a pre-heal
+            // buffer, so the whole task must requeue and revalidate — even if
+            // the counter has meanwhile reached the desired step. Only the
+            // generation-aware callers pass `captured_generation`.
+            if let (Some(signals), Some(captured)) = (signals, captured_generation) {
+                let current = signals.generation();
+                if current != captured {
+                    warn!(
+                        vdf.desired_step = desired_step_number,
+                        vdf.captured_generation = captured,
+                        vdf.current_generation = current,
+                        "VDF wait aborted: a re-anchor heal applied mid-validation"
+                    );
+                    return Err(VdfReanchorGenerationChanged { captured, current }.into());
+                }
+            }
+
+            let current_step = self.current_step();
 
             if current_step >= desired_step_number {
                 debug!(vdf.desired_step = desired_step_number, "VDF step available");
                 return Ok(());
             }
 
-            if current_step != last_observed_step {
-                // Any movement resets the stall baseline/timer — including a
-                // BACKWARD jump from a partition-recovery VDF re-anchor, which
-                // rebuilds the buffer at a lower `global_step`. The stall detector
-                // exists to catch a DEAD writer, which leaves `global_step`
-                // constant; only the re-anchor swap ever decreases it (`store_step`
-                // is strictly forward-only), so resetting on a decrease responds to
-                // a genuine liveness event and cannot mask the frozen-writer case.
+            // While suspect, counter freeze is expected (heal in progress).
+            let advanced = current_step > last_observed_step;
+            if advanced {
                 last_observed_step = current_step;
+            }
+            if advanced || signals.is_some_and(ReanchorSignals::is_buffer_suspect) {
                 last_progress_at = Instant::now();
             } else if last_progress_at.elapsed() >= progress_timeout {
                 return Err(WaitForStepError::Stalled {
@@ -298,220 +396,138 @@ impl VdfStateReadonly {
     }
 }
 
-/// create VDF state using the latest block in db
+/// TEST-ONLY mutation handle. Gated behind `test` (in-crate) and the
+/// `test-utils` feature (so downstream crates' tests — e.g. `irys-p2p` — can
+/// enable it as a dev-dependency feature). It replaces the removed
+/// `into_inner_cloned` writable escape: it can push the step counter forward
+/// WITHOUT handing back the writable `Arc<RwLock<_>>`, so the read-only
+/// contract holds in production builds.
+#[cfg(any(test, feature = "test-utils"))]
+impl VdfStateReadonly {
+    /// Force the global step counter to `step` (lock-free). Mirrors the legacy
+    /// `into_inner_cloned().write().global_step = step` stub.
+    pub fn test_set_step(&self, step: u64) {
+        self.global_step.store(step, Ordering::Relaxed);
+    }
+}
+
+/// Mining enable/disable handle (shared `AtomicBool` with `VdfState`).
+#[derive(Debug, Clone)]
+pub struct VdfController {
+    is_vdf_mining_enabled: Arc<AtomicBool>,
+}
+
+impl VdfController {
+    pub fn new(flag: &Arc<AtomicBool>) -> Self {
+        Self {
+            is_vdf_mining_enabled: Arc::clone(flag),
+        }
+    }
+
+    pub fn start(&self) {
+        self.is_vdf_mining_enabled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop(&self) {
+        self.is_vdf_mining_enabled.store(false, Ordering::Relaxed);
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.is_vdf_mining_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.is_vdf_mining_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn swap_enabled(&self, new: bool) -> bool {
+        self.is_vdf_mining_enabled.swap(new, Ordering::Relaxed)
+    }
+
+    /// CAS for chain-sync pause/restore so concurrent enables are not clobbered.
+    pub fn compare_exchange_enabled(&self, current: bool, new: bool) -> Result<bool, bool> {
+        self.is_vdf_mining_enabled.compare_exchange(
+            current,
+            new,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+    }
+}
+
+/// Bootstrap seed window: contiguous `first_step..=global_step`, oldest→newest.
+/// May hold up to `capacity + 1` seeds (legacy genesis prepend).
+#[derive(Debug, Clone)]
+pub struct VdfBootstrap {
+    pub global_step: u64,
+    pub first_step: u64,
+    pub ordered_seeds: VecDeque<Seed>,
+}
+
+/// Seed history for VDF startup (implemented in `irys-chain`).
+pub trait VdfSeedSource {
+    fn vdf_bootstrap(&self, capacity: usize) -> VdfBootstrap;
+}
+
 pub fn create_state(
-    block_index: &BlockIndex,
-    db: &DatabaseProvider,
+    seed_source: &dyn VdfSeedSource,
     is_vdf_mining_enabled: Arc<AtomicBool>,
     config: &Config,
 ) -> VdfState {
     let capacity = calc_capacity(config);
-
-    let block_hash = block_index
-        .get_latest_item()
-        .map(|item| item.block_hash)
-        .expect("To have at least genesis block");
-
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-    let tx = db.tx().unwrap();
-    let mut block = block_header_by_hash(&tx, &block_hash, false)
-        .unwrap()
-        .unwrap();
-    let global_step_number = block.vdf_limiter_info.global_step_number;
-    let mut steps_remaining = capacity;
-
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = block_header_by_hash(&tx, &block.previous_block_hash, false)
-            .unwrap()
-            .unwrap();
-    }
-
-    if block.height == 0 {
-        seeds.push_front(Seed(block.vdf_limiter_info.steps[0]));
-    }
+    let VdfBootstrap {
+        global_step,
+        first_step,
+        ordered_seeds,
+    } = seed_source.vdf_bootstrap(capacity);
+    // Enforce the VdfBootstrap contract in release builds too: a corrupt or buggy
+    // VdfSeedSource must fail fast at startup rather than silently initialize a
+    // non-contiguous or empty seed window (consensus-critical).
+    assert!(
+        !ordered_seeds.is_empty(),
+        "VdfBootstrap must contain at least one seed"
+    );
+    let seed_count =
+        u64::try_from(ordered_seeds.len()).expect("VdfBootstrap seed count must fit in u64");
+    // The legitimate maximum window is `capacity + 1` (the genesis-anchor edge
+    // case in the seed-replay walk); a larger deque from a buggy source would
+    // persist through `store_step`'s pop-one/push-one and corrupt consensus state.
+    assert!(
+        ordered_seeds.len() <= capacity.saturating_add(1),
+        "VdfBootstrap seed window exceeds capacity + genesis anchor"
+    );
+    let capacity_u64 = u64::try_from(capacity).expect("VDF capacity must fit in u64");
+    let expected_first_step = global_step
+        .checked_sub(seed_count.saturating_sub(1))
+        .expect("VdfBootstrap contains more seeds than global_step can anchor");
+    // One-based genesis contract: a valid window anchors at step 1 or later, so a
+    // step-zero bootstrap is a corrupt seed source, not a legitimate genesis.
+    assert!(expected_first_step >= 1, "VdfBootstrap one-based contract");
+    assert_eq!(
+        first_step, expected_first_step,
+        "VdfBootstrap contiguity contract"
+    );
 
     info!(
-        "Initializing vdf service from block's info in step number {}",
-        global_step_number
+        "Initializing vdf service from seed source at step number {}",
+        global_step
     );
 
     VdfState {
-        global_step: global_step_number,
-        global_step_from_the_latest_canonical_block: global_step_number,
-        minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-        seeds,
-        capacity,
-        is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-    }
-}
-
-/// Walk back from `tip` accumulating up to `capacity` VDF steps into a seed buffer (oldest step
-/// at the front, the tip's last step at the back), resolving each ancestor header via
-/// `fetch_parent`. Genesis (height 0) contributes only its first step. This is the shared
-/// walk-back used by the canonical-tip re-anchor; it mirrors [`create_state`]'s inline loop.
-fn build_vdf_seed_buffer(
-    tip: &IrysBlockHeader,
-    capacity: usize,
-    mut fetch_parent: impl FnMut(&H256) -> eyre::Result<IrysBlockHeader>,
-) -> eyre::Result<VecDeque<Seed>> {
-    let mut seeds: VecDeque<Seed> = VecDeque::with_capacity(capacity);
-    let mut steps_remaining = capacity;
-    let mut block = tip.clone();
-    while steps_remaining > 0 && block.height > 0 {
-        // get all the steps out of the block
-        for step in block.vdf_limiter_info.steps.0.iter().rev() {
-            seeds.push_front(Seed(*step));
-            steps_remaining -= 1;
-            if steps_remaining == 0 {
-                break;
-            }
-        }
-        // Buffer full — stop before fetching the parent. The inner break only exits the
-        // for-loop; falling through to fetch the parent would, when that parent is genesis,
-        // trip the post-loop genesis branch and push one EXTRA seed (capacity+1). That
-        // inflates seeds.len(), dragging get_steps' first_global_step one too low and
-        // mis-mapping the buffer's oldest step.
-        if steps_remaining == 0 {
-            break;
-        }
-        // get the previous block
-        block = fetch_parent(&block.previous_block_hash)?;
-    }
-    if block.height == 0 {
-        // Genesis contributes only its first step. Guard the index: this runs on
-        // the live VDF supervisor thread during re-anchor, so a malformed genesis
-        // header must surface as a no-op rather than panicking the node.
-        if let Some(first) = block.vdf_limiter_info.steps.0.first() {
-            seeds.push_front(Seed(*first));
-        }
-    }
-    Ok(seeds)
-}
-
-/// Rebuild [`VdfState`] anchored at the canonical chain TIP, for partition-recovery re-anchor.
-///
-/// Unlike [`create_state`] (which anchors at the block index's latest item — the LCA after a
-/// partition-recovery truncation), this anchors at the new canonical tip so the rebuilt buffer
-/// carries the recovered range's canonical steps, each with its OWN reset-boundary seed.
-/// Anchoring at the LCA instead leaves the loop to re-cross the recovered range's reset
-/// boundaries by local stepping with the canonical tip's single `next_seed`, which is wrong for
-/// every intermediate boundary — diverging the buffer and re-wedging block validation. See
-/// design/docs/vdf-partition-recovery-reanchor.md.
-///
-/// `canonical_headers` is the block tree's canonical chain (oldest cached .. tip, as returned by
-/// `BlockTree::get_canonical_chain`). The recovered range is always within the block tree (a
-/// reorg is only representable up to `block_tree_depth` deep), so the tip and the whole recovered
-/// range are present here. Block headers are persisted to the DB only at migration, so the
-/// un-migrated tail MUST come from these headers; steps deeper than the cache (needed to fill
-/// `capacity`) fall back to the DB, which holds the migrated ancestors.
-pub fn create_state_for_canonical_tip(
-    canonical_headers: &[Arc<IrysBlockHeader>],
-    db: &DatabaseProvider,
-    is_vdf_mining_enabled: Arc<AtomicBool>,
-    config: &Config,
-) -> eyre::Result<(VdfState, H256)> {
-    let capacity = calc_capacity(config);
-
-    let cached: std::collections::HashMap<H256, Arc<IrysBlockHeader>> = canonical_headers
-        .iter()
-        .map(|h| (h.block_hash, Arc::clone(h)))
-        .collect();
-    let tip: &IrysBlockHeader = canonical_headers
-        .last()
-        .ok_or_else(|| eyre!("canonical chain empty during VDF re-anchor"))?;
-    let global_step_number = tip.vdf_limiter_info.global_step_number;
-    // Captured from the anchor (tip) block; the walk-back below only reads ancestors.
-    let next_seed = tip.vdf_limiter_info.next_seed;
-
-    // This runs on the live VDF supervisor thread (the re-anchor arm of
-    // init_vdf_thread). A transient DB error or an ancestor missing from BOTH the
-    // canonical cache and the DB must surface as an error — the caller keeps the
-    // current buffer and retries on the next re-anchor signal — rather than
-    // panicking and shutting the node down via the thread's CancelOnDrop guard.
-    let tx = db
-        .tx()
-        .map_err(|e| eyre!("VDF re-anchor: opening db tx failed: {e}"))?;
-    // Resolve an ancestor header by hash: the block tree's canonical cache first (the recovered,
-    // un-migrated range), then the DB (migrated ancestors below the cache).
-    let seeds = build_vdf_seed_buffer(tip, capacity, |hash| {
-        if let Some(header) = cached.get(hash) {
-            return Ok((**header).clone());
-        }
-        block_header_by_hash(&tx, hash, false)
-            .map_err(|e| eyre!("VDF re-anchor: header lookup failed for {hash}: {e}"))?
-            .ok_or_else(|| eyre!("VDF re-anchor: missing header for {hash}"))
-    })?;
-
-    info!(
-        "Re-anchoring vdf service to canonical tip at step number {}",
-        global_step_number
-    );
-
-    Ok((
-        VdfState {
-            global_step: global_step_number,
-            global_step_from_the_latest_canonical_block: global_step_number,
-            minimum_step_to_keep: global_step_number.saturating_sub(capacity as u64),
-            seeds,
-            capacity,
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
-        },
-        next_seed,
-    ))
-}
-
-/// Build a TRANSIENT, read-only VDF step view anchored on `tip`'s OWN lineage — its
-/// `vdf_limiter_info.steps` plus ancestors resolved via `fetch_parent` (oldest at the front, the
-/// tip's last step at the back), filling up to `capacity` steps. Mirrors the walk-back of
-/// [`create_state_for_canonical_tip`] / [`build_vdf_seed_buffer`].
-///
-/// This is the single place that resolves FORK-LOCAL VDF steps for block validation. A node
-/// validating a block on a competing fork (deep partition recovery) must not trust its live VDF
-/// buffer, which may hold a different (poisoned) lineage past a reset boundary — that buffer would
-/// make validation reject the canonical fork it must adopt (the partition-recovery wedge). Callers
-/// build a view over just the steps a validation stage needs (e.g. a recall-range window back to
-/// the reset boundary, a handful of blocks) from the block's own ancestors in the block tree, then
-/// hand it to the existing consumers (which take `&VdfStateReadonly`) unchanged. The view never
-/// touches the live buffer, so mining and the #1447 confirmation gate are unaffected.
-pub fn build_fork_local_view(
-    tip: &IrysBlockHeader,
-    capacity: usize,
-    fetch_parent: impl FnMut(&H256) -> eyre::Result<IrysBlockHeader>,
-) -> eyre::Result<VdfStateReadonly> {
-    let seeds = build_vdf_seed_buffer(tip, capacity, fetch_parent)?;
-    let global_step = tip.vdf_limiter_info.global_step_number;
-    Ok(VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-        global_step,
+        global_step: Arc::new(AtomicU64::new(global_step)),
         global_step_from_the_latest_canonical_block: global_step,
-        minimum_step_to_keep: global_step.saturating_sub(capacity as u64),
-        seeds,
+        minimum_step_to_keep: global_step.saturating_sub(capacity_u64),
+        seeds: ordered_seeds,
         capacity,
-        is_vdf_mining_enabled: None,
-    }))))
+        is_vdf_mining_enabled,
+    }
 }
 
 /// return the larger of max_allowed_vdf_fork_steps or num_recall_ranges_in_partition()
 /// num_recall_ranges_in_partition() ensures the capacity of VecDeqeue is large enough for the partition.
 /// max_allowed_vdf_fork_steps of 60k allows for forks. VDF capacity limits the depth at which a fork can happen. If the fork happens out of the VDF range, the node cannot validate it.
 #[tracing::instrument(level = "trace", skip_all)]
-fn calc_capacity(config: &Config) -> usize {
+pub fn calc_capacity(config: &Config) -> usize {
     let capacity_from_config: u64 = num_recall_ranges_in_partition(&config.consensus);
 
     let max_allowed_vdf_fork_steps = config.vdf.max_allowed_vdf_fork_steps;
@@ -567,48 +583,22 @@ pub fn vdf_step_batch_is_valid(
     // parallel VDF recomputation. `get_steps` returns owned data and releases
     // the underlying read guard before we log or compare below.
     match vdf_steps_guard.get_steps(ii(batch_start_step_number, batch_end_step_number)) {
-        // Fast-path MATCH: the range is known locally AND identical, so these steps are
-        // already proven consistent with this node's lineage — accept without recomputing.
-        Ok(steps) if steps.0.as_slice() == batch_steps => {
+        Ok(steps) => {
             tracing::debug!(
                 vdf.batch_start = batch_start_step_number,
                 vdf.batch_end = batch_end_step_number,
                 "Validating VDF steps from VdfStepsReadGuard!"
             );
-            // `verify_last_step_checkpoints` is intentionally skipped on this
-            // fast path. Every block reaching the validation service has
-            // already passed through `prevalidate_block`
-            // (crates/actors/src/block_validation.rs), which unconditionally
-            // calls `last_step_checkpoints_is_valid` against the block's
-            // claimed `vdf_limiter_info`. That helper (crates/vdf/src/lib.rs)
-            // re-derives the SHA chain from the previous step's seed and
-            // rejects any mismatch — including the invariant that the last
-            // checkpoint equals the last step. So by the time we reach here,
-            // the block's `last_step_checkpoints` are already proven
-            // consistent with `steps`; repeating the check would just redo
-            // work the node already did. Static reviewers (CodeRabbit) flag
-            // the missing call repeatedly — leave this comment so they don't.
-            return Ok(());
-        }
-        // MISMATCH against the local buffer is NOT proof of invalidity: a competing fork
-        // legitimately diverges at/after a VDF reset boundary (its rotation block pins a
-        // different `next_seed`), and the local buffer reflects THIS node's lineage — it is
-        // not authoritative over another fork's steps. Fall through to the authoritative
-        // parallel recompute below, which derives every step from the block's OWN
-        // prev_output/steps/seed and still rejects a genuinely invalid chain. This closes the
-        // partition-recovery wedge: a node whose buffer free-ran past a reset boundary on a
-        // minority seed would otherwise reject the canonical chain's boundary-crossing blocks
-        // here, so the deep reorg — and the VDF re-anchor it triggers — could never fire. The
-        // #1447 run-ahead seed-poisoning protection is the mining-loop confirmed-step gate
-        // (`is_reset_boundary_blocked`), NOT this validation fast path, so recomputing here
-        // does not weaken it.
-        Ok(steps) => {
-            let expected = H256List(batch_steps.to_vec());
-            warn_mismatches(&steps, &expected);
+            if steps.0.as_slice() == batch_steps {
+                // Checkpoints already proven in prevalidate; do not re-hash here.
+                return Ok(());
+            }
+
+            // Mismatch: recompute from the block (buffer may be post-reorg poison).
             tracing::debug!(
                 vdf.batch_start = batch_start_step_number,
                 vdf.batch_end = batch_end_step_number,
-                "VDF batch mismatches local buffer; recomputing from the block's own seed (competing fork or poisoned buffer)"
+                "Local VDF buffer disagrees with the block's claimed steps; recomputing from the block's own seed (buffer may be poisoned by a cross-boundary reorg)"
             );
         }
         Err(err) => tracing::debug!(
@@ -744,12 +734,12 @@ pub mod test_helpers {
         let capacity = calc_capacity(config);
 
         let state = VdfState {
-            global_step: 0,
+            global_step: Arc::new(AtomicU64::new(0)),
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity,
             seeds: VecDeque::default(),
-            is_vdf_mining_enabled: Some(is_vdf_mining_enabled),
+            is_vdf_mining_enabled,
         };
         Arc::new(RwLock::new(state))
     }
@@ -762,261 +752,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::time::Duration;
-
-    /// Regression for the partition-recovery re-anchor fix (review Finding #1):
-    /// [`build_vdf_seed_buffer`] — the walk-back behind [`create_state_for_canonical_tip`] — must
-    /// reproduce the canonical chain's recorded steps VERBATIM, anchored at the tip. That is what
-    /// lets the re-anchored buffer match (and validate) the canonical chain across the recovered
-    /// range. The broken design re-anchored at the LCA and let the loop re-derive the post-LCA
-    /// steps with the wrong reset seed; rebuilding from the canonical headers instead copies each
-    /// block's own steps, which already encode the correct boundary crossings.
-    #[test]
-    fn build_vdf_seed_buffer_reproduces_canonical_steps_anchored_at_tip() {
-        fn mock_header(height: u64, hash: u8, prev: u8, steps: &[u8]) -> IrysBlockHeader {
-            let mut h = IrysBlockHeader::new_mock_header();
-            h.height = height;
-            h.block_hash = H256::repeat_byte(hash);
-            h.previous_block_hash = H256::repeat_byte(prev);
-            h.vdf_limiter_info.global_step_number = height; // unused by the walk-back
-            h.vdf_limiter_info.steps =
-                H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
-            h
-        }
-
-        // Canonical chain: genesis(0x00) <- b1(0x01) <- tip(0x02), each carrying its own steps.
-        let genesis = mock_header(0, 0x00, 0xFF, &[0x10]);
-        let b1 = mock_header(1, 0x01, 0x00, &[0x11, 0x12]);
-        let tip = mock_header(2, 0x02, 0x01, &[0x13, 0x14]);
-        let by_hash: std::collections::HashMap<H256, IrysBlockHeader> = [genesis, b1, tip.clone()]
-            .into_iter()
-            .map(|h| (h.block_hash, h))
-            .collect();
-
-        let seeds = build_vdf_seed_buffer(&tip, 1000, |hash| {
-            Ok(by_hash
-                .get(hash)
-                .cloned()
-                .expect("canonical ancestor present"))
-        })
-        .expect("walk-back over present canonical headers must succeed");
-
-        // Oldest at the front; genesis contributes only its first step; b1 and tip contribute all
-        // of theirs; the back is the canonical TIP's last step (anchored at the tip, not the LCA).
-        let got: Vec<H256> = seeds.iter().map(|s| s.0).collect();
-        let expected: Vec<H256> = [0x10, 0x11, 0x12, 0x13, 0x14]
-            .iter()
-            .map(|b| H256::repeat_byte(*b))
-            .collect();
-        assert_eq!(
-            got, expected,
-            "re-anchor rebuild must reproduce the canonical chain's steps verbatim"
-        );
-        assert_eq!(
-            seeds.back().map(|s| s.0),
-            Some(H256::repeat_byte(0x14)),
-            "buffer must be anchored at the canonical TIP's last step (the re-anchor-to-tip fix)"
-        );
-    }
-
-    /// Regression: when `capacity` is exhausted exactly while consuming the height-1 block's
-    /// steps, the walk-back must stop at exactly `capacity` seeds and NOT fall through to fetch
-    /// genesis and prepend its first step (which produced a capacity+1 buffer). The extra front
-    /// seed inflates `seeds.len()`, dragging `get_steps`' `first_global_step` one too low and
-    /// mis-mapping the buffer's oldest step onto genesis entropy.
-    #[test]
-    fn build_vdf_seed_buffer_stops_at_capacity_without_appending_genesis() {
-        fn mock_header(height: u64, hash: u8, prev: u8, steps: &[u8]) -> IrysBlockHeader {
-            let mut h = IrysBlockHeader::new_mock_header();
-            h.height = height;
-            h.block_hash = H256::repeat_byte(hash);
-            h.previous_block_hash = H256::repeat_byte(prev);
-            h.vdf_limiter_info.steps =
-                H256List(steps.iter().map(|b| H256::repeat_byte(*b)).collect());
-            h
-        }
-
-        // Same chain as the verbatim-reproduction test: genesis(0x10) <- b1(0x11,0x12) <- tip(0x13,0x14).
-        let genesis = mock_header(0, 0x00, 0xFF, &[0x10]);
-        let b1 = mock_header(1, 0x01, 0x00, &[0x11, 0x12]);
-        let tip = mock_header(2, 0x02, 0x01, &[0x13, 0x14]);
-        let by_hash: std::collections::HashMap<H256, IrysBlockHeader> = [genesis, b1, tip.clone()]
-            .into_iter()
-            .map(|h| (h.block_hash, h))
-            .collect();
-
-        // capacity=3 is reached while consuming b1 (whose parent IS genesis), exercising the
-        // off-by-one path. Want the 3 most-recent steps; genesis's 0x10 must NOT appear.
-        let seeds = build_vdf_seed_buffer(&tip, 3, |hash| {
-            Ok(by_hash.get(hash).cloned().expect("ancestor present"))
-        })
-        .expect("walk-back must succeed");
-
-        let got: Vec<H256> = seeds.iter().map(|s| s.0).collect();
-        let expected: Vec<H256> = [0x12, 0x13, 0x14]
-            .iter()
-            .map(|b| H256::repeat_byte(*b))
-            .collect();
-        assert_eq!(
-            got, expected,
-            "buffer must hold exactly the `capacity` most-recent steps, not capacity+1 with genesis prepended"
-        );
-        assert_eq!(
-            seeds.len(),
-            3,
-            "buffer length must equal capacity, not capacity+1"
-        );
-        assert!(
-            !seeds.iter().any(|s| s.0 == H256::repeat_byte(0x10)),
-            "genesis's first step must not be appended once capacity is already filled"
-        );
-    }
-
-    /// Finding #3: the re-anchor walk-back runs on the live VDF supervisor thread, so an
-    /// ancestor missing from both the block-tree cache and the DB (or a transient DB error)
-    /// must PROPAGATE as an error — letting the supervisor keep the old buffer and retry —
-    /// rather than panicking and shutting the node down.
-    #[test]
-    fn build_vdf_seed_buffer_propagates_fetch_error() {
-        let mut tip = IrysBlockHeader::new_mock_header();
-        tip.height = 2;
-        tip.block_hash = H256::repeat_byte(0x02);
-        tip.previous_block_hash = H256::repeat_byte(0x01);
-        tip.vdf_limiter_info.steps = H256List(vec![H256::repeat_byte(0x13)]);
-
-        // capacity is large, so the walk-back proceeds past the tip into the parent fetch,
-        // which fails — the error must surface instead of unwinding through a panic.
-        let result = build_vdf_seed_buffer(&tip, 1000, |_hash| {
-            Err(eyre!("ancestor missing from cache and DB"))
-        });
-
-        assert!(
-            result.is_err(),
-            "a failed ancestor fetch must propagate as an error, not panic the VDF thread"
-        );
-    }
-
-    /// Partition-recovery wedge fix: `vdf_step_batch_is_valid` must RECOMPUTE (from the block's own
-    /// seed) when the local buffer MISMATCHES, not reject. A competing fork legitimately has
-    /// different steps at the same step-numbers past a reset boundary, so a node whose buffer is
-    /// poisoned with a minority lineage must still ACCEPT an honest canonical block (otherwise the
-    /// deep reorg — and the VDF re-anchor it triggers — can never fire: the wedge). A genuinely
-    /// FORGED block must still be rejected by the recompute.
-    #[test]
-    fn vdf_step_batch_recomputes_on_buffer_mismatch() {
-        let mut node_config = NodeConfig::testing();
-        node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        node_config
-            .consensus
-            .get_mut()
-            .vdf
-            .num_checkpoints_in_vdf_step = 2;
-        node_config.consensus.get_mut().vdf.reset_frequency = 4;
-        let config = Config::new_with_random_peer_id(node_config);
-        let vdf_config = config.vdf.clone();
-
-        let num_steps = 10_usize;
-        let prev_output = H256::from_low_u64_be(42);
-
-        // Build a VALID VDF chain exactly as `vdf_step_batch_is_valid`'s recompute derives it:
-        // step i (batch index i, previous_step_number = i) is vdf_sha(salt(i), seed), where seed is
-        // the previous step (or prev_output for i==0), with `reset_seed` folded in at multiples of
-        // reset_frequency. Returns the steps and the LAST step's checkpoints.
-        let build_chain = |reset_seed: H256| -> (Vec<H256>, Vec<H256>) {
-            let mut steps: Vec<H256> = Vec::with_capacity(num_steps);
-            let mut last_checkpoints = Vec::new();
-            for i in 0..num_steps {
-                let mut seed = if i == 0 { prev_output } else { steps[i - 1] };
-                if i > 0 && (i as u64).is_multiple_of(vdf_config.reset_frequency as u64) {
-                    seed = apply_reset_seed(seed, reset_seed);
-                }
-                let salt = U256::from(step_number_to_salt_number(&vdf_config, i as u64));
-                let mut checkpoints = vec![H256::default(); vdf_config.num_checkpoints_in_vdf_step];
-                vdf_sha(
-                    salt,
-                    &mut seed,
-                    vdf_config.num_checkpoints_in_vdf_step,
-                    vdf_config.num_iterations_per_checkpoint(),
-                    &mut checkpoints,
-                );
-                steps.push(seed);
-                last_checkpoints = checkpoints;
-            }
-            (steps, last_checkpoints)
-        };
-
-        let reset_seed = H256::from_low_u64_be(1337);
-        let (canonical_steps, canonical_checkpoints) = build_chain(reset_seed);
-        // A losing fork's lineage: same step-numbers, a DIFFERENT reset seed → diverges after the
-        // first reset boundary. This is what poisons a recovering node's buffer.
-        let (poisoned_steps, _) = build_chain(H256::from_low_u64_be(0xBAD));
-        assert_ne!(
-            canonical_steps, poisoned_steps,
-            "the two reset seeds must diverge the chains"
-        );
-
-        let canonical_block = VDFLimiterInfo {
-            output: *canonical_steps.last().unwrap(),
-            global_step_number: num_steps as u64,
-            seed: reset_seed,
-            next_seed: H256::zero(),
-            prev_output,
-            last_step_checkpoints: H256List(canonical_checkpoints),
-            steps: H256List(canonical_steps.clone()),
-            vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
-            next_vdf_difficulty: Some(vdf_config.sha_1s_difficulty),
-        };
-
-        // Buffer poisoned with the losing fork's steps over the block's exact step range.
-        let poisoned_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState {
-            global_step: num_steps as u64,
-            global_step_from_the_latest_canonical_block: num_steps as u64,
-            minimum_step_to_keep: 0,
-            capacity: 1000,
-            seeds: poisoned_steps.iter().map(|s| Seed(*s)).collect(),
-            is_vdf_mining_enabled: None,
-        })));
-        // Sanity: the buffer genuinely mismatches the block over its range → exercises the
-        // recompute fall-through, not the fast-path match.
-        let buffered = poisoned_guard.get_steps(ii(1, num_steps as u64)).unwrap();
-        assert_ne!(
-            buffered.0, canonical_block.steps.0,
-            "poisoned buffer must mismatch the canonical block's steps"
-        );
-
-        let pool = crate::build_verification_pool(&vdf_config);
-
-        // THE FIX: the poisoned buffer ACCEPTS the honest canonical block via recompute.
-        let accepted = vdf_steps_are_valid(
-            &pool,
-            &canonical_block,
-            &vdf_config,
-            &poisoned_guard,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-        );
-        assert!(
-            accepted.is_ok(),
-            "poisoned buffer must ACCEPT the honest canonical block via recompute (wedge fix): {accepted:?}"
-        );
-
-        // A genuinely FORGED chain (one tampered step) is still rejected by the recompute.
-        let mut forged_steps = canonical_steps;
-        forged_steps[num_steps / 2] = H256::repeat_byte(0xFF);
-        let forged_block = VDFLimiterInfo {
-            steps: H256List(forged_steps),
-            ..canonical_block
-        };
-        let forged = vdf_steps_are_valid(
-            &pool,
-            &forged_block,
-            &vdf_config,
-            &poisoned_guard,
-            Arc::new(AtomicU8::new(CancelEnum::Continue as u8)),
-        );
-        assert!(
-            forged.is_err(),
-            "a forged VDF chain must still be REJECTED by the recompute"
-        );
-    }
 
     #[tokio::test]
     async fn test_mid_execution_cancellation() {
@@ -1065,7 +800,7 @@ mod tests {
         // Create VDF state WITHOUT the steps we're going to validate
         // This forces vdf_steps_are_valid to actually compute them
         let vdf_state = Arc::new(RwLock::new(VdfState {
-            global_step: 0, // Start at 0, not at num_steps
+            global_step: Arc::new(AtomicU64::new(0)), // Start at 0, not at num_steps
             global_step_from_the_latest_canonical_block: 0,
             minimum_step_to_keep: 0,
             capacity: 1000,
@@ -1075,7 +810,7 @@ mod tests {
                 seeds.push_back(Seed(H256::from_low_u64_be(42)));
                 seeds
             },
-            is_vdf_mining_enabled: None,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }));
 
         // Create VDFLimiterInfo with our generated steps
@@ -1162,12 +897,12 @@ mod tests {
     fn vdf_state_at(current_step: u64) -> VdfState {
         let capacity: usize = 64;
         VdfState {
-            global_step: current_step,
+            global_step: Arc::new(AtomicU64::new(current_step)),
             global_step_from_the_latest_canonical_block: current_step,
             minimum_step_to_keep: current_step.saturating_sub(capacity as u64),
             seeds: VecDeque::with_capacity(capacity),
             capacity,
-            is_vdf_mining_enabled: None,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1215,14 +950,14 @@ mod tests {
             let local_step = 100_u64;
             let canonical = 10_000_u64;
             let mut state = VdfState {
-                global_step: local_step,
+                global_step: Arc::new(AtomicU64::new(local_step)),
                 global_step_from_the_latest_canonical_block: canonical,
                 minimum_step_to_keep: canonical.saturating_sub(capacity as u64),
                 seeds: (0..initial_seeds)
                     .map(|i| Seed(H256::from_low_u64_be(i as u64)))
                     .collect(),
                 capacity,
-                is_vdf_mining_enabled: None,
+                is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
             };
             let initial_len = state.seeds.len();
 
@@ -1255,6 +990,54 @@ mod tests {
         assert_eq!(returned, expected);
     }
 
+    /// `reanchor_seeds` replaces the buffer with a canonical window, keeps the
+    /// step counter forward (no backward store), and re-maps `get_steps` onto
+    /// the corrected values.
+    #[test]
+    fn reanchor_seeds_replaces_buffer_and_keeps_counter() {
+        // Buffer at step 10 holding "poisoned" values for steps 1..=10.
+        let mut state = vdf_state_at(10);
+        state.seeds = (0..10)
+            .map(|i| Seed(H256::from_low_u64_be(1000 + i)))
+            .collect();
+        assert_eq!(state.current_step(), 10);
+
+        // Canonical window of the same length (steps 1..=10), different values.
+        let canonical: VecDeque<Seed> = (1..=10).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(canonical.clone());
+
+        // Counter is unchanged (forward, never rewound).
+        assert_eq!(state.current_step(), 10);
+        // Buffer now holds the canonical values.
+        assert_eq!(state.seeds, canonical);
+        // get_steps maps [current - len + 1, current] = [1, 10] onto them.
+        let steps = state.get_steps(ii(1, 10)).expect("range available");
+        let expected: Vec<H256> = (1..=10).map(H256::from_low_u64_be).collect();
+        assert_eq!(steps.0, expected);
+        // The tip seed is the canonical last value.
+        let (last_step, last_seed) = state.get_last_step_and_seed();
+        assert_eq!(last_step, 10);
+        assert_eq!(last_seed, Seed(H256::from_low_u64_be(10)));
+    }
+
+    /// A corrected window longer than `capacity` (canonical window + recomputed
+    /// tail) is trimmed to the NEWEST `capacity` seeds — `store_step`'s
+    /// one-pop-per-push would otherwise carry the excess forever.
+    #[test]
+    fn reanchor_seeds_trims_oldest_down_to_capacity() {
+        // vdf_state_at uses capacity 64; install a 70-seed window at step 70.
+        let mut state = vdf_state_at(70);
+        let corrected: VecDeque<Seed> = (1..=70).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        state.reanchor_seeds(corrected);
+
+        assert_eq!(state.current_step(), 70);
+        assert_eq!(state.seeds.len(), 64, "trimmed to capacity");
+        // The retained seeds are the NEWEST 64: steps 7..=70.
+        let steps = state.get_steps(ii(7, 70)).expect("range available");
+        let expected: Vec<H256> = (7..=70).map(H256::from_low_u64_be).collect();
+        assert_eq!(steps.0, expected);
+    }
+
     /// Regression: `VdfStateReadonly::read()` previously called `.unwrap()`,
     /// so a writer panic that poisoned the lock cascaded into validation /
     /// mining hot paths. The recovery path must surface the most recent
@@ -1278,7 +1061,8 @@ mod tests {
         let readonly = VdfStateReadonly::new(inner);
         let guard = readonly.read();
         assert_eq!(
-            guard.global_step, 42,
+            guard.current_step(),
+            42,
             "poison-recovery must surface the data the writer wrote before panicking"
         );
     }
@@ -1333,7 +1117,11 @@ mod tests {
             tokio::spawn(async move {
                 for step in 101_u64..=110 {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    inner.write().unwrap().global_step = step;
+                    inner
+                        .write()
+                        .unwrap()
+                        .global_step
+                        .store(step, Ordering::Relaxed);
                 }
             })
         };
@@ -1346,43 +1134,260 @@ mod tests {
         assert!(result.is_ok(), "wait should succeed when state advances");
     }
 
-    /// Regression for the partition-recovery re-anchor (review Finding #2, Mode A):
-    /// a BACKWARD jump in `global_step` (the shared buffer rebuilt at a lower step)
-    /// must reset the stall baseline/timer, not be mistaken for a dead writer.
-    ///
-    /// Timeline (progress_timeout = 10s): advance 100→150 at t=4s, REWIND 150→120 at
-    /// t=8s, then climb to the desired 200 at t=16s. Pre-fix, the climb after the
-    /// rewind never exceeds the pre-rewind `last_observed_step` (150), so
-    /// `last_progress_at` (frozen at t=4s) elapses its 10s window at t=14s and the
-    /// wait spuriously returns `Stalled` (which panics the validation service).
-    /// Post-fix, the rewind at t=8s resets the timer, so the wait reaches 200 first.
+    /// The re-anchor race (heal applies after `send_validated_batch`'s check,
+    /// before `run_vdf` drains — the queued steps are dropped as stale): the
+    /// generation-aware wait must abort with `VdfReanchorGenerationChanged`
+    /// as soon as the heal applies, instead of freezing until the `Stalled`
+    /// error escalates to the never-mislabel panic.
     #[tokio::test(start_paused = true)]
-    async fn wait_for_step_tolerates_backward_reanchor_jump() {
+    async fn wait_aborts_with_generation_change_when_heal_applies_mid_wait() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let captured = signals.generation();
+
+        let healer = {
+            let signals = signals.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                signals.record_heal_applied();
+            })
+        };
+
+        // Step 200 is unreachable (the state never advances) and the progress
+        // timeout is far longer than the heal, so only the generation watch
+        // can end this wait early.
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                200,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(3600),
+                &signals,
+                captured,
+            )
+            .await;
+
+        healer.await.unwrap();
+        let err = result.expect_err("a mid-wait heal must abort the wait");
+        let change = err
+            .downcast_ref::<crate::vdf_utils::VdfReanchorGenerationChanged>()
+            .expect("the abort must carry the typed generation-change error");
+        assert_eq!(change.captured, captured);
+        assert_eq!(change.current, captured + 1);
+    }
+
+    /// A stale capture aborts on the first poll — even when the desired step
+    /// is ALREADY reached. The steps were validated against a pre-heal buffer;
+    /// requeuing for revalidation always wins over a vacuous `Ok`.
+    #[tokio::test(start_paused = true)]
+    async fn wait_with_stale_generation_aborts_even_when_step_is_reached() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        let captured = signals.generation();
+        signals.record_heal_applied();
+
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                50, // already below the current step 100
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+                captured,
+            )
+            .await;
+
+        assert!(
+            result
+                .expect_err("a stale capture must abort")
+                .downcast_ref::<crate::vdf_utils::VdfReanchorGenerationChanged>()
+                .is_some()
+        );
+    }
+
+    /// With a stable generation the watch variant is behaviourally identical
+    /// to `wait_for_step`: reaching the desired step returns `Ok`.
+    #[tokio::test(start_paused = true)]
+    async fn wait_with_stable_generation_completes_normally() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+
+        let result = readonly
+            .wait_for_step_or_reanchor(
+                100,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+                signals.generation(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_or_suspect_rides_out_a_heal_longer_than_the_timeout() {
         let inner = Arc::new(RwLock::new(vdf_state_at(100)));
         let readonly = VdfStateReadonly::new(Arc::clone(&inner));
         let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
-        let progress_timeout = std::time::Duration::from_secs(10);
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        // A re-anchor is queued: buffer suspect, local stepping paused.
+        signals.mark_buffer_suspect();
+        let progress_timeout = std::time::Duration::from_secs(15);
 
-        let advancer = {
+        // The heal takes far longer than `progress_timeout`; only when it applies
+        // does the counter jump to the block's end.
+        let healer = {
             let inner = Arc::clone(&inner);
+            let signals = signals.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 150; // forward
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                inner.write().unwrap().global_step = 120; // re-anchor rewind (the trigger)
-                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-                inner.write().unwrap().global_step = 200; // climb to desired before timeout
+                tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+                inner
+                    .write()
+                    .unwrap()
+                    .global_step
+                    .store(200, Ordering::Relaxed);
+                signals.record_heal_applied();
             })
         };
 
         let result = readonly
-            .wait_for_step(200, Arc::clone(&cancel), progress_timeout)
+            .wait_for_step_or_suspect(200, Arc::clone(&cancel), progress_timeout, &signals)
             .await;
 
-        advancer.await.unwrap();
+        healer.await.unwrap();
         assert!(
             result.is_ok(),
-            "a backward re-anchor jump must reset the stall timer, not surface as Stalled: {result:?}"
+            "a suspect buffer must suppress the stall panic across a long heal, got: {result:?}"
         );
+    }
+
+    /// The suppression is scoped to the suspect window only: with a clean buffer a
+    /// genuinely frozen counter must still surface `Stalled`, preserving the
+    /// dead-VDF-writer guard.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_step_or_suspect_still_stalls_when_buffer_is_clean() {
+        let inner = Arc::new(RwLock::new(vdf_state_at(100)));
+        let readonly = VdfStateReadonly::new(inner);
+        let cancel = Arc::new(AtomicU8::new(CancelEnum::Continue as u8));
+        let signals = crate::vdf_utils::ReanchorSignals::new();
+        // Buffer NOT suspect — a frozen counter is a real stall.
+
+        let result = readonly
+            .wait_for_step_or_suspect(
+                200,
+                Arc::clone(&cancel),
+                std::time::Duration::from_secs(30),
+                &signals,
+            )
+            .await;
+
+        let err = result.expect_err("a clean-buffer stall must still bail");
+        assert!(
+            matches!(
+                err.downcast_ref::<WaitForStepError>(),
+                Some(WaitForStepError::Stalled { .. })
+            ),
+            "must be a Stalled error, got: {err}"
+        );
+    }
+
+    /// SSOT invariant: after N sequential `store_step` calls the owned atomic
+    /// counter equals the locked view, and the seed window is contiguous over
+    /// `[first ..= last]` with one seed per step.
+    #[test]
+    fn store_step_keeps_atomic_counter_and_seed_window_consistent() {
+        // capacity 64, start at step 0 with the genesis seed present (anchor).
+        let mut state = vdf_state_at(0);
+        state.seeds.push_back(Seed(H256::zero())); // step-0 seed
+
+        for step in 1..=50_u64 {
+            let returned = state.store_step(Seed(H256::from_low_u64_be(step)), step);
+            assert_eq!(returned, step, "sequential store advances by one");
+            // SSOT: the owned atomic equals the just-stored step.
+            assert_eq!(state.current_step(), step);
+        }
+
+        // Seed window is contiguous: first..=last maps 1:1 onto stored seeds.
+        let last = state.current_step();
+        let first = last - state.seeds.len() as u64 + 1;
+        let steps = state.get_steps(ii(first, last)).expect("contiguous window");
+        assert_eq!(steps.len(), state.seeds.len());
+        assert_eq!(last, 50);
+    }
+
+    /// Lock-freedom proven through the PUBLIC handle API: `current_step()` must
+    /// return while a writer holds the `RwLock` write guard. A bounded channel
+    /// timeout (not an unbounded `join`) fails the test if the call blocked.
+    #[test]
+    fn current_step_is_readable_through_handle_while_write_guard_held() {
+        let state = Arc::new(RwLock::new(vdf_state_at(5)));
+        let readonly = VdfStateReadonly::new(Arc::clone(&state));
+
+        let guard = state.write().unwrap(); // hold the writer
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = tx.send(readonly.current_step());
+        });
+
+        let observed = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("current_step() must not block on the held write guard");
+        assert_eq!(observed, 5);
+
+        drop(guard);
+        reader.join().unwrap();
+    }
+
+    /// The read handle exposes the step counter lock-free and reflects the
+    /// controller's mining toggles (same `Arc`, shared by handle).
+    #[test]
+    fn readonly_exposes_lockfree_step_and_controller_toggles_mining() {
+        let mining = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(RwLock::new(VdfState::new(64, 9, Arc::clone(&mining))));
+        let readonly = VdfStateReadonly::new(Arc::clone(&state));
+        assert_eq!(readonly.current_step(), 9);
+
+        // Controller and handle share the same mining Arc (same allocation).
+        let controller = VdfController::new(&mining);
+        assert!(!readonly.is_mining_enabled());
+        controller.start();
+        assert!(readonly.is_mining_enabled());
+        controller.stop();
+        assert!(!readonly.is_mining_enabled());
+    }
+
+    struct FakeSeedSource(VdfBootstrap);
+    impl VdfSeedSource for FakeSeedSource {
+        fn vdf_bootstrap(&self, _capacity: usize) -> VdfBootstrap {
+            self.0.clone()
+        }
+    }
+
+    /// `create_state` faithfully assembles a `VdfState` from a `VdfBootstrap`,
+    /// honouring the one-based contiguity contract.
+    #[test]
+    fn create_state_assembles_vdf_state_from_bootstrap() {
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
+        let mining = Arc::new(AtomicBool::new(false));
+        // Contiguous steps 1..=5 (one-based): first_step == 5 - 5 + 1 == 1.
+        let seeds: VecDeque<Seed> = (1..=5).map(|i| Seed(H256::from_low_u64_be(i))).collect();
+        let source = FakeSeedSource(VdfBootstrap {
+            global_step: 5,
+            first_step: 1,
+            ordered_seeds: seeds.clone(),
+        });
+
+        let state = create_state(&source, Arc::clone(&mining), &config);
+
+        assert_eq!(state.current_step(), 5);
+        assert_eq!(state.canonical_step(), 5);
+        assert_eq!(state.seeds, seeds);
+        let (last, _) = state.get_last_step_and_seed();
+        assert_eq!(last, 5);
     }
 }

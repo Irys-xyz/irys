@@ -25,11 +25,9 @@ pub enum MiningBroadcastEvent {
     Seed(BroadcastMiningSeed),
     Difficulty(BroadcastDifficultyUpdate),
     PartitionsExpiration(BroadcastPartitionsExpiration),
-    /// The VDF was re-anchored (deep partition recovery rewound and rebuilt the step buffer at a
-    /// lower global step). Partition miners must discard their stateful efficient-sampling
-    /// recall-range rotation and rebuild it from the re-anchored steps on the next seed; otherwise
-    /// they mine recall ranges computed from the old, now-discarded lineage (which then fail
-    /// validation). Carries no payload — the reset is unconditional.
+    /// The VDF seed buffer was re-anchored to canonical in place after a deep
+    /// reorg. Carries no payload — the step numbers are unchanged, so miners
+    /// only need to rebuild their recall-range rotation from the healed buffer.
     Reanchored,
 }
 
@@ -111,13 +109,9 @@ impl MiningBus {
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 
-    /// Notify all subscribers that the VDF re-anchored (partition recovery) so they reset any
-    /// step-derived state — specifically partition mining's efficient-sampling recall-range
-    /// rotation, which is stateful and would otherwise carry the pre-re-anchor lineage forward.
-    pub fn send_reanchor(&self) -> usize {
-        info!(
-            "Broadcast Mining: VDF re-anchored; signalling partition miners to reset recall-range state"
-        );
+    /// Notify subscribers that the VDF buffer was re-anchored to canonical.
+    pub fn send_reanchored(&self) -> usize {
+        info!("Broadcasting VDF re-anchor: miners rebuild recall-range rotation");
         self.send_event(Arc::new(MiningBroadcastEvent::Reanchored))
     }
 }
@@ -149,5 +143,9 @@ impl From<MiningBus> for MiningBusBroadcaster {
 impl MiningBroadcaster for MiningBusBroadcaster {
     fn broadcast(&self, seed: Seed, checkpoints: H256List, global_step: u64) {
         let _ = self.bus.send_seed(seed, checkpoints, global_step);
+    }
+
+    fn broadcast_reanchored(&self) {
+        let _ = self.bus.send_reanchored();
     }
 }

@@ -176,6 +176,53 @@ fn fixture_block_header_none() -> wire::IrysBlockHeader {
     header.into()
 }
 
+/// Golden-byte pin: canonical `irys_types::VDFLimiterInfo` serialises to the
+/// exact gossip bytes, for both `Some(..)` and `None` difficulty fields. The
+/// literals were captured from the (now-removed) p2p wire `VDFLimiterInfo`
+/// mirror BEFORE its deletion, then verified equal to the canonical type's
+/// output — proving the dedup is byte-stable on the wire. A parsed-`Value`
+/// round-trip (the fixture test) does not prove byte identity, so this asserts
+/// raw `serde_json::to_vec` bytes.
+#[rstest::rstest]
+#[case::some_difficulties(
+    Some(50000),
+    Some(55000),
+    br#"{"output":"Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7","globalStepNumber":"1000","seed":"Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp","nextSeed":"BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX","prevOutput":"C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE","lastStepCheckpoints":["C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"],"steps":["C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"],"vdfDifficulty":"50000","nextVdfDifficulty":"55000"}"#
+)]
+#[case::none_difficulties(
+    None,
+    None,
+    br#"{"output":"Bp2HuBWdciXFKV2CnoC1Z4V44QfCmArCQHdzKpArYJc7","globalStepNumber":"1000","seed":"Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp","nextSeed":"BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX","prevOutput":"C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE","lastStepCheckpoints":["C5hUUPNfyui9sr2EXzVgiZa733W1TRbUdvJcZLMFXdtw"],"steps":["C9cmcgqgaD1P1wGjyHpc1SLsHCiD8VHJCKyGciPrGyDe"],"vdfDifficulty":null,"nextVdfDifficulty":null}"#
+)]
+fn vdf_limiter_info_golden_bytes(
+    #[case] vdf_difficulty: Option<u64>,
+    #[case] next_vdf_difficulty: Option<u64>,
+    #[case] golden: &[u8],
+) {
+    use irys_types::H256;
+    use irys_types::block::VDFLimiterInfo;
+    use irys_types::serialization::H256List;
+
+    let test_h256 = |b: u8| H256::from([b; 32]);
+
+    let info = VDFLimiterInfo {
+        output: test_h256(0xA0),
+        global_step_number: 1000,
+        seed: test_h256(0xA1),
+        next_seed: test_h256(0xA2),
+        prev_output: test_h256(0xA3),
+        last_step_checkpoints: H256List(vec![test_h256(0xA4)]),
+        steps: H256List(vec![test_h256(0xA5)]),
+        vdf_difficulty,
+        next_vdf_difficulty,
+    };
+    assert_eq!(
+        serde_json::to_vec(&info).unwrap(),
+        golden,
+        "VDFLimiterInfo wire bytes changed"
+    );
+}
+
 /// BlockBody with data transactions that have optional fields set to None.
 fn fixture_block_body_none() -> wire::BlockBody {
     wire::BlockBody {

@@ -16,6 +16,10 @@ use crate::{H256, VDFLimiterInfo};
 pub struct CanonicalVdfSnapshot {
     pub vdf_info: VDFLimiterInfo,
     pub confirmed_global_step_number: u64,
+    /// Reset seed for the next boundary above `step_number`: `next_seed` of the
+    /// canonical block whose VDF range ends at or before that step. Using the tip's
+    /// `next_seed` alone is wrong when the local loop is behind the tip across one
+    /// or more reset boundaries.
     pub reset_seed_for_step: H256,
 }
 

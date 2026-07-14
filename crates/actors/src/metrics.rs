@@ -90,6 +90,7 @@ irys_utils::define_metrics! {
     counter PRODUCER_PARENT_WAIT_TARGET_SWITCHES("irys.block_producer.parent_wait_target_switches_total", "Times block producer switched parent target while waiting for validation");
     counter SOFT_INTERNAL_DISCARD("irys.block.soft_internal_discard_total", "Blocks discarded from block_tree due to soft-internal validation failure (labelled by reason). Pairs with soft_internal_recovered_total to gauge whether gossip-driven recovery is sufficient.");
     counter SOFT_INTERNAL_RECOVERED("irys.block.soft_internal_recovered_total", "Blocks previously discarded as soft-internal that later reached Valid (labelled by the original discard reason). Pair with soft_internal_discard_total to gauge gossip-driven recovery rate.");
+    counter VDF_REANCHOR_WATCHDOG_RETRIES("irys.block_tree.vdf_reanchor_watchdog_retries_total", "VDF re-anchor requests re-fired by the block-tree buffer-suspect watchdog (suspect persisted with changed inputs and no message-driven retry)");
 }
 
 // Defined separately: uses the "irys-chain" meter (not "irys-actors") but
@@ -136,6 +137,10 @@ pub(crate) fn record_block_tree_last_block_at_ms(ms: i64) {
 
 pub(crate) fn record_block_tree_last_reorg_at_ms(ms: i64) {
     BLOCK_TREE_LAST_REORG_AT_MS.record(u64::try_from(ms).unwrap_or(0), &[]);
+}
+
+pub(crate) fn record_vdf_reanchor_watchdog_retry() {
+    VDF_REANCHOR_WATCHDOG_RETRIES.add(1, &[]);
 }
 
 /// Record a snapshot of the validation queue. `vdf_pending_by_priority` MUST

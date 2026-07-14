@@ -120,7 +120,16 @@ impl VDFLimiterInfo {
         // It is + 1 because there's always at least one step. I.e., in case if there's only
         // one step, the first step and the last step are the same, in case if there are two
         // steps, the first step is the last step - 1, and so on.
-        self.global_step_number - self.steps.len() as u64 + 1
+        //
+        // Saturating: a declared step count exceeding `global_step_number` is malformed
+        // and rejected by prevalidation (`vdf_step_count_is_consistent`) before any
+        // validation caller computes this, so guarded paths never observe the clamp.
+        // The saturation only shields a FUTURE unguarded caller from an abort-class
+        // underflow panic on network data; 0 (a step number below genesis) is the
+        // conspicuous out-of-band result.
+        self.global_step_number
+            .saturating_add(1)
+            .saturating_sub(self.steps.len() as u64)
     }
 
     /// Returns the reset step if the block contains one

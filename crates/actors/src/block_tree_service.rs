@@ -1,7 +1,9 @@
 use crate::{
     StorageModuleServiceMessage,
     block_migration_service::BlockMigrationService,
-    block_validation::PreValidationError,
+    block_validation::{
+        PreValidationError, build_fork_local_step_window, resolve_header_tree_or_db,
+    },
     mempool_service::MempoolServiceMessage,
     metrics,
     mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
@@ -20,11 +22,16 @@ use irys_domain::{
 };
 use irys_types::{
     BlockHash, Config, DatabaseProvider, H256, H256List, IrysAddress, IrysBlockHeader, SealedBlock,
-    SendTraced as _, SystemLedger, TokioServiceHandle, Traced,
+    SendTraced as _, SystemLedger, TokioServiceHandle, Traced, block_production::Seed,
+};
+use irys_vdf::{
+    ReanchorRequest, first_divergent_boundary, reorg_crossed_divergent_boundary,
+    state::{VdfStateReadonly, calc_capacity},
 };
 use lru::LruCache;
 use reth::tasks::shutdown::Shutdown;
 use std::{
+    collections::VecDeque,
     num::NonZeroUsize,
     sync::{Arc, RwLock},
     time::SystemTime,
@@ -144,6 +151,12 @@ pub struct BlockTreeServiceInner {
     /// Shared with `ApiState` so `/v1/tip` can expose the same in-process
     /// canonical-advance / reorg timestamps the OTEL gauges record.
     pub lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
+    /// Lock-free VDF view; the re-anchor gate uses the live step so free-run
+    /// boundary crossings that tip headers have not yet reached are visible.
+    vdf_state: VdfStateReadonly,
+    /// Last `(tip hash, live step)` the suspect-watchdog published; cleared when
+    /// suspect clears so identical inputs are not re-fired.
+    vdf_reanchor_watchdog_last_sent: Option<(BlockHash, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +204,10 @@ enum DiscardKind {
 /// under 256 KB and far exceeds any plausible burst of soft-internal
 /// discards in a single block window. See the field doc for full rationale.
 const SOFT_INTERNAL_DISCARD_LRU_CAPACITY: usize = 4096;
+
+/// Watchdog cadence for re-anchor retries on a quiet network (matches
+/// `BOUNDARY_GATE_WARN_INTERVAL`).
+const VDF_REANCHOR_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Emit the discard log line at the correct level for the given `DiscardKind`.
 ///
@@ -327,6 +344,7 @@ impl BlockTreeService {
         block_migration_service: BlockMigrationService,
         cache: Arc<RwLock<BlockTree>>,
         lifecycle_timestamps: Arc<BlockTreeLifecycleTimestamps>,
+        vdf_state: VdfStateReadonly,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -355,6 +373,8 @@ impl BlockTreeService {
                             NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                         ),
                         lifecycle_timestamps,
+                        vdf_state,
+                        vdf_reanchor_watchdog_last_sent: None,
                     },
                 };
                 if let Err(e) = block_tree_service.start().await {
@@ -379,6 +399,14 @@ impl BlockTreeService {
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 
+        // VDF re-anchor watchdog: the suspect buffer's message-driven retry
+        // sources all need an inbound canonical block, so on a quiet network a
+        // skipped heal would otherwise have no retry at all. Rationale, cure
+        // scope, and the never-clears-suspect rule live on
+        // `retry_vdf_reanchor_if_suspect`.
+        let mut vdf_reanchor_watchdog = tokio::time::interval(VDF_REANCHOR_WATCHDOG_INTERVAL);
+        vdf_reanchor_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 biased;
@@ -387,6 +415,11 @@ impl BlockTreeService {
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block tree service");
                     break;
+                }
+                // At most one tick per interval, so despite the biased order
+                // this cannot starve the message arm below.
+                _ = vdf_reanchor_watchdog.tick() => {
+                    self.inner.retry_vdf_reanchor_if_suspect();
                 }
                 // Handle messages
                 traced = self.msg_rx.recv() => {
@@ -1069,21 +1102,6 @@ impl BlockTreeServiceInner {
                         // proceeding with the new canonical chain.
                         self.block_migration_service
                             .recover_from_network_partition(fork_height)?;
-
-                        // The minority fork may have crossed a VDF reset boundary, leaving the
-                        // VDF loop's running hash and the shared step buffer poisoned with reset
-                        // entropy pinned by an orphaned block. Signal the VDF supervisor to
-                        // re-anchor to the new canonical tip and restart; it rebuilds the step
-                        // buffer from the block tree's canonical chain. (The index rollback above
-                        // is independent — it only reverts the orphaned fork's storage/supply side
-                        // effects; the VDF rebuild does not read the index.) See
-                        // design/docs/vdf-partition-recovery-reanchor.md.
-                        if let Err(e) = self.service_senders.vdf_reanchor.send(()) {
-                            error!(
-                                "Failed to signal VDF re-anchor after partition recovery: {e}. \
-                                 The VDF buffer may stay poisoned until restart."
-                            );
-                        }
                     }
 
                     metrics::record_reorg();
@@ -1187,13 +1205,17 @@ impl BlockTreeServiceInner {
         }
 
         // Broadcast reorg event if applicable
-        if let Some(reorg_event) = reorg_event
-            && let Err(e) = self.service_senders.reorg_events.send(reorg_event)
-        {
-            error!(
-                "Failed to broadcast reorg event - mempool state may be stale: {:?}",
-                e
-            );
+        let reorg_occurred = reorg_event.is_some();
+        if let Some(reorg_event) = reorg_event {
+            // Deep reorg may poison VDF seeds; re-anchor before reorg fans out.
+            self.maybe_reanchor_vdf_after_reorg(&arc_block, &reorg_event);
+
+            if let Err(e) = self.service_senders.reorg_events.send(reorg_event) {
+                error!(
+                    "Failed to broadcast reorg event - mempool state may be stale: {:?}",
+                    e
+                );
+            }
         }
 
         if let Some(markers) = &new_canonical_markers {
@@ -1210,6 +1232,16 @@ impl BlockTreeServiceInner {
                 );
                 metrics::record_canonical_tip_height(arc_block.height);
                 self.lifecycle_timestamps.note_canonical_advance();
+
+                // Suspect buffer with no reorg on this tip: re-send re-anchor.
+                if !reorg_occurred
+                    && self
+                        .service_senders
+                        .vdf_reanchor_signals
+                        .is_buffer_suspect()
+                {
+                    self.send_reanchor_request(&arc_block);
+                }
             }
 
             // Emit consensus events
@@ -1300,6 +1332,147 @@ impl BlockTreeServiceInner {
         }
 
         Ok(())
+    }
+
+    /// Queue a VDF seed-buffer re-anchor after a deep reorg that may have
+    /// crossed a divergent reset boundary. See
+    /// `design/docs/vdf-reset-seed-confirmation-gate.md`.
+    fn maybe_reanchor_vdf_after_reorg(&self, canonical_tip: &IrysBlockHeader, reorg: &ReorgEvent) {
+        // Shallow reorgs stay inside the confirmation gate's safe window.
+        let migration_depth = usize::try_from(self.config.consensus.block_migration_depth)
+            .expect("block_migration_depth must fit in usize");
+        if reorg.old_fork.len() <= migration_depth {
+            return;
+        }
+
+        let reset_frequency = u64::try_from(self.config.consensus.vdf.reset_frequency)
+            .expect("VDF reset_frequency must fit in u64");
+        if reset_frequency == 0 {
+            return;
+        }
+        let c_step = canonical_tip.vdf_limiter_info.global_step_number;
+        let lca_step = reorg.fork_parent.vdf_limiter_info.global_step_number;
+
+        // Max of tip, old-fork tip, and live VDF step — free-run can cross a
+        // boundary before either tip header has.
+        let old_fork_tip_step = reorg.old_fork.last().map_or(c_step, |block| {
+            block.header().vdf_limiter_info.global_step_number
+        });
+        let live_step = self.vdf_state.current_step();
+        let crossing_step = c_step.max(old_fork_tip_step).max(live_step);
+
+        if !reorg_crossed_divergent_boundary(lca_step, crossing_step, reset_frequency) {
+            return;
+        }
+
+        info!(
+            c_step,
+            lca_step,
+            live_step,
+            first_divergent_boundary = first_divergent_boundary(lca_step, reset_frequency),
+            "Deep reorg crossed a divergent VDF reset boundary; queuing a seed-buffer re-anchor"
+        );
+        // Mark suspect before publish so validation never trusts the buffer
+        // after a heal could clear first (record_heal_applied clears suspect).
+        self.service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        if !self.send_reanchor_request(canonical_tip) {
+            warn!(
+                c_step,
+                "VDF re-anchor not queued after marking buffer suspect; \
+                 tip-advance path will retry while suspect remains set"
+            );
+        }
+    }
+
+    /// Publish a [`ReanchorRequest`] for `canonical_tip` (also used by suspect retries).
+    /// Returns `true` if the request was queued.
+    fn send_reanchor_request(&self, canonical_tip: &IrysBlockHeader) -> bool {
+        let c_step = canonical_tip.vdf_limiter_info.global_step_number;
+
+        // Full capacity window (not reorg depth): reanchor_seeds replaces the
+        // whole buffer; tree then DB for ancestry past the in-memory tail.
+        let capacity = u64::try_from(calc_capacity(&self.config)).expect("capacity fits in u64");
+        let want_start = c_step.saturating_sub(capacity.saturating_sub(1)).max(1);
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::clone(&self.cache));
+        let resolve = |hash: &H256| resolve_header_tree_or_db(&block_tree_guard, &self.db, hash);
+        let Some(window) = build_fork_local_step_window(canonical_tip, want_start, c_step, resolve)
+        else {
+            warn!(
+                c_step,
+                want_start,
+                "VDF re-anchor skipped: canonical seed window unavailable (ancestry below DB)"
+            );
+            return false;
+        };
+
+        let canonical_seeds: VecDeque<Seed> = window.0.into_iter().map(Seed).collect();
+        let request = ReanchorRequest {
+            canonical_seeds,
+            c_step,
+            seed: canonical_tip.vdf_limiter_info.seed,
+            next_seed: canonical_tip.vdf_limiter_info.next_seed,
+        };
+        if self.service_senders.vdf_reanchor.try_send(request) {
+            info!(c_step, "Queued a VDF seed-buffer re-anchor request");
+            true
+        } else {
+            // Latest-value channel: fails only when the VDF receiver is gone.
+            warn!(
+                c_step,
+                "VDF re-anchor channel closed (VDF thread not running); heal not queued"
+            );
+            false
+        }
+    }
+
+    /// While the buffer is suspect, re-send a re-anchor if tip/live-step inputs
+    /// changed (quiet-network backstop; never clears suspect itself).
+    fn retry_vdf_reanchor_if_suspect(&mut self) {
+        if !self
+            .service_senders
+            .vdf_reanchor_signals
+            .is_buffer_suspect()
+        {
+            self.vdf_reanchor_watchdog_last_sent = None;
+            return;
+        }
+
+        // Drop the cache guard before send_reanchor_request takes its own reads.
+        let canonical_tip = match self.cache.read() {
+            Ok(cache) => cache.get_block(&cache.tip).cloned(),
+            Err(_) => {
+                error!(
+                    "block tree cache read lock poisoned in the VDF re-anchor watchdog; skipping tick"
+                );
+                return;
+            }
+        };
+        let Some(canonical_tip) = canonical_tip else {
+            error!("canonical tip missing from cache in the VDF re-anchor watchdog; skipping tick");
+            return;
+        };
+
+        let inputs = (canonical_tip.block_hash, self.vdf_state.current_step());
+        if self.vdf_reanchor_watchdog_last_sent == Some(inputs) {
+            debug!(
+                c_step = canonical_tip.vdf_limiter_info.global_step_number,
+                live_step = inputs.1,
+                "VDF buffer still suspect; watchdog inputs unchanged, awaiting fresher state"
+            );
+            return;
+        }
+
+        warn!(
+            c_step = canonical_tip.vdf_limiter_info.global_step_number,
+            live_step = inputs.1,
+            "VDF buffer suspect with no message-driven retry; watchdog re-firing the re-anchor request"
+        );
+        metrics::record_vdf_reanchor_watchdog_retry();
+        if self.send_reanchor_request(&canonical_tip) {
+            self.vdf_reanchor_watchdog_last_sent = Some(inputs);
+        }
     }
 
     /// Shared discard path for soft `InternalFailure` and `Invalid` results.
@@ -1748,6 +1921,37 @@ mod tests {
         assert_eq!(result.metric_label(), "invalid");
     }
 
+    /// The seeds stage records its label through `granular_metric_label`. This
+    /// drives a real `irys_vdf::verify::is_seed_data_valid` failure and maps its
+    /// `eyre` error exactly as `block_validation_task` does, pinning that a
+    /// `SeedDataInvalid` rejection surfaces as `"invalid"` (not `"seed_data_invalid"`,
+    /// which is `metric_reason`).
+    #[test]
+    fn seed_data_invalid_dispatches_to_invalid_with_label() {
+        use irys_types::{BlockHash, H256, H256List, IrysBlockHeader};
+        let reset_frequency = 2;
+        let mut parent = IrysBlockHeader::new_mock_header();
+        parent.block_hash = BlockHash::from_slice(&[4; 32]);
+        parent.vdf_limiter_info.seed = BlockHash::from_slice(&[2; 32]);
+        parent.vdf_limiter_info.next_seed = BlockHash::from_slice(&[3; 32]);
+
+        let mut block = IrysBlockHeader::new_mock_header();
+        block.vdf_limiter_info.global_step_number = 3;
+        block.vdf_limiter_info.steps = H256List(vec![H256::zero(); 2]);
+        block.vdf_limiter_info.set_seeds(reset_frequency, &parent);
+        // Corrupt the embedded seeds so verification fails.
+        block.vdf_limiter_info.seed = BlockHash::from_slice(&[5; 32]);
+        block.vdf_limiter_info.next_seed = BlockHash::from_slice(&[6; 32]);
+
+        let err = irys_vdf::verify::is_seed_data_valid(&block, &parent, reset_frequency)
+            .expect_err("corrupted seeds must fail verification");
+        // Mirror the block_validation_task seeds-stage mapping of the eyre error.
+        let result: ValidationResult =
+            crate::block_validation::ValidationError::SeedDataInvalid(err.to_string()).into();
+        assert!(matches!(result, ValidationResult::Invalid(_)));
+        assert_eq!(result.granular_metric_label(), "invalid");
+    }
+
     /// A local/runtime PreValidationError must convert to InternalFailure so
     /// downstream consumers don't mark the block as consensus-invalid.
     #[test]
@@ -1916,6 +2120,9 @@ mod tests {
     struct DiscardHarness {
         inner: BlockTreeServiceInner,
         block_state_rx: tokio::sync::broadcast::Receiver<BlockStateUpdated>,
+        /// Retained VDF re-anchor receiver so the gate tests can observe a queued
+        /// `ReanchorRequest`; unused by the discard/recovery tests.
+        vdf_reanchor_rx: irys_vdf::ReanchorReceiver,
         /// Hash of the synthetic genesis seeded into the cache by `new()`.
         /// Use as `previous_block_hash` when inserting test blocks via
         /// `insert_block_in_cache`.
@@ -1927,6 +2134,22 @@ mod tests {
 
     impl DiscardHarness {
         fn new() -> Self {
+            Self::new_with_config(|_| {})
+        }
+
+        /// Like [`Self::new`] but lets the caller tweak the `NodeConfig` (e.g. the
+        /// VDF reset frequency) before the inner service is built. The live VDF
+        /// step starts at 0, so the re-anchor gate's `live_step` term is inert.
+        fn new_with_config(configure: impl FnOnce(&mut irys_types::NodeConfig)) -> Self {
+            Self::new_with_config_and_live_step(configure, 0)
+        }
+
+        /// Like [`Self::new_with_config`], additionally pinning the local VDF's
+        /// live step — the gate's third crossing term.
+        fn new_with_config_and_live_step(
+            configure: impl FnOnce(&mut irys_types::NodeConfig),
+            live_step: u64,
+        ) -> Self {
             use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
             use irys_domain::BlockIndex;
             use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
@@ -1955,13 +2178,14 @@ mod tests {
             )));
 
             let (service_senders, service_rx) = crate::test_helpers::build_test_service_senders();
-            // Subscribe BEFORE the discard path runs so the broadcast event
-            // is observable. The receivers struct is dropped — we only need
-            // the broadcast receiver.
+            // Subscribe BEFORE the discard path runs so the broadcast event is
+            // observable. Retain the VDF re-anchor receiver so gate tests can
+            // observe a queued request; the rest of `service_rx` drops here.
             let block_state_rx = service_senders.subscribe_block_state_updates();
-            drop(service_rx);
+            let vdf_reanchor_rx = service_rx.vdf_reanchor;
 
-            let node_config = NodeConfig::testing();
+            let mut node_config = NodeConfig::testing();
+            configure(&mut node_config);
             let miner_address = node_config.miner_address();
             let config = irys_types::Config::new_with_random_peer_id(node_config);
 
@@ -1983,6 +2207,15 @@ mod tests {
                 chunk_migration_sender,
             );
 
+            // Real (not mocked) VDF state pinned at `live_step`; the gate only
+            // reads the lock-free counter.
+            let vdf_state =
+                VdfStateReadonly::new(Arc::new(RwLock::new(irys_vdf::state::VdfState::new(
+                    64,
+                    live_step,
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ))));
+
             let inner = BlockTreeServiceInner {
                 db,
                 cache,
@@ -1996,11 +2229,14 @@ mod tests {
                     NonZeroUsize::new(SOFT_INTERNAL_DISCARD_LRU_CAPACITY).unwrap(),
                 ),
                 lifecycle_timestamps: Arc::new(BlockTreeLifecycleTimestamps::default()),
+                vdf_state,
+                vdf_reanchor_watchdog_last_sent: None,
             };
 
             Self {
                 inner,
                 block_state_rx,
+                vdf_reanchor_rx,
                 genesis_hash,
                 _tempdir: tmp,
             }
@@ -2059,6 +2295,453 @@ mod tests {
             }
             out
         }
+    }
+
+    /// `n` throwaway sealed blocks for a synthetic `ReorgEvent.old_fork` — only
+    /// its length is read by the re-anchor gate (deep-reorg guard).
+    fn sealed_fork(n: usize) -> Vec<Arc<SealedBlock>> {
+        (0..n)
+            .map(|i| {
+                let mut hdr = IrysBlockHeader::new_mock_header();
+                hdr.height = i as u64 + 1;
+                Arc::new(SealedBlock::new_unchecked(
+                    Arc::new(hdr),
+                    BlockTransactions::default(),
+                ))
+            })
+            .collect()
+    }
+
+    /// A canonical tip header carrying its own VDF steps `[1..=c_step]` (value ==
+    /// step number), so the gate's window build resolves entirely from this header
+    /// with no ancestry walk. Returns the tip and the expected window values.
+    fn canonical_tip(c_step: u64, next_seed: H256) -> (IrysBlockHeader, Vec<H256>) {
+        let steps: Vec<H256> = (1..=c_step).map(H256::from_low_u64_be).collect();
+        let mut tip = IrysBlockHeader::new_mock_header();
+        tip.vdf_limiter_info.global_step_number = c_step;
+        tip.vdf_limiter_info.steps = H256List(steps.clone());
+        tip.vdf_limiter_info.next_seed = next_seed;
+        (tip, steps)
+    }
+
+    /// A synthetic `ReorgEvent` with the LCA at `lca_step` and an `old_fork` of
+    /// the given depth. Only the fields the gate reads are meaningful.
+    fn reorg_from(lca_step: u64, old_fork_len: usize, new_tip: H256) -> ReorgEvent {
+        let mut fork_parent = IrysBlockHeader::new_mock_header();
+        fork_parent.vdf_limiter_info.global_step_number = lca_step;
+        ReorgEvent {
+            old_fork: Arc::new(sealed_fork(old_fork_len)),
+            new_fork: Arc::new(vec![]),
+            fork_parent: Arc::new(fork_parent),
+            new_tip,
+            timestamp: std::time::UNIX_EPOCH,
+            db: None,
+        }
+    }
+
+    #[test]
+    fn deep_reorg_across_divergent_boundary_queues_reanchor() {
+        // reset_frequency 4; block_migration_depth defaults to 1 in testing.
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let next_seed = H256::repeat_byte(0x99);
+        let (tip, steps) = canonical_tip(20, next_seed);
+        // first_divergent_boundary(lca=5, rf=4) = 12; c_step 20 >= 12 → crossed.
+        let reorg = reorg_from(5, 2, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a deep cross-boundary reorg must queue a ReanchorRequest");
+        assert_eq!(req.c_step, 20);
+        assert_eq!(
+            req.seed, tip.vdf_limiter_info.seed,
+            "the request must carry the tip's `seed` (the boundary-tip fold value)"
+        );
+        assert_eq!(req.next_seed, next_seed);
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(
+            sent, steps,
+            "the gate must ship the canonical [floor, c_step] window from the tip's ancestry"
+        );
+        assert!(
+            h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "queuing a re-anchor must mark the buffer suspect until the heal applies"
+        );
+    }
+
+    #[test]
+    fn shallow_reorg_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        // old_fork depth 1 == block_migration_depth(1) → not a deep reorg.
+        let reorg = reorg_from(5, 1, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a shallow reorg must not queue a re-anchor"
+        );
+        assert!(
+            !h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "a shallow reorg must not mark the buffer suspect"
+        );
+    }
+
+    #[test]
+    fn deep_reorg_below_divergent_boundary_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 100;
+        });
+        // first_divergent_boundary(lca=5, rf=100) = 200; c_step 20 < 200 → not crossed.
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a reorg below the first divergent boundary must not queue a re-anchor"
+        );
+    }
+
+    /// Live VDF step alone can cross the divergent boundary before either tip.
+    #[test]
+    fn deep_reorg_crossed_only_by_live_vdf_queues_reanchor() {
+        let mut h = DiscardHarness::new_with_config_and_live_step(
+            |c| {
+                let cc = c.consensus.get_mut();
+                cc.block_migration_depth = 1;
+                cc.vdf.reset_frequency = 100;
+            },
+            // first_divergent_boundary(lca=5, rf=100) = 200: the live VDF at
+            // 250 has crossed it; the canonical tip below stays at 20.
+            250,
+        );
+        let (tip, steps) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a live-VDF-only boundary crossing must queue a ReanchorRequest");
+        assert_eq!(
+            req.c_step, 20,
+            "the request still anchors at the canonical tip; the VDF thread recomputes the tail"
+        );
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(sent, steps);
+        assert!(
+            h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "the live-only crossing must also mark the buffer suspect"
+        );
+    }
+
+    /// Companion bound for the live term: a live step short of the boundary
+    /// adds nothing — with every crossing term below it the gate stays quiet.
+    #[test]
+    fn deep_reorg_with_live_vdf_below_boundary_does_not_queue_reanchor() {
+        let mut h = DiscardHarness::new_with_config_and_live_step(
+            |c| {
+                let cc = c.consensus.get_mut();
+                cc.block_migration_depth = 1;
+                cc.vdf.reset_frequency = 100;
+            },
+            // Below first_divergent_boundary(lca=5, rf=100) = 200.
+            150,
+        );
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let reorg = reorg_from(5, 5, tip.block_hash);
+
+        h.inner.maybe_reanchor_vdf_after_reorg(&tip, &reorg);
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "no crossing term reached the boundary, so no re-anchor may queue"
+        );
+        assert!(
+            !h.inner
+                .service_senders
+                .vdf_reanchor_signals
+                .is_buffer_suspect(),
+            "an idle gate must not mark the buffer suspect"
+        );
+    }
+
+    #[test]
+    fn send_reanchor_request_publishes_without_reorg_gating() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (older_tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        let (fresh_tip, fresh_steps) = canonical_tip(21, H256::repeat_byte(0x98));
+
+        h.inner.send_reanchor_request(&older_tip);
+        h.inner.send_reanchor_request(&fresh_tip);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("the retry path must publish a request with no ReorgEvent");
+        assert_eq!(req.c_step, 21, "the freshest request wins");
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(sent, fresh_steps);
+    }
+
+    /// Insert `tip` as the canonical cache tip for the suspect-watchdog tests.
+    fn make_cache_tip(
+        h: &mut DiscardHarness,
+        mut tip: IrysBlockHeader,
+        cumulative_diff: u64,
+    ) -> IrysBlockHeader {
+        use irys_domain::{CommitmentSnapshot, EmaSnapshot, EpochSnapshot};
+        use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+        tip.previous_block_hash = h.genesis_hash;
+        tip.height = 1;
+        tip.cumulative_diff = irys_types::U256::from(cumulative_diff);
+        // `test_sign()` derives `block_hash` from the header content; keep the
+        // signed hash so the watchdog's `(tip hash, live step)` dedupe key is a
+        // real, content-distinct value.
+        tip.test_sign();
+
+        let sealed = Arc::new(SealedBlock::new_unchecked(
+            Arc::new(tip.clone()),
+            BlockTransactions::default(),
+        ));
+        let ema = EmaSnapshot::genesis(sealed.header());
+
+        let mut cache = h.inner.cache.write().expect("cache lock for tip seed");
+        cache
+            .add_block(
+                &sealed,
+                Arc::new(CommitmentSnapshot::default()),
+                Arc::new(EpochSnapshot::default()),
+                ema,
+            )
+            .expect("seed cache with tip block");
+        // Production flow: add_block → mark_block_as_validation_scheduled →
+        // mark_block_as_valid → mark_tip.
+        cache
+            .mark_block_as_validation_scheduled(&tip.block_hash)
+            .expect("mark ValidationScheduled for tip block");
+        cache
+            .mark_block_as_valid(&tip.block_hash)
+            .expect("mark Valid for tip block");
+        assert!(
+            cache.mark_tip(&tip.block_hash).expect("mark_tip"),
+            "the seeded block must become the canonical tip"
+        );
+        tip
+    }
+
+    #[test]
+    fn watchdog_retry_does_nothing_while_buffer_not_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        h.inner.retry_vdf_reanchor_if_suspect();
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a not-suspect tick must not publish a re-anchor request"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "a not-suspect tick must leave the dedupe state disarmed"
+        );
+    }
+
+    #[test]
+    fn watchdog_retry_fires_once_per_input_state_while_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (tip1_hdr, tip1_steps) = canonical_tip(20, H256::repeat_byte(0x99));
+        make_cache_tip(&mut h, tip1_hdr, 6000);
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+
+        // Tick 1: fresh inputs → read the cache tip and publish.
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("the first suspect tick must publish a re-anchor request");
+        assert_eq!(
+            req.c_step, 20,
+            "the request must anchor at the cache tip's step"
+        );
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        assert_eq!(
+            sent, tip1_steps,
+            "the watchdog must ship the cache tip's own canonical window"
+        );
+
+        // Tick 2: identical inputs → suppressed (no new value on the channel).
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            !h.vdf_reanchor_rx.has_changed().unwrap(),
+            "an identical-inputs tick must not re-publish"
+        );
+
+        // A fresher canonical tip changes the dedupe key → the watchdog re-fires
+        // (only the tip hash moves; the live step stays 0).
+        let (tip2_hdr, _) = canonical_tip(21, H256::repeat_byte(0x98));
+        make_cache_tip(&mut h, tip2_hdr, 7000);
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a changed tip must re-fire the watchdog");
+        assert_eq!(
+            req.c_step, 21,
+            "the re-fire must anchor at the new canonical tip's step"
+        );
+    }
+
+    #[test]
+    fn watchdog_retry_does_not_arm_on_failed_publish() {
+        let mut h = DiscardHarness::new();
+
+        // Genesis tip has no steps → window build fails → publish returns false.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+
+        h.inner.retry_vdf_reanchor_if_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_none(),
+            "a failed publish must not place a request on the channel"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "a failed publish must leave the watchdog armed for the next tick"
+        );
+    }
+
+    #[test]
+    fn watchdog_retry_rearms_after_a_heal_clears_suspect() {
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.block_migration_depth = 1;
+            cc.vdf.reset_frequency = 4;
+        });
+
+        let (tip_hdr, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        make_cache_tip(&mut h, tip_hdr, 6000);
+
+        // Episode 1: suspect → the tick publishes.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            h.vdf_reanchor_rx.borrow_and_update().is_some(),
+            "the first suspect episode must publish"
+        );
+
+        // A heal applies (the only legitimate clear) → the next tick disarms.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .test_record_heal_applied();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        assert!(
+            !h.vdf_reanchor_rx.has_changed().unwrap(),
+            "a not-suspect tick must not publish"
+        );
+        assert!(
+            h.inner.vdf_reanchor_watchdog_last_sent.is_none(),
+            "clearing suspect must disarm the watchdog dedupe"
+        );
+
+        // Episode 2: suspect again with identical inputs must still re-fire.
+        h.inner
+            .service_senders
+            .vdf_reanchor_signals
+            .mark_buffer_suspect();
+        h.inner.retry_vdf_reanchor_if_suspect();
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("a fresh suspect episode must re-fire even with identical inputs");
+        assert_eq!(req.c_step, 20);
+    }
+
+    #[test]
+    fn send_reanchor_request_window_clamps_to_capacity() {
+        // calc_capacity = max(num_chunks_in_partition / num_chunks_in_recall_range,
+        // max_allowed_vdf_fork_steps) = max(8, 8) = 8.
+        let mut h = DiscardHarness::new_with_config(|c| {
+            let cc = c.consensus.get_mut();
+            cc.vdf.max_allowed_vdf_fork_steps = 8;
+            cc.num_chunks_in_partition = 8;
+            cc.num_chunks_in_recall_range = 1;
+        });
+
+        // c_step 20 > capacity 8, so the window must clamp, not run [1, 20].
+        let (tip, _) = canonical_tip(20, H256::repeat_byte(0x99));
+        h.inner.send_reanchor_request(&tip);
+
+        let req = h
+            .vdf_reanchor_rx
+            .borrow_and_update()
+            .clone()
+            .expect("send_reanchor_request must publish a request");
+        assert_eq!(req.c_step, 20);
+        let sent: Vec<H256> = req.canonical_seeds.iter().map(|s| s.0).collect();
+        let expected: Vec<H256> = (13..=20).map(H256::from_low_u64_be).collect();
+        assert_eq!(
+            sent, expected,
+            "window must clamp to [c_step-capacity+1, c_step] = [13,20], length == capacity 8, NOT reorg depth and NOT [1,20]"
+        );
+        assert_eq!(sent.len(), 8);
     }
 
     /// SoftInternal discard path must record (block_hash, reason) into the

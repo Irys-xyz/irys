@@ -7,8 +7,8 @@
 //! Why a normal "gossip the head only" setup doesn't exercise this:
 //! when peer receives a head whose parent isn't in its tree,
 //! `block_pool` runs the orphan-fetch cascade — each fetched ancestor is
-//! validated and `fast_forward_vdf_steps_from_block` bridges the peer's
-//! VDF state over the gap. By the time the head reaches VDF validation,
+//! validated and its validated steps are fast-forwarded into the peer's
+//! VDF state, bridging the gap. By the time the head reaches VDF validation,
 //! peer's `global_step` has caught up and the progress check correctly
 //! does not fire.
 //!
@@ -76,7 +76,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // injected parent below is never sent through validation, so its
     // steps will never reach the fast-forward channel.
     peer.stop_mining();
-    let peer_frozen_step = peer.node_ctx.vdf_steps_guard.read().global_step;
+    let peer_frozen_step = peer.node_ctx.vdf_steps_guard.current_step();
     tracing::info!(
         peer.frozen_global_step = peer_frozen_step,
         "peer mining stopped"
@@ -213,7 +213,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // Snapshot peer's vdf step *before* delivery; we'll assert it
     // doesn't advance during the wait (peer is supposed to be unable
     // to reach the parent's last step).
-    let pre_delivery_step = peer.node_ctx.vdf_steps_guard.read().global_step;
+    let pre_delivery_step = peer.node_ctx.vdf_steps_guard.current_step();
 
     // -- Deliver the head via direct block_discovery + payload injection.
     //    This bypasses block_pool entirely, so the orphan-fetch cascade
@@ -347,7 +347,7 @@ async fn heavy_test_vdf_progress_check_fails_stalled_peer() -> eyre::Result<()> 
     // Peer's local VDF must not have advanced (mining is stopped, no
     // fast-forward arrived). Any advancement would mean a different
     // code path bridged the gap.
-    let post_step = peer.node_ctx.vdf_steps_guard.read().global_step;
+    let post_step = peer.node_ctx.vdf_steps_guard.current_step();
     assert_eq!(
         post_step, pre_delivery_step,
         "peer's local global_step changed during the wait \

@@ -20,22 +20,9 @@ pub struct PoaData {
     pub data_path: Option<Base64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VDFLimiterInfo {
-    pub output: H256,
-    #[serde(with = "irys_types::string_u64")]
-    pub global_step_number: u64,
-    pub seed: H256,
-    pub next_seed: H256,
-    pub prev_output: H256,
-    pub last_step_checkpoints: H256List,
-    pub steps: H256List,
-    #[serde(default, with = "irys_types::option_u64_stringify")]
-    pub vdf_difficulty: Option<u64>,
-    #[serde(default, with = "irys_types::option_u64_stringify")]
-    pub next_vdf_difficulty: Option<u64>,
-}
+// NOTE: `VDFLimiterInfo` has no sovereign wire mirror — see the "shared stable
+// protocol DTO" exception documented in `wire_types/mod.rs`. The canonical
+// `irys_types::VDFLimiterInfo` is used directly on the wire below.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -90,7 +77,7 @@ pub struct IrysBlockHeaderV1Inner {
     pub system_ledgers: Vec<SystemTransactionLedger>,
     pub data_ledgers: Vec<DataTransactionLedger>,
     pub evm_block_hash: B256,
-    pub vdf_limiter_info: VDFLimiterInfo,
+    pub vdf_limiter_info: irys_types::VDFLimiterInfo,
     pub oracle_irys_price: IrysTokenPrice,
     pub ema_irys_price: IrysTokenPrice,
     pub treasury: U256,
@@ -116,11 +103,6 @@ super::impl_mirror_from!(irys_types::PoaData => PoaData {
     partition_chunk_offset, partition_hash, chunk, ledger_id, tx_path, data_path,
 });
 
-super::impl_mirror_from!(irys_types::VDFLimiterInfo => VDFLimiterInfo {
-    output, global_step_number, seed, next_seed, prev_output,
-    last_step_checkpoints, steps, vdf_difficulty, next_vdf_difficulty,
-});
-
 super::impl_mirror_from!(irys_types::DataTransactionLedger => DataTransactionLedger {
     ledger_id, tx_root, tx_ids, total_chunks, expires, proofs, required_proof_count,
 });
@@ -134,7 +116,10 @@ super::impl_mirror_from!(irys_types::IrysBlockHeaderV1 => IrysBlockHeaderV1Inner
     last_diff_timestamp, previous_solution_hash, last_epoch_hash, chunk_hash,
     previous_block_hash, previous_cumulative_diff, reward_address, reward_amount,
     miner_address, timestamp, evm_block_hash, oracle_irys_price, ema_irys_price, treasury,
-} convert { poa, vdf_limiter_info }
+    // vdf_limiter_info is moved verbatim: both sides are now the canonical
+    // irys_types::VDFLimiterInfo (shared stable protocol DTO), so no .into().
+    vdf_limiter_info,
+} convert { poa }
   convert_iter { system_ledgers, data_ledgers });
 
 super::impl_mirror_enum_from!(

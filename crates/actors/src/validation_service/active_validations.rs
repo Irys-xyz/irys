@@ -27,8 +27,8 @@ use crate::block_tree_service::ValidationResult;
 use crate::metrics;
 use crate::validation_service::block_validation_task::BlockValidationTask;
 use crate::validation_service::{
-    VdfBlockingTaskFailed, VdfPrevStepForkViewUnavailable, VdfStageBParentMissing, VdfTaskStage,
-    VdfValidationResult, record_vdf_task_progress,
+    VdfBlockingTaskFailed, VdfStageBParentMissing, VdfTaskStage, VdfValidationResult,
+    record_vdf_task_progress,
 };
 
 /// Block priority states for validation ordering
@@ -191,12 +191,15 @@ impl PreemptibleVdfTask {
                     VdfValidationResult::ParentMissing {
                         parent_hash: parent_missing.parent_hash,
                     }
-                // Transient race: the block's fork-local lineage view could not be built
-                // (an ancestor was evicted mid reorg / re-anchor) to cross-check a
-                // live-buffer prev-step mismatch. Peer-innocent — requeue rather than
-                // mislabel as Invalid.
-                } else if e.downcast_ref::<VdfPrevStepForkViewUnavailable>().is_some() {
-                    metrics::record_validation_cancellation("vdf_prev_step_fork_view_unavailable");
+                // An in-place re-anchor healed the seed buffer mid-validation:
+                // the batches were validated against the pre-heal buffer, so the
+                // send refused to fast-forward them. Peer-innocent — requeue and
+                // revalidate against the healed buffer (never Invalid).
+                } else if e
+                    .downcast_ref::<irys_vdf::VdfReanchorGenerationChanged>()
+                    .is_some()
+                {
+                    metrics::record_validation_cancellation("vdf_reanchor_generation_changed");
                     VdfValidationResult::Cancelled
                 } else {
                     match e.downcast_ref::<WaitForStepError>() {

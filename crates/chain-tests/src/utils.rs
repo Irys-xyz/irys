@@ -162,11 +162,11 @@ pub async fn capacity_chunk_solution(
     // Wait until we have at least 2 new VDF steps so we can compute checkpoints for (step-1, step)
     let max_wait_retries = 20;
     let mut i = 1;
-    let initial_step_num = vdf_steps_guard.read().global_step;
+    let initial_step_num = vdf_steps_guard.current_step();
     let mut step_num: u64 = 0;
     while i < max_wait_retries && step_num < initial_step_num + 2 {
         sleep(Duration::from_secs(1)).await;
-        step_num = vdf_steps_guard.read().global_step;
+        step_num = vdf_steps_guard.current_step();
         i += 1;
     }
 
@@ -248,21 +248,21 @@ pub async fn capacity_chunk_solution(
         // Advance to next step and wait a bit to allow VDF to progress
         let next_step_target = current_step.saturating_add(1);
         let mut tries = 0_u8;
-        while vdf_steps_guard.read().global_step < next_step_target && tries < 10 {
+        while vdf_steps_guard.current_step() < next_step_target && tries < 10 {
             sleep(Duration::from_millis(200)).await;
             tries += 1;
         }
         // Never advance past the latest AVAILABLE VDF step. When the confirmation gate parks
-        // the VDF at a reset boundary, `global_step` stops here; targeting the un-produced boundary
-        // step would make `get_steps` fail. Mining a solution at an available step still produces a
-        // block, which advances the confirmed step so the gate releases for the next block (exactly
-        // how a real node crosses a reset boundary).
-        current_step = vdf_steps_guard.read().global_step;
+        // the VDF at a reset boundary, the step counter stops here; targeting the un-produced
+        // boundary step would make `get_steps` fail. Mining a solution at an available step still
+        // produces a block, which advances the confirmed step so the gate releases for the next
+        // block (exactly how a real node crosses a reset boundary).
+        current_step = vdf_steps_guard.current_step();
     }
 
     // Fallback: if no valid solution found, return the best-effort solution for the latest step (may fail prevalidation)
     // Use the latest AVAILABLE step — the gate may have parked the VDF at a reset boundary.
-    let current_step = vdf_steps_guard.read().global_step;
+    let current_step = vdf_steps_guard.current_step();
     let steps: H256List = vdf_steps_guard
         .read()
         .get_steps(ii(current_step.saturating_sub(1), current_step))
@@ -487,11 +487,7 @@ impl IrysNodeTest<()> {
 
 impl IrysNodeTest<IrysNodeCtx> {
     fn ensure_vdf_running_for_sync(&self, context: &str) {
-        if !self
-            .node_ctx
-            .is_vdf_mining_enabled
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        if !self.node_ctx.vdf_controller.is_enabled() {
             self.node_ctx.start_vdf();
             info!("Auto-started VDF for sync context={}", context);
         }
@@ -1209,7 +1205,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let max_seconds = coverage_adjusted_timeout(max_seconds);
         let deadline = Instant::now() + Duration::from_secs(max_seconds as u64);
         loop {
-            let current_step = self.node_ctx.vdf_steps_guard.read().global_step;
+            let current_step = self.node_ctx.vdf_steps_guard.current_step();
             if current_step >= target_step {
                 info!("VDF step {} reached target {}", current_step, target_step);
                 return Ok(());
@@ -3742,9 +3738,7 @@ pub async fn solution_context_with_poa_chunk(
     node_ctx: &IrysNodeCtx,
     poa_chunk: Vec<u8>,
 ) -> Result<SolutionContext, eyre::Error> {
-    let was_vdf_enabled = node_ctx
-        .is_vdf_mining_enabled
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let was_vdf_enabled = node_ctx.vdf_controller.is_enabled();
     if !was_vdf_enabled {
         node_ctx.start_vdf();
     }
@@ -3760,7 +3754,7 @@ pub async fn solution_context_with_poa_chunk(
                     "VDF steps unavailable: timed out waiting for (prev,current) pair"
                 ));
             }
-            let s = vdf_steps_guard.read().global_step;
+            let s = vdf_steps_guard.current_step();
             if s >= 1
                 && let Ok(steps) = vdf_steps_guard.read().get_steps(ii(s - 1, s))
                 && steps.len() >= 2
@@ -3825,9 +3819,7 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     };
 
     let vdf_steps_guard = node_ctx.vdf_steps_guard.clone();
-    let was_vdf_enabled = node_ctx
-        .is_vdf_mining_enabled
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let was_vdf_enabled = node_ctx.vdf_controller.is_enabled();
     if !was_vdf_enabled {
         node_ctx.start_vdf();
     }
