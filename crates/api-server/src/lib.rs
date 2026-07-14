@@ -176,11 +176,11 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/epoch/current", web::get().to(ledger::get_current_epoch))
         // Storage endpoints
         .route(
-            "/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
+            storage::INTERVALS_ROUTE,
             web::get().to(storage::get_intervals),
         )
         .route(
-            "/storage/counts/{ledger}/{slot_index}",
+            storage::COUNTS_ROUTE,
             web::get().to(storage::get_chunk_counts),
         )
         .route(
