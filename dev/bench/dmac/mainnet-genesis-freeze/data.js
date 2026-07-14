@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784047493182,
+  "lastUpdate": 1784048186857,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9547,6 +9547,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000122,
             "range": "± 0.00001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "4c152de809ecb42e9c45f55cf18a04bea8603a0a",
+          "message": "fix(config): freeze mainnet genesis constants, add golden-pin tests and fail-closed boot guard",
+          "timestamp": "2026-07-14T16:25:34Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1517/commits/4c152de809ecb42e9c45f55cf18a04bea8603a0a"
+        },
+        "date": 1784048185600,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012664,
+            "range": "± 0.000411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127997,
+            "range": "± 0.005687",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.26679,
+            "range": "± 0.029475",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.518036,
+            "range": "± 0.290588",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078999,
+            "range": "± 0.000514",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.956753,
+            "range": "± 14.556649",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1023.621861,
+            "range": "± 21.217566",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.150854,
+            "range": "± 0.007055",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1397.899971,
+            "range": "± 137.643628",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1565.294421,
+            "range": "± 19.70381",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034512,
+            "range": "± 0.001133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 215.755456,
+            "range": "± 9.41922",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.368117,
+            "range": "± 3.832939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
