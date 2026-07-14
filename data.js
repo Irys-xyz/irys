@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784001597099,
+  "lastUpdate": 1784019705317,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9223,6 +9223,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00015,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ec44983b05ad78ce98d4b90aec45d1ef402058a9",
+          "message": "refactor(vdf): centralise VDF ownership and heal deep reorgs in place (#1474)\n\n* revert(vdf): remove supervisor-loop re-anchor superseded by in-place heal\n\n* refactor(vdf): centralise ownership and re-anchor seed buffer on reorg\n\n* test(chain-tests): clamp mining helper to the latest available VDF step\n\n* refactor: address review comments\n\n* fix(vdf): restore per-step canonical reset seed lookup\n\nReintroduce BlockProvider::canonical_vdf_snapshot(step) and\nCanonicalVdfSnapshot.reset_seed_for_step so the VDF loop folds the\nreset seed pinned by the block ending at or before the current step,\nnot always the tip's next_seed.\n\nWithout this, a node catching up while behind the tip across a reset\nwindow can apply the wrong boundary seed and diverge the local lineage.\nRestores BlockTree::canonical_entry_at_or_below_step and the regression\ntests that guard tip-vs-step seed selection.\n\n* fix(vdf): pause free-run while buffer suspect; harden re-anchor queue\n\nKeep mark-before-queue for buffer_suspect (required: heal clears the\nflag, so a post-send mark can stick forever). Document that ordering,\nreturn whether send_reanchor_request published, and warn when a queue\nfails after marking so tip-advance retries remain the recovery path.\n\nAlso pause free-running VDF steps while the buffer is suspect so the\nnode does not mine on minority seeds or advance live_step further past\napply_reanchor's second-boundary skip. Validated peer FF still applies.\n\n* fix(vdf): use Acquire/Release on re-anchor generation and suspect\n\nPublish heals and suspect marks with Release/AcqRel, and load them with\nAcquire, so validators that observe a new generation also observe the\nbuffer rewrite that preceded record_heal_applied (and cannot re-poison\nvia generation-stamped FF of pre-heal seeds on weak memory models).\n\n* fix(vdf): metricize re-anchor heal/skip and buffer-suspect state\n\nExport irys.vdf.buffer_suspect, reanchor_healed_total, and\nreanchor_skipped_total so operators can alert on long-lived poison\nwindows and skipped heals (e.g. second-boundary skip while tip lags).\nWarn when a re-anchor is skipped so the stuck-suspect path is visible\nin logs without solely relying on metrics.\n\n* fix(vdf): keep validation waits alive across a re-anchor heal\n\napply_reanchor freezes the step counter while it recomputes the seed\nbuffer tail (up to ~2*reset_frequency steps at ~1s/step). The plain\nwait_for_step treated that as a dead VDF thread and returned Stalled,\nwhich the validation task escalates to the never-mislabel panic — so a\nnode could self-abort during the exact deep-reorg recovery the re-anchor\nexists to perform.\n\nMake the step wait heal-aware: while the buffer is suspect, hold the\nprogress deadline open instead of firing Stalled. The dead-thread guard\nstill fires whenever the buffer is not suspect. Stage A now uses the new\nwait_for_step_or_suspect (liveness only; its invariant is proven\nblock-rootedly in prevalidate_block) and the generation-aware Stage F\nwait gains the same suppression.\n\n* fix(consensus): reject VDF step count that would underflow first_step_number\n\nfirst_step_number() computes global_step_number - steps.len() + 1 with\nraw subtraction, and the release profile enables overflow-checks, so a\npeer can self-sign a gossip block declaring more steps than its global\nstep number and panic the block-discovery task (remote DoS). Guard the\nstep count in prevalidate_block before the subtraction runs; honest\nblocks never exceed global_step_number + 1 steps.\n\n* test(chain-tests): repair the cross-boundary re-anchor e2e spec\n\nThe ignored heavy_vdf_reanchor_after_boundary_crossing_reorg deadlocked\nin setup: the confirmation gate operates in VDF steps, but the test set\nreset_frequency=6 and treated fork_len as a block count, so the loop\nparked before the first block could confirm.\n\nDrive the fork toward a VDF-step target with reset_frequency=240\n(headroom over steps-per-block), crossing just past the first divergent\nboundary so the confirmation lag stays under the reset window. Add an\nassertion that the re-anchor generation advanced, so a green run proves\nthe heal actually fired rather than passing trivially.\n\nStill #[ignore]d: the full-stack timing is fragile under load (the\nmechanism is covered by the deterministic apply_reanchor / gate /\ngeneration / wait tests), so this stays an opt-in executable spec.\n\n* fix: address review findings\n\n* fix: address review findings on the VDF reset-seed gate\n\n* fix: address review findings\n\n* fix: rephrase AB-BA comments to satisfy typos check\n\nCI's typos-cli flags \"BA\" in lock-order jargon; use \"lock-order inversion\" instead.\n\n* docs: collapse VDF re-anchor comment essays\n\nTrim multi-paragraph safety prose to short why-notes and design-doc links.\nNo behavior change (~700 LOC net reduction).\n\n* fix(workflow): add heavy-nightly\n\n* fix(workflow): remove target caching from workflow\n\n* test(vdf): un-ignore the re-anchor e2e and de-flake its fork phases\n\nPromote spiky_slow_heavy_vdf_reanchor_after_boundary_crossing_reorg into\nthe PR lane (spiky_ caps concurrent CPU-spiking tests, slow_ keeps the\n180s kill budget) by removing the wedge/flake sources:\n\n- Freeze the peer's VDF between the shared base and its own fork phase:\n  free-running ahead of its frozen chain makes the first fork block span\n  a full reset window, permanently wedging the confirmation gate. A\n  fail-fast assert pins the freeze against harness waits auto-restarting\n  the VDF.\n- Free-run genesis's VDF during its fork phase instead of crawling a\n  step or two per mine_block call.\n- Extend the peer fork until its penultimate block passes the second\n  divergent boundary's rotation point, so the post-reorg confirmed step\n  un-gates genesis's mining for the closing block.\n- Pin genesis difficulty to zero (0.5 packed partitions) so mining at a\n  gate-parked step always succeeds; fork choice is unaffected since\n  per-block work stays uniform.\n- Poll the asynchronous heal-generation bump instead of asserting the\n  instant heights converge.\n- Start only the peer's VDF (not partition mining) for its fork loop, so\n  zero-difficulty autonomous solutions can't slip in unrecorded blocks.\n\n* docs(actors): drop stale review-label cross-references from recall-range tests\n\n---------\n\nCo-authored-by: dmac <samuraidan@gmail.com>\nCo-authored-by: JesseTheRobot <jesse.cruz.wright@gmail.com>",
+          "timestamp": "2026-07-14T09:42:13+01:00",
+          "tree_id": "6dfec2c216cfa454069eb2a0b62799c7f5303896",
+          "url": "https://github.com/Irys-xyz/irys/commit/ec44983b05ad78ce98d4b90aec45d1ef402058a9"
+        },
+        "date": 1784019704162,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012473,
+            "range": "± 0.000255",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.125912,
+            "range": "± 0.00308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.277263,
+            "range": "± 0.041652",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.336602,
+            "range": "± 0.245542",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078119,
+            "range": "± 0.001436",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 766.454845,
+            "range": "± 28.051798",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.177078,
+            "range": "± 12.662709",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117285,
+            "range": "± 0.000072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1190.988184,
+            "range": "± 10.754694",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1549.262265,
+            "range": "± 12.952971",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034361,
+            "range": "± 0.00168",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.225105,
+            "range": "± 1.082372",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.139076,
+            "range": "± 1.837752",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00011,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
