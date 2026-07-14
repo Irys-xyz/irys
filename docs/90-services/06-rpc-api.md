@@ -1,9 +1,9 @@
-# Node-internal block-follower API (`/internal/blocks/*`)
+# Node-internal block-follower API (`/internal/*`)
 
-The `/internal/*` HTTP surface serves the gateway block follower. It exposes the node's durable
-block-event log two ways — a push stream and an equivalent paged poll — plus canonical block reads. Both
-transports carry the **same** `StreamFrame`s from the **same** seq-keyed log, so a follower may use either
-and reach identical state.
+The `/internal/*` HTTP surface serves the gateway block follower and its verification pipeline. It
+exposes the node's durable block-event log two ways — a push stream and an equivalent paged poll — plus
+canonical block reads and an unpacked chunk-range read. Both transports carry the **same** `StreamFrame`s
+from the **same** seq-keyed log, so a follower may use either and reach identical state.
 
 > **Security.** These routes carry no application-layer authentication. They are mounted only when the
 > node sets `http.expose_internal_api` (off by default); when enabled they ride the same HTTP listener as
@@ -81,10 +81,47 @@ SSE stream from `0`.
 These return current canonical state, not transition history; they back a follower's reconciliation after
 a `truncated` poll.
 
+## `GET /internal/chunks?ledger=&offset=from-to`
+
+The stored chunks of one inclusive absolute-ledger-offset span, **unpacked** (packing entropy reversed,
+tail chunk trimmed to the data). This backs the gateway's verification pipeline: the relay reads bodies
+back in 8-chunk windows to verify them against the block's committed `data_root`, and the data service
+acquires extents through the same route.
+
+**Query**
+
+- `ledger` — numeric `DataLedger` id (0 = Publish, 1 = Submit, 10 = OneYear, 20 = ThirtyDay).
+- `offset` — the inclusive span, `from-to`, in absolute ledger chunk offsets (the space `tx_start_offset`
+  in a `StreamFrame`'s `TxMeta` points into). The span is bounded by `MAX_CHUNK_SPAN` (64 chunks); a wider
+  span is `400`.
+
+**Response — `200 application/json`**
+
+```jsonc
+[
+  {
+    "ledger_id": 1,
+    "offset": 42,            // absolute ledger chunk offset
+    "bytes": [7, 0, 255],    // unpacked chunk data, plain integer array (not Base64)
+    "proof": [1, 2, 3]       // the chunk's data_path; validates against the tx's data_root
+  }
+]
+```
+
+`bytes` and `proof` are JSON integer arrays, unlike the `Base64` strings of the public chunk routes — the
+gateway decodes them as raw byte vectors.
+
+**Short reads.** A chunk the node does not hold is omitted from the array; a fully unstored span is `[]`.
+The response is still `200`: the gateway reads a shortfall as "this node lacks the range" and fails over
+to another node, so absence must stay distinguishable from a malformed request. Consumers must therefore
+size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a permanently short page.
+
 ## Error and probe conventions
 
-- `200` for any valid `from_seq` / `limit`, including every cursor regime above.
-- `400` only for an unparsable `from_seq` / `limit`, or a range read exceeding `MAX_BLOCK_RANGE`.
+- `200` for any valid `from_seq` / `limit`, including every cursor regime above, and for any well-formed
+  chunk span (however little of it is stored).
+- `400` only for an unparsable `from_seq` / `limit`, a range read exceeding `MAX_BLOCK_RANGE`, or a chunk
+  request that is malformed (bad `ledger`, unparsable or inverted `offset`) or wider than `MAX_CHUNK_SPAN`.
 - `5xx` only on a genuine log-read fault.
 - **`404` means the endpoint is not available.** The `/internal` routes are mounted only when the node
   sets `http.expose_internal_api` (off by default); a node with it disabled, or an older build that lacks

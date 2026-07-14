@@ -10,7 +10,7 @@ use eyre::OptionExt as _;
 use irys_actors::block_stream_service::BlockStreamHandle;
 use irys_types::block_stream::{StreamEvent, StreamFrame};
 use irys_types::irys::IrysSigner;
-use irys_types::{H256, NodeConfig};
+use irys_types::{Base64, DataLedger, H256, LedgerChunkOffset, NodeConfig, validate_path};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -715,5 +715,132 @@ async fn internal_range_after_reorg_is_single_parent_linked_fork() -> eyre::Resu
     );
 
     tokio::join!(genesis_node.stop(), peer_node.stop());
+    Ok(())
+}
+
+/// The `/internal/chunks` contract the gateway's verification pipeline relies on: unpacked bytes
+/// plus the `data_path` proof per stored chunk of an inclusive absolute-offset span, short reads
+/// (not errors) for offsets the node does not hold, and 400s for malformed requests.
+#[test_log::test(tokio::test)]
+async fn internal_chunks_serves_unpacked_proven_range_with_short_reads() -> eyre::Result<()> {
+    let chunk_size = 32_u64;
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = 10;
+        c.num_chunks_in_recall_range = 2;
+        c.num_partitions_per_slot = 1;
+        c.entropy_packing_iterations = 1_000;
+        c.block_migration_depth = 1;
+    });
+    config.storage.num_writes_before_sync = 1;
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let node = IrysNodeTest::new_genesis(config).start().await;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
+
+    // 2 full chunks + 1 byte: the tail chunk must come back trimmed to the data, not padded to
+    // chunk_size by the unpack.
+    let data: Vec<u8> = (0..(2 * chunk_size + 1)).map(|i| i as u8).collect();
+    let tx = node
+        .post_data_tx(node.get_anchor().await?, data.clone(), &signer)
+        .await;
+    node.wait_for_mempool(tx.header.id, 20).await?;
+    node.upload_chunks(&tx).await?;
+    let inclusion_block = node.mine_block().await?;
+    node.mine_block().await?;
+    node.wait_for_block_in_index_height(inclusion_block.height, 20)
+        .await?;
+    // Sole data tx on the chain, Submit ledger: absolute offsets [0, 3). Wait for the last chunk
+    // to land in a storage module so the range read below is deterministic.
+    node.wait_for_chunk_in_storage(DataLedger::Submit, LedgerChunkOffset::from(2_u64), 30)
+        .await?;
+
+    let address = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.bind_port
+    );
+    let client = reqwest::Client::new();
+
+    // Mirrors the gateway's decode: bytes/proof as plain u8 arrays. A base64-string regression
+    // fails deserialization here, exactly as it would on the gateway.
+    #[derive(Debug, serde::Deserialize)]
+    struct ChunkRead {
+        ledger_id: u32,
+        offset: u64,
+        bytes: Vec<u8>,
+        proof: Vec<u8>,
+    }
+
+    let submit_id = DataLedger::Submit.get_id();
+    let chunks: Vec<ChunkRead> = client
+        .get(format!(
+            "{address}/internal/chunks?ledger={submit_id}&offset=0-2"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(chunks.len(), 3, "all three stored chunks are served");
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk.ledger_id, submit_id);
+        assert_eq!(chunk.offset, i as u64);
+        let start = i * chunk_size as usize;
+        let end = (start + chunk_size as usize).min(data.len());
+        assert_eq!(
+            chunk.bytes,
+            &data[start..end],
+            "unpacked bytes at offset {i} match the uploaded data"
+        );
+        // The served proof is the stored data_path, byte-identical to the one the signer built,
+        // and it validates against the tx's committed data_root at this chunk's byte position.
+        assert_eq!(chunk.proof, tx.proofs[i].proof, "data_path at offset {i}");
+        validate_path(
+            tx.header.data_root.0,
+            &Base64(chunk.proof.clone()),
+            start as u128,
+        )?;
+    }
+
+    // Short read: a span reaching past the stored data returns only the stored chunks (the
+    // gateway reads the shortfall as "this node lacks the rest" and fails over — never a 4xx).
+    let short: Vec<ChunkRead> = client
+        .get(format!(
+            "{address}/internal/chunks?ledger={submit_id}&offset=0-7"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(short.len(), 3, "unstored offsets are omitted, not erred");
+    let empty: Vec<ChunkRead> = client
+        .get(format!(
+            "{address}/internal/chunks?ledger={submit_id}&offset=5-7"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(empty.is_empty(), "a fully unstored span is an empty page");
+
+    // Malformed requests are 400s, distinguishable from absence.
+    for bad in [
+        format!("{address}/internal/chunks?ledger={submit_id}&offset=2-1"),
+        format!("{address}/internal/chunks?ledger={submit_id}&offset=abc"),
+        format!("{address}/internal/chunks?ledger={submit_id}&offset=0-64"),
+        format!("{address}/internal/chunks?ledger=999&offset=0-2"),
+        format!("{address}/internal/chunks?ledger={submit_id}"),
+    ] {
+        let status = client.get(&bad).send().await?.status();
+        assert_eq!(status, 400, "GET {bad} must be a bad request");
+    }
+
+    node.stop().await;
     Ok(())
 }
