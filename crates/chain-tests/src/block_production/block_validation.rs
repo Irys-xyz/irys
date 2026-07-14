@@ -395,6 +395,85 @@ async fn test_prevalidation_rejects_tx_root_mismatch() -> Result<()> {
     Ok(())
 }
 
+/// Remote-panic DoS regression (end-to-end): a block whose Publish ledger carries
+/// a flat ingress-proof list that doesn't match `publish_txs.len() * N` must be
+/// rejected by `prevalidate_block` with `PublishLedgerProofCountMismatch` —
+/// BEFORE state validation drives `ShadowTxGenerator`, which slices that list by
+/// N and would otherwise panic on an out-of-bounds range. This pins the guard's
+/// wiring and ordering: the unit test `ingress_proof_count_guard_rejects_short_proof_list`
+/// covers the `len != txs * N` arithmetic in isolation; this proves the guard
+/// actually runs inside `prevalidate_block`.
+///
+/// Note the orphan shape (proofs present, zero publish txs) does NOT isolate this
+/// guard — `validate_ingress_proof_signers` rejects that earlier with the same
+/// error. So the fixture uses a NON-empty Publish ledger: one structurally-valid
+/// publish tx, `required_proof_count = 0` (so the earlier per-tx signer check
+/// slices zero proofs and passes without needing valid signatures), and a proofs
+/// list of length 2. With testing `N = 1`, `proofs.len() = 2 != 1 * N = 1`, a
+/// mismatch that only this guard catches — every earlier check passes.
+#[tokio::test]
+async fn test_prevalidation_rejects_mismatched_ingress_proof_count() -> Result<()> {
+    use irys_types::{
+        BoundedFee, DataLedger, DataTransactionLedger, H256List, IngressProofsList,
+        IrysTransactionCommon as _, ingress::IngressProof,
+    };
+
+    let ctx = PrevalidationTestContext::new().await?;
+    let consensus = ctx.config.consensus_config();
+
+    // A structurally-valid Publish data tx (data_size = 1 → contributes exactly
+    // one chunk; well-funded so it clears structural validation).
+    let mut tx = DataTransactionHeader::new(&consensus);
+    tx.data_root = H256::from_low_u64_be(0x0CE_CAFE_u64);
+    tx.data_size = 1;
+    tx.term_fee = BoundedFee::from_u64(1_000_000_000_000_000_000);
+    tx.perm_fee = Some(BoundedFee::from_u64(1_000_000_000_000_000_000));
+    tx.ledger_id = DataLedger::Publish as u32;
+    let tx = tx.sign(&ctx.config.signer())?;
+
+    // Splice it into the Publish ledger with a 2-proof list (needs 1 * N = 1).
+    let mut header = (**ctx.block.header()).clone();
+    let publish_ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
+        .expect("Publish ledger should exist");
+    publish_ledger.tx_ids = H256List(vec![tx.id]);
+    publish_ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&tx));
+    publish_ledger.total_chunks = 1;
+    publish_ledger.proofs = Some(IngressProofsList(vec![
+        IngressProof::default(),
+        IngressProof::default(),
+    ]));
+    // rpc = 0 → the earlier `validate_ingress_proof_signers` slices zero proofs
+    // per tx and passes; the aggregate guard is what must catch the length.
+    publish_ledger.required_proof_count = Some(0);
+
+    ctx.config.signer().sign_block_header(&mut header)?;
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![tx.clone()];
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::PublishLedgerProofCountMismatch {
+            proof_count,
+            tx_count,
+        }) => {
+            assert_eq!(proof_count, 2);
+            assert_eq!(tx_count, 1);
+        }
+        other => panic!(
+            "expected PublishLedgerProofCountMismatch (guard must reject before shadow-tx \
+             generation slices the proofs), got {:?}",
+            other
+        ),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// A block that includes a `data_size == 0` data tx must be rejected with `ZeroSizeDataTx`.
 /// A zero-size tx stores no data and would inject a zero-width leaf into the ledger
 /// `tx_root` tree, colliding start offsets with the next tx and breaking PoA owning-tx
