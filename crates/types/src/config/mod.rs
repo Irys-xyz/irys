@@ -1098,7 +1098,6 @@ mod tests {
         expected_config.gossip.bind_ip = Some("127.0.0.1".to_string());
         expected_config.http.public_ip = Some("127.0.0.1".to_string());
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
-        // TOML omits `expose_internal_api`, so it defaults to `false`; `testing()` sets it `true`.
         expected_config.http.expose_internal_api = false;
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());

@@ -127,7 +127,18 @@ size requests within `MAX_CHUNK_SPAN`, or a conforming node would answer with a 
   sets `http.expose_internal_api` (off by default); a node with it disabled, or an older build that lacks
   the route entirely, serves a normal not-found. The gateway's transport selector treats `404` /
   connection-refused as "this transport is unsupported" and falls back accordingly. When the routes are
-  mounted they never return `404` for an empty, short, or out-of-range log.
+  mounted they never return `404` for an empty, short, or out-of-range log. The one exception is
+  `GET /internal/blocks/{height}`, whose `404` also means "no canonical block at that height" — a
+  transport prober must key on the stream/events routes, never on the by-height read.
+
+## Limitation: the crash window
+
+A signal is in-memory between its authoritative site and the producer's durable append, so the log
+is lossless only while the node runs: a crash inside that window loses the frame. For `finalized`
+the durable truth survives in the block index, and the producer reconciles the index tail against
+the log at startup, appending any missing `finalized` frames in height order. A lost `observed` or
+`reorged` frame is not replayed; a follower recovers the resulting state through the canonical
+reads, exactly as it does after a `truncated` poll.
 
 ## Limitation: log recreation (reset)
 

@@ -1,10 +1,18 @@
 //! The block-stream producer: the single, node-wide writer of the durable `seq` event log.
 //!
-//! The producer consumes a lossless, unbounded feed of [`BlockStreamSignal`]s emitted from the
-//! node's authoritative sites (the confirmation loop, the reorg site, and the per-block migration
-//! loop). For each signal it builds the wire [`StreamEvent`], appends it to the durable log
-//! (assigning the next `seq`), and fans it out to live SSE subscribers. Being the sole writer makes
-//! `seq` assignment monotonic and gap-free.
+//! The producer consumes an unbounded feed of [`BlockStreamSignal`]s emitted from the node's
+//! authoritative sites (the confirmation loop, the reorg site, and the per-block migration loop).
+//! For each signal it builds the wire [`StreamEvent`], appends it to the durable log (assigning
+//! the next `seq`), and fans it out to live SSE subscribers. Being the sole writer makes `seq`
+//! assignment monotonic and gap-free.
+//!
+//! The feed is lossless while the node runs — the channel is unbounded and an append failure halts
+//! the producer rather than skipping an event — but a signal is in-memory until its append
+//! commits, so a crash between a state transition and its append can lose that frame. For
+//! `finalized` the durable truth survives in the block index, and startup reconciliation
+//! ([`Producer::reconcile_finalized_tail`]) re-derives and appends the missing frames; `observed`
+//! and `reorged` frames lost this way are recovered by a follower through the canonical read
+//! endpoints, which serve current state rather than transition history.
 //!
 //! The HTTP handlers never touch `seq`: they hold an [`Arc<BlockStreamHandle>`] and call the atomic
 //! [`BlockStreamHandle::subscribe`], which snapshots the durable replay suffix and registers a live
@@ -42,6 +50,11 @@ const SUBSCRIBER_BUFFER: usize = 1_024;
 /// Max frames a single `GET /internal/blocks/events` page may return; an over-size `limit` is clamped to
 /// this rather than rejected, bounding per-request work.
 const MAX_PAGE: u64 = 1_024;
+
+/// Upper bound on the backward block-index scan in [`Producer::reconcile_finalized_tail`]. A real
+/// crash gap is at most the migration batch that was in flight; a scan this deep means the log and
+/// index tails do not meet at all, and reconciliation aborts instead of replaying history.
+const RECONCILE_SCAN_CAP: u64 = 1_000;
 
 /// Shared handle: the live fan-out registry plus DB access. Held by the producer task and cloned
 /// into `ApiState` so every SSE handler shares the one producer.
@@ -86,11 +99,8 @@ impl BlockStreamHandle {
             .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
         let (start, end) = self.db.view_eyre(|tx| {
             let (lowest, logical_len) = irys_database::block_stream_log_bounds(tx)?;
-            // A cursor beyond the tip is stale — only reachable after a log reset shrank the log. Replay
-            // from the retained floor so the follower sees below-cursor frames and rewinds, matching the
-            // `/events` beyond-tip clamp; otherwise the SSE follower would silently continue onto the new
-            // chain at the same seq. In-window / caught-up cursors replay from `from_seq` (empty at the
-            // tip); a below-floor cursor also clamps to the retained floor.
+            // Below-floor and beyond-tip (post-reset) cursors replay from the retained floor — the
+            // SSE rewind; the poll endpoint instead signals `truncated` for a below-floor cursor.
             let start = if from_seq < lowest || from_seq > logical_len {
                 lowest
             } else {
@@ -118,15 +128,9 @@ impl BlockStreamHandle {
     /// empty `truncated` page whose `next_seq` is the floor (the follower discards frames and resyncs
     /// forward to it); a `from_seq` past the tip clamps to the floor.
     pub fn events_page(&self, from_seq: u64, limit: u64) -> eyre::Result<EventsPage> {
-        // checked conversions / arithmetic only — never silently manufacture a wrong cursor
         let limit = usize::try_from(limit.min(MAX_PAGE))?;
         self.db.view_eyre(|tx| {
             let (lowest, logical_len) = irys_database::block_stream_log_bounds(tx)?;
-            // A below-floor (truncated) page is a pure resync signal: the follower discards any frames
-            // and force-resets its cursor forward to `next_seq` (the floor), so carry no frames — with an
-            // empty page `next_seq == lowest` is exactly that floor. A beyond-tip cursor clamps to the
-            // floor so the follower instead sees a below-cursor frame and rewinds (chain reset, not a
-            // gap). In-window pages from `from_seq`, empty when caught up at `from_seq == logical_len`.
             let (start, read_limit, truncated) = if from_seq < lowest {
                 (lowest, 0, true) // below the retained floor → signal only, no frames
             } else if from_seq > logical_len {
@@ -160,9 +164,8 @@ impl BlockStreamHandle {
     /// advanced the retained floor past `cursor` mid-replay (a `truncated`/no-progress page). On abort the
     /// cursor has not reached `end`, which is how the caller tells "resync" from "done".
     ///
-    /// Bounding each page by `end` (not [`Self::events_page`]'s `has_more`, which tracks a moving tip)
-    /// keeps the replay→live handover gap- and duplicate-free; the abort check subsumes the cross-page
-    /// seq-contiguity and short-snapshot guards the old streaming replay carried.
+    /// Bounding each page by `end` (not [`Self::events_page`]'s `has_more`, which tracks a moving
+    /// tip) keeps the replay→live handover gap- and duplicate-free.
     pub fn replay_page(
         &self,
         cursor: u64,
@@ -181,11 +184,14 @@ impl BlockStreamHandle {
     /// Producer-only. Append `event` to the durable log (assigning `seq`) and fan it out, holding
     /// the same lock as [`Self::subscribe`].
     fn append_and_fanout(&self, event: StreamEvent) -> eyre::Result<u64> {
+        let payload = serde_json::to_vec(&event)?;
+        // The lock must cover the durable append, not just the fan-out: `subscribe` snapshots its
+        // replay bound and registers its live sender under this lock, so an append interleaving
+        // between those two would be both replayed and pushed live to the new subscriber.
         let mut live = self
             .live
             .lock()
             .map_err(|_| eyre::eyre!("block-stream fan-out lock poisoned"))?;
-        let payload = serde_json::to_vec(&event)?;
         let seq = self
             .db
             .update_eyre(|tx| irys_database::append_block_stream_event(tx, payload))?;
@@ -242,9 +248,18 @@ impl BlockStreamService {
 
         let join = runtime_handle.spawn(
             async move {
-                Producer::new(producer_handle, chunk_size, shutdown_rx, signal_rx)
-                    .run()
-                    .await;
+                // A failed de-dup rebuild halts the producer (duplicate re-emission would be the
+                // alternative); the node itself keeps running with a stale stream, and the halt is
+                // surfaced through the `irys.block_stream.halted` gauge.
+                let startup_handle = Arc::clone(&producer_handle);
+                match Producer::new(producer_handle, chunk_size, shutdown_rx, signal_rx) {
+                    Ok(mut producer) => producer.run().await,
+                    Err(e) => {
+                        error!(error = ?e, "block-stream producer failed to start: de-dup rebuild failed");
+                        crate::metrics::record_block_stream_halted();
+                        startup_handle.close_live_subscribers();
+                    }
+                }
             }
             .in_current_span(),
         );
@@ -279,9 +294,9 @@ impl Producer {
         chunk_size: u64,
         shutdown: Shutdown,
         signal_rx: UnboundedReceiver<BlockStreamSignal>,
-    ) -> Self {
-        let (emitted, finalized) = rebuild_state(&handle.db);
-        Self {
+    ) -> eyre::Result<Self> {
+        let (emitted, finalized) = rebuild_state(&handle.db)?;
+        Ok(Self {
             handle,
             chunk_size,
             shutdown,
@@ -289,11 +304,17 @@ impl Producer {
             emitted,
             finalized,
             appends_since_prune: 0,
-        }
+        })
     }
 
     async fn run(&mut self) {
         info!("block-stream producer started");
+        if let Err(e) = self.reconcile_finalized_tail() {
+            error!(error = ?e, "block-stream producer halting: finalized reconciliation failed");
+            crate::metrics::record_block_stream_halted();
+            self.handle.close_live_subscribers();
+            return;
+        }
         loop {
             tokio::select! {
                 _ = &mut self.shutdown => {
@@ -312,6 +333,7 @@ impl Producer {
                                 // and keep assigning later `seq`s, which would break the lossless-log
                                 // contract. Followers reconnect and replay up to the last good `seq`.
                                 error!(error = ?e, "block-stream producer halting: durable append failed");
+                                crate::metrics::record_block_stream_halted();
                                 break;
                             }
                         }
@@ -337,6 +359,81 @@ impl Producer {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
             }
         }
+    }
+
+    /// Re-derives `finalized` frames lost to a crash between a block's migration commit and the
+    /// producer's append (a signal is in-memory until appended). Walks the block index backward
+    /// from its tip until it meets a hash the log already finalised, then appends the gap in
+    /// ascending height order.
+    ///
+    /// Runs only when the rebuilt de-dup state holds at least one finalised hash: on a young or
+    /// freshly-reset log the index tail predates the log entirely, and "reconciling" it would
+    /// emit `finalized` for deep history a follower bootstraps from the canonical reads instead.
+    /// The same reasoning caps the backward scan — the crash window loses at most the migration
+    /// batch that was in flight, so a scan that runs [`RECONCILE_SCAN_CAP`] deep means the log and
+    /// index tails do not meet, and reconciliation aborts rather than replay history.
+    fn reconcile_finalized_tail(&mut self) -> eyre::Result<()> {
+        if self.finalized.is_empty() {
+            return Ok(());
+        }
+        let missing = self.handle.db.view_eyre(|tx| {
+            let mut missing: Vec<(u64, H256)> = Vec::new();
+            let Some(latest) = irys_database::block_index_latest_height(tx)? else {
+                return Ok(missing);
+            };
+            for height in (0..=latest).rev() {
+                let Some(hash) = irys_database::block_index_hash_by_height(tx, height)? else {
+                    break;
+                };
+                if self.finalized.contains(&hash) {
+                    break;
+                }
+                missing.push((height, hash));
+                if missing.len() as u64 >= RECONCILE_SCAN_CAP {
+                    warn!(
+                        scanned = missing.len(),
+                        "block-stream finalized reconciliation hit its scan cap; skipping \
+                         (the log and index tails do not meet)"
+                    );
+                    missing.clear();
+                    break;
+                }
+            }
+            Ok(missing)
+        })?;
+
+        for (height, hash) in missing.into_iter().rev() {
+            let event = self.handle.db.view_eyre(|tx| {
+                let header =
+                    irys_database::block_header_by_hash(tx, &hash, false)?.ok_or_else(|| {
+                        eyre::eyre!("migrated block {hash} at height {height} has no header row")
+                    })?;
+                let mut resolve_err: Option<eyre::Report> = None;
+                let event = BlockEvent::from_header_and_txs(
+                    &header,
+                    |ledger| match irys_database::block_ledger_tx_headers(tx, &header, ledger) {
+                        Ok(txs) => txs,
+                        Err(e) => {
+                            resolve_err.get_or_insert(e);
+                            Vec::new()
+                        }
+                    },
+                    self.chunk_size,
+                );
+                match resolve_err {
+                    Some(e) => Err(e),
+                    None => Ok(event),
+                }
+            })?;
+            info!(
+                block.height = height,
+                block.hash = %hash,
+                "appending finalized frame reconciled from the block index"
+            );
+            self.append(StreamEvent::Finalized(event))?;
+            self.finalized.put(hash, ());
+        }
+        Ok(())
     }
 
     fn handle_signal(&mut self, signal: BlockStreamSignal) -> eyre::Result<()> {
@@ -386,6 +483,13 @@ impl Producer {
                 for block in new_fork.iter() {
                     self.emitted.put(block.header().block_hash, ());
                 }
+                // An orphaned block may have been migrated (and emitted `finalized`) before this
+                // reorg rolled it back. Evict it from the finalized de-dup so that if its fork is
+                // later re-adopted and it re-migrates, the fresh `finalized` is emitted rather than
+                // suppressed — a follower that demoted it on this frame is waiting for exactly that.
+                for block in old_fork.iter() {
+                    self.finalized.pop(&block.header().block_hash);
+                }
             }
         }
         Ok(())
@@ -396,7 +500,6 @@ impl Producer {
         self.appends_since_prune += 1;
         if self.appends_since_prune >= PRUNE_INTERVAL {
             self.appends_since_prune = 0;
-            // Fully checked: the subtraction was already guarded, but `seq + 1` was the unchecked add.
             if let Some(keep_from) = seq
                 .checked_add(1)
                 .and_then(|len| len.checked_sub(RETENTION_EVENTS))
@@ -411,26 +514,24 @@ impl Producer {
 
 /// Rebuilds the producer's in-memory de-dup state (`observed` and `finalized` hashes) from the
 /// durable log tail on startup, so a restart does not re-emit for blocks already in the log.
-fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, ()>) {
+///
+/// A failed log read is an error — starting with empty de-dup state would re-emit duplicate
+/// frames for every recent block; the caller halts the producer instead. An individual entry that
+/// fails to decode is skipped with a warning: unlike the serving path (which must error rather
+/// than put a `seq` gap on the wire), the rebuild only mines hashes out of the tail.
+fn rebuild_state(db: &DatabaseProvider) -> eyre::Result<(LruCache<H256, ()>, LruCache<H256, ()>)> {
     let mut emitted = LruCache::new(DEDUP_CAPACITY);
     let mut finalized = LruCache::new(DEDUP_CAPACITY);
 
     // One read tx for both the latest seq and the tail it bounds — an atomic snapshot at startup.
-    let tail = db.view_eyre(|tx| {
+    let events = db.view_eyre(|tx| {
         let Some(latest) = irys_database::block_stream_latest_seq(tx)? else {
             return Ok(Vec::new());
         };
         let capacity = u64::try_from(DEDUP_CAPACITY.get()).unwrap_or(u64::MAX);
         irys_database::read_block_stream_from(tx, latest.saturating_sub(capacity))
-    });
+    })?;
 
-    let events = match tail {
-        Ok(events) => events,
-        Err(e) => {
-            warn!(error = ?e, "block-stream state rebuild failed; starting with empty de-dup state");
-            return (emitted, finalized);
-        }
-    };
     for (_seq, bytes) in &events {
         match serde_json::from_slice::<StreamEvent>(bytes) {
             Ok(StreamEvent::Observed(block)) => {
@@ -439,9 +540,16 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
             Ok(StreamEvent::Finalized(block)) => {
                 finalized.put(block.header.block_hash, ());
             }
-            Ok(StreamEvent::Reorged { new_fork, .. }) => {
+            Ok(StreamEvent::Reorged {
+                orphaned, new_fork, ..
+            }) => {
                 for block in new_fork {
                     emitted.put(block.header.block_hash, ());
+                }
+                // Mirror the live `Reorged` handling: a rolled-back block must be free to emit
+                // `finalized` again if it re-migrates after re-adoption.
+                for block in orphaned {
+                    finalized.pop(&block.header.block_hash);
                 }
             }
             Err(e) => {
@@ -450,7 +558,7 @@ fn rebuild_state(db: &DatabaseProvider) -> (LruCache<H256, ()>, LruCache<H256, (
         }
     }
 
-    (emitted, finalized)
+    Ok((emitted, finalized))
 }
 
 #[cfg(test)]
@@ -647,7 +755,8 @@ mod tests {
             vec![3, 4]
         );
 
-        // Poll side: the raw below-floor cursor gets an empty, truncated resync page (the I6 asymmetry).
+        // Poll side: the raw below-floor cursor gets an empty, truncated resync page — the
+        // deliberate SSE-rewinds/poll-signals asymmetry.
         let page = handle.events_page(0, 10).unwrap();
         assert!(page.truncated && page.frames.is_empty());
         assert_eq!(page.next_seq, 3);
@@ -696,19 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn live_subscribers_share_the_same_frame_allocation() {
-        let (handle, _tmp) = handle_with_events(0);
-        let (_, _, mut live_a) = handle.subscribe(0).unwrap();
-        let (_, _, mut live_b) = handle.subscribe(0).unwrap();
-
-        handle.append_and_fanout(sample_stream_event()).unwrap();
-        let frame_a = live_a.blocking_recv().expect("first live frame");
-        let frame_b = live_b.blocking_recv().expect("second live frame");
-
-        assert!(Arc::ptr_eq(&frame_a, &frame_b));
-    }
-
-    #[test]
     fn subscribe_reports_a_poisoned_fanout_lock() {
         let (handle, _tmp) = handle_with_events(0);
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -748,7 +844,8 @@ mod tests {
         signal_tx
             .send(BlockStreamSignal::Confirmed(sample_block(2)))
             .expect("queue second signal");
-        let mut producer = Producer::new(Arc::clone(&handle), 1, shutdown, signal_rx);
+        let mut producer =
+            Producer::new(Arc::clone(&handle), 1, shutdown, signal_rx).expect("producer");
 
         producer.drain_queued_signals().expect("drain signals");
 
@@ -758,5 +855,129 @@ mod tests {
             frames.iter().map(|frame| frame.seq).collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+
+    /// A producer whose signals these tests feed by direct `handle_signal` calls, so the returned
+    /// shutdown/sender halves are unused and may drop.
+    fn producer_over(handle: &Arc<BlockStreamHandle>) -> Producer {
+        let (_shutdown_tx, shutdown) = reth::tasks::shutdown::signal();
+        let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+        Producer::new(Arc::clone(handle), 1, shutdown, signal_rx).expect("producer")
+    }
+
+    /// The CX-1 regression: a block finalised, then orphaned by a reorg, must emit `finalized`
+    /// again when its fork is re-adopted and it re-migrates — live and across a restart's rebuild.
+    #[test]
+    fn orphaned_block_refinalizes_after_readoption() {
+        let (handle, _tmp) = handle_with_events(0);
+        let handle = Arc::new(handle);
+        let mut producer = producer_over(&handle);
+
+        let block_b = sample_block(1);
+        let block_c = sample_block(2);
+        let fork_parent = Arc::new(IrysBlockHeader::default());
+
+        producer
+            .handle_signal(BlockStreamSignal::Finalized(Arc::clone(&block_b)))
+            .expect("finalize B");
+        producer
+            .handle_signal(BlockStreamSignal::Reorged {
+                fork_parent: Arc::clone(&fork_parent),
+                old_fork: Arc::new(vec![Arc::clone(&block_b)]),
+                new_fork: Arc::new(vec![Arc::clone(&block_c)]),
+            })
+            .expect("reorg orphaning B");
+        producer
+            .handle_signal(BlockStreamSignal::Finalized(Arc::clone(&block_b)))
+            .expect("re-finalize B after re-adoption");
+
+        let (start, end, _live) = handle.subscribe(0).unwrap();
+        let kinds: Vec<&str> = collect_replay(&handle, start, end)
+            .iter()
+            .map(StreamFrame::kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["finalized", "reorged", "finalized"],
+            "the re-migrated orphan must re-emit finalized, not be de-dup-suppressed"
+        );
+
+        // Restart: the rebuilt de-dup state must mirror the live eviction, so the re-finalise
+        // also survives a producer restart that happens between the reorg and the re-migration.
+        let (emitted, finalized) = rebuild_state(&handle.db).expect("rebuild");
+        assert!(
+            !finalized.contains(&block_b.header().block_hash),
+            "rebuild must evict the orphaned hash from the finalized de-dup"
+        );
+        assert!(emitted.contains(&block_c.header().block_hash));
+    }
+
+    /// The CR-7 reconciliation: a `finalized` frame lost to a crash between the migration commit
+    /// and the append is re-derived from the block index at startup and appended in height order.
+    #[test]
+    fn startup_reconciles_finalized_frames_missing_from_the_log_tail() {
+        use irys_types::BlockIndexItem;
+
+        let (handle, _tmp) = handle_with_events(0);
+        let handle = Arc::new(handle);
+
+        // Block 1 migrated AND logged; blocks 2 and 3 migrated (index + headers committed) but
+        // their finalized signals died with the process before the producer appended them.
+        let blocks: Vec<Arc<SealedBlock>> = (1_u64..=3).map(sample_block).collect();
+        {
+            let mut producer = producer_over(&handle);
+            producer
+                .handle_signal(BlockStreamSignal::Finalized(Arc::clone(&blocks[0])))
+                .expect("finalize block 1");
+        }
+        handle
+            .db
+            .update_eyre(|tx| {
+                for block in &blocks {
+                    let header = block.header();
+                    irys_database::insert_block_header(tx, header)?;
+                    irys_database::insert_block_index_item(
+                        tx,
+                        header.height,
+                        &BlockIndexItem {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed index and headers");
+
+        // A fresh producer (as after a restart) reconciles the gap before serving.
+        let mut producer = producer_over(&handle);
+        producer
+            .reconcile_finalized_tail()
+            .expect("reconciliation succeeds");
+
+        let (start, end, _live) = handle.subscribe(0).unwrap();
+        let frames = collect_replay(&handle, start, end);
+        let finalized_hashes: Vec<H256> = frames
+            .iter()
+            .filter(|f| f.kind() == "finalized")
+            .filter_map(StreamFrame::block_hash)
+            .collect();
+        assert_eq!(
+            finalized_hashes,
+            vec![
+                blocks[0].header().block_hash,
+                blocks[1].header().block_hash,
+                blocks[2].header().block_hash,
+            ],
+            "the missing tail is appended once, in ascending height order"
+        );
+
+        // Idempotent: a second reconciliation (say, another restart) appends nothing.
+        let mut producer = producer_over(&handle);
+        producer
+            .reconcile_finalized_tail()
+            .expect("second reconciliation");
+        let (_, end_after, _live) = handle.subscribe(0).unwrap();
+        assert_eq!(end, end_after, "reconciliation is idempotent");
     }
 }

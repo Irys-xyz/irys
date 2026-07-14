@@ -254,6 +254,16 @@ async fn internal_reads_by_height_and_range() -> eyre::Result<()> {
         .await?;
     assert_eq!(resp.status(), 400);
 
+    // inverted range: 400, never a silently empty 200 (a reconciling follower could not tell it
+    // from a genuinely empty canonical span).
+    let resp = client
+        .get(format!(
+            "{address}/internal/blocks?from_height=3&to_height=1"
+        ))
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
+
     Ok(())
 }
 

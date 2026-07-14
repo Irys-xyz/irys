@@ -18,10 +18,7 @@ use irys_actors::block_tree_service::get_block_header;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_domain::BlockTreeEntry;
 use irys_types::block_stream::{BlockEvent, EventsPage, StreamFrame};
-use irys_types::{
-    DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset,
-    app_state::DatabaseProvider,
-};
+use irys_types::{H256, LedgerChunkOffset};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -49,10 +46,6 @@ async fn blocks_stream(
     state: web::Data<ApiState>,
     query: web::Query<StreamQuery>,
 ) -> Result<HttpResponse, ApiError> {
-    // Atomic handover: subscribe snapshots the immutable replay bound `end` and registers the live sender
-    // under one lock, so the live tail begins at exactly `seq = end` (no gap/dup). `start` is already
-    // clamped to the retained floor for a stale cursor, so paging from it replays frames-from-floor — the
-    // SSE rewind; the poll endpoint passes the raw cursor instead and gets a truncated page.
     let (start, end, mut live) = state
         .block_stream
         .subscribe(query.from_seq)
@@ -156,6 +149,17 @@ async fn blocks_range(
     state: web::Data<ApiState>,
     query: web::Query<RangeQuery>,
 ) -> Result<web::Json<Vec<BlockEvent>>, ApiError> {
+    // An inverted range is a malformed request, not an empty span: answering `200 []` here would
+    // be indistinguishable from a genuinely empty canonical range on the endpoint a follower uses
+    // to reconcile after truncation.
+    if query.from_height > query.to_height {
+        return Err(ApiError::InvalidBlockParameter {
+            parameter: format!(
+                "block range {}..={} is inverted (from_height exceeds to_height)",
+                query.from_height, query.to_height
+            ),
+        });
+    }
     // Inclusive count: the handler resolves `from_height..=to_height`, so a span of N covers N + 1
     // heights. Cap the inclusive count so the documented MAX_BLOCK_RANGE bound is exact.
     let height_count = query
@@ -199,6 +203,11 @@ struct ChunksQuery {
 /// misread the shortfall as the node lacking the data.
 const MAX_CHUNK_SPAN: u64 = 64;
 
+/// Concurrent `/internal/chunks` unpack jobs across all requests. Each job recomputes packing
+/// entropy for up to [`MAX_CHUNK_SPAN`] chunks on the blocking pool, so without admission control
+/// a burst of requests could saturate that pool and starve its other users (DB reads, file I/O).
+static UNPACK_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// One chunk of `GET /internal/chunks`, unpacked. `bytes` and `proof` serialise as JSON integer
 /// arrays (plain `Vec<u8>`), NOT the node's usual `Base64` strings — the gateway decodes them as
 /// `Vec<u8>`. `proof` is the chunk's `data_path`, which gateway consumers `validate_path` against
@@ -229,18 +238,27 @@ async fn chunks_range(
 ) -> Result<web::Json<Vec<ChunkRead>>, ApiError> {
     let ledger = crate::routes::parse_ledger_id(query.ledger)?;
     let Some((from, to)) = parse_offset_span(&query.offset) else {
-        return Err(ApiError::Custom(format!(
-            "invalid offset span {:?}: expected from-to with from <= to",
-            query.offset
-        )));
+        return Err(ApiError::InvalidBlockParameter {
+            parameter: format!(
+                "offset span {:?} is malformed: expected from-to with from <= to",
+                query.offset
+            ),
+        });
     };
     if to - from >= MAX_CHUNK_SPAN {
-        return Err(ApiError::Custom(format!(
-            "chunk span {from}-{to} exceeds the maximum of {MAX_CHUNK_SPAN} chunks"
-        )));
+        return Err(ApiError::InvalidBlockParameter {
+            parameter: format!(
+                "chunk span {from}-{to} exceeds the maximum of {MAX_CHUNK_SPAN} chunks"
+            ),
+        });
     }
     // Unpacking recomputes packing entropy per chunk (CPU-bound, millions of hash rounds at
-    // mainnet packing strength), so the read loop runs on the blocking pool.
+    // mainnet packing strength), so the read loop runs on the blocking pool, gated by
+    // [`UNPACK_GATE`]. The semaphore is never closed, so acquire cannot fail.
+    let _permit = UNPACK_GATE
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Internal { err: e.to_string() })?;
     let provider = Arc::clone(&state.chunk_provider);
     let chunks = web::block(move || {
         let mut out = Vec::new();
@@ -256,8 +274,6 @@ async fn chunks_range(
                 }),
                 // Not stored at this offset: omit (the short-read contract).
                 Ok(None) => {}
-                // No storage module covers the offset, or the read failed mid-flight. Either way
-                // this node cannot serve the chunk — omit it and let the gateway fail over.
                 Err(e) => {
                     debug!(?ledger, offset, "internal chunk read failed: {e:#}");
                 }
@@ -364,57 +380,32 @@ fn resolve_block_hash(state: &ApiState, block_hash: H256) -> Result<Option<Block
         return Ok(None);
     };
 
-    let db = &state.db;
-    // Fail the read if any ledger's tx headers cannot be fully resolved, rather than returning a
-    // silently truncated block. The closure stashes the first error; the event built alongside it
-    // is discarded when one is present.
-    let mut resolve_err: Option<ApiError> = None;
-    let event = BlockEvent::from_header_and_txs(
-        &header,
-        |ledger| match resolve_ledger_txs(db, &header, ledger) {
-            Ok(txs) => txs,
-            Err(e) => {
-                resolve_err.get_or_insert(e);
-                Vec::new()
+    // One read transaction resolves every ledger's tx headers — a migrated block can carry
+    // hundreds of ids, and a range request resolves up to MAX_BLOCK_RANGE blocks. Fail the read if
+    // any header cannot be fully resolved, rather than returning a silently truncated block: a
+    // dropped tx would shift the computed `tx_start_offset` of every surviving tx in its ledger.
+    let event = state
+        .db
+        .view_eyre(|tx| {
+            let mut resolve_err: Option<eyre::Report> = None;
+            let event = BlockEvent::from_header_and_txs(
+                &header,
+                |ledger| match irys_database::block_ledger_tx_headers(tx, &header, ledger) {
+                    Ok(txs) => txs,
+                    Err(e) => {
+                        resolve_err.get_or_insert(e);
+                        Vec::new()
+                    }
+                },
+                chunk_size,
+            );
+            match resolve_err {
+                Some(e) => Err(e),
+                None => Ok(event),
             }
-        },
-        chunk_size,
-    );
-    if let Some(e) = resolve_err {
-        return Err(e);
-    }
+        })
+        .map_err(|e| ApiError::Internal { err: e.to_string() })?;
     Ok(Some(event))
-}
-
-/// Resolves the ordered transaction headers for one ledger of a migrated block from the DB.
-///
-/// Fails closed: a tx id with no header row (or a DB error) aborts the read rather than yielding a
-/// truncated ledger. A dropped tx would also shift the computed `tx_start_offset` of every
-/// surviving tx in the ledger, so a short block silently misrepresents canonical contents.
-fn resolve_ledger_txs(
-    db: &DatabaseProvider,
-    header: &IrysBlockHeader,
-    ledger: DataLedger,
-) -> Result<Vec<DataTransactionHeader>, ApiError> {
-    let ledger_id = ledger.get_id();
-    let Some(data_ledger) = header
-        .data_ledgers
-        .iter()
-        .find(|dl| dl.ledger_id == ledger_id)
-    else {
-        return Ok(Vec::new());
-    };
-    let mut txs = Vec::with_capacity(data_ledger.tx_ids.0.len());
-    for tx_id in &data_ledger.tx_ids.0 {
-        let header = db
-            .view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id))
-            .map_err(|e| ApiError::Internal { err: e.to_string() })?
-            .ok_or_else(|| ApiError::Internal {
-                err: format!("canonical block missing tx header for {tx_id}"),
-            })?;
-        txs.push(header);
-    }
-    Ok(txs)
 }
 
 #[cfg(test)]

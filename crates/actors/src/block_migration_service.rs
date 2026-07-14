@@ -599,10 +599,6 @@ impl BlockMigrationService {
     ///
     /// The cache read lock is held only while collecting blocks, then released
     /// before performing DB writes and block index mutations.
-    ///
-    /// Migrates the slice of blocks (oldest-first) from the index head up to `migration_block`,
-    /// invoking `on_migrated` for each block the moment it is fully persisted — so a mid-batch
-    /// failure still signals the blocks that did migrate.
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %migration_block.block_hash, block.height = migration_block.height))]
     pub fn migrate_blocks(
         &self,

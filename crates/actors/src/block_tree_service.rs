@@ -570,8 +570,6 @@ impl BlockTreeServiceInner {
 
     /// Migrates finalized blocks into the block index and DB via `BlockMigrationService`.
     fn migrate_block(&mut self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        // Emit one `finalized` signal per block as it is persisted (inside `migrate_blocks`), so a
-        // mid-batch migration failure still signals the blocks that did migrate.
         let block_stream = self.service_senders.block_stream.clone();
         self.block_migration_service
             .migrate_blocks(block, |sealed| {

@@ -1284,6 +1284,33 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     }
 }
 
+/// Resolves the ordered transaction headers of one ledger of a migrated block.
+///
+/// Fails closed: a tx id with no header row aborts the read rather than yielding a truncated
+/// ledger — a dropped tx would shift the derived `tx_start_offset` of every surviving tx, so a
+/// short result silently misrepresents canonical contents.
+pub fn block_ledger_tx_headers<T: DbTx>(
+    tx: &T,
+    header: &IrysBlockHeader,
+    ledger: DataLedger,
+) -> eyre::Result<Vec<DataTransactionHeader>> {
+    let ledger_id = ledger.get_id();
+    let Some(data_ledger) = header
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == ledger_id)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut txs = Vec::with_capacity(data_ledger.tx_ids.0.len());
+    for tx_id in &data_ledger.tx_ids.0 {
+        let header = tx_header_by_txid(tx, tx_id)?
+            .ok_or_else(|| eyre::eyre!("canonical block missing tx header for {tx_id}"))?;
+        txs.push(header);
+    }
+    Ok(txs)
+}
+
 /// Appends a block-stream event to the durable log, assigning and returning the next monotonic
 /// `seq`.
 ///
@@ -1293,14 +1320,19 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 pub fn append_block_stream_event<T: DbTx + DbTxMut>(tx: &T, value: Vec<u8>) -> eyre::Result<u64> {
     let next_seq = {
         let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
-        cursor.last()?.map_or(0, |(seq, _)| seq + 1)
+        match cursor.last()? {
+            Some((seq, _)) => seq
+                .checked_add(1)
+                .ok_or_else(|| eyre::eyre!("block-stream seq overflow"))?,
+            None => 0,
+        }
     };
     tx.put::<IrysBlockStreamEvents>(next_seq, value)?;
     Ok(next_seq)
 }
 
-/// Reads block-stream events with `seq >= from_seq`, ascending — used by the producer's startup de-dup
-/// state rebuild (`rebuild_state`).
+/// Reads block-stream events with `seq >= from_seq`, ascending and unbounded — callers cap the
+/// span via `from_seq`.
 pub fn read_block_stream_from<T: DbTx>(tx: &T, from_seq: u64) -> eyre::Result<Vec<(u64, Vec<u8>)>> {
     let mut cursor = tx.cursor_read::<IrysBlockStreamEvents>()?;
     let mut events = Vec::new();
@@ -1391,7 +1423,10 @@ mod tests {
 
     #[test]
     fn block_stream_log_append_read_prune() -> eyre::Result<()> {
-        use super::{append_block_stream_event, prune_block_stream_below, read_block_stream_from};
+        use super::{
+            append_block_stream_event, block_stream_lowest_seq, prune_block_stream_below,
+            read_block_stream_from, read_block_stream_range,
+        };
 
         let path = irys_testing_utils::utils::TempDirBuilder::new().build();
         let db = open_or_create_db(
@@ -1400,6 +1435,13 @@ mod tests {
             DatabaseArguments::irys_testing().unwrap(),
         )
         .unwrap();
+
+        // Empty log: no floor, empty bounded range.
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, None);
+        assert!(
+            db.view_eyre(|tx| read_block_stream_range(tx, 0, 10))?
+                .is_empty()
+        );
 
         assert_eq!(
             db.update_eyre(|tx| append_block_stream_event(tx, b"a".to_vec()))?,
@@ -1416,6 +1458,19 @@ mod tests {
 
         let suffix = db.view_eyre(|tx| read_block_stream_from(tx, 1))?;
         assert_eq!(suffix, vec![(1, b"b".to_vec()), (2, b"c".to_vec())]);
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(0));
+
+        // Bounded range honours both from_seq and limit; limit 0 is an empty probe.
+        let seqs: Vec<u64> = db
+            .view_eyre(|tx| read_block_stream_range(tx, 1, 2))?
+            .into_iter()
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
+        assert!(
+            db.view_eyre(|tx| read_block_stream_range(tx, 0, 0))?
+                .is_empty()
+        );
 
         // Cross the 0xFF byte boundary to prove numeric (big-endian) key ordering.
         for _ in 0..260 {
@@ -1439,54 +1494,7 @@ mod tests {
             .map(|(seq, _)| seq)
             .collect();
         assert_eq!(kept, vec![260, 261, 262]);
-        Ok(())
-    }
-
-    #[test]
-    fn block_stream_lowest_and_range() -> eyre::Result<()> {
-        use super::{
-            append_block_stream_event, block_stream_lowest_seq, prune_block_stream_below,
-            read_block_stream_range,
-        };
-
-        let path = irys_testing_utils::utils::TempDirBuilder::new().build();
-        let db = open_or_create_db(
-            path.path(),
-            IrysTables::ALL,
-            DatabaseArguments::irys_testing().unwrap(),
-        )
-        .unwrap();
-
-        // Empty log: no floor, empty range.
-        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, None);
-        assert!(
-            db.view_eyre(|tx| read_block_stream_range(tx, 0, 10))?
-                .is_empty()
-        );
-
-        for b in [b"a", b"b", b"c", b"d"] {
-            db.update_eyre(|tx| append_block_stream_event(tx, b.to_vec()))?;
-        } // seqs 0..=3
-
-        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(0));
-
-        // Bounded range honours both from_seq and limit.
-        let seqs: Vec<u64> = db
-            .view_eyre(|tx| read_block_stream_range(tx, 1, 2))?
-            .into_iter()
-            .map(|(seq, _)| seq)
-            .collect();
-        assert_eq!(seqs, vec![1, 2]);
-
-        // limit 0 → empty page.
-        assert!(
-            db.view_eyre(|tx| read_block_stream_range(tx, 0, 0))?
-                .is_empty()
-        );
-
-        // Pruning advances the retained floor.
-        db.update_eyre(|tx| prune_block_stream_below(tx, 2))?;
-        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(2));
+        assert_eq!(db.view_eyre(block_stream_lowest_seq)?, Some(260));
         Ok(())
     }
 

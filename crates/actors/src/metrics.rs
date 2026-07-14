@@ -107,6 +107,20 @@ pub fn record_reth_fcu_head_height(height: u64) {
     RETH_FCU_HEAD_HEIGHT.record(height, &[]);
 }
 
+static BLOCK_STREAM_HALTED: std::sync::LazyLock<opentelemetry::metrics::Gauge<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("irys-actors")
+            .u64_gauge("irys.block_stream.halted")
+            .with_description(
+                "1 once the block-stream producer has halted; the follower stream is stale until restart",
+            )
+            .build()
+    });
+
+pub(crate) fn record_block_stream_halted() {
+    BLOCK_STREAM_HALTED.record(1, &[]);
+}
+
 pub(crate) fn record_block_produced() {
     BLOCKS_PRODUCED.add(1, &[]);
 }

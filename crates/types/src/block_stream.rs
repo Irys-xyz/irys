@@ -129,9 +129,16 @@ fn serialize_base58<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok,
 fn deserialize_base58<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
     use serde::de::Error as _;
     let encoded = String::deserialize(deserializer)?;
-    encoded
+    let bytes = encoded
         .from_base58()
-        .map_err(|e| D::Error::custom(format!("invalid base58: {e:?}")))
+        .map_err(|e| D::Error::custom(format!("invalid base58: {e:?}")))?;
+    if bytes.len() != 20 {
+        return Err(D::Error::custom(format!(
+            "invalid owner address length: expected 20 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Chunks occupied by a transaction of `data_size` bytes, rounding up.
