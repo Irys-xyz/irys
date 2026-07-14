@@ -85,6 +85,10 @@ max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 8
+# Raised from the 15s default: under this cluster's load a node's VDF clock can pause
+# >15s during fast-forward catch-up, tripping the never-mislabel stall panic. Node-local,
+# NOT consensus-hashed. See design/docs/vdf-validation-stall-detection.md
+progress_timeout_secs = 120
 
 [consensus.Custom]
 expected_genesis_hash = ""
@@ -98,6 +102,7 @@ block_tree_depth = 50
 num_chunks_in_partition = 60
 num_chunks_in_recall_range = 10
 num_partitions_per_slot = 3
+num_partitions_per_term_ledger_slot = 3
 entropy_packing_iterations = 1000
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
@@ -108,8 +113,8 @@ minimum_term_fee_usd = 0.01
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
-miner_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
-reward_address = "0x951AA3768fE8d51DbC348520b0825C0c1f197277"
+miner_address = "0x10605A299777D44BE5373D120d5479f07860325d"
+reward_address = "0x10605A299777D44BE5373D120d5479f07860325d"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
 genesis_price = 1.0
@@ -141,6 +146,10 @@ balance = "0x152cf4e72a974f1c0000"
 [consensus.Custom.reth.alloc.0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC]
 balance = "0x152cf4e72a974f1c0000"
 
+# netwatch data-upload probe signer (key.hex)
+[consensus.Custom.reth.alloc.0x8b2e5fbf97c990dfc06b3c1fe1639a4a694901ee]
+balance = "0x152cf4e72a974f1c0000"
+
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
@@ -158,7 +167,7 @@ min_difficulty_adjustment_factor = "0.25"
 [consensus.Custom.vdf]
 reset_frequency = 2000
 num_checkpoints_in_vdf_step = 25
-max_allowed_vdf_fork_steps = 120000
+max_allowed_vdf_fork_steps = 60000
 sha_1s_difficulty = 100000
 
 [consensus.Custom.block_reward_config]

@@ -3,6 +3,7 @@ pub(crate) mod block_ancestry;
 pub mod block_discovery;
 pub mod block_migration_service;
 pub mod block_producer;
+pub mod block_stream_service;
 pub mod block_tree_service;
 pub mod block_validation;
 

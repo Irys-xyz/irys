@@ -296,14 +296,13 @@ async fn heavy_perm_and_term_expiry_same_epoch() -> eyre::Result<()> {
     // Mine another block to promote tx2 to Publish
     node.mine_block().await?;
 
-    // Verify promotion state before expiry
+    // Verify promotion state before expiry. tx2's promotion lands when the mempool processes the
+    // block's `BlockConfirmed` (behind block production), so wait for it; only then is the
+    // negative tx1 read meaningful.
+    node.wait_for_promotion(&tx2.header.id, 20).await?;
     assert!(
         !node.get_is_promoted(&tx1.header.id).await?,
         "tx1 should NOT be promoted (no chunks uploaded)"
-    );
-    assert!(
-        node.get_is_promoted(&tx2.header.id).await?,
-        "tx2 should be promoted (chunks uploaded)"
     );
 
     // Mine to first epoch boundary to trigger slot allocation (need 2+ slots per ledger)
@@ -833,13 +832,11 @@ async fn slow_heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     node.wait_for_ingress_proofs_no_mining(vec![tx1.header.id], 20)
         .await?;
 
-    // Mine another block to promote tx1 to Publish
+    // Mine another block to promote tx1 to Publish. The mempool reflects the promotion when it
+    // processes the block's `BlockConfirmed`, which runs behind block production — so wait, don't
+    // assert instantly.
     node.mine_block().await?;
-
-    assert!(
-        node.get_is_promoted(&tx1.header.id).await?,
-        "tx1 should be promoted to Publish before expiry"
-    );
+    node.wait_for_promotion(&tx1.header.id, 20).await?;
     info!("tx1 promoted to Publish");
 
     // Mine to first epoch boundary → triggers slot allocation (need 2+ Publish slots)
@@ -963,11 +960,8 @@ async fn slow_heavy_perm_partition_recycle_and_reuse() -> eyre::Result<()> {
     info!("Reached second epoch boundary at height {}", epoch_height2);
 
     // ========== Phase 4: Verify recycling worked ==========
-    // Verify tx2 is promoted
-    assert!(
-        node.get_is_promoted(&tx2.header.id).await?,
-        "tx2 should be promoted to Publish after expiry"
-    );
+    // Verify tx2 is promoted (same confirm-lag as tx1: wait, don't assert instantly).
+    node.wait_for_promotion(&tx2.header.id, 20).await?;
     info!("tx2 promoted to Publish after recycling");
 
     // Get final snapshot and verify every expired Publish partition was recycled.

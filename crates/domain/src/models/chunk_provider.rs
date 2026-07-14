@@ -1,6 +1,7 @@
 use eyre::OptionExt as _;
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
+    UnpackedChunk,
 };
 use tracing::debug;
 
@@ -33,6 +34,26 @@ impl ChunkProvider {
             get_storage_module_at_offset(&self.storage_modules_guard, ledger, ledger_offset)
                 .ok_or_eyre("No storage module contains this chunk")?;
         module.generate_full_chunk_ledger_offset(ledger_offset)
+    }
+
+    /// Retrieves a chunk from a ledger and unpacks it (entropy recompute + XOR + tail trim).
+    ///
+    /// `Ok(None)` when the offset holds no stored chunk; `Err` when no storage module covers it.
+    pub fn get_unpacked_chunk_by_ledger_offset(
+        &self,
+        ledger: DataLedger,
+        ledger_offset: LedgerChunkOffset,
+    ) -> eyre::Result<Option<UnpackedChunk>> {
+        let Some(packed) = self.get_chunk_by_ledger_offset(ledger, ledger_offset)? else {
+            return Ok(None);
+        };
+        let consensus = &self.config.consensus;
+        Ok(Some(irys_packing::unpack(
+            &packed,
+            consensus.entropy_packing_iterations,
+            consensus.chunk_size as usize,
+            consensus.chain_id,
+        )))
     }
 
     /// Retrieves a chunk by [`DataRoot`]

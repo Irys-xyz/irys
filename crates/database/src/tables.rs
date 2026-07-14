@@ -233,4 +233,12 @@ table Metadata {
     type Key = MetadataKey;
     type Value = Vec<u8>;
 }
+
+/// Append-only log of internal block-stream events, keyed by a monotonic `seq`.
+/// The value is the canonical wire JSON of the event payload (see
+/// `irys_types::block_stream`). Node-local: stripped from snapshots.
+table IrysBlockStreamEvents {
+    type Key = u64;
+    type Value = Vec<u8>;
+}
 }

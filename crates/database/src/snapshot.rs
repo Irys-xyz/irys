@@ -12,7 +12,8 @@ use std::ffi::CString;
 use std::path::Path;
 
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockStreamEvents,
+    PeerListItems,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -132,6 +133,9 @@ pub fn strip_node_local(env: &DatabaseEnv, include_caches: bool) -> eyre::Result
         .context("opening write tx for snapshot strip")?;
     tx.clear::<PeerListItems>()
         .context("clearing PeerListItems")?;
+    // Node-local follower stream log; never travels in a snapshot.
+    tx.clear::<IrysBlockStreamEvents>()
+        .context("clearing IrysBlockStreamEvents")?;
     if !include_caches {
         tx.clear::<CachedDataRoots>()
             .context("clearing CachedDataRoots")?;
@@ -202,6 +206,18 @@ mod tests {
         count
     }
 
+    fn count_block_stream_events(env: &DatabaseEnv) -> usize {
+        let tx = env.tx().expect("open ro tx");
+        let mut cursor = tx
+            .cursor_read::<IrysBlockStreamEvents>()
+            .expect("open stream cursor");
+        let mut count = 0;
+        while cursor.next().expect("walk stream").is_some() {
+            count += 1;
+        }
+        count
+    }
+
     fn block_present(env: &DatabaseEnv, block_hash: &irys_types::H256) -> bool {
         let tx = env.tx().expect("open ro tx");
         tx.get::<crate::tables::IrysBlockHeaders>(*block_hash)
@@ -225,6 +241,10 @@ mod tests {
         })
         .expect("insert peers")
         .expect("insert peers ok");
+
+        env.update(|tx| crate::append_block_stream_event(tx, b"stream-evt".to_vec()))
+            .expect("append stream event")
+            .expect("append stream event ok");
 
         block.block_hash
     }
@@ -259,6 +279,11 @@ mod tests {
 
         assert_eq!(count_peers(&copy_db), 2, "peers carried into the copy");
         assert!(block_present(&copy_db, &block_hash));
+        assert_eq!(
+            count_block_stream_events(&copy_db),
+            1,
+            "block-stream log carried into the copy"
+        );
 
         strip_node_local(&copy_db, include_caches).expect("strip succeeds");
 
@@ -266,6 +291,11 @@ mod tests {
         assert!(
             block_present(&copy_db, &block_hash),
             "block headers survive strip"
+        );
+        assert_eq!(
+            count_block_stream_events(&copy_db),
+            0,
+            "block-stream log cleared after strip"
         );
 
         assert_eq!(count_peers(&src_db), 2, "source db left untouched");
