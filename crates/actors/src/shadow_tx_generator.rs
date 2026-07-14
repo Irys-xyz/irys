@@ -2171,6 +2171,13 @@ mod tests {
             "short ingress-proof list must classify as Structural (peer-attributable \
              consensus rejection) — a panic here is a network-wide DoS; got: {err:?}",
         );
+        // Pin the failure to the ingress-proof slice specifically, so a future
+        // earlier `Structural` (e.g. from `PublishFeeCharges::new`) can't silently
+        // shadow this coverage and let the OOB slice regress unnoticed.
+        assert!(
+            err.to_string().contains("ingress proofs at offset"),
+            "Structural error must originate at the ingress-proof slice; got: {err:?}",
+        );
     }
 
     /// `ShadowTxGenError::Display` carries the message verbatim with the

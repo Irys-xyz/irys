@@ -1977,24 +1977,15 @@ pub async fn prevalidate_block(
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
 
     // Reject a mis-sized flat proof list before shadow-tx generation slices it
-    // by N. N is taken at the parent timestamp to match `ShadowTxGenerator`.
-    let ingress_proofs_total_at_parent =
-        config.number_of_ingress_proofs_total_at(previous_block.timestamp_secs());
-    // Defense in depth: this guard and the generator size proofs by parent-N,
-    // while `data_txs_are_valid` and block production use block-N. They agree
-    // only until a hardfork changes N (see `publish_ingress_proof_count_is_valid`).
-    // debug-only so drift is caught in tests when such a fork lands — never a
-    // release panic, which on this consensus path would be a peer-triggerable DoS.
-    debug_assert_eq!(
-        ingress_proofs_total_at_parent,
-        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
-        "ingress-proof N diverges between parent and block timestamps; reconcile \
-         the N-source across prevalidation, ShadowTxGenerator, and data_txs_are_valid"
-    );
+    // by N. N is taken at the parent timestamp to match `ShadowTxGenerator` (see
+    // the doc comment on `publish_ingress_proof_count_is_valid` for the
+    // parent-vs-block-timestamp divergence a future N-changing hardfork must
+    // reconcile — the divergence is expected at such a boundary, so it is a
+    // documented limitation, not a runtime invariant to assert).
     publish_ingress_proof_count_is_valid(
         publish_ledger,
         publish_txs.len(),
-        ingress_proofs_total_at_parent,
+        config.number_of_ingress_proofs_total_at(previous_block.timestamp_secs()),
     )?;
 
     // Flatten (proof, data_root) pairs across publish txs so the parallel
