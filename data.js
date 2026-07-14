@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784023108005,
+  "lastUpdate": 1784047493182,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9439,6 +9439,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bd9ca821249deba34ecff03430afe72f759d9f41",
+          "message": "feat: node-internal block-stream contract over /internal endpoints (#1453)\n\n* feat(block-stream): expose /internal SSE stream and canonical reads\n\n* fix(data-sync): add missing num_partitions_per_term_ledger_slot\n\n* fix(data-sync): let peer nodes join and sync the cluster\n\n* test(data-sync): pre-fund netwatch probe signer in genesis alloc\n\n* fix(block-stream): correctness and resource-safety hardening\n\n* fix: address review findings\n\n* feat(block-stream): add /internal/blocks/events paged poll endpoint\n\n* fix(block-stream): make truncated events page an empty resync signal\n\n* fix(block-stream): clamp stale SSE cursor to the retained floor\n\n* fix(block-stream): bound replay memory and close follower-stream gaps\n\n* fix(block-stream): stage replay page and cover post-reorg range\n\n* fix: address review findings\n\n* fix: address review findings\n\n* fix: address review findings\n\n* refactor(block-stream): replace ReplayStream with an events_page loop\n\n* fix(block-stream): cap internal block range by inclusive height count\n\n* feat(block-stream): add unpacked /internal/chunks range read\n\n* fix(block-stream): close reorg and crash gaps in finalized emission\n\n* fix: address review findings\n\n* test(chain-tests): wait for promotion instead of asserting instantly",
+          "timestamp": "2026-07-14T17:24:42+01:00",
+          "tree_id": "ea03a42331de96305c6d46e9defe83819bb7132c",
+          "url": "https://github.com/Irys-xyz/irys/commit/bd9ca821249deba34ecff03430afe72f759d9f41"
+        },
+        "date": 1784047490535,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011923,
+            "range": "± 0.00009",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119566,
+            "range": "± 0.001499",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.218897,
+            "range": "± 0.035648",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.36503,
+            "range": "± 0.245786",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07478,
+            "range": "± 0.000837",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 755.239385,
+            "range": "± 8.799393",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1011.755347,
+            "range": "± 43.097971",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117777,
+            "range": "± 0.002708",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1179.290094,
+            "range": "± 20.77871",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1730.029564,
+            "range": "± 118.093901",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.036227,
+            "range": "± 0.006173",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 238.224836,
+            "range": "± 20.189209",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 286.931641,
+            "range": "± 40.871318",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000122,
+            "range": "± 0.00001",
             "unit": "ms/iter"
           }
         ]
