@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783968562963,
+  "lastUpdate": 1784001597099,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9115,6 +9115,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e121de8b4b7fa1707d128806076d05f578201948",
+          "message": "fix(api): fix storage Path extraction (drop rename_all on path params) (#1482)\n\n* fix(api): match storage route placeholders to camelCase path params\n\n* fix(api): drop rename_all from storage path params, fix external test parsing\n\n* test(api): lock storage response camelCase JSON keys\n\nAssert slotIndex/chunkType/dataChunks/packedChunks wire names so the\npath-param snake_case fix cannot silently break the response contract.",
+          "timestamp": "2026-07-13T20:47:01-07:00",
+          "tree_id": "90477dd80e15a7af38290329014b2fee1fdbcd04",
+          "url": "https://github.com/Irys-xyz/irys/commit/e121de8b4b7fa1707d128806076d05f578201948"
+        },
+        "date": 1784001595693,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015836,
+            "range": "± 0.000548",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.162886,
+            "range": "± 0.024869",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.640736,
+            "range": "± 0.042976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.995507,
+            "range": "± 1.299183",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083528,
+            "range": "± 0.002241",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 830.614455,
+            "range": "± 22.740414",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1021.472396,
+            "range": "± 24.283116",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.148716,
+            "range": "± 0.002371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1260.615691,
+            "range": "± 68.64174",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1942.701034,
+            "range": "± 20.642939",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.144773,
+            "range": "± 0.04022",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 223.263883,
+            "range": "± 17.148306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 283.368957,
+            "range": "± 9.113794",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.00015,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
