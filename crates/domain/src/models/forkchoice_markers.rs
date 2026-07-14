@@ -114,8 +114,12 @@ impl ForkChoiceMarkers {
 
         let head_height = block_index.latest_height();
         let migration_height = head_height;
-        let depth_delta = compute_depth_delta(prune_depth, migration_depth)?;
-        let prune_height = head_height.saturating_sub(depth_delta);
+        // At restart the head rolls back to the confirmed (migrated) frontier, so
+        // `head_height` here IS the confirmed frontier — the canonical anchor for
+        // finalization. This keeps the finalized we re-announce to reth aligned
+        // with the value in effect before shutdown (no recession).
+        let prune_height =
+            finalized_height(head_height, prune_depth as u64, migration_depth as u64);
 
         let head_block = marker_from_index_height(block_index, database, head_height)?;
         let migration_block = marker_from_index_height(block_index, database, migration_height)?;
@@ -221,6 +225,38 @@ pub(crate) fn compute_prune_height(
     desired_prune.max(index_final_height).min(migration_height)
 }
 
+/// The finalized height: the block that has left (or is leaving) the block tree
+/// and is therefore irreversible. Finalization depth is canonically equal to
+/// `block_tree_depth` — the moment a block falls `block_tree_depth` behind the
+/// head it is pruned from the tree, and no admissible reorg (whose LCA must live
+/// in the tree) can reach it.
+///
+/// Anchored to the **confirmed frontier** (the migrated block-index tip), not the
+/// live head: the confirmed frontier persists across a restart, whereas the head
+/// rolls back to it. Because the confirmed frontier sits `migration_depth` behind
+/// the head, `confirmed − (block_tree_depth − migration_depth)` equals
+/// `head − block_tree_depth` in steady state while remaining monotonic across a
+/// restart's head-rollback. This is the single definition every finalized/prune
+/// computation (fork-choice markers, block-tree restore floor, partition-recovery
+/// guard) must agree on.
+pub fn finalized_height(confirmed_height: u64, block_tree_depth: u64, migration_depth: u64) -> u64 {
+    let depth_delta = block_tree_depth.saturating_sub(migration_depth);
+    confirmed_height.saturating_sub(depth_delta)
+}
+
+/// The block-tree cache floor to restore after a restart: the lowest height the
+/// rebuilt tree should keep, so the reorg window never straddles a finalized block.
+///
+/// On restart the head rolls back to the confirmed (migrated) index tip, so we
+/// reconstruct the pre-crash head (`confirmed_tip + migration_depth`) and apply the
+/// same rule a running node's `prune` follows (`head - (block_tree_depth - 1)`).
+/// This equals `finalized_height(..) + 1` once the chain is `block_tree_depth`
+/// deep, and saturates to 0 (keeping genesis) on a young chain.
+pub fn restore_cache_floor(confirmed_tip: u64, block_tree_depth: u64, migration_depth: u64) -> u64 {
+    let precrash_head = confirmed_tip.saturating_add(migration_depth);
+    precrash_head.saturating_sub(block_tree_depth.saturating_sub(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +302,59 @@ mod tests {
             let result = compute_prune_height(migration_height, index_safe_height, 0);
             prop_assert_eq!(result, migration_height);
         }
+    }
+
+    /// The canonical finalized height is the confirmed (migrated) frontier minus
+    /// `depth_delta` (= `block_tree_depth − migration_depth`). Worked from the
+    /// confirmed counterexample: confirmed tip 94, block_tree_depth 18,
+    /// migration_depth 6 → finalized 82.
+    #[test]
+    fn finalized_height_is_confirmed_minus_depth_delta() {
+        assert_eq!(finalized_height(94, 18, 6), 82);
+    }
+
+    /// Anchored to the confirmed frontier, the helper equals `head − block_tree_depth`
+    /// in steady state, because the confirmed frontier sits `migration_depth` behind
+    /// the head. head 100, migration_depth 6 → confirmed 94 → finalized 82 = 100 − 18.
+    #[test]
+    fn finalized_height_equals_head_minus_block_tree_depth_in_steady_state() {
+        let (head, block_tree_depth, migration_depth) = (100_u64, 18_u64, 6_u64);
+        let confirmed = head - migration_depth;
+        assert_eq!(
+            finalized_height(confirmed, block_tree_depth, migration_depth),
+            head - block_tree_depth,
+        );
+    }
+
+    /// Before the chain is `block_tree_depth` deep nothing has left the tree, so
+    /// finalized saturates at genesis rather than underflowing.
+    #[test]
+    fn finalized_height_saturates_to_genesis_on_shallow_chain() {
+        assert_eq!(finalized_height(5, 18, 6), 0);
+    }
+
+    /// Deep chain: the reconstructed pre-crash head is `confirmed_tip + migration_depth`
+    /// = 100, so the floor is `100 - (18 - 1)` = 83, matching `finalized_height(94, 18, 6) + 1`.
+    #[test]
+    fn restore_cache_floor_matches_finalized_height_plus_one_on_deep_chain() {
+        assert_eq!(restore_cache_floor(94, 18, 6), 83);
+        assert_eq!(
+            restore_cache_floor(94, 18, 6),
+            finalized_height(94, 18, 6) + 1
+        );
+    }
+
+    /// Boundary: pre-crash head (confirmed_tip + migration_depth = 18) exactly equals
+    /// block_tree_depth, so the floor lands at height 1.
+    #[test]
+    fn restore_cache_floor_at_exact_boundary() {
+        assert_eq!(restore_cache_floor(12, 18, 6), 1);
+    }
+
+    /// Young chain: pre-crash head (9 + 6 = 15) is still less than block_tree_depth (18),
+    /// so the floor saturates to 0, keeping genesis in the tree.
+    #[test]
+    fn restore_cache_floor_saturates_to_genesis_on_young_chain() {
+        assert_eq!(restore_cache_floor(9, 18, 6), 0);
     }
 }

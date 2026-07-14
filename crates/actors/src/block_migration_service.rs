@@ -6,7 +6,8 @@ use irys_database::{
 };
 use irys_domain::{
     BlockIndex, BlockTree, ChunkType, StorageModule, StorageModulesReadGuard, SupplyState,
-    block_index_guard::BlockIndexReadGuard, get_overlapped_storage_modules,
+    block_index_guard::BlockIndexReadGuard, forkchoice_markers::finalized_height,
+    get_overlapped_storage_modules,
 };
 use irys_storage::ii;
 use irys_types::{
@@ -32,6 +33,8 @@ pub struct BlockMigrationService {
     /// (re-list) every commitment of the epoch but never first-INCLUDE one, so
     /// they must not write commitment dedup metadata.
     num_blocks_in_epoch: u64,
+    block_tree_depth: u64,
+    block_migration_depth: u64,
     cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     storage_modules_guard: Option<StorageModulesReadGuard>,
@@ -133,6 +136,8 @@ impl BlockMigrationService {
         supply_state: Option<Arc<SupplyState>>,
         chunk_size: u64,
         num_blocks_in_epoch: u64,
+        block_tree_depth: u64,
+        block_migration_depth: u64,
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
     ) -> Self {
@@ -142,6 +147,8 @@ impl BlockMigrationService {
             supply_state,
             chunk_size,
             num_blocks_in_epoch,
+            block_tree_depth,
+            block_migration_depth,
             cache,
             chunk_migration_sender,
             storage_modules_guard: None,
@@ -408,6 +415,15 @@ impl BlockMigrationService {
         let latest = block_index.latest_height();
         if fork_parent_height >= latest {
             return Ok(());
+        }
+
+        let finalized = finalized_height(latest, self.block_tree_depth, self.block_migration_depth);
+        if fork_parent_height < finalized {
+            return Err(eyre::eyre!(
+                "network-partition recovery would roll back to height {fork_parent_height}, below the \
+                 finalized height {finalized}; refusing to orphan a finalized block. A reorg below \
+                 finalized means our view of finality was wrong; halting is the safe response."
+            ));
         }
 
         let rollback_count = latest - fork_parent_height;
@@ -889,6 +905,8 @@ mod tests {
             None, // supply_state — unused by persist_metadata
             ConsensusConfig::testing().chunk_size,
             num_blocks_in_epoch,
+            ConsensusConfig::testing().block_tree_depth,
+            ConsensusConfig::testing().block_migration_depth as u64,
             cache,
             chunk_migration_sender,
         );
@@ -2072,6 +2090,97 @@ mod tests {
         assert_eq!(
             modules[1].get_intervals(ChunkType::Entropy),
             [partition_chunk_offset_ii!(3, 4)]
+        );
+
+        Ok(())
+    }
+
+    /// P0 finality-violation reproduction: a deep reorg whose fork point sits
+    /// **at or below the finalized (prune) height** must never orphan the
+    /// finalized block. `recover_from_network_partition` performs the
+    /// irreversible block-index truncation, so it is the last line of defense —
+    /// it must refuse (error out) rather than roll back an entry at or below
+    /// finalized. A reorg below finalized means our view of finality was wrong;
+    /// continuing would silently revert an already-announced-final block.
+    ///
+    /// Scenario mirrors the confirmed counterexample, scaled to `testing()`
+    /// depths (`block_tree_depth = 50`, `block_migration_depth = 6`, so
+    /// `depth_delta = 44`):
+    ///   - the block index is migrated up to height 60 (latest indexed),
+    ///   - finalized height = 60 - 44 = 16,
+    ///   - a cdiff-heavier fork diverges at height 12 — *below* finalized.
+    ///
+    /// Rolling the index back to the fork parent (12) would orphan finalized
+    /// block 16. The guard must reject the rollback and leave the index intact.
+    #[test]
+    fn recover_from_network_partition_refuses_to_orphan_finalized_block() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (mut svc, _svc_tmp) = make_service(db.clone());
+
+        // recover requires a storage-modules guard. The seeded chain has no
+        // ledger growth, so there are no offsets to unassign and an empty
+        // module set is sufficient.
+        svc.set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(
+            Vec::new(),
+        ))));
+
+        // depth_delta = block_tree_depth(50) - block_migration_depth(6) = 44.
+        let consensus = ConsensusConfig::testing();
+        let depth_delta = consensus.block_tree_depth - consensus.block_migration_depth as u64;
+        let latest_indexed = 60_u64;
+        let finalized_height = latest_indexed - depth_delta; // 16
+        let fork_parent_height = finalized_height - 4; // 12, below finalized
+
+        // Build a chained index 0..=latest_indexed with constant Submit chunks
+        // (no ledger growth → recover finds no storage-module work). recover
+        // reads block headers from the DB, so seed both headers and index items.
+        let mut prev_hash = H256::zero();
+        let mut headers = Vec::new();
+        for height in 0..=latest_indexed {
+            let header = make_block_header(height, prev_hash, 1, vec![]);
+            prev_hash = header.block_hash;
+            headers.push(header);
+        }
+        db.update_eyre(|tx| {
+            for header in &headers {
+                irys_database::insert_block_header(tx, header)?;
+            }
+            Ok(())
+        })?;
+        let submit_index_item = |header: &IrysBlockHeader| BlockIndexItem {
+            block_hash: header.block_hash,
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks: 1,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Submit,
+            }],
+        };
+        {
+            let index = svc.block_index_guard.read();
+            for (height, header) in headers.iter().enumerate() {
+                index.push_item(&submit_index_item(header), height as u64)?;
+            }
+        }
+
+        let result = svc.recover_from_network_partition(fork_parent_height);
+
+        assert!(
+            result.is_err(),
+            "recover_from_network_partition must refuse a rollback below the \
+             finalized height {finalized_height} (fork parent {fork_parent_height}); \
+             orphaning a finalized block is a silent finality violation",
+        );
+
+        let index = svc.block_index_guard.read();
+        assert_eq!(
+            index.latest_height(),
+            latest_indexed,
+            "the block index must not be truncated when a below-finalized reorg is rejected",
+        );
+        assert!(
+            index.get_item(finalized_height).is_some(),
+            "the finalized block at height {finalized_height} must survive the rejected reorg",
         );
 
         Ok(())

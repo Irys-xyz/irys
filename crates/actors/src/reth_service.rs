@@ -46,7 +46,8 @@ pub enum RethServiceMessage {
 // Represents the fork-choice hashes we feed to Reth. Each field is an ancestor of `head`:
 // - `head_hash`: current canonical tip (latest block we want Reth to follow).
 // - `confirmed_hash`: migration/safe block, roughly `migration_depth` behind head.
-// - `finalized_hash`: prune/finalized block, `block_tree_depth` behind the confirmed block.
+// - `finalized_hash`: prune/finalized block, `block_tree_depth` behind head (the
+//   block that has left the block tree and is therefore irreversible).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ForkChoiceUpdate {
     pub head_hash: B256,
