@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784047493182,
+  "lastUpdate": 1784048613489,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9547,6 +9547,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000122,
             "range": "± 0.00001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b71adea4a5f3d49dae33638f00aa906a4d02a64d",
+          "message": "fix(config): validate consensus-critical inputs, fix genesis difficulty diagnostics panic (#1516)",
+          "timestamp": "2026-07-14T09:39:15-07:00",
+          "tree_id": "7acf9471c44482c6611e8f4a5408205a6147b0eb",
+          "url": "https://github.com/Irys-xyz/irys/commit/b71adea4a5f3d49dae33638f00aa906a4d02a64d"
+        },
+        "date": 1784048611221,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011928,
+            "range": "± 0.000032",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120431,
+            "range": "± 0.002128",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.193375,
+            "range": "± 0.010067",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.870389,
+            "range": "± 0.058504",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074637,
+            "range": "± 0.00051",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.01561,
+            "range": "± 5.184618",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1001.901104,
+            "range": "± 35.050804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117779,
+            "range": "± 0.002716",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1187.316633,
+            "range": "± 13.970784",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1547.006602,
+            "range": "± 14.588936",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035526,
+            "range": "± 0.00161",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.713687,
+            "range": "± 1.457568",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.964203,
+            "range": "± 1.603399",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
