@@ -484,9 +484,50 @@ impl BlockMigrationService {
                 let modules = get_overlapped_storage_modules(storage_modules_guard, *ledger, range);
 
                 for module in modules {
-                    let partition_range = match module.make_range_partition_relative(*range) {
+                    // `modules` merely overlap `range`: clip to each module's own
+                    // ledger range before converting (as `index_transaction_data`
+                    // does), otherwise partially covered modules are skipped and
+                    // their orphaned offsets never unassigned.
+                    let module_range = match module.get_storage_module_ledger_offsets() {
                         Ok(r) => r,
-                        Err(_) => continue,
+                        Err(err) => {
+                            warn!(
+                                module_id = module.id,
+                                ?ledger,
+                                %err,
+                                "skipping storage module with no ledger offsets during rollback"
+                            );
+                            continue;
+                        }
+                    };
+                    // Fully qualified method call: importing `InclusiveInterval`
+                    // module-wide breaks inference on `PartitionChunkRange`,
+                    // which implements the trait for two point types.
+                    let Some(overlap) =
+                        nodit::InclusiveInterval::intersection(&module_range, range)
+                    else {
+                        warn!(
+                            module_id = module.id,
+                            ?ledger,
+                            ?range,
+                            ?module_range,
+                            "skipping storage module: orphaned range no longer overlaps during rollback"
+                        );
+                        continue;
+                    };
+                    // The clipped range is contained by construction, so this
+                    // only fails if the module's assignment changed mid-loop.
+                    let partition_range = match module.make_range_partition_relative(overlap) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            warn!(
+                                module_id = module.id,
+                                ?ledger,
+                                %err,
+                                "skipping storage module: clipped range conversion failed during rollback"
+                            );
+                            continue;
+                        }
                     };
 
                     // Clear offset index entries and data_root mappings for orphaned txs
@@ -770,7 +811,8 @@ mod tests {
     //! reorg-orphan metadata cleanup) and for the migration-time metadata writer
     //! `write_data_ledger_metadata` (`IrysDataTxMetadata` /
     //! `IrysCommitmentTxMetadata`). Canonical metadata is written only at
-    //! migration, never at confirmation.
+    //! migration, never at confirmation. Also covers the
+    //! `recover_from_network_partition` rollback of storage module offsets.
     //!
     //! The function only touches `self.db`; the other service fields
     //! (block_index_guard, cache, chunk_migration_sender, supply_state) are
@@ -780,12 +822,13 @@ mod tests {
         IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
         tables::{CachedDataRoots, IrysTables},
     };
-    use irys_domain::BlockTree;
+    use irys_domain::{BlockTree, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{
-        BlockTransactions, ConsensusConfig, DataTransactionHeader, DataTransactionHeaderV1,
-        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, H256, H256List,
-        IrysBlockHeader, U256,
+        BlockIndexItem, BlockTransactions, ConsensusConfig, DataTransactionHeader,
+        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        H256, H256List, IrysBlockHeader, LedgerIndexItem, NodeConfig, U256,
+        partition::PartitionAssignment, partition_chunk_offset_ii,
     };
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -1920,6 +1963,107 @@ mod tests {
         assert!(
             msg.contains("header/body") && msg.contains(&format!("{ledger:?}")),
             "persist_block error must call out the offending ledger; got: {msg}"
+        );
+
+        Ok(())
+    }
+
+    /// Regression test: an orphaned chunk range spanning a storage module
+    /// (slot) boundary only partially overlaps each module, so
+    /// `recover_from_network_partition` must clip the range to each module
+    /// before converting it to partition offsets. The unclipped conversion
+    /// underflowed for the higher module and overshot the lower one.
+    #[test]
+    fn recover_from_network_partition_handles_ranges_spanning_modules() -> eyre::Result<()> {
+        let (db, _db_tmp) = open_db()?;
+        let (mut svc, _svc_tmp) = make_service(db.clone());
+
+        // Two Submit-ledger modules of 5 chunks each: slot 0 covers ledger
+        // offsets [0, 4], slot 1 covers [5, 9].
+        let sm_tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("recover_spanning_modules")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 5,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: sm_tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let mut modules = Vec::new();
+        for slot in 0..2_usize {
+            let info = StorageModuleInfo {
+                id: slot,
+                partition_assignment: Some(PartitionAssignment {
+                    ledger_id: Some(DataLedger::Submit as u32),
+                    slot_index: Some(slot),
+                    ..PartitionAssignment::default()
+                }),
+                submodules: vec![(
+                    partition_chunk_offset_ii!(0, 4),
+                    format!("submodule-{slot}").into(),
+                )],
+            };
+            let module = Arc::new(StorageModule::new(&info, &config)?);
+            module.pack_with_zeros();
+            modules.push(module);
+        }
+        svc.set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(
+            modules.clone(),
+        ))));
+
+        // Genesis leaves the Submit ledger at 3 chunks; the orphaned block
+        // takes it to 8, so its range [3, 7] crosses the slot boundary at 5.
+        let genesis = make_block_header(0, H256::zero(), 3, vec![]);
+        let orphan = make_block_header(1, genesis.block_hash, 8, vec![]);
+        db.update_eyre(|tx| {
+            irys_database::insert_block_header(tx, &genesis)?;
+            irys_database::insert_block_header(tx, &orphan)
+        })?;
+        let submit_index_item = |header: &IrysBlockHeader, total_chunks| BlockIndexItem {
+            block_hash: header.block_hash,
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Submit,
+            }],
+        };
+        {
+            let index = svc.block_index_guard.read();
+            index.push_item(&submit_index_item(&genesis, 3), 0)?;
+            index.push_item(&submit_index_item(&orphan, 8), 1)?;
+        }
+
+        svc.recover_from_network_partition(0)?;
+
+        {
+            let index = svc.block_index_guard.read();
+            assert_eq!(index.num_blocks(), 1);
+            assert_eq!(index.latest_height(), 0);
+        }
+
+        // Each module had exactly its own slice of [3, 7] unassigned: the
+        // genesis chunks [0, 2] stay packed in slot 0, and slot 1's offsets
+        // past the orphaned range (ledger [8, 9]) stay packed.
+        assert_eq!(
+            modules[0].get_intervals(ChunkType::Uninitialized),
+            [partition_chunk_offset_ii!(3, 4)]
+        );
+        assert_eq!(
+            modules[0].get_intervals(ChunkType::Entropy),
+            [partition_chunk_offset_ii!(0, 2)]
+        );
+        assert_eq!(
+            modules[1].get_intervals(ChunkType::Uninitialized),
+            [partition_chunk_offset_ii!(0, 2)]
+        );
+        assert_eq!(
+            modules[1].get_intervals(ChunkType::Entropy),
+            [partition_chunk_offset_ii!(3, 4)]
         );
 
         Ok(())
