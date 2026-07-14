@@ -224,4 +224,60 @@ mod tests {
         )
         .await;
     }
+
+    /// Wire JSON for storage responses must stay camelCase even though path params
+    /// are snake_case (no `rename_all` on the Path structs).
+    #[actix_web::test]
+    async fn intervals_response_serialises_camel_case_keys() {
+        let params: StorageIntervalsParams = serde_json::from_value(serde_json::json!({
+            "ledger": "OneYear",
+            "slot_index": 2,
+            "chunk_type": "Data",
+        }))
+        .expect("params");
+        let intervals: Vec<ChunkInterval> = serde_json::from_value(serde_json::json!([
+            {"start": 0, "end": 3}
+        ]))
+        .expect("intervals");
+        let body = StorageIntervalsResponse::new(&params, intervals);
+        let value = serde_json::to_value(&body).expect("serialise");
+        let object = value.as_object().expect("object");
+        assert!(
+            object.contains_key("slotIndex") && !object.contains_key("slot_index"),
+            "expected camelCase slotIndex, got keys {:?}",
+            object.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            object.contains_key("chunkType") && !object.contains_key("chunk_type"),
+            "expected camelCase chunkType, got keys {:?}",
+            object.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(object["slotIndex"], 2);
+        assert_eq!(object["chunkType"], "Data");
+        assert_eq!(object["intervals"][0]["start"], 0);
+        assert_eq!(object["intervals"][0]["end"], 3);
+    }
+
+    #[actix_web::test]
+    async fn counts_response_serialises_camel_case_keys() {
+        let params: ChunkCountsParams = serde_json::from_value(serde_json::json!({
+            "ledger": "Submit",
+            "slot_index": 5,
+        }))
+        .expect("params");
+        let body = ChunkCountsResponse::new(&params, 10, 20);
+        let value = serde_json::to_value(&body).expect("serialise");
+        let object = value.as_object().expect("object");
+        let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        for snake in ["slot_index", "data_chunks", "packed_chunks"] {
+            assert!(
+                !keys.contains(&snake),
+                "response must not emit snake_case {snake}, got {keys:?}"
+            );
+        }
+        assert_eq!(object["slotIndex"], 5);
+        assert_eq!(object["dataChunks"], 10);
+        assert_eq!(object["packedChunks"], 20);
+        assert_eq!(object["ledger"], "Submit");
+    }
 }
