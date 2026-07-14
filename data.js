@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784019705317,
+  "lastUpdate": 1784023108005,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9331,6 +9331,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.00011,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "57174310+glottologist@users.noreply.github.com",
+            "name": "Jason Ridgway-Taylor (~misfur-mondut)",
+            "username": "glottologist"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "aefe6f2179fb4deb89383a0f0f371bafbafa02c4",
+          "message": "fix: clip orphaned chunk ranges to storage module bounds in deep-reorg recovery (#1476)\n\n* fix(consensus): clip orphaned chunk ranges to storage module bounds\n\n* style(consensus): trim review-flagged comments in recovery fix\n\n* fix: address review findings\n\n* docs: clarify method comment\n\n---------\n\nCo-authored-by: DMac <samuraidan@gmail.com>",
+          "timestamp": "2026-07-14T10:42:47+01:00",
+          "tree_id": "251a84c81ab939523f675ae9140ce1a003812e0a",
+          "url": "https://github.com/Irys-xyz/irys/commit/aefe6f2179fb4deb89383a0f0f371bafbafa02c4"
+        },
+        "date": 1784023106773,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.016115,
+            "range": "± 0.001819",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.157842,
+            "range": "± 0.003699",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.62116,
+            "range": "± 0.088373",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.794596,
+            "range": "± 0.696782",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078541,
+            "range": "± 0.001488",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 775.84745,
+            "range": "± 16.353676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 980.169141,
+            "range": "± 7.124949",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.123659,
+            "range": "± 0.002056",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1203.804938,
+            "range": "± 91.44792",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1533.086408,
+            "range": "± 10.170632",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034426,
+            "range": "± 0.001171",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.41312,
+            "range": "± 1.316681",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.506897,
+            "range": "± 0.833385",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
