@@ -574,12 +574,16 @@ impl ConsensusConfig {
     // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
     pub const CHUNKS_PER_PARTITION_20TB: u64 = 75_534_400;
 
-    /// Calculate the number of epochs in one year based on network parameters
+    /// Seconds in a non-leap year (`epochs_per_year` / `Config::validate` epoch-length cap).
+    pub const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
+
+    /// Calculate the number of epochs in one year based on network parameters.
+    ///
+    /// Requires `Config::validate()`: non-zero block/epoch sizes and epoch ≤ one year.
     pub fn epochs_per_year(&self) -> u64 {
-        const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
         let seconds_per_epoch =
             self.difficulty_adjustment.block_time * self.epoch.num_blocks_in_epoch;
-        SECONDS_PER_YEAR / seconds_per_epoch
+        Self::SECONDS_PER_YEAR / seconds_per_epoch
     }
 
     /// Convert years to epochs based on network parameters
