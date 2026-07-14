@@ -27,13 +27,24 @@ pub fn calculate_initial_difficulty(
     // Rearranged operations to avoid overflow
     let scale = U256::from(1_000_000);
     let probability_per_hash = target / (max_diff / scale); // Divide max first
-    let expected_hashes = scale / probability_per_hash;
+    // Diagnostics only: floors to 0 when block_hashrate > 1e6 (~209 mainnet partitions).
+    let expected_hashes = scale.checked_div(probability_per_hash);
 
     tracing::info!("Block hashrate: {}", block_hashrate);
     tracing::info!("Initial difficulty: {}", initial_difficulty);
     tracing::info!("Target: {}", target);
     tracing::info!("Probability per hash (×10^-6): {}", probability_per_hash);
-    tracing::info!("Expected hashes to find block: {}", expected_hashes);
+    match expected_hashes {
+        Some(expected_hashes) => {
+            tracing::info!("Expected hashes to find block: {}", expected_hashes);
+        }
+        None => {
+            tracing::info!(
+                "Expected hashes to find block: ~{} (probability per hash < 1e-6)",
+                block_hashrate
+            );
+        }
+    }
 
     Ok(initial_difficulty)
 }
@@ -182,6 +193,30 @@ mod tests {
             max_difficulty_adjustment_factor: dec![4.0],
             min_difficulty_adjustment_factor: dec![0.25],
         }
+    }
+
+    /// High genesis hashrate must not panic diagnostics in `calculate_initial_difficulty`.
+    #[rstest]
+    #[case::mainnet_first_panicking_count(400, 12, 209.0)]
+    #[case::exact_1e6_boundary(1, 1, 1_000_000.0)]
+    #[case::just_past_1e6_boundary(1, 1, 1_000_001.0)]
+    #[case::far_past_boundary(400, 12, 100_000.0)]
+    fn initial_difficulty_survives_high_genesis_hashrate(
+        #[case] recall_range: u64,
+        #[case] block_time: u64,
+        #[case] packed_partitions: f64,
+    ) {
+        let mut config = ConsensusConfig::testing();
+        config.num_chunks_in_recall_range = recall_range;
+        config.difficulty_adjustment.block_time = block_time;
+
+        let difficulty = calculate_initial_difficulty(&config, packed_partitions)
+            .expect("initial difficulty must not panic on large genesis hashrates");
+
+        let hashes_per_sec = (recall_range as f64 * packed_partitions).round() as u64;
+        let block_hashrate = U256::from(hashes_per_sec) * U256::from(block_time);
+        let expected = U256::MAX - (U256::MAX / block_hashrate);
+        assert_eq!(difficulty, expected, "initial difficulty formula drifted");
     }
 
     #[test]

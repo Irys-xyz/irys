@@ -1,4 +1,5 @@
 use eyre::ensure;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::{ops::Deref, sync::Arc};
 
@@ -132,6 +133,11 @@ impl Config {
             self.consensus.num_chunks_in_recall_range > 0,
             "num_chunks_in_recall_range must be > 0"
         );
+        // Zero → genesis capacity math hits log10(0) / NaN during epoch-snapshot build.
+        ensure!(
+            self.consensus.num_partitions_per_slot > 0,
+            "num_partitions_per_slot must be > 0"
+        );
 
         // ensure that the VDF step cache is >= chunks_per_partition.div_ceil(chunks_per_recall_range)
         let minimum_step_capacity = self
@@ -151,6 +157,19 @@ impl Config {
         ensure!(
             self.vdf.progress_timeout_secs > 0,
             "vdf.progress_timeout_secs must be > 0 (zero would make every wait_for_step instantly bail and reject every block)"
+        );
+        // Divisor of num_iterations_per_checkpoint(); zero panics at VDF pre-flight.
+        ensure!(
+            self.consensus.vdf.num_checkpoints_in_vdf_step > 0,
+            "vdf.num_checkpoints_in_vdf_step must be > 0"
+        );
+        // Else iterations-per-checkpoint floor to 0 and VDF steps do no sequential work.
+        ensure!(
+            self.consensus.vdf.sha_1s_difficulty
+                >= self.consensus.vdf.num_checkpoints_in_vdf_step as u64,
+            "vdf.sha_1s_difficulty ({}) must be >= vdf.num_checkpoints_in_vdf_step ({})",
+            self.consensus.vdf.sha_1s_difficulty,
+            self.consensus.vdf.num_checkpoints_in_vdf_step,
         );
 
         // The reset-boundary confirmation gate parks the VDF loop at a boundary
@@ -296,6 +315,71 @@ impl Config {
         ensure!(
             self.consensus.epoch.submit_ledger_epoch_length > 0,
             "submit_ledger_epoch_length must be > 0"
+        );
+
+        // Difficulty params: reject at startup rather than panic/freeze later in
+        // producer and validators (calculate_difficulty / adjust_difficulty).
+        let diff = &self.consensus.difficulty_adjustment;
+        ensure!(
+            diff.block_time > 0,
+            "difficulty_adjustment.block_time must be > 0"
+        );
+        ensure!(
+            diff.difficulty_adjustment_interval > 0,
+            "difficulty_adjustment.difficulty_adjustment_interval must be > 0"
+        );
+        // Mirror calculate_difficulty's (factor * 100) → u128 / u32 conversions.
+        let hundred = Decimal::from(100_u32);
+        ensure!(
+            diff.max_difficulty_adjustment_factor > Decimal::ONE,
+            "difficulty_adjustment.max_difficulty_adjustment_factor ({}) must be > 1",
+            diff.max_difficulty_adjustment_factor
+        );
+        ensure!(
+            diff.max_difficulty_adjustment_factor
+                .checked_mul(hundred)
+                .is_some(),
+            "difficulty_adjustment.max_difficulty_adjustment_factor ({}) * 100 overflows Decimal",
+            diff.max_difficulty_adjustment_factor
+        );
+        ensure!(
+            diff.min_difficulty_adjustment_factor >= Decimal::ZERO,
+            "difficulty_adjustment.min_difficulty_adjustment_factor ({}) must be >= 0",
+            diff.min_difficulty_adjustment_factor
+        );
+        let min_threshold = diff
+            .min_difficulty_adjustment_factor
+            .checked_mul(hundred)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "difficulty_adjustment.min_difficulty_adjustment_factor ({}) * 100 overflows Decimal",
+                    diff.min_difficulty_adjustment_factor
+                )
+            })?;
+        ensure!(
+            min_threshold <= Decimal::from(u32::MAX),
+            "difficulty_adjustment.min_difficulty_adjustment_factor ({}) * 100 must fit in u32",
+            diff.min_difficulty_adjustment_factor
+        );
+
+        // Else epochs_per_year() floors to 0 and storage fees divide by zero.
+        let seconds_per_epoch = diff
+            .block_time
+            .checked_mul(self.consensus.epoch.num_blocks_in_epoch)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "block_time ({}) * num_blocks_in_epoch ({}) overflows u64",
+                    diff.block_time,
+                    self.consensus.epoch.num_blocks_in_epoch
+                )
+            })?;
+        ensure!(
+            seconds_per_epoch <= ConsensusConfig::SECONDS_PER_YEAR,
+            "epoch duration ({}s) must be <= one year ({}s); block_time={}, num_blocks_in_epoch={}",
+            seconds_per_epoch,
+            ConsensusConfig::SECONDS_PER_YEAR,
+            diff.block_time,
+            self.consensus.epoch.num_blocks_in_epoch,
         );
 
         // NC-0042 / deep-reorg safety: a term-ledger slot's lifetime must exceed
@@ -1525,6 +1609,7 @@ mod tests {
 mod validate_tests {
     use super::*;
     use rstest::rstest;
+    use rust_decimal_macros::dec;
 
     fn valid_config() -> Config {
         Config::new_with_random_peer_id(NodeConfig::testing())
@@ -1581,6 +1666,113 @@ mod validate_tests {
             err_str.contains(expected_msg),
             "expected error containing {expected_msg:?}, got: {err_str}"
         );
+    }
+
+    /// Runtime panic / freeze configs that used to pass validate() — message substring match.
+    #[rstest]
+    #[case::zero_num_partitions_per_slot(
+        |c: &mut ConsensusConfig| {
+            c.num_partitions_per_slot = 0;
+        },
+        "num_partitions_per_slot"
+    )]
+    #[case::zero_vdf_checkpoints(
+        |c: &mut ConsensusConfig| {
+            c.vdf.num_checkpoints_in_vdf_step = 0;
+        },
+        "num_checkpoints_in_vdf_step"
+    )]
+    #[case::zero_block_time(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.block_time = 0;
+        },
+        "difficulty_adjustment.block_time"
+    )]
+    #[case::zero_adjustment_interval(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.difficulty_adjustment_interval = 0;
+        },
+        "difficulty_adjustment_interval"
+    )]
+    #[case::max_factor_below_one(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.max_difficulty_adjustment_factor = dec!(0.005);
+        },
+        "max_difficulty_adjustment_factor"
+    )]
+    #[case::max_factor_exactly_one(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.max_difficulty_adjustment_factor = dec!(1);
+        },
+        "must be > 1"
+    )]
+    #[case::max_factor_times_100_overflows_decimal(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.max_difficulty_adjustment_factor = Decimal::MAX;
+        },
+        "max_difficulty_adjustment_factor"
+    )]
+    #[case::negative_min_factor(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.min_difficulty_adjustment_factor = dec!(-1);
+        },
+        "min_difficulty_adjustment_factor"
+    )]
+    #[case::min_factor_times_100_overflows_decimal(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.min_difficulty_adjustment_factor = Decimal::MAX;
+        },
+        "min_difficulty_adjustment_factor"
+    )]
+    #[case::min_threshold_exceeds_u32(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.min_difficulty_adjustment_factor = dec!(100_000_000);
+        },
+        "must fit in u32"
+    )]
+    #[case::sha_difficulty_below_checkpoint_count(
+        |c: &mut ConsensusConfig| {
+            c.vdf.sha_1s_difficulty = c.vdf.num_checkpoints_in_vdf_step as u64 - 1;
+        },
+        "sha_1s_difficulty"
+    )]
+    #[case::epoch_longer_than_a_year(
+        |c: &mut ConsensusConfig| {
+            c.difficulty_adjustment.block_time = 1;
+            c.epoch.num_blocks_in_epoch = ConsensusConfig::SECONDS_PER_YEAR + 1;
+        },
+        "one year"
+    )]
+    #[case::epoch_seconds_overflow(
+        |c: &mut ConsensusConfig| {
+            // block_migration_depth = 0 keeps the reset-frequency guard
+            // (2x migration_depth x block_time) from tripping first.
+            c.block_migration_depth = 0;
+            c.difficulty_adjustment.block_time = u64::MAX / 2;
+        },
+        "overflows u64"
+    )]
+    fn validate_rejects_runtime_panic_configs(
+        #[case] mutate: fn(&mut ConsensusConfig),
+        #[case] expected_msg: &str,
+    ) {
+        let cfg = config_with_consensus(mutate);
+        let err = cfg.validate().unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains(expected_msg),
+            "expected error containing {expected_msg:?}, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_epoch_of_exactly_one_year() {
+        let cfg = config_with_consensus(|c| {
+            c.difficulty_adjustment.block_time = 1;
+            c.epoch.num_blocks_in_epoch = ConsensusConfig::SECONDS_PER_YEAR;
+        });
+        cfg.validate()
+            .expect("an epoch of exactly one year must pass (epochs_per_year == 1)");
     }
 
     #[test]
