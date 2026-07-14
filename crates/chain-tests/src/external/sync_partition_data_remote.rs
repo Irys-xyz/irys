@@ -252,41 +252,15 @@ async fn sync_partition_data_remote_test() -> Result<()> {
             current_height_for_check
         );
 
-        // Check Publish(0) ledger for data
-        let publish_result = clients[0]
-            .http_client
-            .get(format!("{}/v1/storage/counts/Publish/0", clients[0].url))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
+        // Check Publish(0) and Submit(0) ledgers for data; the typed response makes a
+        // missing/renamed field a hard error instead of silently reading as 0 chunks
+        let publish_counts = get_chunk_counts(&clients[0], "Publish", 0).await?;
+        let publish_data_chunks = publish_counts.data_chunks;
+        let publish_packed_chunks = publish_counts.packed_chunks;
 
-        let publish_data_chunks = publish_result
-            .get("data_chunks")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let publish_packed_chunks = publish_result
-            .get("packed_chunks")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-
-        // Check Submit(0) ledger for data
-        let submit_result = clients[0]
-            .http_client
-            .get(format!("{}/v1/storage/counts/Submit/0", clients[0].url))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
-
-        let submit_data_chunks = submit_result
-            .get("data_chunks")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let submit_packed_chunks = submit_result
-            .get("packed_chunks")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let submit_counts = get_chunk_counts(&clients[0], "Submit", 0).await?;
+        let submit_data_chunks = submit_counts.data_chunks;
+        let submit_packed_chunks = submit_counts.packed_chunks;
 
         if publish_data_chunks == 0 && submit_data_chunks == 0 {
             return Err(eyre::eyre!(

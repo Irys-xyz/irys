@@ -56,6 +56,7 @@ pub(crate) struct ChunkInterval {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct StorageIntervalsResponse {
     pub ledger: String,
     pub slot_index: usize,
@@ -188,6 +189,7 @@ pub(crate) struct SlotReplicaSummary {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ChunkCountsResponse {
     pub ledger: String,
     pub slot_index: usize,

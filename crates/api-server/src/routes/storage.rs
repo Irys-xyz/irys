@@ -5,15 +5,15 @@ use irys_domain::ChunkType;
 use irys_types::DataLedger;
 use serde::{Deserialize, Serialize};
 
-/// Route path templates registered in [`crate::routes`]. Placeholder names must match the
-/// serde-visible (camelCase) field names of the `Path`-extracted structs below — actix-web
-/// matches placeholders to struct fields by name, and a mismatch rejects the request with
-/// a "missing field" error before it reaches the handler.
-pub const INTERVALS_ROUTE: &str = "/storage/intervals/{ledger}/{slotIndex}/{chunkType}";
-pub const COUNTS_ROUTE: &str = "/storage/counts/{ledger}/{slotIndex}";
+/// Route path templates registered in [`crate::routes()`]. actix-web matches placeholders to
+/// `Path`-extracted struct fields by their serde-visible names; a mismatch rejects every
+/// request with a 404 ("missing field" in the body) before it reaches the handler. Keep the
+/// params structs below free of `#[serde(rename_all)]` so these snake_case placeholders stay
+/// correct — the camelCase JSON contract lives on the `*Response` structs.
+pub const INTERVALS_ROUTE: &str = "/storage/intervals/{ledger}/{slot_index}/{chunk_type}";
+pub const COUNTS_ROUTE: &str = "/storage/counts/{ledger}/{slot_index}";
 
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
 pub struct StorageIntervalsParams {
     ledger: DataLedger,
     slot_index: usize,
@@ -48,7 +48,6 @@ impl StorageIntervalsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
 pub struct ChunkCountsParams {
     ledger: DataLedger,
     slot_index: usize,
@@ -203,7 +202,7 @@ mod tests {
     async fn data_intervals_path_reaches_handler() {
         assert_extracted(
             "/v1/storage/intervals/OneYear/0/Data",
-            serde_json::json!({"ledger": "OneYear", "slotIndex": 0, "chunkType": "Data"}),
+            serde_json::json!({"ledger": "OneYear", "slot_index": 0, "chunk_type": "Data"}),
         )
         .await;
     }
@@ -212,7 +211,7 @@ mod tests {
     async fn entropy_intervals_path_reaches_handler() {
         assert_extracted(
             "/v1/storage/intervals/Submit/3/Entropy",
-            serde_json::json!({"ledger": "Submit", "slotIndex": 3, "chunkType": "Entropy"}),
+            serde_json::json!({"ledger": "Submit", "slot_index": 3, "chunk_type": "Entropy"}),
         )
         .await;
     }
@@ -221,7 +220,7 @@ mod tests {
     async fn counts_path_reaches_handler() {
         assert_extracted(
             "/v1/storage/counts/OneYear/7",
-            serde_json::json!({"ledger": "OneYear", "slotIndex": 7}),
+            serde_json::json!({"ledger": "OneYear", "slot_index": 7}),
         )
         .await;
     }
