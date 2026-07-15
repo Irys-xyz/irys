@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784048613489,
+  "lastUpdate": 1784120981235,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9655,6 +9655,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9ff7789c440377ff3369e65a1043e37d0bf69896",
+          "message": "feat(api): add network-wide epoch partition assignment roster endpoint (#1518)\n\nExpose GET /v1/epoch/current/partition-assignments so clients can read the\ncanonical epoch snapshot's data, capacity, and unassigned partitions in one\ndeterministic response (including Cascade term ledgers).",
+          "timestamp": "2026-07-15T05:53:23-07:00",
+          "tree_id": "4e61f5486a5f156325cb4494c5b7111e4193a4b7",
+          "url": "https://github.com/Irys-xyz/irys/commit/9ff7789c440377ff3369e65a1043e37d0bf69896"
+        },
+        "date": 1784120978879,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.0152,
+            "range": "± 0.000279",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15235,
+            "range": "± 0.01479",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.292102,
+            "range": "± 0.03579",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.411634,
+            "range": "± 0.179789",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075113,
+            "range": "± 0.001359",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 772.19333,
+            "range": "± 27.006713",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 984.935229,
+            "range": "± 4.787221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121784,
+            "range": "± 0.002859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1209.990018,
+            "range": "± 104.289901",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1541.78221,
+            "range": "± 19.048847",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034017,
+            "range": "± 0.001554",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.413452,
+            "range": "± 0.840184",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.605557,
+            "range": "± 0.378886",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
