@@ -183,8 +183,8 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/epoch/latest", web::get().to(ledger::get_epoch_latest))
         .route(
-            "/epoch/latest/ledger/{ledger_id}/info",
-            web::get().to(ledger::get_ledger_info),
+            "/epoch/latest/ledger/{ledger_id}",
+            web::get().to(ledger::get_epoch_ledger_summary),
         )
         // Storage endpoints
         .route(
