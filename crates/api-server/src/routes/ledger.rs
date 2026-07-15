@@ -277,6 +277,57 @@ pub async fn get_current_epoch(
     }))
 }
 
+/// Network-wide roster from the canonical epoch snapshot.
+/// Capacity (no ledger slot) is separate from data-ledger assignments;
+/// unassigned partitions (active but owned by no miner, e.g. after an
+/// unpledge) are bare hashes. The three arrays together cover every active
+/// partition the epoch knows about.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EpochPartitionAssignmentsResponse {
+    #[serde(with = "string_u64")]
+    pub epoch_height: u64,
+    #[serde(with = "string_u64")]
+    pub epoch_block_height: u64,
+    pub assignments: Vec<PartitionAssignment>,
+    pub capacity_assignments: Vec<PartitionAssignment>,
+    pub unassigned_partitions: Vec<H256>,
+}
+
+/// Consensus-only projection; all rosters are hash-ascending (BTreeMap order
+/// for the assignment maps, an explicit sort for the insertion-ordered
+/// unassigned list). No ledger filter.
+fn build_epoch_partition_assignments(
+    epoch_snapshot: &irys_domain::EpochSnapshot,
+) -> EpochPartitionAssignmentsResponse {
+    let mut unassigned_partitions = epoch_snapshot.unassigned_partitions.clone();
+    unassigned_partitions.sort_unstable();
+    EpochPartitionAssignmentsResponse {
+        epoch_height: epoch_snapshot.epoch_height,
+        epoch_block_height: epoch_snapshot.epoch_block.height,
+        assignments: epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .values()
+            .copied()
+            .collect(),
+        capacity_assignments: epoch_snapshot
+            .partition_assignments
+            .capacity_partitions
+            .values()
+            .copied()
+            .collect(),
+        unassigned_partitions,
+    }
+}
+
+pub async fn get_current_partition_assignments(
+    app_state: Data<ApiState>,
+) -> Result<Json<EpochPartitionAssignmentsResponse>, ApiError> {
+    let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
+    Ok(Json(build_epoch_partition_assignments(&epoch_snapshot)))
+}
+
 // === Ledger offset → transaction attribution ===
 
 /// Response for the `/ledger/{ledger_id}/offset/{ledger_offset}/tx` endpoints.
@@ -736,6 +787,211 @@ mod tests {
             count_assignments_by_ledger_type(miner, &assignments, DataLedger::Submit).unwrap(),
             1
         );
+    }
+
+    // === Epoch-wide partition assignment roster ===
+
+    fn ledger_assignment(seed: u8, ledger_id: u32, slot_index: usize) -> PartitionAssignment {
+        PartitionAssignment {
+            partition_hash: nonzero_hash(seed),
+            miner_address: IrysAddress::ZERO,
+            ledger_id: Some(ledger_id),
+            slot_index: Some(slot_index),
+        }
+    }
+
+    fn capacity_assignment(seed: u8) -> PartitionAssignment {
+        PartitionAssignment {
+            partition_hash: nonzero_hash(seed),
+            miner_address: IrysAddress::ZERO,
+            ledger_id: None,
+            slot_index: None,
+        }
+    }
+
+    fn snapshot_with_assignments(
+        data: &[PartitionAssignment],
+        capacity: &[PartitionAssignment],
+    ) -> irys_domain::EpochSnapshot {
+        let mut snapshot = irys_domain::EpochSnapshot {
+            epoch_height: 9,
+            ..Default::default()
+        };
+        snapshot.epoch_block.height = 1080;
+        for assignment in data {
+            snapshot
+                .partition_assignments
+                .data_partitions
+                .insert(assignment.partition_hash, *assignment);
+        }
+        for assignment in capacity {
+            snapshot
+                .partition_assignments
+                .capacity_partitions
+                .insert(assignment.partition_hash, *assignment);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn epoch_assignments_cover_every_data_ledger_and_exclude_capacity() {
+        // All data ledger ids pass through (incl. Cascade + unknown 42); capacity separate.
+        let data = vec![
+            ledger_assignment(1, DataLedger::Publish.get_id(), 0),
+            ledger_assignment(2, DataLedger::Submit.get_id(), 0),
+            ledger_assignment(3, DataLedger::OneYear.get_id(), 0),
+            ledger_assignment(4, DataLedger::ThirtyDay.get_id(), 1),
+            ledger_assignment(5, 42, 3),
+        ];
+        let capacity = vec![capacity_assignment(6), capacity_assignment(7)];
+        let mut snapshot = snapshot_with_assignments(&data, &capacity);
+        // Insertion-ordered in the snapshot; the response sorts by hash.
+        snapshot.unassigned_partitions = vec![nonzero_hash(9), nonzero_hash(8)];
+
+        let response = build_epoch_partition_assignments(&snapshot);
+
+        assert_eq!(response.assignments.len(), data.len());
+        for expected_ledger in [0, 1, 10, 20, 42] {
+            assert!(
+                response
+                    .assignments
+                    .iter()
+                    .any(|a| a.ledger_id == Some(expected_ledger)),
+                "ledger {expected_ledger} missing from the roster"
+            );
+        }
+        for cap in &capacity {
+            assert!(
+                !response
+                    .assignments
+                    .iter()
+                    .any(|a| a.partition_hash == cap.partition_hash),
+                "capacity partition {} must not appear in the roster",
+                cap.partition_hash
+            );
+        }
+        assert_eq!(response.capacity_assignments, capacity);
+        // Unassigned partitions (no miner, no slot) are bare hashes, sorted,
+        // and never mix into the assignment arrays.
+        assert_eq!(
+            response.unassigned_partitions,
+            vec![nonzero_hash(8), nonzero_hash(9)]
+        );
+    }
+
+    #[test]
+    fn epoch_assignments_are_ordered_by_partition_hash() {
+        // Scrambled insert order; BTreeMap yields ascending hash in both arrays.
+        let data = vec![
+            ledger_assignment(9, 1, 0),
+            ledger_assignment(3, 0, 0),
+            ledger_assignment(7, 20, 0),
+            ledger_assignment(1, 10, 0),
+        ];
+        let capacity = vec![capacity_assignment(8), capacity_assignment(2)];
+        let snapshot = snapshot_with_assignments(&data, &capacity);
+
+        let response = build_epoch_partition_assignments(&snapshot);
+
+        let hashes: Vec<H256> = response
+            .assignments
+            .iter()
+            .map(|a| a.partition_hash)
+            .collect();
+        assert_eq!(
+            hashes,
+            vec![
+                nonzero_hash(1),
+                nonzero_hash(3),
+                nonzero_hash(7),
+                nonzero_hash(9)
+            ]
+        );
+        let capacity_hashes: Vec<H256> = response
+            .capacity_assignments
+            .iter()
+            .map(|a| a.partition_hash)
+            .collect();
+        assert_eq!(capacity_hashes, vec![nonzero_hash(2), nonzero_hash(8)]);
+    }
+
+    #[test]
+    fn epoch_assignments_empty_when_no_data_partitions() {
+        let snapshot = snapshot_with_assignments(&[], &[capacity_assignment(1)]);
+
+        let response = build_epoch_partition_assignments(&snapshot);
+
+        assert!(response.assignments.is_empty());
+        assert_eq!(response.capacity_assignments.len(), 1);
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["assignments"], serde_json::json!([]));
+        assert_eq!(json["epochHeight"], "9");
+
+        let empty = build_epoch_partition_assignments(&snapshot_with_assignments(&[], &[]));
+        let json = serde_json::to_value(&empty).unwrap();
+        assert_eq!(json["assignments"], serde_json::json!([]));
+        assert_eq!(json["capacityAssignments"], serde_json::json!([]));
+        assert_eq!(json["unassignedPartitions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn epoch_assignments_metadata_comes_from_the_snapshot() {
+        let mut snapshot = snapshot_with_assignments(&[ledger_assignment(1, 0, 0)], &[]);
+        snapshot.epoch_height = 9;
+        snapshot.epoch_block.height = 1080;
+
+        let response = build_epoch_partition_assignments(&snapshot);
+
+        assert_eq!(response.epoch_height, 9);
+        assert_eq!(response.epoch_block_height, 1080);
+    }
+
+    #[test]
+    fn epoch_assignments_serialization_contract() {
+        let response = EpochPartitionAssignmentsResponse {
+            epoch_height: 9,
+            epoch_block_height: 1080,
+            assignments: vec![PartitionAssignment {
+                partition_hash: nonzero_hash(1),
+                miner_address: IrysAddress::ZERO,
+                ledger_id: Some(DataLedger::OneYear.get_id()),
+                slot_index: Some(2),
+            }],
+            capacity_assignments: vec![capacity_assignment(3)],
+            unassigned_partitions: vec![nonzero_hash(4)],
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+
+        // Outer camelCase + string u64s; nested PartitionAssignment stays snake_case.
+        assert_eq!(json["epochHeight"], "9");
+        assert_eq!(json["epochBlockHeight"], "1080");
+        let row = &json["assignments"][0];
+        assert!(row["partition_hash"].is_string());
+        assert!(row["miner_address"].is_string());
+        assert_eq!(row["ledger_id"], 10);
+        assert_eq!(row["slot_index"], 2);
+        // Consensus fields only — no storage/chunk/peer leakage.
+        let mut keys: Vec<&String> = row.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["ledger_id", "miner_address", "partition_hash", "slot_index"]
+        );
+        // Capacity: same shape; nulls are present (not omitted).
+        let capacity_row = &json["capacityAssignments"][0];
+        assert!(capacity_row["partition_hash"].is_string());
+        assert!(capacity_row["miner_address"].is_string());
+        assert!(capacity_row["ledger_id"].is_null());
+        assert!(capacity_row["slot_index"].is_null());
+        let mut capacity_keys: Vec<&String> = capacity_row.as_object().unwrap().keys().collect();
+        capacity_keys.sort();
+        assert_eq!(
+            capacity_keys,
+            ["ledger_id", "miner_address", "partition_hash", "slot_index"]
+        );
+        // Unassigned entries are bare hash strings, not assignment objects.
+        assert!(json["unassignedPartitions"][0].is_string());
     }
 
     // === Ledger offset → transaction attribution ===

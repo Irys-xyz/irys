@@ -177,6 +177,10 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         // Epoch endpoints
         .route("/epoch/current", web::get().to(ledger::get_current_epoch))
+        .route(
+            "/epoch/current/partition-assignments",
+            web::get().to(ledger::get_current_partition_assignments),
+        )
         // Storage endpoints
         .route(
             storage::INTERVALS_ROUTE,
