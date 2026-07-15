@@ -775,6 +775,17 @@ impl Ledgers {
             .collect()
     }
 
+    /// Lowest slot index that has not expired — the boundary between the
+    /// contiguous expired prefix and the live tail. The last slot never
+    /// expires, so when `ledger` has any slots at all this always resolves
+    /// to a real index; `0` when it has none.
+    pub fn expiry_frontier_for(&self, ledger: DataLedger) -> usize {
+        self.get_slots(ledger)
+            .iter()
+            .position(|slot| !slot.is_expired)
+            .unwrap_or(0)
+    }
+
     /// Mark every slot that received new canonical data during this epoch as
     /// written. When `refresh_last_height` is true, also refresh `last_height`
     /// so the slot's expiry clock counts from the last time data was written
@@ -1579,5 +1590,25 @@ mod tests {
         let config = make_test_config(None); // make_test_config sets num_blocks_in_epoch = 10
         let ledgers = Ledgers::new(&config, false);
         assert_eq!(ledgers.num_blocks_in_epoch(), 10);
+    }
+
+    #[test]
+    fn expiry_frontier_for_returns_first_non_expired_slot() {
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.slots_mut(DataLedger::Submit)[0].is_expired = true;
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 1);
+    }
+
+    #[test]
+    fn expiry_frontier_for_zero_when_no_slots_expired() {
+        let ledgers = ledgers_with_submit_slots(2, 1);
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 0);
+    }
+
+    #[test]
+    fn expiry_frontier_for_zero_when_no_slots_allocated() {
+        let config = ConsensusConfig::testing();
+        let ledgers = Ledgers::new(&config, false); // Submit ledger active but empty
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 0);
     }
 }
