@@ -7,7 +7,9 @@ use irys_database::{block_header_by_hash, database, db::IrysDatabaseExt as _};
 use irys_domain::{BlockBounds, BlockBoundsError, BlockIndex};
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionLedger, H256, IrysAddress, IrysBlockHeader,
-    LedgerChunkOffset, partition::PartitionAssignment, serialization::string_u64,
+    LedgerChunkOffset,
+    partition::PartitionAssignment,
+    serialization::{optional_string_u64, string_u64},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -326,6 +328,68 @@ pub async fn get_current_partition_assignments(
 ) -> Result<Json<EpochPartitionAssignmentsResponse>, ApiError> {
     let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
     Ok(Json(build_epoch_partition_assignments(&epoch_snapshot)))
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct EpochLedgerEntry {
+    ledger_id: u32,
+    #[serde(with = "optional_string_u64")]
+    epoch_length: Option<u64>,
+    num_slots: usize,
+    #[serde(with = "string_u64")]
+    num_partitions_per_slot: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct EpochLatestResponse {
+    #[serde(with = "string_u64")]
+    current_epoch: u64,
+    #[serde(with = "string_u64")]
+    epoch_block_height: u64,
+    #[serde(with = "string_u64")]
+    num_blocks_in_epoch: u64,
+    total_active_partitions: usize,
+    unassigned_partitions: usize,
+    ledgers: Vec<EpochLedgerEntry>,
+}
+
+fn build_epoch_latest_response(
+    ledgers: &irys_database::Ledgers,
+    current_epoch: u64,
+    epoch_block_height: u64,
+    total_active_partitions: usize,
+    unassigned_partitions: usize,
+) -> EpochLatestResponse {
+    EpochLatestResponse {
+        current_epoch,
+        epoch_block_height,
+        num_blocks_in_epoch: ledgers.num_blocks_in_epoch(),
+        total_active_partitions,
+        unassigned_partitions,
+        ledgers: ledgers
+            .ledger_meta()
+            .into_iter()
+            .map(|meta| EpochLedgerEntry {
+                ledger_id: meta.ledger_id,
+                epoch_length: meta.epoch_length,
+                num_slots: meta.num_slots,
+                num_partitions_per_slot: meta.num_partitions_per_slot,
+            })
+            .collect(),
+    }
+}
+
+pub async fn get_epoch_latest(
+    app_state: Data<ApiState>,
+) -> Result<Json<EpochLatestResponse>, ApiError> {
+    let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
+    Ok(Json(build_epoch_latest_response(
+        &epoch_snapshot.ledgers,
+        epoch_snapshot.epoch_height,
+        epoch_snapshot.epoch_block.height,
+        epoch_snapshot.all_active_partitions.len(),
+        epoch_snapshot.unassigned_partitions.len(),
+    )))
 }
 
 // === Ledger offset → transaction attribution ===
@@ -697,7 +761,46 @@ fn attribute_tx_at_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_database::Ledgers;
+    use irys_types::ConsensusConfig;
     use rstest::rstest;
+
+    fn make_test_ledgers(publish_epoch_length: Option<u64>) -> Ledgers {
+        let mut config = ConsensusConfig::testing();
+        config.epoch.num_blocks_in_epoch = 10;
+        config.epoch.submit_ledger_epoch_length = 5;
+        config.epoch.publish_ledger_epoch_length = publish_epoch_length;
+        Ledgers::new(&config, false)
+    }
+
+    #[test]
+    fn build_epoch_latest_response_maps_ledgers_and_perm_epoch_length() {
+        let mut ledgers = make_test_ledgers(Some(3));
+        ledgers[DataLedger::Publish].allocate_slots(2, 1);
+        ledgers[DataLedger::Submit].allocate_slots(1, 1);
+
+        let response = build_epoch_latest_response(&ledgers, 42, 420, 100, 7);
+
+        assert_eq!(response.current_epoch, 42);
+        assert_eq!(response.epoch_block_height, 420);
+        assert_eq!(response.num_blocks_in_epoch, 10);
+        assert_eq!(response.total_active_partitions, 100);
+        assert_eq!(response.unassigned_partitions, 7);
+        assert_eq!(response.ledgers.len(), 2);
+        assert_eq!(response.ledgers[0].ledger_id, DataLedger::Publish as u32);
+        assert_eq!(response.ledgers[0].epoch_length, Some(3));
+        assert_eq!(response.ledgers[0].num_slots, 2);
+        assert_eq!(response.ledgers[1].ledger_id, DataLedger::Submit as u32);
+        assert_eq!(response.ledgers[1].epoch_length, Some(5));
+        assert_eq!(response.ledgers[1].num_slots, 1);
+    }
+
+    #[test]
+    fn build_epoch_latest_response_perm_epoch_length_none_when_unconfigured() {
+        let ledgers = make_test_ledgers(None);
+        let response = build_epoch_latest_response(&ledgers, 1, 1, 0, 0);
+        assert_eq!(response.ledgers[0].epoch_length, None);
+    }
 
     fn make_assignment(ledger: DataLedger, partition_hash: H256) -> PartitionAssignment {
         PartitionAssignment {
