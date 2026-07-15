@@ -779,6 +779,11 @@ impl Ledgers {
     /// contiguous expired prefix and the live tail. The last slot never
     /// expires, so when `ledger` has any slots at all this always resolves
     /// to a real index; `0` when it has none.
+    ///
+    /// Precondition: `ledger` must be currently active — callers should
+    /// confirm via `ledger_meta_for` (which returns `None` for inactive
+    /// ledgers) or `active_ledgers()` first. Panics otherwise, consistent
+    /// with `get_slots`.
     pub fn expiry_frontier_for(&self, ledger: DataLedger) -> usize {
         self.get_slots(ledger)
             .iter()
@@ -1610,5 +1615,24 @@ mod tests {
         let config = ConsensusConfig::testing();
         let ledgers = Ledgers::new(&config, false); // Submit ledger active but empty
         assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 0);
+    }
+
+    #[test]
+    fn expiry_frontier_for_multi_slot_expired_prefix() {
+        let mut ledgers = ledgers_with_submit_slots(4, 1);
+        ledgers.slots_mut(DataLedger::Submit)[0].is_expired = true;
+        ledgers.slots_mut(DataLedger::Submit)[1].is_expired = true;
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 2);
+    }
+
+    #[test]
+    fn expiry_frontier_for_all_but_last_expired() {
+        let mut ledgers = ledgers_with_submit_slots(4, 1);
+        let slots = ledgers.slots_mut(DataLedger::Submit);
+        let last = slots.len() - 1;
+        for slot in slots.iter_mut().take(last) {
+            slot.is_expired = true;
+        }
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 3);
     }
 }
