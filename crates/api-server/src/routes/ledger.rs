@@ -331,6 +331,7 @@ pub async fn get_current_partition_assignments(
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct EpochLedgerEntry {
     ledger_id: u32,
     #[serde(with = "optional_string_u64")]
@@ -341,6 +342,7 @@ pub struct EpochLedgerEntry {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct EpochLatestResponse {
     #[serde(with = "string_u64")]
     current_epoch: u64,
@@ -1647,7 +1649,7 @@ mod tests {
         };
         let epoch_json = serde_json::to_string(&epoch_response).unwrap();
         assert!(
-            epoch_json.contains("\"num_blocks_in_epoch\":\"10\""),
+            epoch_json.contains("\"numBlocksInEpoch\":\"10\""),
             "expected quoted u64 in {epoch_json}"
         );
 
@@ -1674,16 +1676,16 @@ mod tests {
         };
         let epoch_json_with_ledgers = serde_json::to_string(&epoch_response_with_ledgers).unwrap();
         assert!(
-            epoch_json_with_ledgers.contains("\"epoch_length\":\"3\""),
-            "expected quoted epoch_length for Some(3) in {epoch_json_with_ledgers}"
+            epoch_json_with_ledgers.contains("\"epochLength\":\"3\""),
+            "expected quoted epochLength for Some(3) in {epoch_json_with_ledgers}"
         );
         assert!(
-            epoch_json_with_ledgers.contains("\"num_partitions_per_slot\":\"2\""),
-            "expected quoted num_partitions_per_slot in {epoch_json_with_ledgers}"
+            epoch_json_with_ledgers.contains("\"numPartitionsPerSlot\":\"2\""),
+            "expected quoted numPartitionsPerSlot in {epoch_json_with_ledgers}"
         );
         assert!(
-            epoch_json_with_ledgers.contains("\"epoch_length\":null"),
-            "expected null epoch_length for None in {epoch_json_with_ledgers}"
+            epoch_json_with_ledgers.contains("\"epochLength\":null"),
+            "expected null epochLength for None in {epoch_json_with_ledgers}"
         );
     }
 
