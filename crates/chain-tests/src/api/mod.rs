@@ -2,6 +2,7 @@ use irys_types::DataLedger;
 mod api;
 mod client;
 mod commitment_anchor_window;
+mod epoch_partition_assignments_endpoint;
 mod external_api;
 mod hardfork_tests;
 mod ledger_offset_endpoint;
