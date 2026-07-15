@@ -182,6 +182,10 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(ledger::get_current_partition_assignments),
         )
         .route("/epoch/latest", web::get().to(ledger::get_epoch_latest))
+        .route(
+            "/epoch/latest/ledger/{ledger_id}/info",
+            web::get().to(ledger::get_ledger_info),
+        )
         // Storage endpoints
         .route(
             storage::INTERVALS_ROUTE,
