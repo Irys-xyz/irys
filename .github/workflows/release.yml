@@ -1,4 +1,5 @@
 name: Release
+run-name: Release - ${{ inputs.release_type }} - ${{ inputs.version }}${{ inputs.dry_run && ' (dry-run)' || '' }}
 
 concurrency:
   group: release
@@ -14,6 +15,10 @@ on:
         description: 'Release type / environment'
         required: true
         type: choice
+        # testnet is the normal first step of a release; mainnet follows once the
+        # testnet tag exists. (workflow_dispatch defaults are static literals — they
+        # can't be derived, which is why version/commit below have no default.)
+        default: testnet
         options:
           - testnet
           - mainnet
@@ -114,6 +119,11 @@ jobs:
         with:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Wait for in-progress CI on the release base to finish rather than
+          # failing immediately, so a release kicked off while its base CI is
+          # still running blocks until the result is known (up to 60 min).
+          wait-timeout-seconds: "3600"
+          poll-interval-seconds: "30"
 
       - name: Determine tag name
         id: tag
