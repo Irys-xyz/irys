@@ -1581,6 +1581,42 @@ mod tests {
             "expected quoted u64 in {epoch_json}"
         );
 
+        // Test optional_string_u64 codec with populated ledgers
+        let epoch_response_with_ledgers = EpochLatestResponse {
+            current_epoch: 42,
+            epoch_block_height: 420,
+            num_blocks_in_epoch: 10,
+            total_active_partitions: 5,
+            unassigned_partitions: 1,
+            ledgers: vec![
+                EpochLedgerEntry {
+                    ledger_id: 1,
+                    epoch_length: Some(3),
+                    num_slots: 5,
+                    num_partitions_per_slot: 2,
+                },
+                EpochLedgerEntry {
+                    ledger_id: 2,
+                    epoch_length: None,
+                    num_slots: 3,
+                    num_partitions_per_slot: 1,
+                },
+            ],
+        };
+        let epoch_json_with_ledgers = serde_json::to_string(&epoch_response_with_ledgers).unwrap();
+        assert!(
+            epoch_json_with_ledgers.contains("\"epoch_length\":\"3\""),
+            "expected quoted epoch_length for Some(3) in {epoch_json_with_ledgers}"
+        );
+        assert!(
+            epoch_json_with_ledgers.contains("\"num_partitions_per_slot\":\"2\""),
+            "expected quoted num_partitions_per_slot in {epoch_json_with_ledgers}"
+        );
+        assert!(
+            epoch_json_with_ledgers.contains("\"epoch_length\":null"),
+            "expected null epoch_length for None in {epoch_json_with_ledgers}"
+        );
+
         let ledger_info_response = LedgerInfoResponse {
             ledger_id: DataLedger::Submit as u32,
             epoch_length: Some(5),
@@ -1600,6 +1636,10 @@ mod tests {
         assert!(
             ledger_info_json.contains("\"num_blocks_in_epoch\":\"10\""),
             "expected quoted u64 in {ledger_info_json}"
+        );
+        assert!(
+            ledger_info_json.contains("\"epoch_length\":\"5\""),
+            "expected quoted epoch_length in {ledger_info_json}"
         );
         let ledger_info_value = serde_json::to_value(&ledger_info_response).unwrap();
         assert!(ledger_info_value["slots"][0]["partitions"][0]["partition_hash"].is_string());
