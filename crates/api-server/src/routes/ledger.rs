@@ -393,13 +393,15 @@ pub async fn get_epoch_latest(
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PartitionReplica {
     partition_hash: H256,
     miner_address: IrysAddress,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct LedgerSlotInfo {
+#[serde(rename_all = "camelCase")]
+pub struct LedgerSlotDetailResponse {
     slot_index: usize,
     is_expired: bool,
     #[serde(with = "string_u64")]
@@ -493,6 +495,66 @@ pub async fn get_epoch_ledger_summary(
         chain_height,
         tip_total_chunks,
         app_state.config.consensus.num_chunks_in_partition,
+    )?;
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+pub struct LedgerSlotPath {
+    ledger_id: u32,
+    slot_number: usize,
+}
+
+/// The only route that resolves `partitions[].minerAddress` — the
+/// partition-assignment join — and it does so for exactly one slot.
+fn build_ledger_slot_response(
+    ledgers: &irys_database::Ledgers,
+    partition_assignments: &irys_domain::PartitionAssignments,
+    ledger: DataLedger,
+    slot_number: usize,
+) -> Result<LedgerSlotDetailResponse, ApiError> {
+    let meta = ledgers
+        .ledger_meta_for(ledger)
+        .ok_or(("ledger is not currently active", StatusCode::NOT_FOUND))?;
+
+    if slot_number >= meta.num_slots {
+        return Err(("slot number out of range", StatusCode::NOT_FOUND).into());
+    }
+
+    let slot = &ledgers.get_slots(ledger)[slot_number];
+    let partitions = slot
+        .partitions
+        .iter()
+        .filter_map(|hash| {
+            partition_assignments
+                .get_assignment(*hash)
+                .map(|a| PartitionReplica {
+                    partition_hash: *hash,
+                    miner_address: a.miner_address,
+                })
+        })
+        .collect();
+
+    Ok(LedgerSlotDetailResponse {
+        slot_index: slot_number,
+        is_expired: slot.is_expired,
+        last_height: slot.last_height,
+        partitions,
+    })
+}
+
+pub async fn get_ledger_slot(
+    app_state: Data<ApiState>,
+    path: Path<LedgerSlotPath>,
+) -> Result<Json<LedgerSlotDetailResponse>, ApiError> {
+    let ledger = DataLedger::try_from(path.ledger_id)
+        .map_err(|_| ("unknown ledger id", StatusCode::BAD_REQUEST))?;
+    let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
+    let response = build_ledger_slot_response(
+        &epoch_snapshot.ledgers,
+        &epoch_snapshot.partition_assignments,
+        ledger,
+        path.slot_number,
     )?;
     Ok(Json(response))
 }
@@ -869,6 +931,7 @@ mod tests {
     use actix_web::ResponseError;
     use awc::http::StatusCode;
     use irys_database::Ledgers;
+    use irys_domain::PartitionAssignments;
     use irys_types::ConsensusConfig;
     use rstest::rstest;
 
@@ -1202,6 +1265,101 @@ mod tests {
         );
         // Unassigned entries are bare hash strings, not assignment objects.
         assert!(json["unassignedPartitions"][0].is_string());
+    }
+
+    // === Ledger slot detail ===
+
+    #[test]
+    fn build_ledger_slot_response_resolves_replica_addresses() {
+        let mut ledgers = make_test_ledgers(None);
+        ledgers[DataLedger::Submit].allocate_slots(1, 1);
+        let miner_a = IrysAddress::from([1_u8; 20]);
+        let hash_a = H256::from([10_u8; 32]);
+        ledgers.push_partition_to_slot(DataLedger::Submit, 0, hash_a);
+
+        let mut partition_assignments = PartitionAssignments::new();
+        partition_assignments.data_partitions.insert(
+            hash_a,
+            PartitionAssignment {
+                partition_hash: hash_a,
+                miner_address: miner_a,
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(0),
+            },
+        );
+
+        let response =
+            build_ledger_slot_response(&ledgers, &partition_assignments, DataLedger::Submit, 0)
+                .unwrap();
+
+        assert_eq!(response.slot_index, 0);
+        assert!(!response.is_expired);
+        assert_eq!(response.last_height, 1);
+        assert_eq!(response.partitions.len(), 1);
+        assert_eq!(response.partitions[0].miner_address, miner_a);
+    }
+
+    #[test]
+    fn build_ledger_slot_response_drops_unresolved_partition_hash() {
+        let mut ledgers = make_test_ledgers(None);
+        ledgers[DataLedger::Submit].allocate_slots(1, 1);
+        let orphan_hash = H256::from([99_u8; 32]);
+        ledgers.push_partition_to_slot(DataLedger::Submit, 0, orphan_hash);
+
+        let partition_assignments = PartitionAssignments::new(); // no assignment for orphan_hash
+
+        let response =
+            build_ledger_slot_response(&ledgers, &partition_assignments, DataLedger::Submit, 0)
+                .unwrap();
+
+        assert!(response.partitions.is_empty());
+    }
+
+    #[test]
+    fn build_ledger_slot_response_out_of_range_returns_not_found() {
+        let mut ledgers = make_test_ledgers(None);
+        ledgers[DataLedger::Submit].allocate_slots(1, 1);
+        let partition_assignments = PartitionAssignments::new();
+
+        let err =
+            build_ledger_slot_response(&ledgers, &partition_assignments, DataLedger::Submit, 1)
+                .unwrap_err();
+
+        assert_eq!(ResponseError::status_code(&err), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn build_ledger_slot_response_inactive_ledger_returns_not_found() {
+        let ledgers = make_test_ledgers(None); // cascade not activated
+        let partition_assignments = PartitionAssignments::new();
+
+        let err =
+            build_ledger_slot_response(&ledgers, &partition_assignments, DataLedger::OneYear, 0)
+                .unwrap_err();
+
+        assert_eq!(ResponseError::status_code(&err), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn ledger_slot_detail_response_serialization_contract() {
+        let response = LedgerSlotDetailResponse {
+            slot_index: 0,
+            is_expired: false,
+            last_height: 60,
+            partitions: vec![PartitionReplica {
+                partition_hash: H256::from([10_u8; 32]),
+                miner_address: IrysAddress::from([1_u8; 20]),
+            }],
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["slotIndex"], 0);
+        assert_eq!(json["isExpired"], false);
+        assert_eq!(json["lastHeight"], "60");
+        assert!(json["partitions"][0]["partitionHash"].is_string());
+        assert!(json["partitions"][0]["minerAddress"].is_string());
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["isExpired", "lastHeight", "partitions", "slotIndex"]);
     }
 
     // === Ledger offset → transaction attribution ===
