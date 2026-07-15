@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784120981235,
+  "lastUpdate": 1784125040018,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -9763,6 +9763,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "distinct": true,
+          "id": "d4b2caa81a921a6d03cb47bf0b83637ad9c637d3",
+          "message": "Assert optional_string_u64 epoch_length wire encoding in endpoint test",
+          "timestamp": "2026-07-15T13:56:26Z",
+          "tree_id": "44f9a1ea34badb4440e9aa4b4ff25027a38ef1d0",
+          "url": "https://github.com/Irys-xyz/irys/commit/d4b2caa81a921a6d03cb47bf0b83637ad9c637d3"
+        },
+        "date": 1784125038871,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012192,
+            "range": "± 0.000244",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.13965,
+            "range": "± 0.008209",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.217167,
+            "range": "± 0.033365",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.293192,
+            "range": "± 0.377763",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074892,
+            "range": "± 0.001113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 763.357186,
+            "range": "± 12.873723",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1016.571097,
+            "range": "± 48.673348",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.129875,
+            "range": "± 0.003328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1431.379604,
+            "range": "± 110.308139",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1661.129258,
+            "range": "± 130.061698",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033596,
+            "range": "± 0.002698",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 214.040199,
+            "range": "± 2.464951",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 285.851812,
+            "range": "± 13.927471",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000122,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
