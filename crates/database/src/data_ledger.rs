@@ -54,6 +54,11 @@ fn fully_written_slot_count(total_chunks: u64, chunks_per_slot: u64) -> u64 {
 /// written — the write frontier has moved past it (`slot_index < fully_written`),
 /// which also implies it has been written at all. Pre-Cascade the gate is
 /// transparent so replay stays bit-identical to the allocation-anchored behavior.
+///
+/// Per-branch recompute of this gate is sound only because expiry is committed at
+/// epoch blocks and no reorg can straddle a finalized epoch block; the config
+/// invariant `num_blocks_in_epoch > block_tree_depth` (see `Config::validate`)
+/// keeps at most one epoch transition unfinalized at a time.
 fn cascade_expiry_gate(
     cascade_active: bool,
     slot: &LedgerSlot,

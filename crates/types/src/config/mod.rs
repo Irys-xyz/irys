@@ -451,6 +451,21 @@ impl Config {
                 );
             }
 
+            // Real networks only (test fixtures deliberately use tiny epochs).
+            // Expiry and settlement are committed at epoch blocks. An epoch block is
+            // irreversible only once it falls block_tree_depth behind the head and is
+            // pruned from the tree (finalized_height in forkchoice_markers). Requiring
+            // the epoch to span more blocks than the reorg window keeps at most one
+            // epoch transition unfinalized at a time, so no admissible reorg can
+            // straddle a settled expiry and the per-branch expiry recompute only ever
+            // spans a single epoch.
+            ensure!(
+                self.consensus.epoch.num_blocks_in_epoch > self.consensus.block_tree_depth,
+                "num_blocks_in_epoch ({}) must be > block_tree_depth ({}) so no reorg can straddle a finalized epoch-block expiry",
+                self.consensus.epoch.num_blocks_in_epoch,
+                self.consensus.block_tree_depth,
+            );
+
             // Tx anchors must resolve INSIDE the reorg window so prevalidation's
             // inclusion/anchor walks can confirm them branch-correctly by-hash. A
             // tx anchored older than the tree would fall to the by-height index/MBH
@@ -1494,6 +1509,46 @@ mod tests {
             err.contains("overflows u64"),
             "expected the slot-lifetime overflow guard, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_epoch_shorter_than_reorg_window() {
+        // Expiry+settlement is committed at epoch blocks; a finalized epoch block is
+        // irreversible only because it falls block_tree_depth behind head (see
+        // forkchoice_markers::finalized_height). If an epoch spans fewer blocks than
+        // the reorg window, more than one epoch transition can be unfinalized at once
+        // and a single reorg could straddle a settled expiry. Production-only invariant.
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 10;
+            c.block_tree_depth = 50; // 10 <= 50 must be rejected
+            c.epoch.submit_ledger_epoch_length = 6; // 6*10=60 > 50 so the NC-0042 slot-lifetime guard passes first
+        }
+        let err = Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect_err("epoch shorter than block_tree_depth must be rejected in production")
+            .to_string();
+        // Assert on a substring UNIQUE to this guard: the NC-0042 message also contains
+        // "num_blocks_in_epoch", so keying on that would false-pass without the guard.
+        assert!(
+            err.contains("straddle"),
+            "expected the reorg-window guard, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_epoch_longer_than_reorg_window() {
+        let mut node_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = node_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 100; // 100 > 50 is fine
+            c.block_tree_depth = 50;
+            c.epoch.submit_ledger_epoch_length = 6; // 6*100 > 50, NC-0042 also satisfied
+        }
+        Config::new_with_random_peer_id(node_config)
+            .validate()
+            .expect("epoch longer than block_tree_depth must validate in production");
     }
 
     #[test]
