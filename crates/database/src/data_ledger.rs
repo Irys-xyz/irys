@@ -897,6 +897,7 @@ mod tests {
     use irys_types::{
         DataLedger, UnixTimestamp, config::consensus::ConsensusConfig, hardfork_config::Cascade,
     };
+    use proptest::prelude::*;
 
     fn config_with_cascade() -> ConsensusConfig {
         let mut config = ConsensusConfig::testing();
@@ -1749,5 +1750,89 @@ mod tests {
             slot.is_expired = true;
         }
         assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 3);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// For any canonical (prefix-written, prefix-expired) term ledger state, the
+        /// newly-expiring set and the inclusive set must satisfy the invariants the
+        /// three consumers rely on. chunks_per_slot is fixed; total_chunks and the
+        /// written/expired/aged prefixes vary.
+        #[test]
+        fn expiry_sets_are_mutually_consistent(
+            num_slots in 2_usize..=8,
+            // frontier: how many chunks written, in [0, num_slots*CPS]
+            total_chunks in 0_u64..=80,
+            // how many leading slots are already is_expired (prefix), capped later
+            already_expired in 0_usize..=8,
+            // how many leading slots are aged at-or-below expiry_height (prefix)
+            aged_prefix in 0_usize..=8,
+        ) {
+            const CPS: u64 = 10;
+            let config = ConsensusConfig::testing();
+            // epoch_length=1, num_blocks_in_epoch from config; pick epoch_height well
+            // above min_blocks so the aging gate is satisfiable.
+            let epoch_length = 1_u64;
+            let mut ledger = TermLedger::new(DataLedger::Submit, &config, epoch_length);
+            let min_blocks = epoch_length * config.epoch.num_blocks_in_epoch;
+            let epoch_height = min_blocks + 1_000;
+            let expiry_height = epoch_height - min_blocks;
+
+            ledger.allocate_slots(num_slots as u64, epoch_height); // default: unaged, unwritten
+
+            let frontier = fully_written_slot_count(total_chunks, CPS) as usize;
+            let aged = aged_prefix.min(num_slots);
+            let exp = already_expired.min(num_slots);
+
+            for (i, slot) in ledger.slots.iter_mut().enumerate() {
+                // canonical: a slot is written iff it is at or below the write frontier
+                slot.has_been_written = i < frontier;
+                if i < aged {
+                    slot.last_height = expiry_height; // aged: last_height <= expiry_height
+                } else {
+                    slot.last_height = epoch_height;  // fresh
+                }
+                // is_expired is a prefix and only ever set on slots the expiry path
+                // could have expired (written + non-last); model it as a leading run.
+                slot.is_expired = i < exp && i < frontier && i != num_slots - 1;
+            }
+
+            let newly = ledger.get_expired_slot_indexes(epoch_height, true, total_chunks, CPS);
+            let inclusive = ledger.get_all_expired_slot_indexes(epoch_height, true, total_chunks, CPS);
+
+            // (a) both sets are strictly ascending & contiguous. The inclusive set
+            // starts at 0 (already-expired slots always pass). The newly-expiring set
+            // may start ABOVE 0 because get_expired_slot_indexes filters out
+            // is_expired slots (data_ledger.rs:180) — so instead assert every slot
+            // below its first entry is already expired (a contiguous expired prefix).
+            for w in newly.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
+            for w in inclusive.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
+            if let Some(&first) = inclusive.first() { prop_assert_eq!(first, 0); }
+            if let Some(&first) = newly.first() {
+                for i in 0..first {
+                    prop_assert!(ledger.slots[i].is_expired,
+                        "slot {i} below the first newly-expiring slot must already be expired");
+                }
+            }
+
+            // (b) newly-expiring is a subset of the inclusive (non-promotability) set
+            for idx in &newly { prop_assert!(inclusive.contains(idx)); }
+
+            // (c) post-Cascade no NEWLY expired slot may sit at or beyond the frontier,
+            //     and the last slot never newly expires
+            for &idx in &newly {
+                prop_assert!(idx < frontier, "newly-expired slot {idx} must be fully written (frontier={frontier})");
+                prop_assert_ne!(idx, num_slots - 1, "last slot must never newly expire");
+            }
+
+            // (d) the inclusive set exceeds `newly` only by already-`is_expired` slots
+            for &idx in &inclusive {
+                let is_newly = newly.contains(&idx);
+                let was_expired = ledger.slots[idx].is_expired;
+                prop_assert!(is_newly || was_expired,
+                    "inclusive slot {idx} is neither newly-expiring nor previously is_expired");
+            }
+        }
     }
 }
