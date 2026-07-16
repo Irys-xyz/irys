@@ -121,8 +121,17 @@ pub fn resolve_time_mode(override_mode: Option<TimeMode>) -> (TimeMode, String) 
             }
         }
     }
-    // Harness default. Task 6 flips this to a seeded 50/50 random draw.
-    (TimeMode::Real, "harness default (Real)".to_string())
+    // Harness default: seeded 50/50 draw, logged for reproducibility.
+    let seed: u64 = rand::random();
+    let mode = if seed.is_multiple_of(2) {
+        TimeMode::Real
+    } else {
+        TimeMode::Accelerated
+    };
+    (
+        mode,
+        format!("random default 50/50 [seed={seed:#x}] (pin with IRYS_TEST_TIME=real|accelerated)"),
+    )
 }
 
 /// Insert a synthetic canonical block header at `height` carrying the given
@@ -4510,14 +4519,12 @@ mod time_mode_tests {
     }
 
     #[test]
-    fn default_is_real_before_rollout_flip() {
-        // With no override and no env, the harness default is Real (Task 6 flips
-        // this to a random draw). This test asserts the pre-flip default.
-        // (Assumes IRYS_TEST_TIME is not set in the test environment.)
+    fn default_is_random_and_logged() {
         if std::env::var("IRYS_TEST_TIME").is_ok() {
-            return; // skip when the env pin is active
+            return; // env pin overrides the random default
         }
-        let (mode, _reason) = resolve_time_mode(None);
-        assert_eq!(mode, TimeMode::Real);
+        let (mode, reason) = resolve_time_mode(None);
+        assert!(matches!(mode, TimeMode::Real | TimeMode::Accelerated));
+        assert!(reason.contains("seed="));
     }
 }

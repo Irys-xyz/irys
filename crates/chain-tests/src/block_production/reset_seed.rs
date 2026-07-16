@@ -1,4 +1,4 @@
-use crate::utils::{AddTxError, IrysNodeTest};
+use crate::utils::{AddTxError, IrysNodeTest, TimeMode};
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
@@ -22,6 +22,7 @@ use tracing::{debug, warn};
 #[test_log::test(tokio::test)]
 async fn spiky_slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer()
 -> eyre::Result<()> {
+    // pin Real: multi-node VDF-reset timing; pin Real.
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
@@ -48,6 +49,7 @@ async fn spiky_slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_a
     let account1 = testing_config_genesis.signer();
 
     let ctx_genesis_node = IrysNodeTest::new_genesis(testing_config_genesis.clone())
+        .with_time_mode(TimeMode::Real)
         .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
 
@@ -125,6 +127,7 @@ async fn spiky_slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_a
         Some(ctx_genesis_node.node_ctx.genesis_hash);
     ctx_peer1_node.sync_mode = SyncMode::Full;
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
+        .with_time_mode(TimeMode::Real)
         .start_with_name("PEER1")
         .await;
 

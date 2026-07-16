@@ -1,4 +1,7 @@
-use crate::utils::IrysNodeTest;
+// pin Real: this module activates hardforks by timestamp and controls
+// time-vs-activation precisely; acceleration is meaningless/hostile to that
+// and risks startup-timing flakiness. Every node in this module is pinned.
+use crate::utils::{IrysNodeTest, TimeMode};
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
@@ -267,7 +270,10 @@ mod single_version_acceptance {
         };
 
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let tx = create_stake_tx(&node, &signer, version).await;
         let result = node.post_commitment_tx(&tx).await;
@@ -305,7 +311,10 @@ mod mixed_versions {
         let mut config = aurora_config_future();
         let [signer1, signer2] = create_funded_signers(&mut config);
 
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
         let v2_tx = create_stake_tx(&node, &signer2, TxVersion::V2).await;
@@ -332,7 +341,10 @@ mod mixed_versions {
         let mut config = aurora_config_past();
         let [signer1, signer2] = create_funded_signers(&mut config);
 
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
         let v2_tx = create_stake_tx(&node, &signer2, TxVersion::V2).await;
@@ -368,7 +380,10 @@ mod boundary_crossing {
         let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let [signer1, signer2] = create_funded_signers(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let genesis_block = node.get_block_by_height(0).await?;
         assert!(genesis_block.timestamp_secs().as_secs() < aurora_activation);
@@ -407,7 +422,10 @@ mod configuration {
         let mut config = create_test_config(None);
         let [signer1, signer2] = create_funded_signers(&mut config);
 
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
         let v2_tx = create_stake_tx(&node, &signer2, TxVersion::V2).await;
@@ -454,7 +472,10 @@ mod edge_cases {
         let aurora_activation = now_secs().saturating_add(PRE_ACTIVATION_WINDOW_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         let v1_tx = create_stake_tx(&node, &signer, TxVersion::V1).await;
         let result = node.post_commitment_tx(&v1_tx).await;
@@ -490,7 +511,10 @@ mod edge_cases {
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         wait_for_wallclock(aurora_activation).await;
 
@@ -521,7 +545,10 @@ mod edge_cases {
         let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
         let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         wait_for_wallclock(aurora_activation).await;
 
@@ -598,7 +625,10 @@ mod epoch_block_filtering {
 
         let mut config = aurora_config_with_epoch(aurora_state);
         let [signer1, signer2] = create_funded_signers(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         // Attempt to post V1 - may be rejected if post-activation
         let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
@@ -685,7 +715,10 @@ mod epoch_block_filtering {
             cascade: None,
         };
         let [signer1, signer2] = create_funded_signers(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         // Before activation: submit both V1 and V2
         let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
@@ -786,7 +819,10 @@ mod borealis_hardfork {
     {
         let mut config = borealis_config_future();
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         node.post_stake_commitment_with_signer(&signer).await?;
         node.mine_block().await?;
@@ -807,7 +843,10 @@ mod borealis_hardfork {
     {
         let mut config = borealis_config_past();
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         node.post_stake_commitment_with_signer(&signer).await?;
         node.mine_block().await?;
@@ -847,7 +886,10 @@ mod borealis_hardfork {
         };
 
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         // Stake first (block 1, still in epoch 0 with genesis as epoch block)
         node.post_stake_commitment_with_signer(&signer).await?;
@@ -908,7 +950,10 @@ mod borealis_hardfork {
         );
 
         let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
+        let node = IrysNodeTest::new_genesis(config)
+            .with_time_mode(TimeMode::Real)
+            .start()
+            .await;
 
         node.post_stake_commitment_with_signer(&signer).await?;
         node.mine_block().await?;
@@ -967,11 +1012,15 @@ mod peer_sync_recovery {
 
         // Step 2: Start Genesis and Peer
         let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+            .with_time_mode(TimeMode::Real)
             .start_and_wait_for_packing("GENESIS", SECONDS_TO_WAIT)
             .await;
 
         let peer_config = genesis_node.testing_peer_with_signer(peer_signer);
-        let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
+        let peer_node = IrysNodeTest::new(peer_config)
+            .with_time_mode(TimeMode::Real)
+            .start_with_name("PEER")
+            .await;
 
         // Peer stakes and pledges to participate in the network
         let peer_stake = peer_node.post_stake_commitment(None).await?;

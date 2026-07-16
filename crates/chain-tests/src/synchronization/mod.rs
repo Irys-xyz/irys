@@ -1,4 +1,4 @@
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, TimeMode};
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
 
@@ -216,6 +216,7 @@ async fn slow_heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
 #[test_log::test(tokio::test)]
 async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources()
 -> eyre::Result<()> {
+    // pin Real: multi-node sync timing; pin Real.
     // settings
     let max_seconds = 10;
 
@@ -257,12 +258,18 @@ async fn spiky_heavy3_should_reject_commitment_transactions_from_unknown_sources
     ]);
     // Originally we should only allow account1 to stake/pledge
     config.initial_stake_and_pledge_whitelist = vec![account1.address()];
-    let genesis_node = IrysNodeTest::new_genesis(config.clone()).start().await;
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .with_time_mode(TimeMode::Real)
+        .start()
+        .await;
     let mut testing_peer_config = genesis_node.testing_peer();
     // Check that even if the peer has an empty whitelist at the start, it still gets the correct
     //  whitelist from the genesis node
     testing_peer_config.initial_stake_and_pledge_whitelist = vec![];
-    let peer = IrysNodeTest::new(testing_peer_config).start().await;
+    let peer = IrysNodeTest::new(testing_peer_config)
+        .with_time_mode(TimeMode::Real)
+        .start()
+        .await;
 
     // retrieve block_migration_depth for use later
     let mut consensus = genesis_node.cfg.consensus.clone();
