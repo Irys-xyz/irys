@@ -2257,6 +2257,8 @@ mod tests {
                 None,
                 config.consensus.chunk_size,
                 config.consensus.epoch.num_blocks_in_epoch,
+                config.consensus.block_tree_depth,
+                config.consensus.block_migration_depth as u64,
                 cache.clone(),
                 chunk_migration_sender,
             );

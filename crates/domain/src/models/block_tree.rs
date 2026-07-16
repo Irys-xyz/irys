@@ -17,6 +17,8 @@ use crate::{
     EpochSnapshot, create_ema_snapshot_from_chain_history,
 };
 
+use super::forkchoice_markers::restore_cache_floor;
+
 /// Why a block is being evicted from the block-tree cache.
 ///
 /// Recorded on the `Removing block from block tree cache` debug log so an
@@ -300,9 +302,11 @@ impl BlockTree {
             let block_index = block_index_guard.read();
             eyre::ensure!(block_index.num_blocks() > 0, "Block list must not be empty");
 
-            let start = block_index
-                .num_blocks()
-                .saturating_sub(consensus_config.block_tree_depth - 1);
+            let start = restore_cache_floor(
+                block_index.latest_height(),
+                consensus_config.block_tree_depth,
+                u64::from(consensus_config.block_migration_depth),
+            );
             let end = block_index.num_blocks();
             let start_block_hash = block_index
                 .get_item(start)
