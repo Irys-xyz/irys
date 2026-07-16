@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
-    BoundedFee, DataLedger, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
+    BoundedFee, DataLedger, H256, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
 
@@ -1187,6 +1187,33 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         Ok((rewards, refunds))
     }
 
+    // Maps each PermFeeRefund in the block at `height` to its CL tx id -> amount.
+    // Keys on the refund's `irys_ref` (the CL tx id), NOT `target`: every tx in
+    // this test shares one signer, so address keying cannot tell them apart.
+    // Asserts each CL tx is refunded at most once per block (no double-settlement).
+    async fn refund_amounts_by_tx(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        height: u64,
+    ) -> eyre::Result<std::collections::HashMap<H256, U256>> {
+        let block = ctx.get_block_by_height(height).await?;
+        let evm = ctx.wait_for_evm_block(block.evm_block_hash, 30).await?;
+        let mut refunds = std::collections::HashMap::new();
+        for tx in evm.body.transactions {
+            let mut input = tx.input().as_ref();
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+                && let Some(TransactionPacket::PermFeeRefund(refund)) = shadow.as_v1()
+            {
+                let tx_id = H256::from_slice(refund.irys_ref.as_slice());
+                let amount = U256::from_le_bytes(refund.amount.to_le_bytes());
+                assert!(
+                    refunds.insert(tx_id, amount).is_none(),
+                    "duplicate PermFeeRefund for CL tx {tx_id} in block {height}"
+                );
+            }
+        }
+        Ok(refunds)
+    }
+
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
@@ -1256,6 +1283,14 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
             slot0.last_height, f,
             "the fill must refresh slot 0's expiry clock to F={f}"
         );
+        // Interim promotability: while live (after the rescued-slot tx was
+        // appended, before the recycle epoch), slot 0 must retain a partition
+        // assignment — the third bug leg (permanently non-promotable rescued
+        // slot) does not recur.
+        assert!(
+            !slot0.partitions.is_empty(),
+            "rescued slot 0 must retain its partition assignment while live at F={f}"
+        );
     }
 
     // Phase B: when the slot ACTUALLY recycles (F + window), the deferred refund
@@ -1264,11 +1299,33 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
     while ctx.get_canonical_chain_height().await < recycle {
         ctx.mine_block().await?;
     }
-    let (_, refunds_at_recycle) = expiry_shadow_counts(&ctx, recycle).await?;
-    assert!(
-        refunds_at_recycle >= 1,
-        "deferred PermFeeRefund for the unpromoted txs must land when slot 0 \
-         actually recycles at F+{window}={recycle} (got {refunds_at_recycle})"
+    // The deferred refunds settle exactly once per unpromoted tx in the rescued
+    // slot, each for its full perm_fee — the outcome the fully-written-gate fix
+    // preserves: charged txs are honored, never stranded, never doubled. All three
+    // txs (tx1/tx2/tx3) are unpromoted here (chunks never uploaded), so each must
+    // be refunded; a promoted tx would instead be absent from the refund set.
+    let refunds = refund_amounts_by_tx(&ctx, recycle).await?;
+    for tx in [&tx1, &tx2, &tx3] {
+        let perm_fee: U256 = tx
+            .header
+            .perm_fee
+            .expect("unpromoted data tx must carry a perm_fee")
+            .into();
+        let tx_id = tx.header.id;
+        assert_eq!(
+            refunds.get(&tx_id).copied(),
+            Some(perm_fee),
+            "unpromoted tx {tx_id} must be refunded exactly its perm_fee once when \
+             slot 0 recycles at F+{window}={recycle}"
+        );
+    }
+    // Exactly the three rescued-slot txs are refunded: no spurious or duplicate
+    // settlement of any other tx.
+    assert_eq!(
+        refunds.len(),
+        3,
+        "exactly the three unpromoted rescued-slot txs must be refunded at recycle, \
+         got {refunds:?}"
     );
 
     ctx.stop().await;
