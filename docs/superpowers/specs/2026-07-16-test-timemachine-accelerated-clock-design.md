@@ -174,33 +174,44 @@ enum TimeMode {
 ```
 
 - Default for the testing harness is `Random { accel_pct: 50, seed: None }`.
-- On node start the harness resolves `Random` → a concrete mode using a seed
-  (entropy unless pinned), **logs** the decision, and installs the global clock:
+- On node start the harness resolves the mode by precedence —
+  **per-test `.with_time_mode()` > `IRYS_TEST_TIME` env > harness default (`Random`)** —
+  drawing a concrete Real/Accelerated from the seed when `Random`, **logs** the
+  decision, and installs the global clock:
 
   ```
   ⏱ test time mode: ACCELERATED tick=1000ms  [seed=0x9f3c… — pin with .with_time_mode(Accelerated)]
   ```
 
 - **Per-test override:** `.with_time_mode(TimeMode::Real | Accelerated{..})` on the
-  harness builder pins a regime. Tests that actively warp time (see below) pin
-  Accelerated.
+  harness builder pins a regime (also settable via env, see reproducibility).
 - **`node.advance_time(Duration)`** jumps the virtual clock forward for
-  expiry/epoch scenarios. This is meaningful only in Accelerated mode; a test using
-  it **must** pin Accelerated (jumping days of real time is infeasible). This
-  refines the philosophy: randomization applies to tests that merely produce blocks
-  and assert; tests that manipulate time explicitly opt out by pinning.
+  expiry/epoch scenarios.
+  - **Accelerated mode:** advances the virtual clock instantly by `Duration`.
+  - **Real mode:** **no-op.** Real wall-clock time advances on its own as the
+    producer sleeps between blocks (`current_timestamp`'s per-block wait), so
+    explicit advancement is unnecessary when time passage is driven by block
+    production. Because `advance_time` is a no-op rather than an error in Real
+    mode, time-warp tests still participate in randomization (run in both regimes)
+    instead of being forced to pin Accelerated.
+  - **Caveat:** a test that needs *pure* time passage in Real mode — time advancing
+    without producing blocks (e.g. a cache-TTL eviction with no intervening blocks)
+    — should call a real sleep, or pin Accelerated. Large jumps (hours/days) are
+    only feasible in Accelerated mode; such tests pin Accelerated.
 
 ### Reproducibility contract
 
 Random-by-default is only safe if a failure is reproducible:
 
 - The resolved mode and seed are logged at node start.
-- A failing test is reproduced by pinning via `.with_time_mode(...)` (in-code) —
-  the primary mechanism for this cut.
-- **Open item for spec review:** a one-line env override (`IRYS_TEST_TIME=real|accelerated`)
-  is the natural repro mechanism for CI flakes where editing the test is
-  inconvenient. It is distinct from the deferred *probability*-tuning env var.
-  Recommendation: include the mode-pin env override now; defer probability tuning.
+- A failing test is reproduced two ways: in-code via `.with_time_mode(...)`, or —
+  without editing the test — via the env override **`IRYS_TEST_TIME=real|accelerated`**,
+  which force-pins the mode for every test in the process — overriding the random
+  default, but **not** an explicit per-test `.with_time_mode()` pin (which exists
+  for correctness, e.g. infeasible large jumps). This is the natural repro mechanism
+  for CI flakes and is **in scope for this cut**.
+- Distinct from the above: the *probability*-tuning env var (dialing `accel_pct`)
+  is deferred; the probability is config-only for now (default 50/50).
 
 ## Determinism & difficulty interaction
 
