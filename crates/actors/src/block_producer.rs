@@ -1987,7 +1987,9 @@ pub async fn current_timestamp(
             return now_ms;
         }
         let virtual_wait = 1001 - (now_ms.as_millis() % 1000) as u64;
-        tokio::time::sleep(clock.real_duration_for_virtual_ms(virtual_wait)).await;
+        let wait = clock.real_duration_for_virtual_ms(virtual_wait);
+        info!("Waiting {:.2?} to prevent timestamp overlap", &wait);
+        tokio::time::sleep(wait).await;
     }
 }
 

@@ -76,6 +76,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::{
     future::Future,
     time::{Duration, Instant},
@@ -89,6 +90,14 @@ use tracing::{debug, error, error_span, info, instrument, warn};
 /// block time (limiting difficulty-retargeting noise), while still crossing
 /// second/minute-scale hardfork activation offsets in a fraction of a real second.
 const ACCEL_FACTOR: u64 = 25;
+
+/// The time mode is decided once per process and shared by every node in the
+/// test. This relies on nextest's process-per-test isolation (one test = one
+/// process = one mode). Under plain `cargo test` all tests in a binary share a
+/// process, so the first test to start a node fixes the mode for the whole
+/// binary — run these tests under nextest (`cargo nextest run`), the sanctioned
+/// runner, not `cargo test`.
+static PROCESS_TIME_MODE: OnceLock<(TimeMode, String)> = OnceLock::new();
 
 /// Which wall clock a test node runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,7 +464,11 @@ impl IrysNodeTest<()> {
         let _enter = span.enter();
         // Resolve and install the process time source before the node boots.
         {
-            let (mode, reason) = resolve_time_mode(self.time_mode_override);
+            // Decide once per process so all nodes in a multi-node test agree
+            // (see PROCESS_TIME_MODE). The first node's pin (if any) wins.
+            let (mode, reason) = PROCESS_TIME_MODE
+                .get_or_init(|| resolve_time_mode(self.time_mode_override))
+                .clone();
             match mode {
                 TimeMode::Real => {
                     info!("⏱ test time mode: REAL [{reason}]");
@@ -547,6 +560,8 @@ impl IrysNodeTest<()> {
 
     /// Pin this node's wall-clock mode, opting out of the random default.
     /// Use `Accelerated` for tests that jump time far forward via `advance_time`.
+    /// The pin applies process-wide, decided by whichever node starts first
+    /// (see `PROCESS_TIME_MODE`); this assumes nextest's process-per-test isolation.
     pub fn with_time_mode(mut self, mode: TimeMode) -> Self {
         self.time_mode_override = Some(mode);
         self
