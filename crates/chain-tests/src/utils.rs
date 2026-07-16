@@ -94,7 +94,7 @@ const ACCEL_FACTOR: u64 = 25;
 /// Probability in `[0.0, 1.0]` that an unpinned test runs in Accelerated mode
 /// under the random default (e.g. `0.5` = 50% accelerated, 50% real). `0.0`
 /// disables acceleration by default; `1.0` always accelerates.
-const ACCEL_PROBABILITY: f64 = 0.5;
+const ACCEL_PROBABILITY: f64 = 0.9;
 
 /// The time mode is decided once per process and shared by every node in the
 /// test. This relies on nextest's process-per-test isolation (one test = one

@@ -1,5 +1,6 @@
 use crate::utils::{IrysNodeTest, TimeMode};
 use irys_types::NodeConfig;
+use tracing::info;
 
 /// In Accelerated mode, producing several blocks must not take ~1s/block, and
 /// block timestamps must be strictly increasing.
@@ -17,6 +18,10 @@ async fn accelerated_time_produces_blocks_faster_than_realtime() {
         .await
         .expect("mining should succeed");
     let elapsed = start.elapsed();
+    let rate = n as f64 / elapsed.as_secs_f64();
+    info!(
+        "⏱ accelerated: mined {n} blocks in {elapsed:?} = {rate:.1} blocks/sec (real-mode floor ~1/sec)"
+    );
 
     // Real mode would need >= ~n seconds (1 block/sec). Accelerated must be well
     // under that. Generous bound to avoid CI flake while still proving the point.
