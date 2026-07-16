@@ -839,14 +839,16 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     // Fee-predicted expiring set: the PARENT epoch snapshot (as the producer
     // sees it) asked which ThirtyDay slots will actually recycle at height E.
     let parent_block = ctx.get_block_by_height(e - 1).await?;
-    let mut fee_set = {
+    let parent_snap = {
         let tree = ctx.node_ctx.block_tree_guard.read();
-        let snap = tree
-            .get_epoch_snapshot(&parent_block.block_hash)
-            .expect("parent epoch snapshot");
+        tree.get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot")
+    };
+    let mut fee_set = {
         // cascade_active=true: this scenario runs post-activation (cascade
         // activated at timestamp 0), matching the producer/validator gate.
-        snap.get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
+        parent_snap
+            .get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
@@ -877,6 +879,29 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
          equal the actual recycle set (expired_partition_infos) at epoch E={e}; \
          a mismatch means fees are distributed for a slot that did not recycle"
     );
+
+    // Third leg: the inclusive non-promotability set (get_all_expired_...) must
+    // contain every slot that actually recycled at E, and may exceed it only by
+    // slots already is_expired from a prior epoch. Pins all three expiry sets on one
+    // block — the property the fully-written-gate fix guarantees by feeding all three
+    // the same write-frontier inputs. Uses the snapshot wrapper (chunks_per_slot is
+    // supplied internally).
+    let blocked: std::collections::BTreeSet<usize> = parent_snap
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, e_total)
+        .into_iter()
+        .collect();
+    let recycled: std::collections::BTreeSet<usize> = actual_set.iter().copied().collect();
+    assert!(
+        recycled.is_subset(&blocked),
+        "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
+    );
+    let parent_slots = parent_snap.ledgers.get_slots(DataLedger::ThirtyDay);
+    for extra in blocked.difference(&recycled) {
+        assert!(
+            parent_slots[*extra].is_expired,
+            "blocked slot {extra} not in the recycle set must be a previously-expired slot"
+        );
+    }
 
     ctx.stop().await;
     Ok(())
