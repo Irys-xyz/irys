@@ -2002,7 +2002,10 @@ pub async fn current_timestamp(
         }
         let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
         let wait_duration = Duration::from_millis(1001 - ms_into_sec);
-        info!("Waiting {:.2?} to prevent timestamp overlap", &wait_duration);
+        info!(
+            "Waiting {:.2?} to prevent timestamp overlap",
+            &wait_duration
+        );
         tokio::time::sleep(wait_duration).await;
     }
 }
