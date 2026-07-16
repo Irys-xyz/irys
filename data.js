@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784138660008,
+  "lastUpdate": 1784194216278,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10087,6 +10087,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8d2e60a4c520e736b41e1c0af5165557d0c8e463",
+          "message": "fix(tests): wait for mempool promotion instead of asserting instantly (#1521)\n\nPromotion is applied on BlockConfirmed behind block production, so\ninstant get_is_promoted asserts race that update and flake under CI.\nUse wait_for_promotion (same pattern as the perm-ledger readiness fix)\nand mine past migration depth so the multi-proofs path actually advances\nbeyond the promotion block.",
+          "timestamp": "2026-07-16T10:14:55+01:00",
+          "tree_id": "3a5d1ebe1f158a9786990c381b48119d3bca4a67",
+          "url": "https://github.com/Irys-xyz/irys/commit/8d2e60a4c520e736b41e1c0af5165557d0c8e463"
+        },
+        "date": 1784194215115,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015322,
+            "range": "± 0.000496",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152343,
+            "range": "± 0.004753",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.567841,
+            "range": "± 0.0416",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.405796,
+            "range": "± 0.275857",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083148,
+            "range": "± 0.001903",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 824.675652,
+            "range": "± 14.323013",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1038.961607,
+            "range": "± 30.576581",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.148166,
+            "range": "± 0.016011",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1285.918013,
+            "range": "± 83.997736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1951.749549,
+            "range": "± 140.305692",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034535,
+            "range": "± 0.00147",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 223.622358,
+            "range": "± 6.094284",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.534009,
+            "range": "± 1.900821",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
