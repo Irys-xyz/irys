@@ -1157,6 +1157,8 @@ mod tests {
     /// values — any change is a protocol change.
     #[test]
     fn test_mainnet_hardfork_activation_times() {
+        use crate::hardfork_config::Cascade;
+
         let config = ConsensusConfig::mainnet();
 
         // Aurora — 2026-06-23T12:00:00+00:00
@@ -1187,6 +1189,34 @@ mod tests {
                 .expect("mainnet Borealis must be configured")
                 .activation_timestamp,
             UnixTimestamp::from_secs(1782820800)
+        );
+
+        // Cascade — 2026-08-03T12:00:00+00:00 (epoch-aligned at runtime; pin the
+        // configured activation timestamp and its term-ledger / cost constants).
+        let cascade_ts = UnixTimestamp::from_secs(1785758400);
+        let cascade = config
+            .hardforks
+            .cascade
+            .as_ref()
+            .expect("mainnet Cascade must be configured");
+        assert_eq!(cascade.activation_timestamp, cascade_ts);
+        assert_eq!(cascade.one_year_epoch_length, 365);
+        assert_eq!(cascade.thirty_day_epoch_length, 30);
+        assert_eq!(
+            cascade.annual_cost_per_gb,
+            Cascade::default_annual_cost_per_gb()
+        );
+        // Inactive one second before the boundary, active at it and after.
+        assert!(
+            !config
+                .hardforks
+                .is_cascade_active_at(UnixTimestamp::from_secs(1785758400 - 1))
+        );
+        assert!(config.hardforks.cascade_at(cascade_ts).is_some());
+        assert!(
+            config
+                .hardforks
+                .is_cascade_active_at(UnixTimestamp::from_secs(1785758400 + 1))
         );
     }
 
