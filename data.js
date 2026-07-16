@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784194216278,
+  "lastUpdate": 1784200396274,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10195,6 +10195,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bab535bed5e10f36d4d09c6a878a74d8c5cc4884",
+          "message": "ci(release): changelog range fix + green-CI gate hardening (#1520)\n\n* ci(release): descriptive run-name, wait for in-progress base CI, sensible dispatch default\n\n- Add run-name so each dispatch is titled 'Release - <env> - <version>' (with a\n  (dry-run) marker), instead of every run showing as 'Release'.\n- require-green-ci: poll in-progress CI on the release base until it settles\n  (up to 60 min from release.yml) instead of failing fast; real failures still\n  fail immediately. Log a clickable link to the commit's checks view.\n- release.yml: default release_type to testnet (workflow_dispatch defaults are\n  static literals, so version/commit stay blank on purpose).\n\n* ci(release): harden green-CI gate against transient errors and unregistered checks\n\nThe require-green-ci poll loop now:\n- retries gh api calls with backoff, so a single transient failure over the\n  ~60-min wait window no longer aborts the whole release gate under set -e\n- treats \"no checks registered yet\" as waitable (bounded by the deadline)\n  rather than hard-failing a release dispatched just as its base landed\n- names the pending checks in the wait/timeout messages\n\nwait-timeout-seconds=0 still fails fast, preserving the original behavior.\n\n* ci(release): bound changelog to previous same-env release, add previous_tag override\n\ngit-cliff's --unreleased boundary detection is ancestry/time-based. Because\nreleases live on diverged sibling deployment branches, the previous same-env\ntag is not an ancestor of the release commit, so cliff anchored the range to\nthe oldest reachable tag and the changelog spanned the entire history.\n\nCompute the boundary in the workflow instead: the highest <env>-X.Y.Z tag\nstrictly below the version being released in SEMVER order (not tag-creation\norder, so a back-port tagged after a newer release is bounded by its own\npredecessor), and hand cliff an explicit <prev>..<commit> range whose\nset-difference is correct regardless of ancestry. First release of an env\nspans full history.\n\nAdd an optional previous_tag dispatch input to override the auto-detected\nboundary for irregular tag histories; it must resolve to a commit or the run\nfails. Correct the now-stale cliff.toml comment about how the range is bounded.\n\n* ci(release): restrict previous_tag override to SHA or env-matching tag\n\nprevious_tag was the only workflow_dispatch input flowing into cliff_args\n(and thence the git-cliff action's arg string) without a pattern\nrestriction; its resolve-only check accepts any ref, and a ref name may\ncarry whitespace/metacharacters that smuggle extra tokens into the arg\nstring. Restrict it to a full 40-char commit SHA or an <env>-X.Y.Z tag for\nthe current release_type before interpolation. Both forms are\nmetacharacter-free.\n\n* ci(release): require tag-form previous_tag override to be a lower version\n\nThe previous_tag override accepted any resolvable <env>-X.Y.Z tag, so an\nequal or forward tag would produce an inverted/empty prev..commit range\nand a bogus changelog. Auto-detection always picks a predecessor strictly\nbelow the release; gate tag-form overrides the same way. SHA overrides\nstay unconstrained as the escape hatch for irregular history.",
+          "timestamp": "2026-07-16T11:58:13+01:00",
+          "tree_id": "6f79b4c186dce4bf36c46de7be1274c91de31c93",
+          "url": "https://github.com/Irys-xyz/irys/commit/bab535bed5e10f36d4d09c6a878a74d8c5cc4884"
+        },
+        "date": 1784200393964,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015247,
+            "range": "± 0.00041",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15383,
+            "range": "± 0.002897",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.56416,
+            "range": "± 0.02024",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.53933,
+            "range": "± 0.237451",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083169,
+            "range": "± 0.00397",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 840.003539,
+            "range": "± 24.626722",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.915656,
+            "range": "± 14.257511",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.126882,
+            "range": "± 0.003614",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1228.015391,
+            "range": "± 73.108627",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1566.558387,
+            "range": "± 138.754931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034152,
+            "range": "± 0.002305",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.649621,
+            "range": "± 0.848124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.244387,
+            "range": "± 1.73578",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
