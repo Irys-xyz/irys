@@ -36,7 +36,7 @@ on:
         type: boolean
         default: false
       previous_tag:
-        description: 'Optional changelog range lower bound (tag or commit SHA). Overrides the auto-detected previous same-env release. Leave empty for automatic semver detection.'
+        description: 'Optional changelog range lower bound: a full 40-char commit SHA or an <env>-X.Y.Z tag for this release_type. Overrides the auto-detected previous same-env release. Leave empty for automatic semver detection.'
         required: false
         type: string
         default: ''
@@ -288,10 +288,20 @@ jobs:
           GIT_TAG: ${{ env.GIT_TAG }}
         run: |
           # An explicit previous_tag override wins over auto-detection, to
-          # re-anchor the range when tag history is irregular. It may be any ref
-          # git can resolve; require that it resolves so a typo fails loudly
-          # rather than feeding git-cliff a bogus range.
+          # re-anchor the range when tag history is irregular. Restrict it to a
+          # full 40-char commit SHA or an <env>-X.Y.Z tag for THIS release_type:
+          # the value is interpolated into cliff_args below (and thence into the
+          # git-cliff action's arg string), so a form admitting whitespace or
+          # shell metacharacters could smuggle extra arguments. Both accepted
+          # forms are metacharacter-free. Then require that it resolves, so a
+          # typo fails loudly rather than feeding git-cliff a bogus range.
           if [ -n "$INPUT_PREVIOUS_TAG" ]; then
+            SHA_RE='^[0-9a-f]{40}$'
+            TAG_RE="^${INPUT_RELEASE_TYPE}-[0-9]+\.[0-9]+\.[0-9]+$"
+            if ! [[ "$INPUT_PREVIOUS_TAG" =~ $SHA_RE || "$INPUT_PREVIOUS_TAG" =~ $TAG_RE ]]; then
+              echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' must be a full 40-char commit SHA or a ${INPUT_RELEASE_TYPE}-X.Y.Z tag"
+              exit 1
+            fi
             if ! git rev-parse --verify --quiet "${INPUT_PREVIOUS_TAG}^{commit}" >/dev/null; then
               echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' does not resolve to a commit"
               exit 1
