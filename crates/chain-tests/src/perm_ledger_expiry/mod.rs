@@ -1386,6 +1386,15 @@ async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()>
         !publish_slots[1].partitions.is_empty(),
         "the surviving partial frontier slot's partition assignment must be retained"
     );
+    // Discriminating anchor: slot 0 (fully written at batch 1, non-last, mined far past
+    // its allocation-anchored expiry) MUST have expired. Without this, slot 1's survival
+    // could pass on a dead or over-strong gate that never expires anything — this proves
+    // the expiry machinery is live, so slot 1 surviving is the fully-written gate at work.
+    assert!(
+        publish_slots[0].is_expired,
+        "slot 0 (fully written, non-last, aged well past its window) must expire — else \
+         slot 1's survival is not discriminating"
+    );
 
     // --- Fixture hygiene: no term-ledger settlement shadow txs leaked into the
     //     window. (Publish recycle never emits these tx types, so this does not

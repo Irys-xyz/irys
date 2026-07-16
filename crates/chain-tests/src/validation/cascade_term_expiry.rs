@@ -886,6 +886,10 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     // block — the property the fully-written-gate fix guarantees by feeding all three
     // the same write-frontier inputs. Uses the snapshot wrapper (chunks_per_slot is
     // supplied internally).
+    // Note: this feeds the epoch block's own total (e_total); the production §4c
+    // promotion validator passes the PARENT header's total. They are equal here because
+    // no data is written in the expiry epoch, so this stays a faithful gate-family
+    // consistency check (blocked vs recycle computed from one snapshot's inputs).
     let blocked: std::collections::BTreeSet<usize> = parent_snap
         .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, e_total)
         .into_iter()
@@ -1078,6 +1082,14 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
     assert!(
         recycled.is_subset(&blocked),
         "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
+    );
+    // Pin the newly-recycled set exactly, so the surplus checks below cannot silently
+    // degrade to a vacuous form if fixture drift ever stops slot B(1) recycling at E2
+    // (recycled={} would satisfy subset, strict-surplus, and the surplus checks trivially).
+    assert_eq!(
+        recycled,
+        std::collections::BTreeSet::from([1]),
+        "slot B(1) must be the sole newly-recycled slot at E2 (got {recycled:?})"
     );
     // Non-vacuity: the blocked set STRICTLY exceeds the newly-recycled set — this
     // is the surplus the sibling fixture never produces.
