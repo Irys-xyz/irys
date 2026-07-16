@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784200396274,
+  "lastUpdate": 1784206161823,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10302,6 +10302,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "9cc43fd18b4c503e18bb0f5959e623e459a3af13",
+          "message": "fix: Reorg reverts a reth-finalized block post-restart (0a / FC-recheck-1) (#1513)\n\n* fix(consensus): raise restart block-tree floor to finalized+1 and guard partition recovery\n\nOn restart, restore_from_db rebuilt the block-tree cache floor from the index\ntip, which sits block_migration_depth below the pre-crash head, so the floor\nlanded below the finalized height and re-opened a reorg window straddling an\nalready-finalized block — a silent finality violation.\n\nAnchor the restore floor to the reconstructed pre-crash head\n(confirmed_tip + migration_depth), so it matches a never-crashed node's prune\nfloor: finalized+1 once the chain is block_tree_depth deep, or genesis on a\nyoung chain. As a backstop, recover_from_network_partition now refuses to\ntruncate the block index below the finalized height, halting rather than\norphaning a finalized block.\n\nFinalization depth is canonically block_tree_depth; add finalized_height and\nrestore_cache_floor helpers expressing that and route from_index through them.\n\n* refactor(consensus): clarify finalized-marker docs and use lossless depth casts\n\nOn restart the FCU's finalized_hash sits block_tree_depth - migration_depth\nbehind head_hash (the head rolls back to the confirmed tip); document this on\nForkChoiceUpdate and fix the from_index doc to name the confirmed frontier\nrather than the prior canonical head. Convert the u32 block_migration_depth\narguments with u64::from instead of an unchecked cast.",
+          "timestamp": "2026-07-16T13:32:53+01:00",
+          "tree_id": "c247a9aac5889bab40bb51b320a6332953da733a",
+          "url": "https://github.com/Irys-xyz/irys/commit/9cc43fd18b4c503e18bb0f5959e623e459a3af13"
+        },
+        "date": 1784206160569,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015376,
+            "range": "± 0.001311",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126007,
+            "range": "± 0.004302",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.263856,
+            "range": "± 0.027364",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.323068,
+            "range": "± 0.207155",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.076453,
+            "range": "± 0.000955",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 763.706111,
+            "range": "± 32.622621",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 982.470969,
+            "range": "± 9.583989",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.121795,
+            "range": "± 0.002458",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1223.85037,
+            "range": "± 98.531585",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1581.610737,
+            "range": "± 21.851848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.03433,
+            "range": "± 0.001126",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.166021,
+            "range": "± 1.251436",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.310314,
+            "range": "± 2.252772",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
