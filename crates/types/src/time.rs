@@ -66,7 +66,7 @@ impl UnixTimestamp {
     /// Returns an error if the system time is before the Unix epoch.
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        Ok(global_clock().now_ms().to_secs())
+        Ok(global_clock().now_ms()?.to_secs())
     }
 
     /// Creates a UnixTimestamp from seconds since Unix epoch
@@ -175,7 +175,7 @@ impl UnixTimestampMs {
     /// Creates a UnixTimestampMs from the current system time
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        Ok(global_clock().now_ms())
+        global_clock().now_ms()
     }
 
     /// Creates a UnixTimestampMs from milliseconds since Unix epoch
@@ -370,15 +370,14 @@ pub enum Clock {
 }
 
 impl Clock {
-    pub fn now_ms(&self) -> UnixTimestampMs {
+    pub fn now_ms(&self) -> Result<UnixTimestampMs, std::time::SystemTimeError> {
         match self {
-            Self::Real => UnixTimestampMs::from_millis(
+            Self::Real => Ok(UnixTimestampMs::from_millis(
                 SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .expect("system clock before UNIX epoch")
+                    .duration_since(SystemTime::UNIX_EPOCH)?
                     .as_millis(),
-            ),
-            Self::Test(t) => t.now_ms(),
+            )),
+            Self::Test(t) => Ok(t.now_ms()),
         }
     }
 }
@@ -468,7 +467,7 @@ mod tests {
     #[test]
     fn test_clock_enum_now_ms() {
         // Real is close to SystemTime.
-        let real = Clock::Real.now_ms().as_millis();
+        let real = Clock::Real.now_ms().unwrap().as_millis();
         let sys = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -477,7 +476,7 @@ mod tests {
 
         // Test reads its virtual value.
         let t = Clock::Test(std::sync::Arc::new(TestClock::new(42_000, 1_000)));
-        assert_eq!(t.now_ms().as_millis(), 42_000);
+        assert_eq!(t.now_ms().unwrap().as_millis(), 42_000);
     }
 
     #[test]
