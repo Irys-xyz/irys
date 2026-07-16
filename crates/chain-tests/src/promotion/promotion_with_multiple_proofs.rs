@@ -148,26 +148,23 @@ async fn spiky_slow_heavy4_promotion_with_multiple_proofs_test() -> eyre::Result
         .await;
     assert_matches!(res, Ok(()));
 
-    let height = genesis_node.get_canonical_chain_height().await;
+    // Mine the promotion block. Mempool reflects promotion when it processes
+    // `BlockConfirmed` (behind production) — wait for that, don't assert instantly.
     genesis_node.mine_block().await?;
     genesis_node
-        .wait_until_height_confirmed(height + 1, seconds_to_wait)
+        .wait_for_promotion(&data_tx.header.id, seconds_to_wait)
         .await?;
 
-    // Check is promoted state of tx in the mempool
-    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
-    assert!(is_promoted);
-
+    // Advance past migration depth so the promoting block is written to the DB
+    // index, then confirm promotion is still visible via DB/mempool.
+    // (Previously waited for `height + migration_depth`, which with depth=1
+    // equalled the pre-mine height + 1 and never advanced past the promotion
+    // block itself.)
+    let migration_depth = config.consensus_config().block_migration_depth as usize;
+    genesis_node.mine_blocks(migration_depth).await?;
     genesis_node
-        .wait_until_height_confirmed(
-            height + config.consensus_config().block_migration_depth as u64,
-            seconds_to_wait,
-        )
+        .wait_for_promotion(&data_tx.header.id, seconds_to_wait)
         .await?;
-
-    // Check is promoted state of tx after it migrates to DB
-    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
-    assert!(is_promoted);
 
     // Wind down test
     genesis_node.stop().await;

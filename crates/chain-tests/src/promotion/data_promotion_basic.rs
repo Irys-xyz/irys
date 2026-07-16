@@ -395,12 +395,12 @@ async fn promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
         .await?;
 
-    // Mine a block to promote from submit to publish
+    // Mine a block to promote from submit to publish. Mempool reflects
+    // promotion when it processes `BlockConfirmed` (behind production).
     genesis_node.mine_block().await?;
-
-    // ..and now it should be promoted!
-    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
-    assert!(is_promoted);
+    genesis_node
+        .wait_for_promotion(&data_tx.header.id, seconds_to_wait)
+        .await?;
 
     // Wind down test
     genesis_node.stop().await;
@@ -517,20 +517,12 @@ async fn promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
         .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait)
         .await?;
 
-    // Mine a block - the ingress proof should enable promotion
+    // Mine a block - the ingress proof should enable promotion. Mempool
+    // reflects promotion when it processes `BlockConfirmed` (behind production).
     genesis_node.mine_block().await?;
-
-    // Poll for promotion status - mempool processes BlockConfirmed asynchronously
-    // Use 100ms intervals for faster detection (300 checks over 30 seconds)
-    let mut is_promoted = false;
-    for _ in 0..(seconds_to_wait * 10) {
-        if genesis_node.get_is_promoted(&data_tx.header.id).await? {
-            is_promoted = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(is_promoted, "Transaction was not promoted within timeout");
+    genesis_node
+        .wait_for_promotion(&data_tx.header.id, seconds_to_wait)
+        .await?;
 
     // Wind down test
     genesis_node.stop().await;
