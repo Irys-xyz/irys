@@ -20,8 +20,8 @@
 //   1. an evil block promoting the already-refunded tx is REJECTED post-activation
 //      with `ShadowTransactionInvalid` (NC-0042) — no double-pay;
 //   2. the chain stays LIVE past the expiry epoch — the expired set stays a
-//      contiguous prefix {0}, so `expired_submit_range`'s fail-loud bail never
-//      trips.
+//      contiguous prefix {0, 1}, so `expired_submit_range`'s fail-loud bail
+//      never trips.
 //
 // Fixture (partial slot 0, so the fully-written gate would exclude it):
 //   - num_chunks_in_partition = 4; a single 3-chunk (96B) Submit tx never fills a
@@ -343,7 +343,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         .await?;
 
     // --- 7. Liveness: honest epoch blocks keep being produced past the expiry
-    //         epoch. The override keeps the expired set a contiguous prefix {0}, so
+    //         epoch. The override keeps the expired set a contiguous prefix {0, 1}, so
     //         `expired_submit_range`'s fail-loud bail never trips (which would halt
     //         the chain). ---
     let before = node.get_canonical_chain_height().await;

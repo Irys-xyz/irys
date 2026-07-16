@@ -1191,8 +1191,10 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
 ///
 /// Then it mines far past where slot 1's allocation-anchored — and even its
 /// last-write-anchored — age would recycle it under the pre-gate behavior, and
-/// asserts slot 1 survives with its partition assignment, and that no Publish
-/// expiry fee/refund shadow txs were produced for the slot that never recycles.
+/// asserts slot 1 survives with its partition assignment, plus a fixture-hygiene
+/// guard that no term-ledger settlement shadow txs leaked into the window (Publish
+/// recycle never emits these tx types, so this does not test the Publish gate
+/// itself — that's covered by the is_expired/partitions assertions above).
 #[test_log::test(tokio::test)]
 async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()> {
     let num_blocks_in_epoch = 2_u64;
@@ -1255,9 +1257,13 @@ async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()>
         Ok(())
     }
 
-    // Counts Publish-expiry fee/refund shadow txs in the block at `height`.
-    // Publish expiry emits no fee distribution and perm fees are never refunded,
-    // so both counts must be zero for a slot that never recycles.
+    // Counts TermFeeReward / PermFeeRefund shadow txs in the block at `height`.
+    // Publish-ledger recycle never emits either of these tx types (perm fees are
+    // never refunded and Publish expiry emits no fee distribution), so this cannot
+    // discriminate a recycling Publish slot from a non-recycling one — it does not
+    // test the Publish frontier gate. Its value is fixture hygiene: guarding that
+    // no term-ledger (Submit/OneYear/ThirtyDay) settlement leaked into the window,
+    // since Submit is configured far from expiry.
     async fn count_publish_expiry_shadow_txs(
         node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
         height: u64,
@@ -1381,14 +1387,19 @@ async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()>
         "the surviving partial frontier slot's partition assignment must be retained"
     );
 
-    // --- No Publish expiry fee/refund shadow txs for the slot that never recycles. ---
+    // --- Fixture hygiene: no term-ledger settlement shadow txs leaked into the
+    //     window. (Publish recycle never emits these tx types, so this does not
+    //     test the Publish frontier gate — that's covered by the
+    //     is_expired/partitions assertions above.) ---
     let mut epoch_height = a2;
     while epoch_height <= final_height {
         let count = count_publish_expiry_shadow_txs(&node, epoch_height).await?;
         assert_eq!(
             count, 0,
-            "no Publish expiry fee/refund shadow txs may be generated for a non-recycling \
-             perm slot (found {count} at epoch height {epoch_height})"
+            "no term-ledger (Submit/OneYear/ThirtyDay) expiry settlement shadow txs should \
+             appear while Submit is held non-expiring (found {count} at epoch height \
+             {epoch_height}); Publish recycle never emits these tx types, so this is a \
+             fixture-hygiene guard, not a check on the Publish frontier slot"
         );
         epoch_height += num_blocks_in_epoch;
     }

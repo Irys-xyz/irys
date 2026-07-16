@@ -1804,8 +1804,8 @@ mod tests {
             // (a) both sets are strictly ascending & contiguous. The inclusive set
             // starts at 0 (already-expired slots always pass). The newly-expiring set
             // may start ABOVE 0 because get_expired_slot_indexes filters out
-            // is_expired slots (data_ledger.rs:180) — so instead assert every slot
-            // below its first entry is already expired (a contiguous expired prefix).
+            // is_expired slots — so instead assert every slot below its first
+            // entry is already expired (a contiguous expired prefix).
             for w in newly.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
             for w in inclusive.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
             if let Some(&first) = inclusive.first() { prop_assert_eq!(first, 0); }
