@@ -9,7 +9,7 @@ use std::fmt;
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 /// Zero-cost newtype wrapper for Unix timestamps in seconds
 ///
@@ -324,40 +324,48 @@ impl Decodable for UnixTimestampMs {
     }
 }
 
-/// Virtual clock for tests: an atomic millisecond-since-epoch counter plus a
-/// fixed per-block tick. ms-since-epoch fits in u64 (overflows ~year 584e6).
+/// Free-running virtual clock for tests. `now_ms()` advances on its own:
+/// `anchor_wall_ms + monotonic_elapsed * factor + manual_offset`.
+///
+/// Elapsed is measured with a monotonic `Instant` (not `SystemTime`) so it is
+/// immune to WSL2 CLOCK_REALTIME skew; the anchor and result are wall-clock,
+/// which is the correct domain for block timestamps / hardfork activation.
 #[derive(Debug)]
 pub struct TestClock {
-    now_ms: AtomicU64,
-    tick_ms: u64,
+    anchor_wall_ms: u64,
+    anchor_instant: Instant,
+    factor: u64,
+    offset_ms: AtomicU64,
 }
 
 impl TestClock {
-    /// `anchor_ms`: initial virtual time. `tick_ms`: per-block advance (= block_time).
-    pub fn new(anchor_ms: u64, tick_ms: u64) -> Self {
+    /// `anchor_wall_ms`: virtual wall time at install (typically real `now()`).
+    /// `factor`: acceleration multiplier (virtual ms per real ms); clamped to >= 1.
+    pub fn new(anchor_wall_ms: u64, factor: u64) -> Self {
         Self {
-            now_ms: AtomicU64::new(anchor_ms),
-            tick_ms,
+            anchor_wall_ms,
+            anchor_instant: Instant::now(),
+            factor: factor.max(1),
+            offset_ms: AtomicU64::new(0),
         }
     }
 
     pub fn now_ms(&self) -> UnixTimestampMs {
-        UnixTimestampMs::from_millis(self.now_ms.load(Ordering::Relaxed) as u128)
+        let elapsed = self.anchor_instant.elapsed().as_millis() as u64;
+        let virtual_ms = self
+            .anchor_wall_ms
+            .saturating_add(elapsed.saturating_mul(self.factor))
+            .saturating_add(self.offset_ms.load(Ordering::Relaxed));
+        UnixTimestampMs::from_millis(virtual_ms as u128)
     }
 
-    pub fn tick_ms(&self) -> u64 {
-        self.tick_ms
+    pub fn factor(&self) -> u64 {
+        self.factor
     }
 
-    /// Advance virtual time by `millis`.
+    /// Jump virtual time forward by `millis` (used by the harness `advance_time`).
     pub fn advance_millis(&self, millis: u64) {
-        self.now_ms.fetch_add(millis, Ordering::Relaxed);
-    }
-
-    /// Monotonically raise virtual now to at least `ts` (never moves backward).
-    pub fn set_at_least(&self, ts: UnixTimestampMs) {
-        self.now_ms
-            .fetch_max(ts.as_millis() as u64, Ordering::Relaxed);
+        self.offset_ms.fetch_add(millis, Ordering::Relaxed);
     }
 }
 
@@ -378,6 +386,16 @@ impl Clock {
                     .as_millis(),
             )),
             Self::Test(t) => Ok(t.now_ms()),
+        }
+    }
+
+    /// Real sleep duration needed for `virtual_ms` of virtual time to elapse.
+    /// Real clock: 1:1. Test clock: divided by the acceleration factor (min 1ms
+    /// so callers never busy-spin).
+    pub fn real_duration_for_virtual_ms(&self, virtual_ms: u64) -> std::time::Duration {
+        match self {
+            Self::Real => std::time::Duration::from_millis(virtual_ms),
+            Self::Test(t) => std::time::Duration::from_millis((virtual_ms / t.factor()).max(1)),
         }
     }
 }
@@ -447,21 +465,21 @@ mod tests {
     }
 
     #[test]
-    fn test_testclock_advance_and_set_at_least() {
-        let c = TestClock::new(1_000, 1_000);
-        assert_eq!(c.now_ms().as_millis(), 1_000);
-        assert_eq!(c.tick_ms(), 1_000);
+    fn test_testclock_free_running_advances() {
+        let c = TestClock::new(1_000_000, 1_000);
+        let a = c.now_ms().as_millis();
+        assert!(a >= 1_000_000, "now must be >= anchor");
+        assert_eq!(c.factor(), 1_000);
 
-        c.advance_millis(500);
-        assert_eq!(c.now_ms().as_millis(), 1_500);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = c.now_ms().as_millis();
+        assert!(b > a, "free-running clock must advance on its own");
 
-        // set_at_least is monotonic: a lower target does nothing.
-        c.set_at_least(UnixTimestampMs::from_millis(1_200));
-        assert_eq!(c.now_ms().as_millis(), 1_500);
-
-        // a higher target moves it forward.
-        c.set_at_least(UnixTimestampMs::from_millis(2_000));
-        assert_eq!(c.now_ms().as_millis(), 2_000);
+        c.advance_millis(10_000);
+        assert!(
+            c.now_ms().as_millis() >= b + 10_000,
+            "manual advance must apply on top of free-running time"
+        );
     }
 
     #[test]
@@ -474,9 +492,9 @@ mod tests {
             .as_millis();
         assert!(sys.abs_diff(real) < 5_000);
 
-        // Test reads its virtual value.
-        let t = Clock::Test(std::sync::Arc::new(TestClock::new(42_000, 1_000)));
-        assert_eq!(t.now_ms().unwrap().as_millis(), 42_000);
+        // Test reads its virtual value (factor 1 so it tracks ~anchor + elapsed).
+        let t = Clock::Test(std::sync::Arc::new(TestClock::new(42_000, 1)));
+        assert!(t.now_ms().unwrap().as_millis() >= 42_000);
     }
 
     #[test]
@@ -494,14 +512,14 @@ mod tests {
 
         // After install, now() is virtual.
         assert!(install_clock(Clock::Test(std::sync::Arc::new(
-            TestClock::new(7_000_000, 1_000,)
+            TestClock::new(7_000_000, 1,)
         ))));
-        assert_eq!(UnixTimestampMs::now().unwrap().as_millis(), 7_000_000);
-        assert_eq!(UnixTimestamp::now().unwrap().as_secs(), 7_000);
+        assert!(UnixTimestampMs::now().unwrap().as_millis() >= 7_000_000);
+        assert!(UnixTimestamp::now().unwrap().as_secs() >= 7_000);
 
         // A second install is a no-op.
         assert!(!install_clock(Clock::Real));
-        assert_eq!(UnixTimestampMs::now().unwrap().as_millis(), 7_000_000);
+        assert!(UnixTimestampMs::now().unwrap().as_millis() >= 7_000_000);
     }
 }
 

@@ -1974,39 +1974,20 @@ pub async fn current_timestamp(
 ) -> UnixTimestampMs {
     let prev_secs = prev_block_header.timestamp.to_secs();
 
-    // Accelerated (virtual) clock: derive the timestamp deterministically as
-    // parent + block_time and jump virtual time forward — no sleep. Because the
-    // tick is >= 1000ms, the block's second strictly exceeds the parent's, which
-    // is all Reth requires.
-    if let irys_types::Clock::Test(t) = clock {
-        let target = prev_block_header
-            .timestamp
-            .saturating_add_millis(t.tick_ms() as u128);
-        t.set_at_least(target);
-        return target;
-    }
-
-    // Real clock: EVM block timestamps are seconds-precision and must be strictly
-    // greater than the parent's. Loop until wall-clock time has actually advanced
-    // past the parent's second. We re-check after each sleep because tokio's sleep
-    // is monotonic-clock based, while the timestamp comes from the realtime clock —
-    // the two can drift (notably under WSL2, which periodically resyncs
-    // CLOCK_REALTIME against the Windows host and can lurch by hundreds of ms or
-    // seconds), so a one-shot computed wait is unsafe.
+    // EVM block timestamps are seconds-precision and must be strictly greater
+    // than the parent's. Loop until the clock has actually crossed the parent's
+    // second, re-checking after each sleep (tokio sleep is monotonic; the clock
+    // is wall-clock — never assume one sleep advances it by the wanted amount).
+    // With a free-running accelerated clock this normally returns on the first
+    // iteration; the sleep is factor-scaled so the wait stays tiny under
+    // acceleration and ~sub-second under the real clock.
     loop {
-        // Clock::now_ms() is fallible (Real arm can Err on pre-epoch clock);
-        // the original code unwrapped UnixTimestampMs::now() here too.
         let now_ms = clock.now_ms().expect("system clock before UNIX epoch");
         if now_ms.to_secs() > prev_secs {
             return now_ms;
         }
-        let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
-        let wait_duration = Duration::from_millis(1001 - ms_into_sec);
-        info!(
-            "Waiting {:.2?} to prevent timestamp overlap",
-            &wait_duration
-        );
-        tokio::time::sleep(wait_duration).await;
+        let virtual_wait = 1001 - (now_ms.as_millis() % 1000) as u64;
+        tokio::time::sleep(clock.real_duration_for_virtual_ms(virtual_wait)).await;
     }
 }
 
@@ -2144,26 +2125,27 @@ mod current_timestamp_tests {
     use super::current_timestamp;
     use irys_types::{Clock, IrysBlockHeader, TestClock, UnixTimestampMs};
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[tokio::test]
-    async fn accelerated_mode_returns_parent_plus_tick_without_sleeping() {
+    async fn accelerated_clock_returns_now_past_parent_without_long_sleep() {
+        // Anchor ahead of the parent so the free-running clock is already past it.
+        let clock = Clock::Test(Arc::new(TestClock::new(1_767_225_600_000, 25)));
         let mut parent = IrysBlockHeader::new_mock_header();
-        parent.timestamp = UnixTimestampMs::from_millis(1_767_225_600_000); // anchor
-        let clock = Clock::Test(Arc::new(TestClock::new(1_767_225_600_000, 1_000)));
+        parent.timestamp = UnixTimestampMs::from_millis(1_767_225_500_000); // 100s before anchor
 
+        let start = std::time::Instant::now();
         let ts = current_timestamp(&parent, &clock).await;
 
-        // Deterministic: parent + block_time (tick).
-        assert_eq!(ts.as_millis(), 1_767_225_600_000 + 1_000);
-        // The virtual clock advanced to (at least) the new block's timestamp.
-        if let Clock::Test(t) = &clock {
-            assert!(t.now_ms().as_millis() >= 1_767_225_600_000 + 1_000);
-        }
+        assert!(ts.to_secs().as_secs() > parent.timestamp.to_secs().as_secs());
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "accelerated path must not do a ~1s real sleep"
+        );
     }
 
     #[tokio::test]
     async fn real_mode_returns_now_when_already_past_parent() {
-        // Parent is far in the past, so Real mode returns immediately (no sleep).
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.timestamp = UnixTimestampMs::from_millis(1_000); // 1970-ish
         let before = UnixTimestampMs::now().unwrap().as_millis();

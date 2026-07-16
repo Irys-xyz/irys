@@ -84,17 +84,19 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
 
-/// Fixed virtual-time anchor for Accelerated mode: 2026-01-01T00:00:00Z, in ms.
-/// Chosen near the real test era so hardfork-by-timestamp gating matches
-/// today's behavior at the low end.
-const ANCHOR_MS: u64 = 1_767_225_600_000;
+/// Accelerated-mode time multiplier (virtual ms per real ms). Sized near the
+/// ~25ms VDF step cadence so virtual block spacing stays close to the ~1s target
+/// block time (limiting difficulty-retargeting noise), while still crossing
+/// second/minute-scale hardfork activation offsets in a fraction of a real second.
+const ACCEL_FACTOR: u64 = 25;
 
 /// Which wall clock a test node runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeMode {
     /// Real OS clock (current behavior; ~1 block/sec).
     Real,
-    /// Accelerated virtual clock: block timestamps = parent + block_time, no sleep.
+    /// Accelerated virtual clock: free-running, anchored at now(), advancing at
+    /// a fixed factor x real time.
     Accelerated,
 }
 
@@ -439,36 +441,27 @@ impl IrysNodeTest<()> {
     }
 
     #[diag_slow(state = "start".to_string())]
-    pub async fn start(mut self) -> IrysNodeTest<IrysNodeCtx> {
+    pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
         // Resolve and install the process time source before the node boots.
         {
-            let consensus = self.cfg.consensus.get_mut();
-            let block_time_secs = consensus.difficulty_adjustment.block_time;
             let (mode, reason) = resolve_time_mode(self.time_mode_override);
             match mode {
                 TimeMode::Real => {
                     info!("⏱ test time mode: REAL [{reason}]");
                 }
                 TimeMode::Accelerated => {
-                    // Anchor genesis to the virtual start (0 == "use now()" sentinel).
-                    if consensus.genesis.timestamp_millis == 0 {
-                        consensus.genesis.timestamp_millis = ANCHOR_MS as u128;
-                    }
-                    let tick_ms = block_time_secs.saturating_mul(1_000);
-                    // Guard the producer's invariant (accelerated block seconds
-                    // strictly increase) at the construction site.
-                    assert!(
-                        tick_ms >= 1_000,
-                        "accelerated block_time must be >= 1s to keep block seconds \
-                         strictly increasing; got {block_time_secs}s"
-                    );
-                    let installed = irys_types::install_clock(irys_types::Clock::Test(
-                        std::sync::Arc::new(irys_types::TestClock::new(ANCHOR_MS, tick_ms)),
-                    ));
+                    let anchor_wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock before UNIX epoch")
+                        .as_millis() as u64;
+                    let installed =
+                        irys_types::install_clock(irys_types::Clock::Test(std::sync::Arc::new(
+                            irys_types::TestClock::new(anchor_wall_ms, ACCEL_FACTOR),
+                        )));
                     info!(
-                        "⏱ test time mode: ACCELERATED tick={tick_ms}ms anchor={ANCHOR_MS} \
+                        "⏱ test time mode: ACCELERATED factor={ACCEL_FACTOR} anchor={anchor_wall_ms} \
                          installed={installed} [{reason}] \
                          (reproduce with IRYS_TEST_TIME=accelerated or .with_time_mode(Accelerated))"
                     );
