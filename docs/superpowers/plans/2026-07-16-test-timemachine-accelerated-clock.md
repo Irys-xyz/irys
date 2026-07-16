@@ -614,6 +614,13 @@ Immediately after `let _enter = span.enter();` (line 402), insert:
                         consensus.genesis.timestamp_millis = ANCHOR_MS as u128;
                     }
                     let tick_ms = block_time_secs.saturating_mul(1_000);
+                    // Guard the producer's invariant (accelerated block seconds
+                    // strictly increase) at the construction site.
+                    assert!(
+                        tick_ms >= 1_000,
+                        "accelerated block_time must be >= 1s to keep block seconds \
+                         strictly increasing; got {block_time_secs}s"
+                    );
                     let installed = irys_types::install_clock(irys_types::Clock::Test(
                         std::sync::Arc::new(irys_types::TestClock::new(ANCHOR_MS, tick_ms)),
                     ));
