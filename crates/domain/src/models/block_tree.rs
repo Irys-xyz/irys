@@ -305,7 +305,7 @@ impl BlockTree {
             let start = restore_cache_floor(
                 block_index.latest_height(),
                 consensus_config.block_tree_depth,
-                consensus_config.block_migration_depth as u64,
+                u64::from(consensus_config.block_migration_depth),
             );
             let end = block_index.num_blocks();
             let start_block_hash = block_index

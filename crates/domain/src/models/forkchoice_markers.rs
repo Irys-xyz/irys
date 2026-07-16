@@ -98,10 +98,12 @@ impl ForkChoiceMarkers {
     /// latest indexed block).
     ///
     /// During startup the block tree is empty, so:
-    /// - `head` resolves to the latest block index entry (the prior canonical head).
-    /// - `migration_block` mirrors that same entry to match the “confirmed” head just before shutdown.
-    /// - `prune_block` is derived from the index at `block_tree_depth` behind the tip so the finalized
-    ///   marker aligns with the state before shutdown.
+    /// - `head` resolves to the latest block index entry — the confirmed/migrated frontier, which
+    ///   sits `migration_depth` below the pre-shutdown canonical head (the head rolls back to it).
+    /// - `migration_block` mirrors that same entry (the “confirmed” head just before shutdown).
+    /// - `prune_block` is `finalized_height(...)` behind that frontier — `block_tree_depth −
+    ///   migration_depth` below the tip, equal to `block_tree_depth` below the pre-shutdown head —
+    ///   so the finalized marker aligns with the state before shutdown.
     pub fn from_index(
         block_index: &block_index::BlockIndex,
         database: &DatabaseProvider,
