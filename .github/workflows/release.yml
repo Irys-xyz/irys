@@ -1,4 +1,5 @@
 name: Release
+run-name: Release - ${{ inputs.release_type }} - ${{ inputs.version }}${{ inputs.dry_run && ' (dry-run)' || '' }}
 
 concurrency:
   group: release
@@ -14,6 +15,10 @@ on:
         description: 'Release type / environment'
         required: true
         type: choice
+        # testnet is the normal first step of a release; mainnet follows once the
+        # testnet tag exists. (workflow_dispatch defaults are static literals — they
+        # can't be derived, which is why version/commit below have no default.)
+        default: testnet
         options:
           - testnet
           - mainnet
@@ -30,6 +35,11 @@ on:
         required: false
         type: boolean
         default: false
+      previous_tag:
+        description: 'Optional changelog range lower bound: a full 40-char commit SHA or an <env>-X.Y.Z tag for this release_type. Overrides the auto-detected previous same-env release. Leave empty for automatic semver detection.'
+        required: false
+        type: string
+        default: ''
       dry_run:
         description: 'Build and validate without tagging or publishing'
         required: false
@@ -114,6 +124,11 @@ jobs:
         with:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Wait for in-progress CI on the release base to finish rather than
+          # failing immediately, so a release kicked off while its base CI is
+          # still running blocks until the result is known (up to 60 min).
+          wait-timeout-seconds: "3600"
+          poll-interval-seconds: "30"
 
       - name: Determine tag name
         id: tag
@@ -251,13 +266,86 @@ jobs:
           image: ${{ steps.image.outputs.name }}
           tag: ${{ env.DOCKER_TAG }}
 
+      # Bound the changelog to (previous same-env release, this release]. The
+      # boundary is the highest <env>-X.Y.Z tag strictly BELOW the version being
+      # released in SEMVER order — not tag-creation order — so a back-port tagged
+      # after a newer release (e.g. testnet-3.1.1 cut after testnet-4.0.0) is
+      # bounded by its own predecessor (testnet-3.1.0), never the newer tag.
+      #
+      # Releases live on diverged sibling deployment branches, so the predecessor
+      # tag is generally NOT an ancestor of the release commit. git-cliff's own
+      # --unreleased boundary detection is ancestry/time-based and would anchor to
+      # the oldest reachable tag here (spanning the entire history); instead we
+      # compute the boundary and hand cliff an explicit <prev>..<commit> range,
+      # whose set-difference is correct regardless of ancestry. First release of an
+      # env (no lower tag) has no lower bound and spans full history.
+      - name: Determine changelog range
+        id: changelog_range
+        env:
+          INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PREVIOUS_TAG: ${{ inputs.previous_tag }}
+          GIT_TAG: ${{ env.GIT_TAG }}
+        run: |
+          # An explicit previous_tag override wins over auto-detection, to
+          # re-anchor the range when tag history is irregular. Restrict it to a
+          # full 40-char commit SHA or an <env>-X.Y.Z tag for THIS release_type:
+          # the value is interpolated into cliff_args below (and thence into the
+          # git-cliff action's arg string), so a form admitting whitespace or
+          # shell metacharacters could smuggle extra arguments. Both accepted
+          # forms are metacharacter-free. Then require that it resolves, so a
+          # typo fails loudly rather than feeding git-cliff a bogus range.
+          #
+          # A tag-form override must additionally be a STRICTLY LOWER semver than
+          # the version being released, mirroring auto-detection (which always
+          # picks a predecessor below GIT_TAG). An equal or forward tag would
+          # yield an inverted/empty prev..commit range and a bogus changelog. SHA
+          # overrides are exempt: an arbitrary commit has no comparable version,
+          # and that is the intended escape hatch for irregular history.
+          if [ -n "$INPUT_PREVIOUS_TAG" ]; then
+            SHA_RE='^[0-9a-f]{40}$'
+            TAG_RE="^${INPUT_RELEASE_TYPE}-[0-9]+\.[0-9]+\.[0-9]+$"
+            if ! [[ "$INPUT_PREVIOUS_TAG" =~ $SHA_RE || "$INPUT_PREVIOUS_TAG" =~ $TAG_RE ]]; then
+              echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' must be a full 40-char commit SHA or a ${INPUT_RELEASE_TYPE}-X.Y.Z tag"
+              exit 1
+            fi
+            if [[ "$INPUT_PREVIOUS_TAG" =~ $TAG_RE ]]; then
+              OVERRIDE_VER="${INPUT_PREVIOUS_TAG#"${INPUT_RELEASE_TYPE}-"}"
+              LOWER=$(printf '%s\n%s\n' "$OVERRIDE_VER" "$INPUT_VERSION" | sort -V | head -n1)
+              if [ "$OVERRIDE_VER" = "$INPUT_VERSION" ] || [ "$LOWER" != "$OVERRIDE_VER" ]; then
+                echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' (${OVERRIDE_VER}) must be a lower version than the release being cut (${INPUT_VERSION})"
+                exit 1
+              fi
+            fi
+            if ! git rev-parse --verify --quiet "${INPUT_PREVIOUS_TAG}^{commit}" >/dev/null; then
+              echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' does not resolve to a commit"
+              exit 1
+            fi
+            echo "Changelog range: ${INPUT_PREVIOUS_TAG}..${GIT_TAG} (previous_tag override)"
+            echo "cliff_args=--tag ${GIT_TAG} ${INPUT_PREVIOUS_TAG}..${INPUT_COMMIT}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PATTERN="^${INPUT_RELEASE_TYPE}-[0-9]+\.[0-9]+\.[0-9]+$"
+          # Insert the not-yet-created release tag into the version-sorted list of
+          # same-env release tags; its predecessor is the entry immediately before
+          # it. `sort -V` gives semver order; grep -B1 pulls the preceding line.
+          SORTED=$( { git tag --list | grep -E "$PATTERN"; echo "$GIT_TAG"; } | sort -V -u )
+          PREV=$(printf '%s\n' "$SORTED" | grep -B1 -xF "$GIT_TAG" | head -n1)
+          [ "$PREV" = "$GIT_TAG" ] && PREV=""
+          if [ -n "$PREV" ]; then
+            echo "Changelog range: ${PREV}..${GIT_TAG} (commit ${INPUT_COMMIT})"
+            echo "cliff_args=--tag ${GIT_TAG} ${PREV}..${INPUT_COMMIT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changelog range: full history (first ${INPUT_RELEASE_TYPE} release)"
+            echo "cliff_args=--tag ${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate changelog
         uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
         with:
           config: .config/cliff.toml
-          args: >-
-            --unreleased
-            --tag ${{ env.GIT_TAG }}
+          args: ${{ steps.changelog_range.outputs.cliff_args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OUTPUT: /tmp/cliff-changelog.md
@@ -270,11 +358,11 @@ jobs:
           # action) does not auto-detect the repo from origin, so omitting GITHUB_REPO
           # disables the fetch. The action still injects a token for its binary download.
           #
-          # Bound the changelog to the previous release of THIS env: restrict the
-          # release-tag pattern to the env's own tags so --unreleased anchors to the
-          # last <env>-X.Y.Z (testnet-3.0.0 spans since testnet-0.2.0, not the newer
-          # mainnet-0.1.3). --ignore-tags only relabels "previous"; --tag-pattern moves
-          # the range. First release of an env (no prior tag) spans the full history.
+          # Restrict recognised version tags to THIS env so cliff never treats a
+          # tag from the other env as a release boundary. The explicit range above
+          # already scopes normal releases; this matters for an env's first release
+          # (full history), where the other env's tags would otherwise split the
+          # output into spurious version sections.
           GIT_CLIFF_TAG_PATTERN: ${{ inputs.release_type == 'mainnet' && '^mainnet-[0-9]+\.[0-9]+\.[0-9]+$' || '^testnet-[0-9]+\.[0-9]+\.[0-9]+$' }}
           # Log each skipped/non-conventional commit (the "N commit(s) skipped due to
           # parse error" warning) without the global -vv flood.

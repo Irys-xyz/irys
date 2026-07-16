@@ -21,6 +21,20 @@ inputs:
   github-token:
     description: "Token with checks:read and statuses:read on this repo."
     required: true
+  wait-timeout-seconds:
+    description: >-
+      Max seconds to wait for still-running CI to finish before evaluating.
+      0 (the default) preserves the original fail-fast behavior: any check
+      still running is an immediate failure. A positive value polls until every
+      check has settled (or the timeout elapses). A commit that concludes with a
+      real failure/cancellation fails immediately regardless of this value —
+      only in-progress checks are waited on.
+    required: false
+    default: "0"
+  poll-interval-seconds:
+    description: "Seconds to sleep between polls while waiting for in-progress CI."
+    required: false
+    default: "30"
 
 runs:
   using: "composite"
@@ -31,6 +45,8 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
         SHA: ${{ inputs.commit }}
+        WAIT_TIMEOUT: ${{ inputs.wait-timeout-seconds }}
+        POLL_INTERVAL: ${{ inputs.poll-interval-seconds }}
       run: |
         set -euo pipefail
         if [ -z "${SHA}" ]; then
@@ -38,63 +54,151 @@ runs:
           exit 1
         fi
 
-        # GitHub Actions jobs surface as "check runs"; external CI / bots surface
-        # as legacy "commit statuses". A fully passing CI result must satisfy both.
-        # filter=latest (the API default) collapses re-runs to the most recent run
-        # per check name, so a red run that was later re-run green is not counted.
-        runs_tsv=$(gh api --paginate \
-          "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-          -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')
+        # Link to GitHub's checks view for this commit so the log has a clickable
+        # jump to the live CI runs being gated on.
+        CHECKS_URL="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/commit/${SHA}/checks"
+        echo "Gating release on CI for ${SHA}"
+        echo "  checks: ${CHECKS_URL}"
 
-        fail=0
-        successes=0
-        total_runs=0
-        if [ -n "${runs_tsv}" ]; then
-          while IFS=$'\t' read -r name status conclusion; do
-            [ -z "${name}" ] && continue
-            total_runs=$((total_runs + 1))
-            if [ "${status}" != "completed" ]; then
-              echo "::error::Check '${name}' has not completed (status=${status}); CI is still running on ${SHA}."
-              fail=1
-              continue
+        # gh has no built-in retry for transient API failures. Under `set -e` a
+        # single network blip / 5xx would otherwise abort the whole gate — and the
+        # poll loop below makes ~120 calls over a 60-min window, so one such blip
+        # anywhere would force a full release re-run. Retry with backoff; only a
+        # persistent failure (all attempts exhausted) fails the step, still closed.
+        gh_api() {
+          local attempt=1 max_attempts=3 out
+          while true; do
+            # Buffer the attempt's output and emit only on success, so a failure
+            # part-way through pagination is discarded rather than concatenated
+            # onto the retry's (re-fetched-from-page-1) output.
+            if out=$(gh api "$@"); then
+              # Re-add the trailing newline `$(...)` strips: gh's `-q @tsv` output is
+              # newline-terminated and the downstream `read` relies on that delimiter.
+              printf '%s\n' "${out}"
+              return 0
             fi
-            case "${conclusion}" in
+            if [ "${attempt}" -ge "${max_attempts}" ]; then
+              return 1
+            fi
+            echo "gh api call failed (attempt ${attempt}/${max_attempts}); retrying in $((attempt * 2))s..." >&2
+            sleep "$((attempt * 2))"
+            attempt=$((attempt + 1))
+          done
+        }
+
+        # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
+        # the poll loop below waits until SECONDS exceeds this deadline.
+        deadline=$((SECONDS + WAIT_TIMEOUT))
+
+        while true; do
+          # GitHub Actions jobs surface as "check runs"; external CI / bots surface
+          # as legacy "commit statuses". A fully passing CI result must satisfy both.
+          # filter=latest (the API default) collapses re-runs to the most recent run
+          # per check name, so a red run that was later re-run green is not counted.
+          runs_tsv=$(gh_api --paginate \
+            "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
+            -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')
+
+          fail=0          # a check reached a real, terminal non-pass conclusion
+          pending=0       # a check is still running (waitable)
+          no_results=0    # no checks/statuses registered yet (also waitable)
+          pending_names=""
+          successes=0
+          total_runs=0
+          if [ -n "${runs_tsv}" ]; then
+            while IFS=$'\t' read -r name status conclusion; do
+              [ -z "${name}" ] && continue
+              total_runs=$((total_runs + 1))
+              if [ "${status}" != "completed" ]; then
+                echo "Check '${name}' is still running (status=${status}) on ${SHA}."
+                pending=$((pending + 1))
+                pending_names="${pending_names:+${pending_names}, }${name}"
+                continue
+              fi
+              case "${conclusion}" in
+                success)
+                  successes=$((successes + 1))
+                  ;;
+                skipped|neutral)
+                  # Non-blocking, mirrors GitHub's required-status-check semantics.
+                  ;;
+                *)
+                  echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}."
+                  fail=1
+                  ;;
+              esac
+            done <<< "${runs_tsv}"
+          fi
+
+          # Combined legacy status: the .state field is aggregated server-side across
+          # every context, so one read is authoritative regardless of context count.
+          # One call returns both fields as a TSV (via gh's embedded jq, so no system
+          # jq dependency); splitting it into two `gh api` calls would risk reading an
+          # inconsistent state/total across a status update mid-poll.
+          IFS=$'\t' read -r status_state status_total < <(
+            gh_api "repos/${REPO}/commits/${SHA}/status" -q '[.state, .total_count] | @tsv'
+          )
+          if [ "${status_total}" -gt 0 ]; then
+            case "${status_state}" in
               success)
                 successes=$((successes + 1))
                 ;;
-              skipped|neutral)
-                # Non-blocking, mirrors GitHub's required-status-check semantics.
+              pending)
+                echo "Combined commit status for ${SHA} is still pending."
+                pending=$((pending + 1))
+                pending_names="${pending_names:+${pending_names}, }combined commit status"
                 ;;
               *)
-                echo "::error::Check '${name}' did not pass (conclusion=${conclusion}) on ${SHA}."
+                echo "::error::Combined commit status for ${SHA} is '${status_state}' (expected success)."
                 fail=1
                 ;;
             esac
-          done <<< "${runs_tsv}"
-        fi
-
-        # Combined legacy status: the .state field is aggregated server-side across
-        # every context, so one read is authoritative regardless of context count.
-        status_state=$(gh api "repos/${REPO}/commits/${SHA}/status" -q '.state')
-        status_total=$(gh api "repos/${REPO}/commits/${SHA}/status" -q '.total_count')
-        if [ "${status_total}" -gt 0 ]; then
-          if [ "${status_state}" = "success" ]; then
-            successes=$((successes + 1))
-          else
-            echo "::error::Combined commit status for ${SHA} is '${status_state}' (expected success)."
-            fail=1
           fi
-        fi
 
-        if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ]; then
-          echo "::error::No CI check runs or commit statuses found for ${SHA}. Cannot prove the release base passed CI. (Emergency hotfixes can bypass with force=true.)"
-          exit 1
-        fi
+          # No checks/statuses observed yet. When waiting is enabled this is likely a
+          # race — the release was dispatched just as the merge-base landed, before CI
+          # registered — so treat it as waitable and let later polls see them appear.
+          # With WAIT_TIMEOUT=0 the deadline is already past, so the pending branch
+          # below still fails fast on the first poll, preserving the original behavior.
+          if [ "${total_runs}" -eq 0 ] && [ "${status_total}" -eq 0 ]; then
+            echo "No CI check runs or commit statuses found yet for ${SHA}."
+            no_results=1
+            pending=$((pending + 1))
+          fi
 
-        if [ "${fail}" -ne 0 ]; then
-          echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
-          exit 1
-        fi
+          # A real failure is terminal — waiting cannot turn it green, so fail fast
+          # even if other checks are still in flight.
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
+            exit 1
+          fi
+
+          # No failures, but something is still settling (in-progress checks, a
+          # pending combined status, or checks not registered yet). Wait and re-poll
+          # until the deadline, then give up. With WAIT_TIMEOUT=0 the deadline is
+          # already past so this is the original fail-fast behavior.
+          if [ "${pending}" -ne 0 ]; then
+            if [ "${no_results}" -ne 0 ]; then
+              waiting_for="CI to register on ${SHA}"
+            else
+              waiting_for="${pending} in-progress CI check(s) on ${SHA} to finish (${pending_names})"
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              if [ "${no_results}" -ne 0 ]; then
+                echo "::error::Timed out after ${WAIT_TIMEOUT}s: no CI check runs or commit statuses ever appeared for ${SHA}. Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+              else
+                echo "::error::Timed out after ${WAIT_TIMEOUT}s waiting for ${waiting_for} (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+              fi
+              exit 1
+            fi
+            echo "Waiting ${POLL_INTERVAL}s for ${waiting_for} (elapsed ${SECONDS}s / timeout ${WAIT_TIMEOUT}s) — ${CHECKS_URL}"
+            sleep "${POLL_INTERVAL}"
+            continue
+          fi
+
+          # Settled with no failures and nothing pending — exit the poll loop.
+          break
+        done
 
         # Every check was skipped/neutral and no green status exists: CI never
         # actually ran (e.g. a #disable-ci gate short-circuit), so there is no
