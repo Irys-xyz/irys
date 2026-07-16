@@ -480,9 +480,20 @@ impl IrysNodeTest<()> {
                 .clone();
             match mode {
                 TimeMode::Real => {
-                    info!("⏱ test time mode: REAL [{reason}]");
+                    info!("Using system time as time source");
                 }
                 TimeMode::Accelerated => {
+                    // The virtual clock is a test-only device. Refuse to install it
+                    // on a named consensus variant (Testnet/Testing/Mainnet/Path),
+                    // which model real/network parameters — only an explicit Custom
+                    // config may run accelerated. Pin such tests with
+                    // `.with_time_mode(TimeMode::Real)`.
+                    assert!(
+                        matches!(self.cfg.consensus, irys_types::ConsensusOptions::Custom(_)),
+                        "accelerated test time requires a Custom consensus config; \
+                         refusing to install the virtual clock on a named consensus \
+                         variant (Testnet/Testing/Mainnet/Path)"
+                    );
                     let anchor_wall_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .expect("system clock before UNIX epoch")
