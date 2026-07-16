@@ -13,6 +13,7 @@ mod invalid_perm_fee_refund;
 mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
+mod mid_epoch_promotability;
 mod poa_cases;
 mod promote_after_submit_expiry;
 mod publish_after_submit_expiry_filtered;
