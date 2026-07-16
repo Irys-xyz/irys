@@ -480,7 +480,7 @@ impl IrysNodeTest<()> {
                 .clone();
             match mode {
                 TimeMode::Real => {
-                    info!("Using system time as time source");
+                    info!("⏱ test time mode: REAL [{reason}]");
                 }
                 TimeMode::Accelerated => {
                     // The virtual clock is a test-only device. Refuse to install it
