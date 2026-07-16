@@ -284,6 +284,7 @@ jobs:
         env:
           INPUT_RELEASE_TYPE: ${{ inputs.release_type }}
           INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VERSION: ${{ inputs.version }}
           INPUT_PREVIOUS_TAG: ${{ inputs.previous_tag }}
           GIT_TAG: ${{ env.GIT_TAG }}
         run: |
@@ -295,12 +296,27 @@ jobs:
           # shell metacharacters could smuggle extra arguments. Both accepted
           # forms are metacharacter-free. Then require that it resolves, so a
           # typo fails loudly rather than feeding git-cliff a bogus range.
+          #
+          # A tag-form override must additionally be a STRICTLY LOWER semver than
+          # the version being released, mirroring auto-detection (which always
+          # picks a predecessor below GIT_TAG). An equal or forward tag would
+          # yield an inverted/empty prev..commit range and a bogus changelog. SHA
+          # overrides are exempt: an arbitrary commit has no comparable version,
+          # and that is the intended escape hatch for irregular history.
           if [ -n "$INPUT_PREVIOUS_TAG" ]; then
             SHA_RE='^[0-9a-f]{40}$'
             TAG_RE="^${INPUT_RELEASE_TYPE}-[0-9]+\.[0-9]+\.[0-9]+$"
             if ! [[ "$INPUT_PREVIOUS_TAG" =~ $SHA_RE || "$INPUT_PREVIOUS_TAG" =~ $TAG_RE ]]; then
               echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' must be a full 40-char commit SHA or a ${INPUT_RELEASE_TYPE}-X.Y.Z tag"
               exit 1
+            fi
+            if [[ "$INPUT_PREVIOUS_TAG" =~ $TAG_RE ]]; then
+              OVERRIDE_VER="${INPUT_PREVIOUS_TAG#"${INPUT_RELEASE_TYPE}-"}"
+              LOWER=$(printf '%s\n%s\n' "$OVERRIDE_VER" "$INPUT_VERSION" | sort -V | head -n1)
+              if [ "$OVERRIDE_VER" = "$INPUT_VERSION" ] || [ "$LOWER" != "$OVERRIDE_VER" ]; then
+                echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' (${OVERRIDE_VER}) must be a lower version than the release being cut (${INPUT_VERSION})"
+                exit 1
+              fi
             fi
             if ! git rev-parse --verify --quiet "${INPUT_PREVIOUS_TAG}^{commit}" >/dev/null; then
               echo "::error::previous_tag override '${INPUT_PREVIOUS_TAG}' does not resolve to a commit"
