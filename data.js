@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784206161823,
+  "lastUpdate": 1784237532830,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10411,6 +10411,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "535130cdf972e411ca8154260a7853da18543b1b",
+          "message": "feat: time machine (#1522)\n\n* docs(test): design for accelerated virtual wall-clock (test time machine)\n\n* docs(test): env mode-pin + no-op advance_time in real mode; precedence rules\n\n* docs(test): implementation plan for accelerated virtual clock\n\n* feat(types): add swappable Clock with virtual TestClock for tests\n\nnow() funnels through a process-global clock, default Real (unchanged in\nproduction); a Test clock lets tests read a virtual wall-clock.\n\n* fix(types): propagate clock underflow error instead of panicking\n\nReal clock now returns Err(SystemTimeError) as before, preserving the\ngraceful-degradation callers relied on.\n\n* docs(test): Task 2 plan uses fallible Clock::now_ms\n\n* feat(actors): derive block timestamp from an injectable clock\n\nIn Accelerated mode the producer sets timestamp = parent + block_time and\nadvances virtual time instead of sleeping to the next real second; Real mode\nkeeps the existing sleep-to-next-second behavior.\n\n* feat(actors): validate timestamp drift against the process clock\n\nFuture-drift check now reads now() from the injectable clock so accelerated\ntests aren't rejected; production still reads the real OS clock.\n\n* docs(test): Task 4 asserts accelerated tick_ms>=1s at install\n\n* feat(chain-tests): time-mode harness (Real/Accelerated) + advance_time\n\nResolve mode by per-test pin > IRYS_TEST_TIME env > default (Real for now);\nin Accelerated mode anchor genesis and install a virtual clock before boot.\n\n* test(chain-tests): prove accelerated time mines blocks sub-realtime\n\n* style(actors): rustfmt the timestamp-overlap info! call\n\nTask 2's current_timestamp rewrite collapsed a multi-line info! that rustfmt\nrequires expanded; restore the formatter-approved layout.\n\n* refactor(test-time): free-running accelerated clock\n\nReplace advance-on-block virtual time with a free-running clock anchored at\nnow() (monotonic elapsed x factor). Virtual time now passes without mining, so\ntests that wait on now() progress, and activations scheduled relative to now()\nare reachable. Block timestamp is now(); factor keeps block spacing near target.\n\n* docs(test): record free-running clock model revision\n\n* test(chain-tests): pin time-coupled tests to Real, default others to random\n\nPin the timestamp-based hardfork suite and 4 multi-node/drift timing tests to\nReal (they encode real-time-relative semantics acceleration can't honor), then\nflip the harness default to a seeded random 50/50 so every other test must pass\nunder both Real and Accelerated time.\n\n* test(chain-tests): resolve accelerated time mode once per process\n\nDecide Real/Accelerated once per test process (not per node) so multi-node\ntests agree and the IRYS_TEST_TIME reproduction contract holds; document the\nnextest process-isolation assumption. Restore the Real-mode timestamp-overlap\nwait log dropped when current_timestamp was unified.\n\n* test(chain-tests): make accelerated share a float probability const\n\nReplace the 50/50 parity draw with ACCEL_PROBABILITY: f64 (roll < p), so the\naccelerated share is tunable in one place (e.g. 0.5 = 50%).\n\n* test(chain-tests): log accelerated block-production rate\n\nEmit blocks/sec from the accelerated-time test so the >1 block/sec speedup is\nobservable, not just asserted.\n\n* fix(test-time): narrow the virtual clock to block timestamp production/validation\n\nUn-funnel UnixTimestamp(Ms)::now() back to the real OS clock; only\ncurrent_timestamp (block production) and timestamp_is_valid (drift) read the\nvirtual clock explicitly. Keeps cache/CachedDataRoots/p2p/data-sync bookkeeping\non real time so accelerated virtual time can't expire real-time-delivered\nartifacts before they arrive (fixes flaky *_no_mining ingress-proof waits).\n\n* test(chain-tests): pin block_stream SSE-equality test to Real\n\nAccelerated block production races the SSE consumer, intermittently dropping an\nexpected 'finalized' frame (measured ~1/5 accel vs 0/5 real). Pin it Real; SSE\nstreaming semantics are validated there.\n\n* chore: remove docs\n\n* test(test-time): verify drift uses global clock; safe conversions in TestClock::now_ms\n\n- timestamp_is_valid_uses_clock_now_for_drift now installs a controlled virtual\n  clock and proves the drift bound reads global_clock() (not the OS clock),\n  closing the previously-indirect coverage; parent-order/future checks preserved.\n- TestClock::now_ms uses a saturating u128->u64 conversion for elapsed ms and\n  u128::from for the widening, removing truncating runtime 'as' casts.\n\n* test(chain-tests): refuse virtual clock on non-Custom consensus configs\n\nHard-error when accelerated mode would install the virtual clock on a named\nconsensus variant (Testnet/Testing/Mainnet/Path) — those model real/network\nparameters and must run on the real clock. Only an explicit Custom config may\nrun accelerated.\n\n* test(test-time): clarify time-mode log messages",
+          "timestamp": "2026-07-16T22:12:43+01:00",
+          "tree_id": "a3d9b5e91af3161437bed2ada98be39c7578d9a4",
+          "url": "https://github.com/Irys-xyz/irys/commit/535130cdf972e411ca8154260a7853da18543b1b"
+        },
+        "date": 1784237530504,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012548,
+            "range": "± 0.000454",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126075,
+            "range": "± 0.007976",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.563682,
+            "range": "± 0.023126",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 11.142904,
+            "range": "± 0.431706",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07974,
+            "range": "± 0.001553",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.284656,
+            "range": "± 15.750874",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1015.245696,
+            "range": "± 31.280795",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117355,
+            "range": "± 0.001325",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1213.505767,
+            "range": "± 99.648806",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1578.848934,
+            "range": "± 24.287871",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.10352,
+            "range": "± 0.048548",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 215.536825,
+            "range": "± 1.784318",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.987515,
+            "range": "± 2.378394",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
