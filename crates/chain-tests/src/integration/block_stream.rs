@@ -3,7 +3,7 @@
 //! These drive a real node and exercise the producer through the shared `BlockStreamHandle`
 //! (`observed`, `finalized`, `reorged`) and the canonical read endpoints over HTTP.
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, TimeMode};
 use alloy_core::primitives::ruint::aliases::U256;
 use alloy_genesis::GenesisAccount;
 use eyre::OptionExt as _;
@@ -527,7 +527,9 @@ async fn internal_events_endpoint_pages_and_regimes() -> eyre::Result<()> {
 /// end-to-end by `reorged_emitted_for_fork_switch_without_duplicate_observed`.
 #[test_log::test(tokio::test)]
 async fn internal_events_equal_sse_over_same_range() -> eyre::Result<()> {
-    let mut node = IrysNodeTest::default_async();
+    // pin Real: accelerated block production races the SSE consumer, so an
+    // expected "finalized" frame over the polled range can be missed.
+    let mut node = IrysNodeTest::default_async().with_time_mode(TimeMode::Real);
     node.cfg.consensus.get_mut().block_migration_depth = 2;
     let node = node.start().await;
     let address = format!(
