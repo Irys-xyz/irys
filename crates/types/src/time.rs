@@ -7,6 +7,8 @@ use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr as _;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 /// Zero-cost newtype wrapper for Unix timestamps in seconds
@@ -64,11 +66,7 @@ impl UnixTimestamp {
     /// Returns an error if the system time is before the Unix epoch.
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        Ok(Self(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs(),
-        ))
+        Ok(global_clock().now_ms().to_secs())
     }
 
     /// Creates a UnixTimestamp from seconds since Unix epoch
@@ -177,11 +175,7 @@ impl UnixTimestampMs {
     /// Creates a UnixTimestampMs from the current system time
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        Ok(Self(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_millis(),
-        ))
+        Ok(global_clock().now_ms())
     }
 
     /// Creates a UnixTimestampMs from milliseconds since Unix epoch
@@ -330,6 +324,81 @@ impl Decodable for UnixTimestampMs {
     }
 }
 
+/// Virtual clock for tests: an atomic millisecond-since-epoch counter plus a
+/// fixed per-block tick. ms-since-epoch fits in u64 (overflows ~year 584e6).
+#[derive(Debug)]
+pub struct TestClock {
+    now_ms: AtomicU64,
+    tick_ms: u64,
+}
+
+impl TestClock {
+    /// `anchor_ms`: initial virtual time. `tick_ms`: per-block advance (= block_time).
+    pub fn new(anchor_ms: u64, tick_ms: u64) -> Self {
+        Self {
+            now_ms: AtomicU64::new(anchor_ms),
+            tick_ms,
+        }
+    }
+
+    pub fn now_ms(&self) -> UnixTimestampMs {
+        UnixTimestampMs::from_millis(self.now_ms.load(Ordering::Relaxed) as u128)
+    }
+
+    pub fn tick_ms(&self) -> u64 {
+        self.tick_ms
+    }
+
+    /// Advance virtual time by `millis`.
+    pub fn advance_millis(&self, millis: u64) {
+        self.now_ms.fetch_add(millis, Ordering::Relaxed);
+    }
+
+    /// Monotonically raise virtual now to at least `ts` (never moves backward).
+    pub fn set_at_least(&self, ts: UnixTimestampMs) {
+        self.now_ms
+            .fetch_max(ts.as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+/// Process-wide time source. `Real` reads the OS clock (production default);
+/// `Test` reads a virtual clock. Cloning `Test` shares the same atomic counter.
+#[derive(Clone, Debug)]
+pub enum Clock {
+    Real,
+    Test(Arc<TestClock>),
+}
+
+impl Clock {
+    pub fn now_ms(&self) -> UnixTimestampMs {
+        match self {
+            Self::Real => UnixTimestampMs::from_millis(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("system clock before UNIX epoch")
+                    .as_millis(),
+            ),
+            Self::Test(t) => t.now_ms(),
+        }
+    }
+}
+
+static GLOBAL_CLOCK: OnceLock<Clock> = OnceLock::new();
+static REAL_CLOCK: Clock = Clock::Real;
+
+/// The installed process clock, or `Real` if none was installed. Always Real in
+/// production because nothing outside test harness code calls `install_clock`.
+pub fn global_clock() -> &'static Clock {
+    GLOBAL_CLOCK.get().unwrap_or(&REAL_CLOCK)
+}
+
+/// Install the process clock. Test-only. Idempotent: returns `false` (and keeps
+/// the existing clock) if one is already installed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn install_clock(clock: Clock) -> bool {
+    GLOBAL_CLOCK.set(clock).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +445,64 @@ mod tests {
                 assert_eq!(result.unwrap(), UnixTimestamp::from_secs(u64::MAX));
             }
         }
+    }
+
+    #[test]
+    fn test_testclock_advance_and_set_at_least() {
+        let c = TestClock::new(1_000, 1_000);
+        assert_eq!(c.now_ms().as_millis(), 1_000);
+        assert_eq!(c.tick_ms(), 1_000);
+
+        c.advance_millis(500);
+        assert_eq!(c.now_ms().as_millis(), 1_500);
+
+        // set_at_least is monotonic: a lower target does nothing.
+        c.set_at_least(UnixTimestampMs::from_millis(1_200));
+        assert_eq!(c.now_ms().as_millis(), 1_500);
+
+        // a higher target moves it forward.
+        c.set_at_least(UnixTimestampMs::from_millis(2_000));
+        assert_eq!(c.now_ms().as_millis(), 2_000);
+    }
+
+    #[test]
+    fn test_clock_enum_now_ms() {
+        // Real is close to SystemTime.
+        let real = Clock::Real.now_ms().as_millis();
+        let sys = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert!(sys.abs_diff(real) < 5_000);
+
+        // Test reads its virtual value.
+        let t = Clock::Test(std::sync::Arc::new(TestClock::new(42_000, 1_000)));
+        assert_eq!(t.now_ms().as_millis(), 42_000);
+    }
+
+    #[test]
+    fn test_global_clock_defaults_to_real_then_installs() {
+        // NOTE: touches the process-global clock. nextest runs each test in its
+        // own process, so this is isolated. Keep this the ONLY test in this
+        // crate that installs a global clock.
+        // Before install, now() tracks the OS clock.
+        let before = UnixTimestampMs::now().unwrap().as_millis();
+        let sys = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert!(sys.abs_diff(before) < 5_000);
+
+        // After install, now() is virtual.
+        assert!(install_clock(Clock::Test(std::sync::Arc::new(
+            TestClock::new(7_000_000, 1_000,)
+        ))));
+        assert_eq!(UnixTimestampMs::now().unwrap().as_millis(), 7_000_000);
+        assert_eq!(UnixTimestamp::now().unwrap().as_secs(), 7_000);
+
+        // A second install is a no-op.
+        assert!(!install_clock(Clock::Real));
+        assert_eq!(UnixTimestampMs::now().unwrap().as_millis(), 7_000_000);
     }
 }
 
