@@ -895,6 +895,198 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
         recycled.is_subset(&blocked),
         "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
     );
+    // blocked ⊇ recycled is the safety-critical (double-pay) direction, cross-checked
+    // here between two independently-computed functions. The complementary
+    // "surplus is only previously-expired slots" direction needs a prior-epoch-expired
+    // slot, which this fixture never produces — it is exercised by
+    // heavy_cascade_expiry_blocked_set_surplus_is_previously_expired (below) and by the
+    // data_ledger proptest invariant (d) / get_all_expired_slot_indexes_includes_already_expired_slots.
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Non-vacuous companion to `heavy_cascade_expiry_fee_model_matches_actual_recycle`:
+/// drives the ThirtyDay ledger through TWO expiry epochs so the inclusive
+/// non-promotability set (`get_all_expired_term_slot_indexes`) STRICTLY exceeds
+/// the set that newly recycles at the second expiry, and the surplus is exactly
+/// the slot that already recycled at the first expiry.
+///
+/// Scenario (nbe=2, thirty_day_epoch_length=2 -> window=4 blocks, C=10 chunks):
+/// 1. Epoch E_a: write 12 chunks -> slot A(=0) fully written (chunks 0-9), slot
+///    B(=1) partial frontier (10-11); extra empty slots so slot 0 is non-last.
+///    Both get last_height=E_a.
+/// 2. Epoch E1 = E_a + window: slot A (fully written, aged) recycles. It is now
+///    `is_expired` and drops OUT of every later newly-recycling set.
+/// 3. Epoch E_b (> E_a): write more ThirtyDay data so slot B fills fully (chunks
+///    10-19) and spills into slot C(=2) (the new frontier / trailing headroom).
+///    The touch advances slots B and C to E_b; slot A is frozen (frontier long
+///    past it) so it stays expired.
+/// 4. Epoch E2 = E_b + window: slot B recycles.
+///
+/// At E2 the inclusive blocked set = {A, B} but the newly-recycled set = {B}, so
+/// the surplus {A} is non-empty AND is a previously-expired slot — the direction
+/// the sibling test's fixture cannot reach.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+    let window = thirty_day_epoch_length * num_blocks_in_epoch; // 4
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length,
+            thirty_day_epoch_length,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let ctx = test_node.start_and_wait_for_packing("test", 30).await;
+
+    let next_epoch_boundary = |h: u64| -> u64 {
+        if h.is_multiple_of(num_blocks_in_epoch) {
+            h
+        } else {
+            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
+        }
+    };
+
+    async fn post_thirty_day(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &irys_types::irys::IrysSigner,
+        tag: u8,
+        bytes: usize,
+    ) -> eyre::Result<()> {
+        let mut data = vec![9_u8; bytes];
+        data[0] = tag;
+        let price = ctx
+            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
+            .await?;
+        let tx = signer.create_transaction_with_fees(
+            data,
+            ctx.get_anchor().await?,
+            DataLedger::ThirtyDay,
+            BoundedFee::new(price.term_fee),
+            None,
+        )?;
+        let tx = signer.sign_transaction(tx)?;
+        ctx.ingest_data_tx(tx.header.clone()).await?;
+        ctx.wait_for_mempool(tx.header.id, 30).await?;
+        Ok(())
+    }
+
+    while ctx.get_canonical_chain_height().await <= activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch E_a: 4 txs × 3 chunks = 12 chunks -> slot A(0) full, slot B(1) partial.
+    for i in 0_u8..4 {
+        post_thirty_day(&ctx, &signer, i, 96).await?;
+    }
+    let e_a = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < e_a {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch E1 = E_a + window: the fully-written aged slot A recycles.
+    let e1 = e_a + window;
+    while ctx.get_canonical_chain_height().await < e1 {
+        ctx.mine_block().await?;
+    }
+    {
+        let e1_block = ctx.get_block_by_height(e1).await?;
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&e1_block.block_hash)
+            .expect("epoch snapshot at E1");
+        assert!(
+            snap.ledgers.get_slots(DataLedger::ThirtyDay)[0].is_expired,
+            "slot A(0) must have recycled at E1={e1}"
+        );
+    }
+
+    // Epoch E_b (> E_a): fill slot B fully and spill into slot C(2) so B is a
+    // fully-written non-last slot, and its expiry clock is refreshed to E_b.
+    // 4 txs × 3 chunks brings total 12 -> 24: slot B(10-19) full, slot C(20-23)
+    // partial frontier / trailing headroom.
+    for i in 0_u8..4 {
+        post_thirty_day(&ctx, &signer, 100 + i, 96).await?;
+    }
+    let e_b = next_epoch_boundary(ctx.mine_block().await?.height);
+    while ctx.get_canonical_chain_height().await < e_b {
+        ctx.mine_block().await?;
+    }
+    assert!(e_b > e_a, "E_b({e_b}) must be after E_a({e_a})");
+
+    // Epoch E2 = E_b + window: slot B recycles while slot A is already expired.
+    let e2 = e_b + window;
+    while ctx.get_canonical_chain_height().await < e2 {
+        ctx.mine_block().await?;
+    }
+
+    // ThirtyDay cumulative total_chunks at E2 (the value fed to the expiry calc).
+    let epoch_block = ctx.get_block_by_height(e2).await?;
+    let e_total = epoch_block
+        .data_ledgers
+        .iter()
+        .find(|dl| dl.ledger_id == DataLedger::ThirtyDay as u32)
+        .map(|dl| dl.total_chunks)
+        .unwrap_or(0);
+
+    let parent_block = ctx.get_block_by_height(e2 - 1).await?;
+    let parent_snap = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        tree.get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot")
+    };
+
+    // Newly-recycled set at E2 (post-touch epoch snapshot).
+    let recycled: std::collections::BTreeSet<usize> = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&epoch_block.block_hash)
+            .expect("epoch snapshot at E2");
+        snap.expired_partition_infos
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.ledger_id == DataLedger::ThirtyDay)
+            .map(|p| p.slot_index)
+            .collect()
+    };
+
+    // Inclusive non-promotability set from the parent snapshot.
+    let blocked: std::collections::BTreeSet<usize> = parent_snap
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e2, true, e_total)
+        .into_iter()
+        .collect();
+
+    assert!(
+        recycled.is_subset(&blocked),
+        "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
+    );
+    // Non-vacuity: the blocked set STRICTLY exceeds the newly-recycled set — this
+    // is the surplus the sibling fixture never produces.
+    assert!(
+        blocked.len() > recycled.len(),
+        "blocked set must strictly exceed the recycle set (surplus non-empty): \
+         recycled={recycled:?} blocked={blocked:?}"
+    );
+    // Every surplus slot must be a previously-expired slot.
     let parent_slots = parent_snap.ledgers.get_slots(DataLedger::ThirtyDay);
     for extra in blocked.difference(&recycled) {
         assert!(
@@ -902,6 +1094,12 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
             "blocked slot {extra} not in the recycle set must be a previously-expired slot"
         );
     }
+    // Slot A(0) specifically is the surplus: expired at E1, not newly recycling at E2.
+    assert!(
+        blocked.contains(&0) && !recycled.contains(&0),
+        "slot A(0) must be in the blocked surplus (expired at E1, not recycling at E2): \
+         recycled={recycled:?} blocked={blocked:?}"
+    );
 
     ctx.stop().await;
     Ok(())
