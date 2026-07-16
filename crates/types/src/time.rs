@@ -368,12 +368,15 @@ impl TestClock {
     }
 
     pub fn now_ms(&self) -> UnixTimestampMs {
-        let elapsed = self.anchor_instant.elapsed().as_millis() as u64;
+        // Saturating u128 -> u64: elapsed ms only exceeds u64 after ~584M years,
+        // and saturating keeps time monotonically increasing rather than wrapping.
+        let elapsed_ms =
+            u64::try_from(self.anchor_instant.elapsed().as_millis()).unwrap_or(u64::MAX);
         let virtual_ms = self
             .anchor_wall_ms
-            .saturating_add(elapsed.saturating_mul(self.factor))
+            .saturating_add(elapsed_ms.saturating_mul(self.factor))
             .saturating_add(self.offset_ms.load(Ordering::Relaxed));
-        UnixTimestampMs::from_millis(virtual_ms as u128)
+        UnixTimestampMs::from_millis(u128::from(virtual_ms))
     }
 
     pub fn factor(&self) -> u64 {

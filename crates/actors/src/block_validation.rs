@@ -8336,22 +8336,41 @@ mod tests {
 
     #[test]
     fn timestamp_is_valid_uses_clock_now_for_drift() {
-        // now() here comes from the global clock funnel. In an un-installed
-        // process it is the real OS clock. A block within drift of "now" passes;
-        // one far in the future fails.
-        let now_ms = irys_types::UnixTimestampMs::now().unwrap().as_millis();
+        // Installs the process-global clock to prove `timestamp_is_valid` reads
+        // the drift bound from `global_clock()` (not the real OS clock). nextest
+        // runs each test in its own process, so this install is isolated — keep
+        // this the ONLY clock-installing test in this crate, and do not run it
+        // under plain `cargo test` alongside other clock-reading tests.
+        //
+        // We anchor virtual "now" ~11.6 days ahead of real time (static offset,
+        // factor 1): a block at virtual-now is far in the *real* future, so it
+        // can only pass the drift check if that check uses the virtual clock.
         let drift = 15_000_u128;
+        let real_now = irys_types::UnixTimestampMs::now().unwrap().as_millis();
+        let anchor_ms = u64::try_from(real_now).expect("real now fits u64") + 1_000_000_000;
+        assert!(
+            irys_types::install_clock(irys_types::Clock::Test(std::sync::Arc::new(
+                irys_types::TestClock::new(anchor_ms, 1),
+            ))),
+            "no clock should have been installed before this test"
+        );
 
-        // within drift, strictly after parent -> ok
+        let now_ms = irys_types::global_clock().now_ms().unwrap().as_millis();
+        // The drift check's "now" is the installed virtual clock, far ahead of real.
+        assert!(now_ms >= u128::from(anchor_ms));
+        assert!(now_ms > real_now + drift);
+
+        // Within drift of virtual-now, strictly after parent -> ok (would be
+        // rejected as far-future if the check used the real clock).
         assert!(timestamp_is_valid(now_ms, now_ms.saturating_sub(1_000), drift).is_ok());
 
-        // far in the future -> rejected
+        // Far beyond even virtual-now -> rejected as too far in the future.
         assert!(matches!(
             timestamp_is_valid(now_ms + 10 * 60 * 1000, now_ms.saturating_sub(1_000), drift),
             Err(PreValidationError::TimestampTooFarInFuture { .. })
         ));
 
-        // not strictly after parent -> rejected
+        // Not strictly after parent -> rejected regardless of the clock.
         assert!(matches!(
             timestamp_is_valid(now_ms, now_ms, drift),
             Err(PreValidationError::TimestampOlderThanParent { .. })
