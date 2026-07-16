@@ -57,7 +57,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::ControlFlow,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use thiserror::Error;
 use tracing::{Instrument as _, debug, error, info, warn};
@@ -2122,8 +2122,10 @@ pub fn timestamp_is_valid(
         return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    // Read "now" from the process clock so accelerated tests, whose block
+    // timestamps race ahead of real time, are not rejected as "too far in the
+    // future". In production this is the real OS clock (unchanged behavior).
+    let now_ms = irys_types::UnixTimestampMs::now()
         .map_err(|e| PreValidationError::SystemTimeError(e.to_string()))?
         .as_millis();
 
@@ -7267,6 +7269,7 @@ mod tests {
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment,
     };
     use std::sync::{Arc, RwLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tracing::{debug, info};
 
     /// Build a minimal `BlockTreeReadGuard` for tests that exercise the
@@ -8325,6 +8328,30 @@ mod tests {
             }
             other => panic!("expected TimestampTooFarInFuture, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn timestamp_is_valid_uses_clock_now_for_drift() {
+        // now() here comes from the global clock funnel. In an un-installed
+        // process it is the real OS clock. A block within drift of "now" passes;
+        // one far in the future fails.
+        let now_ms = irys_types::UnixTimestampMs::now().unwrap().as_millis();
+        let drift = 15_000_u128;
+
+        // within drift, strictly after parent -> ok
+        assert!(timestamp_is_valid(now_ms, now_ms.saturating_sub(1_000), drift).is_ok());
+
+        // far in the future -> rejected
+        assert!(matches!(
+            timestamp_is_valid(now_ms + 10 * 60 * 1000, now_ms.saturating_sub(1_000), drift),
+            Err(PreValidationError::TimestampTooFarInFuture { .. })
+        ));
+
+        // not strictly after parent -> rejected
+        assert!(matches!(
+            timestamp_is_valid(now_ms, now_ms, drift),
+            Err(PreValidationError::TimestampOlderThanParent { .. })
+        ));
     }
 
     #[test]
