@@ -48,9 +48,22 @@ change.** The entire change stays inside Irys code.
 2. **Speed target (first cut):** ~40 blocks/sec — keep the VDF throttle. Removing
    the timestamp sleep alone yields the ~40× speedup. Dropping the throttle is a
    documented follow-up.
-3. **Clock model:** deterministic auto-advance. Each block's timestamp =
-   `parent + block_time` (no wall-clock read, no sleep). Keeps difficulty
-   adjustment stable (actual == target) and is fully deterministic.
+3. **Clock model (REVISED 2026-07-16 — free-running):** the accelerated clock
+   anchors at real `now()` at install and advances on its own:
+   `now_ms() = anchor_wall + (monotonic_elapsed × factor) + manual_offset`.
+   Elapsed is measured with a monotonic `Instant` (WSL2-safe per the
+   `monotonic-time` skill); the anchor and output are wall-clock (legitimate:
+   block timestamps / hardfork activation). Block timestamp simply *is* `now()`
+   (via the existing `current_timestamp` wait-until-past-parent loop, which in
+   accelerated mode rarely sleeps). `advance_time` adds to `manual_offset`.
+   - **Why revised:** the original deterministic advance-on-block model froze
+     virtual time whenever a test waited on `now()` *without* mining (e.g. the
+     `wait_for_wallclock` hardfork tests), and a fixed past anchor never reached
+     activations scheduled relative to real `now()`. Free-running fixes both.
+   - **Tradeoff accepted:** block spacing = `real_inter_block × factor` (not a
+     fixed `block_time`), so `factor` is tuned (~25–40, matching the ~25 ms VDF
+     cadence) to keep spacing near the target block time and limit difficulty
+     retargeting noise. `factor` is a harness constant, tunable later.
 4. **Default-on, randomly, per run:** the testing harness randomly selects Real or
    Accelerated mode per test process (nextest = one process per test → per-test,
    per-run). This forces every test to pass under **both** regimes, so no test can
