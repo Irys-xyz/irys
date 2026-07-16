@@ -315,7 +315,7 @@ fn snapshot_canonical_range(
             .0
             .iter()
             .map(|entry| (entry.height(), entry.block_hash()))
-            .eq(signature.into_iter());
+            .eq(signature);
         if unchanged {
             return Ok(snapshot);
         }
