@@ -820,7 +820,17 @@ impl ConsensusConfig {
                     )
                     .unwrap(),
                 }),
-                cascade: None,
+                cascade: Some(Cascade {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-08-03T12:00:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    one_year_epoch_length: 365,
+                    thirty_day_epoch_length: 30,
+                    annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+                }),
             },
         }
     }
