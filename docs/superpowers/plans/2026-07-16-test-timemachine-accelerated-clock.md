@@ -334,7 +334,9 @@ pub async fn current_timestamp(
     // CLOCK_REALTIME against the Windows host and can lurch by hundreds of ms or
     // seconds), so a one-shot computed wait is unsafe.
     loop {
-        let now_ms = clock.now_ms();
+        // Clock::now_ms() is fallible (Real arm can Err on pre-epoch clock);
+        // the original code unwrapped UnixTimestampMs::now() here too.
+        let now_ms = clock.now_ms().expect("system clock before UNIX epoch");
         if now_ms.to_secs() > prev_secs {
             return now_ms;
         }
