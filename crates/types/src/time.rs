@@ -64,9 +64,19 @@ impl UnixTimestamp {
     /// # Errors
     ///
     /// Returns an error if the system time is before the Unix epoch.
+    ///
+    /// Note: this reads the real OS clock and is NOT routed through the test
+    /// [`Clock`]. The accelerated test clock is read explicitly only where block
+    /// timestamps are produced/validated (see `block_producer::current_timestamp`
+    /// and `block_validation::timestamp_is_valid`), so virtual time never
+    /// outruns real-time bookkeeping (cache TTLs, p2p, data-sync).
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        Ok(global_clock().now_ms()?.to_secs())
+        Ok(Self(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs(),
+        ))
     }
 
     /// Creates a UnixTimestamp from seconds since Unix epoch
@@ -172,10 +182,17 @@ impl Compact for UnixTimestamp {
 pub struct UnixTimestampMs(u128);
 
 impl UnixTimestampMs {
-    /// Creates a UnixTimestampMs from the current system time
+    /// Creates a UnixTimestampMs from the current system time.
+    ///
+    /// Reads the real OS clock (NOT the test [`Clock`] funnel — see
+    /// [`UnixTimestamp::now`]).
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
-        global_clock().now_ms()
+        Ok(Self(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis(),
+        ))
     }
 
     /// Creates a UnixTimestampMs from milliseconds since Unix epoch
@@ -502,24 +519,29 @@ mod tests {
         // NOTE: touches the process-global clock. nextest runs each test in its
         // own process, so this is isolated. Keep this the ONLY test in this
         // crate that installs a global clock.
-        // Before install, now() tracks the OS clock.
-        let before = UnixTimestampMs::now().unwrap().as_millis();
-        let sys = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        assert!(sys.abs_diff(before) < 5_000);
+        let sys = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
 
-        // After install, now() is virtual.
+        // now() is NOT funneled through the clock — it always reads the OS clock.
+        assert!(sys().abs_diff(UnixTimestampMs::now().unwrap().as_millis()) < 5_000);
+        // global_clock() defaults to Real (~OS time).
+        assert!(sys().abs_diff(global_clock().now_ms().unwrap().as_millis()) < 5_000);
+
+        // After install, global_clock() returns virtual time...
         assert!(install_clock(Clock::Test(std::sync::Arc::new(
             TestClock::new(7_000_000, 1,)
         ))));
-        assert!(UnixTimestampMs::now().unwrap().as_millis() >= 7_000_000);
-        assert!(UnixTimestamp::now().unwrap().as_secs() >= 7_000);
+        assert!(global_clock().now_ms().unwrap().as_millis() >= 7_000_000);
+        // ...while now() still reads the OS clock, unaffected by the install.
+        assert!(sys().abs_diff(UnixTimestampMs::now().unwrap().as_millis()) < 5_000);
 
         // A second install is a no-op.
         assert!(!install_clock(Clock::Real));
-        assert!(UnixTimestampMs::now().unwrap().as_millis() >= 7_000_000);
+        assert!(global_clock().now_ms().unwrap().as_millis() >= 7_000_000);
     }
 }
 

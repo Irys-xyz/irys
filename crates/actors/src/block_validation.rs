@@ -2122,10 +2122,14 @@ pub fn timestamp_is_valid(
         return Err(PreValidationError::TimestampOlderThanParent { current, parent });
     }
 
-    // Read "now" from the process clock so accelerated tests, whose block
-    // timestamps race ahead of real time, are not rejected as "too far in the
-    // future". In production this is the real OS clock (unchanged behavior).
-    let now_ms = irys_types::UnixTimestampMs::now()
+    // Read "now" from the process clock (explicitly, not via UnixTimestampMs::now,
+    // which is intentionally un-funneled). Block timestamps are produced from this
+    // same clock, so under accelerated tests they race ahead together and are not
+    // rejected as "too far in the future"; other now() consumers stay on real time
+    // so virtual time can't outrun real-time p2p/data-sync work. In production the
+    // process clock is the real OS clock (unchanged behavior).
+    let now_ms = irys_types::global_clock()
+        .now_ms()
         .map_err(|e| PreValidationError::SystemTimeError(e.to_string()))?
         .as_millis();
 
