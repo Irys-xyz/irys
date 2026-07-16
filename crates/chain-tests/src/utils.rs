@@ -91,6 +91,11 @@ use tracing::{debug, error, error_span, info, instrument, warn};
 /// second/minute-scale hardfork activation offsets in a fraction of a real second.
 const ACCEL_FACTOR: u64 = 25;
 
+/// Probability in `[0.0, 1.0]` that an unpinned test runs in Accelerated mode
+/// under the random default (e.g. `0.5` = 50% accelerated, 50% real). `0.0`
+/// disables acceleration by default; `1.0` always accelerates.
+const ACCEL_PROBABILITY: f64 = 0.5;
+
 /// The time mode is decided once per process and shared by every node in the
 /// test. This relies on nextest's process-per-test isolation (one test = one
 /// process = one mode). Under plain `cargo test` all tests in a binary share a
@@ -130,16 +135,20 @@ pub fn resolve_time_mode(override_mode: Option<TimeMode>) -> (TimeMode, String) 
             }
         }
     }
-    // Harness default: seeded 50/50 draw, logged for reproducibility.
-    let seed: u64 = rand::random();
-    let mode = if seed.is_multiple_of(2) {
-        TimeMode::Real
-    } else {
+    // Harness default: random draw against ACCEL_PROBABILITY, logged (pin via
+    // IRYS_TEST_TIME to reproduce a specific mode).
+    let roll: f64 = rand::random();
+    let mode = if roll < ACCEL_PROBABILITY {
         TimeMode::Accelerated
+    } else {
+        TimeMode::Real
     };
     (
         mode,
-        format!("random default 50/50 [seed={seed:#x}] (pin with IRYS_TEST_TIME=real|accelerated)"),
+        format!(
+            "random default (accel_p={ACCEL_PROBABILITY}) [roll={roll:.4}] \
+             (pin with IRYS_TEST_TIME=real|accelerated)"
+        ),
     )
 }
 
@@ -4540,6 +4549,6 @@ mod time_mode_tests {
         }
         let (mode, reason) = resolve_time_mode(None);
         assert!(matches!(mode, TimeMode::Real | TimeMode::Accelerated));
-        assert!(reason.contains("seed="));
+        assert!(reason.contains("accel_p=") && reason.contains("roll="));
     }
 }
