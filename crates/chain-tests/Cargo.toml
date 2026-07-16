@@ -38,6 +38,7 @@ reth.workspace = true
 reth-db.workspace = true
 reth-ethereum-primitives.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
+rand.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -64,7 +65,6 @@ k256 = { version = "0.13", default-features = false, features = [
     "ecdsa",
     "serde",
 ] }
-rand.workspace = true
 reth-tracing.workspace = true
 rstest.workspace = true
 rust_decimal.workspace = true

@@ -76,6 +76,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::{
     future::Future,
     time::{Duration, Instant},
@@ -83,6 +84,73 @@ use std::{
 use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument, warn};
+
+/// Accelerated-mode time multiplier (virtual ms per real ms). Sized near the
+/// ~25ms VDF step cadence so virtual block spacing stays close to the ~1s target
+/// block time (limiting difficulty-retargeting noise), while still crossing
+/// second/minute-scale hardfork activation offsets in a fraction of a real second.
+const ACCEL_FACTOR: u64 = 25;
+
+/// Probability in `[0.0, 1.0]` that an unpinned test runs in Accelerated mode
+/// under the random default (e.g. `0.5` = 50% accelerated, 50% real). `0.0`
+/// disables acceleration by default; `1.0` always accelerates.
+const ACCEL_PROBABILITY: f64 = 0.9;
+
+/// The time mode is decided once per process and shared by every node in the
+/// test. This relies on nextest's process-per-test isolation (one test = one
+/// process = one mode). Under plain `cargo test` all tests in a binary share a
+/// process, so the first test to start a node fixes the mode for the whole
+/// binary — run these tests under nextest (`cargo nextest run`), the sanctioned
+/// runner, not `cargo test`.
+static PROCESS_TIME_MODE: OnceLock<(TimeMode, String)> = OnceLock::new();
+
+/// Which wall clock a test node runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeMode {
+    /// Real OS clock (current behavior; ~1 block/sec).
+    Real,
+    /// Accelerated virtual clock: free-running, anchored at now(), advancing at
+    /// a fixed factor x real time.
+    Accelerated,
+}
+
+/// Resolve the effective time mode by precedence:
+/// per-test `override_mode` > `IRYS_TEST_TIME` env > harness default.
+/// Returns the mode and a human-readable reason for logging.
+pub fn resolve_time_mode(override_mode: Option<TimeMode>) -> (TimeMode, String) {
+    if let Some(m) = override_mode {
+        return (m, "per-test pin (.with_time_mode)".to_string());
+    }
+    if let Ok(v) = std::env::var("IRYS_TEST_TIME") {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "real" => return (TimeMode::Real, "IRYS_TEST_TIME=real".to_string()),
+            "accelerated" | "accel" => {
+                return (
+                    TimeMode::Accelerated,
+                    "IRYS_TEST_TIME=accelerated".to_string(),
+                );
+            }
+            other => {
+                warn!("ignoring unknown IRYS_TEST_TIME value {other:?}; using default");
+            }
+        }
+    }
+    // Harness default: random draw against ACCEL_PROBABILITY, logged (pin via
+    // IRYS_TEST_TIME to reproduce a specific mode).
+    let roll: f64 = rand::random();
+    let mode = if roll < ACCEL_PROBABILITY {
+        TimeMode::Accelerated
+    } else {
+        TimeMode::Real
+    };
+    (
+        mode,
+        format!(
+            "random default (accel_p={ACCEL_PROBABILITY}) [roll={roll:.4}] \
+             (pin with IRYS_TEST_TIME=real|accelerated)"
+        ),
+    )
+}
 
 /// Insert a synthetic canonical block header at `height` carrying the given
 /// per-ledger `tx_ids`, and repoint `MigratedBlockHashes[height]` at it. Returns
@@ -333,6 +401,8 @@ pub struct IrysNodeTest<T = ()> {
     /// Dedicated multi-thread runtime for test isolation.
     /// Wrapped in RuntimeGuard to safely drop from async contexts.
     runtime: RuntimeGuard,
+    /// Per-test time-mode override; `None` means use `resolve_time_mode`'s default.
+    time_mode_override: Option<TimeMode>,
 }
 
 /// Wrapper that safely drops a tokio Runtime from any context (including async).
@@ -393,6 +463,7 @@ impl IrysNodeTest<()> {
             restart_gossip_ports,
             restart_reth_ports,
             runtime: RuntimeGuard::none(),
+            time_mode_override: None,
         }
     }
 
@@ -400,6 +471,45 @@ impl IrysNodeTest<()> {
     pub async fn start(self) -> IrysNodeTest<IrysNodeCtx> {
         let span = self.get_span();
         let _enter = span.enter();
+        // Resolve and install the process time source before the node boots.
+        {
+            // Decide once per process so all nodes in a multi-node test agree
+            // (see PROCESS_TIME_MODE). The first node's pin (if any) wins.
+            let (mode, reason) = PROCESS_TIME_MODE
+                .get_or_init(|| resolve_time_mode(self.time_mode_override))
+                .clone();
+            match mode {
+                TimeMode::Real => {
+                    info!("⏱ test time mode: REAL [{reason}]");
+                }
+                TimeMode::Accelerated => {
+                    // The virtual clock is a test-only device. Refuse to install it
+                    // on a named consensus variant (Testnet/Testing/Mainnet/Path),
+                    // which model real/network parameters — only an explicit Custom
+                    // config may run accelerated. Pin such tests with
+                    // `.with_time_mode(TimeMode::Real)`.
+                    assert!(
+                        matches!(self.cfg.consensus, irys_types::ConsensusOptions::Custom(_)),
+                        "accelerated test time requires a Custom consensus config; \
+                         refusing to install the virtual clock on a named consensus \
+                         variant (Testnet/Testing/Mainnet/Path)"
+                    );
+                    let anchor_wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock before UNIX epoch")
+                        .as_millis() as u64;
+                    let installed =
+                        irys_types::install_clock(irys_types::Clock::Test(std::sync::Arc::new(
+                            irys_types::TestClock::new(anchor_wall_ms, ACCEL_FACTOR),
+                        )));
+                    info!(
+                        "⏱ test time mode: ACCELERATED factor={ACCEL_FACTOR} anchor={anchor_wall_ms} \
+                         installed={installed} [{reason}] \
+                         (reproduce with IRYS_TEST_TIME=accelerated or .with_time_mode(Accelerated))"
+                    );
+                }
+            }
+        }
         let cfg_for_start = self.cfg.clone();
         let (cfg, http_listener, gossip_listener) =
             match IrysNode::bind_listeners(cfg_for_start.clone()) {
@@ -452,6 +562,7 @@ impl IrysNodeTest<()> {
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
             runtime: RuntimeGuard(Some(runtime)),
+            time_mode_override: self.time_mode_override,
         }
     }
 
@@ -464,6 +575,15 @@ impl IrysNodeTest<()> {
 
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
+        self
+    }
+
+    /// Pin this node's wall-clock mode, opting out of the random default.
+    /// Use `Accelerated` for tests that jump time far forward via `advance_time`.
+    /// The pin applies process-wide, decided by whichever node starts first
+    /// (see `PROCESS_TIME_MODE`); this assumes nextest's process-per-test isolation.
+    pub fn with_time_mode(mut self, mode: TimeMode) -> Self {
+        self.time_mode_override = Some(mode);
         self
     }
 
@@ -486,6 +606,17 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    /// Jump virtual time forward. In Accelerated mode this advances the virtual
+    /// clock instantly. In Real mode it is a no-op: real wall-clock time advances
+    /// on its own as the producer sleeps between blocks. For pure time-passage
+    /// (no intervening blocks) in Real mode, sleep instead; for hour/day-scale
+    /// jumps, pin Accelerated with `.with_time_mode(TimeMode::Accelerated)`.
+    pub fn advance_time(&self, by: std::time::Duration) {
+        if let irys_types::Clock::Test(t) = irys_types::global_clock() {
+            t.advance_millis(by.as_millis() as u64);
+        }
+    }
+
     fn ensure_vdf_running_for_sync(&self, context: &str) {
         if !self.node_ctx.vdf_controller.is_enabled() {
             self.node_ctx.start_vdf();
@@ -2618,6 +2749,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             restart_gossip_ports: self.restart_gossip_ports,
             restart_reth_ports: self.restart_reth_ports,
             runtime: RuntimeGuard::none(),
+            time_mode_override: self.time_mode_override,
         }
     }
 
@@ -4408,4 +4540,26 @@ pub fn build_sealed_block(
         commitment_transactions: txs.all_system_txs().cloned().collect(),
     };
     Ok(Arc::new(SealedBlock::new(header, block_body)?))
+}
+
+#[cfg(test)]
+mod time_mode_tests {
+    use super::{TimeMode, resolve_time_mode};
+
+    #[test]
+    fn override_wins_over_default() {
+        let (mode, reason) = resolve_time_mode(Some(TimeMode::Accelerated));
+        assert_eq!(mode, TimeMode::Accelerated);
+        assert!(reason.contains("per-test"));
+    }
+
+    #[test]
+    fn default_is_random_and_logged() {
+        if std::env::var("IRYS_TEST_TIME").is_ok() {
+            return; // env pin overrides the random default
+        }
+        let (mode, reason) = resolve_time_mode(None);
+        assert!(matches!(mode, TimeMode::Real | TimeMode::Accelerated));
+        assert!(reason.contains("accel_p=") && reason.contains("roll="));
+    }
 }

@@ -4,10 +4,11 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{DataLedger, LedgerChunkOffset, NodeConfig};
 use tracing::info;
 
-use crate::utils::IrysNodeTest;
+use crate::utils::{IrysNodeTest, TimeMode};
 
 #[tokio::test]
 async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
+    // pin Real: multi-node data-sync timing; pin Real.
     // SAFETY: test code; env var set before other threads spawn.
     unsafe { std::env::set_var("RUST_LOG", "debug") };
     initialize_tracing();
@@ -31,6 +32,7 @@ async fn heavy_test_overlapping_data_sizes() -> eyre::Result<()> {
 
     // Start the node
     let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .with_time_mode(TimeMode::Real)
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let genesis_signer = genesis_node.node_ctx.config.irys_signer();

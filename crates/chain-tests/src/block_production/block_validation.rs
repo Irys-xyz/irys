@@ -1,4 +1,4 @@
-use crate::utils::{IrysNodeTest, solution_context};
+use crate::utils::{IrysNodeTest, TimeMode, solution_context};
 use eyre::Result;
 use irys_actors::block_tree_service::BlockTreeServiceMessage;
 use irys_actors::block_validation::{PreValidationError, prevalidate_block};
@@ -201,7 +201,9 @@ async fn test_future_block_rejection() -> Result<()> {
 
     // Setup node
     let genesis_config = NodeConfig::testing();
+    // pin Real: drift rejection is now()-relative; pin Real so "future" is meaningful.
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .with_time_mode(TimeMode::Real)
         .start()
         .await;
     genesis_node.gossip_disable();

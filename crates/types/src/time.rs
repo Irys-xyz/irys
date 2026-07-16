@@ -7,7 +7,9 @@ use reth_db::table::{Decode, Encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr as _;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Instant, SystemTime};
 
 /// Zero-cost newtype wrapper for Unix timestamps in seconds
 ///
@@ -62,6 +64,12 @@ impl UnixTimestamp {
     /// # Errors
     ///
     /// Returns an error if the system time is before the Unix epoch.
+    ///
+    /// Note: this reads the real OS clock and is NOT routed through the test
+    /// [`Clock`]. The accelerated test clock is read explicitly only where block
+    /// timestamps are produced/validated (see `block_producer::current_timestamp`
+    /// and `block_validation::timestamp_is_valid`), so virtual time never
+    /// outruns real-time bookkeeping (cache TTLs, p2p, data-sync).
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
         Ok(Self(
@@ -174,7 +182,10 @@ impl Compact for UnixTimestamp {
 pub struct UnixTimestampMs(u128);
 
 impl UnixTimestampMs {
-    /// Creates a UnixTimestampMs from the current system time
+    /// Creates a UnixTimestampMs from the current system time.
+    ///
+    /// Reads the real OS clock (NOT the test [`Clock`] funnel — see
+    /// [`UnixTimestamp::now`]).
     #[inline]
     pub fn now() -> Result<Self, std::time::SystemTimeError> {
         Ok(Self(
@@ -330,6 +341,101 @@ impl Decodable for UnixTimestampMs {
     }
 }
 
+/// Free-running virtual clock for tests. `now_ms()` advances on its own:
+/// `anchor_wall_ms + monotonic_elapsed * factor + manual_offset`.
+///
+/// Elapsed is measured with a monotonic `Instant` (not `SystemTime`) so it is
+/// immune to WSL2 CLOCK_REALTIME skew; the anchor and result are wall-clock,
+/// which is the correct domain for block timestamps / hardfork activation.
+#[derive(Debug)]
+pub struct TestClock {
+    anchor_wall_ms: u64,
+    anchor_instant: Instant,
+    factor: u64,
+    offset_ms: AtomicU64,
+}
+
+impl TestClock {
+    /// `anchor_wall_ms`: virtual wall time at install (typically real `now()`).
+    /// `factor`: acceleration multiplier (virtual ms per real ms); clamped to >= 1.
+    pub fn new(anchor_wall_ms: u64, factor: u64) -> Self {
+        Self {
+            anchor_wall_ms,
+            anchor_instant: Instant::now(),
+            factor: factor.max(1),
+            offset_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn now_ms(&self) -> UnixTimestampMs {
+        // Saturating u128 -> u64: elapsed ms only exceeds u64 after ~584M years,
+        // and saturating keeps time monotonically increasing rather than wrapping.
+        let elapsed_ms =
+            u64::try_from(self.anchor_instant.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let virtual_ms = self
+            .anchor_wall_ms
+            .saturating_add(elapsed_ms.saturating_mul(self.factor))
+            .saturating_add(self.offset_ms.load(Ordering::Relaxed));
+        UnixTimestampMs::from_millis(u128::from(virtual_ms))
+    }
+
+    pub fn factor(&self) -> u64 {
+        self.factor
+    }
+
+    /// Jump virtual time forward by `millis` (used by the harness `advance_time`).
+    pub fn advance_millis(&self, millis: u64) {
+        self.offset_ms.fetch_add(millis, Ordering::Relaxed);
+    }
+}
+
+/// Process-wide time source. `Real` reads the OS clock (production default);
+/// `Test` reads a virtual clock. Cloning `Test` shares the same atomic counter.
+#[derive(Clone, Debug)]
+pub enum Clock {
+    Real,
+    Test(Arc<TestClock>),
+}
+
+impl Clock {
+    pub fn now_ms(&self) -> Result<UnixTimestampMs, std::time::SystemTimeError> {
+        match self {
+            Self::Real => Ok(UnixTimestampMs::from_millis(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)?
+                    .as_millis(),
+            )),
+            Self::Test(t) => Ok(t.now_ms()),
+        }
+    }
+
+    /// Real sleep duration needed for `virtual_ms` of virtual time to elapse.
+    /// Real clock: 1:1. Test clock: divided by the acceleration factor (min 1ms
+    /// so callers never busy-spin).
+    pub fn real_duration_for_virtual_ms(&self, virtual_ms: u64) -> std::time::Duration {
+        match self {
+            Self::Real => std::time::Duration::from_millis(virtual_ms),
+            Self::Test(t) => std::time::Duration::from_millis((virtual_ms / t.factor()).max(1)),
+        }
+    }
+}
+
+static GLOBAL_CLOCK: OnceLock<Clock> = OnceLock::new();
+static REAL_CLOCK: Clock = Clock::Real;
+
+/// The installed process clock, or `Real` if none was installed. Always Real in
+/// production because nothing outside test harness code calls `install_clock`.
+pub fn global_clock() -> &'static Clock {
+    GLOBAL_CLOCK.get().unwrap_or(&REAL_CLOCK)
+}
+
+/// Install the process clock. Test-only. Idempotent: returns `false` (and keeps
+/// the existing clock) if one is already installed.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn install_clock(clock: Clock) -> bool {
+    GLOBAL_CLOCK.set(clock).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +482,69 @@ mod tests {
                 assert_eq!(result.unwrap(), UnixTimestamp::from_secs(u64::MAX));
             }
         }
+    }
+
+    #[test]
+    fn test_testclock_free_running_advances() {
+        let c = TestClock::new(1_000_000, 1_000);
+        let a = c.now_ms().as_millis();
+        assert!(a >= 1_000_000, "now must be >= anchor");
+        assert_eq!(c.factor(), 1_000);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let b = c.now_ms().as_millis();
+        assert!(b > a, "free-running clock must advance on its own");
+
+        c.advance_millis(10_000);
+        assert!(
+            c.now_ms().as_millis() >= b + 10_000,
+            "manual advance must apply on top of free-running time"
+        );
+    }
+
+    #[test]
+    fn test_clock_enum_now_ms() {
+        // Real is close to SystemTime.
+        let real = Clock::Real.now_ms().unwrap().as_millis();
+        let sys = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert!(sys.abs_diff(real) < 5_000);
+
+        // Test reads its virtual value (factor 1 so it tracks ~anchor + elapsed).
+        let t = Clock::Test(std::sync::Arc::new(TestClock::new(42_000, 1)));
+        assert!(t.now_ms().unwrap().as_millis() >= 42_000);
+    }
+
+    #[test]
+    fn test_global_clock_defaults_to_real_then_installs() {
+        // NOTE: touches the process-global clock. nextest runs each test in its
+        // own process, so this is isolated. Keep this the ONLY test in this
+        // crate that installs a global clock.
+        let sys = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
+
+        // now() is NOT funneled through the clock — it always reads the OS clock.
+        assert!(sys().abs_diff(UnixTimestampMs::now().unwrap().as_millis()) < 5_000);
+        // global_clock() defaults to Real (~OS time).
+        assert!(sys().abs_diff(global_clock().now_ms().unwrap().as_millis()) < 5_000);
+
+        // After install, global_clock() returns virtual time...
+        assert!(install_clock(Clock::Test(std::sync::Arc::new(
+            TestClock::new(7_000_000, 1,)
+        ))));
+        assert!(global_clock().now_ms().unwrap().as_millis() >= 7_000_000);
+        // ...while now() still reads the OS clock, unaffected by the install.
+        assert!(sys().abs_diff(UnixTimestampMs::now().unwrap().as_millis()) < 5_000);
+
+        // A second install is a no-op.
+        assert!(!install_clock(Clock::Real));
+        assert!(global_clock().now_ms().unwrap().as_millis() >= 7_000_000);
     }
 }
 
