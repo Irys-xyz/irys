@@ -29,6 +29,16 @@ inputs:
       'false' when minting a new release tag.
     required: false
     default: "false"
+  allow-non-tip:
+    description: >-
+      If 'true', permit a commit that is behind the tip of the deployment branch
+      (emit a warning instead of failing). Default 'true' preserves the ad-hoc
+      build behavior of the devnet/docker callers, which legitimately target
+      arbitrary commits on the branch. The release workflow passes 'false' so a
+      stale/non-tip SHA — which would silently drop the later commits on the
+      branch — is rejected unless an operator explicitly opts in.
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -40,6 +50,7 @@ runs:
         COMMIT: ${{ inputs.commit }}
         VERSION: ${{ inputs.version }}
         REQUIRE_RELEASE_TAG: ${{ inputs.require-release-tag }}
+        ALLOW_NON_TIP: ${{ inputs.allow-non-tip }}
       run: |
         if ! git cat-file -e "${COMMIT}^{commit}" 2>/dev/null; then
           echo "::error::Commit ${COMMIT} does not exist"
@@ -89,6 +100,24 @@ runs:
             exit 1
           fi
           echo "Commit ${COMMIT} found on $EXPECTED_BRANCH"
+
+          # Releasing a commit that is not the tip of the deployment branch silently
+          # drops the later commits on that branch (see the 4.0.2 revertme case).
+          # By default this is a hard error; allow-non-tip=true downgrades it to a
+          # warning for the deliberate "cut from behind HEAD" case. This is a
+          # provenance guarantee, independent of the release workflow's force/dry_run
+          # gates — so a non-tip release must opt in explicitly, even under force.
+          BRANCH_HEAD=$(git rev-parse "refs/remotes/$EXPECTED_BRANCH")
+          COMMIT_FULL=$(git rev-parse "${COMMIT}^{commit}")
+          if [ "$COMMIT_FULL" != "$BRANCH_HEAD" ]; then
+            BEHIND=$(git rev-list --count "${COMMIT}..refs/remotes/$EXPECTED_BRANCH")
+            if [ "$ALLOW_NON_TIP" = "true" ]; then
+              echo "::warning::Commit ${COMMIT} is not the tip of $EXPECTED_BRANCH (HEAD is ${BRANCH_HEAD}); ${BEHIND} later commit(s) on the branch will NOT be included in this release. Proceeding because allow-non-tip is set."
+            else
+              echo "::error::Commit ${COMMIT} is not the tip of $EXPECTED_BRANCH (HEAD is ${BRANCH_HEAD}); ${BEHIND} commit(s) on the branch after it would NOT be included. Re-dispatch from the branch tip, or set the workflow's non-tip toggle if excluding them is intentional."
+              exit 1
+            fi
+          fi
         fi
 
         if [[ "$ENVIRONMENT" != "devnet" ]]; then

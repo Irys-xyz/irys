@@ -35,6 +35,16 @@ on:
         required: false
         type: boolean
         default: false
+      gate_ci_on_trunk:
+        description: 'CI gate target. ON (default): require green CI on the release/<major>.x trunk merge-base — the shared upstream code being shipped. OFF: require green CI on the release commit itself — use when the deployment branch is expected to be green in its own right.'
+        required: false
+        type: boolean
+        default: true
+      allow_non_tip_commit:
+        description: 'Allow releasing a commit that is behind the tip of release/<env>/<major>.x. Default OFF: a non-tip commit is rejected, since it silently drops the later commits on the branch. Turn ON only when excluding those commits is intentional.'
+        required: false
+        type: boolean
+        default: false
       previous_tag:
         description: 'Optional changelog range lower bound: a full 40-char commit SHA or an <env>-X.Y.Z tag for this release_type. Overrides the auto-detected previous same-env release. Leave empty for automatic semver detection.'
         required: false
@@ -90,35 +100,48 @@ jobs:
           environment: ${{ inputs.release_type }}
           commit: ${{ inputs.commit }}
           version: ${{ inputs.version }}
+          allow-non-tip: ${{ inputs.allow_non_tip_commit }}
 
-      # Defense-in-depth CI gate. The deployment branch only adds a forward-merge
-      # of release/<major>.x plus env-specific patches on top of it; the
-      # substantive released code is the merge-base on release/<major>.x. Require
-      # that commit's CI to be fully green before releasing. Scoped to real
-      # releases: force=true (emergency hotfixes) and dry_run=true (which may run
-      # before release/<major>.x even exists — see RELEASE_PLAYBOOK.md dry-run
-      # section) both bypass it.
-      - name: Resolve release/<major>.x merge-base
+      # Defense-in-depth CI gate. Which commit we gate on depends on
+      # gate_ci_on_trunk:
+      #   ON  (default): the deployment branch only adds a forward-merge of
+      #     release/<major>.x plus env-specific patches on top of it; the
+      #     substantive released code is the merge-base on release/<major>.x, so we
+      #     gate that trunk commit — which is expected to be green even though the
+      #     deployment branch's own CI may be red from the env patches.
+      #   OFF: gate the release commit directly. Use when the deployment branch is
+      #     expected to pass CI in its own right, so the env-specific patches above
+      #     the trunk merge-base are CI-verified too rather than trusted implicitly.
+      # Scoped to real releases: force=true (emergency hotfixes) and dry_run=true
+      # (which may run before release/<major>.x even exists — see RELEASE_PLAYBOOK.md
+      # dry-run section) both bypass it.
+      - name: Resolve CI-gate commit
         id: base
         if: ${{ !inputs.force && !inputs.dry_run }}
         env:
           INPUT_COMMIT: ${{ inputs.commit }}
           INPUT_VERSION: ${{ inputs.version }}
+          GATE_ON_TRUNK: ${{ inputs.gate_ci_on_trunk }}
         run: |
-          MAJOR="${INPUT_VERSION%%.*}"
-          RELEASE_BRANCH="origin/release/${MAJOR}.x"
-          if ! git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
-            echo "::error::Release branch $RELEASE_BRANCH does not exist; cannot CI-gate the release base."
-            exit 1
+          if [ "$GATE_ON_TRUNK" = "true" ]; then
+            MAJOR="${INPUT_VERSION%%.*}"
+            RELEASE_BRANCH="origin/release/${MAJOR}.x"
+            if ! git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
+              echo "::error::Release branch $RELEASE_BRANCH does not exist; cannot CI-gate the release base. (Set gate_ci_on_trunk=false to gate the release commit directly.)"
+              exit 1
+            fi
+            if ! MERGE_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH"); then
+              echo "::error::No common ancestor between ${INPUT_COMMIT} and $RELEASE_BRANCH"
+              exit 1
+            fi
+            echo "CI gate target: trunk merge-base of ${INPUT_COMMIT} and $RELEASE_BRANCH: $MERGE_BASE"
+            echo "sha=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+          else
+            echo "CI gate target: release commit directly (gate_ci_on_trunk=false): ${INPUT_COMMIT}"
+            echo "sha=${INPUT_COMMIT}" >> "$GITHUB_OUTPUT"
           fi
-          if ! MERGE_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH"); then
-            echo "::error::No common ancestor between ${INPUT_COMMIT} and $RELEASE_BRANCH"
-            exit 1
-          fi
-          echo "Release base (merge-base of ${INPUT_COMMIT} and $RELEASE_BRANCH): $MERGE_BASE"
-          echo "sha=$MERGE_BASE" >> "$GITHUB_OUTPUT"
 
-      - name: Require green CI on release base
+      - name: Require green CI on gate target
         if: ${{ !inputs.force && !inputs.dry_run }}
         uses: ./.github/actions/require-green-ci
         with:
