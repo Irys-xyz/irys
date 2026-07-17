@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       force:
-        description: 'Skip testnet-tag validation and release-base CI gate (emergency hotfixes only)'
+        description: 'Skip testnet-tag validation and the CI gate (emergency hotfixes only)'
         required: false
         type: boolean
         default: false
@@ -62,7 +62,7 @@ jobs:
     runs-on: [self-hosted, misc-runner]
     permissions:
       contents: read
-      # Read check runs and commit statuses to CI-gate the release base below.
+      # Read check runs and commit statuses to CI-gate the gate target below.
       checks: read
       statuses: read
     steps:
@@ -127,7 +127,7 @@ jobs:
             MAJOR="${INPUT_VERSION%%.*}"
             RELEASE_BRANCH="origin/release/${MAJOR}.x"
             if ! git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
-              echo "::error::Release branch $RELEASE_BRANCH does not exist; cannot CI-gate the release base. (Set gate_ci_on_trunk=false to gate the release commit directly.)"
+              echo "::error::Release branch $RELEASE_BRANCH does not exist; cannot CI-gate the trunk merge-base. (Set gate_ci_on_trunk=false to gate the release commit directly.)"
               exit 1
             fi
             if ! MERGE_BASE=$(git merge-base "${INPUT_COMMIT}" "$RELEASE_BRANCH"); then
@@ -147,9 +147,9 @@ jobs:
         with:
           commit: ${{ steps.base.outputs.sha }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Wait for in-progress CI on the release base to finish rather than
-          # failing immediately, so a release kicked off while its base CI is
-          # still running blocks until the result is known (up to 60 min).
+          # Wait for in-progress CI on the gate target to finish rather than
+          # failing immediately, so a release kicked off while its gate-target CI
+          # is still running blocks until the result is known (up to 60 min).
           wait-timeout-seconds: "3600"
           poll-interval-seconds: "30"
 

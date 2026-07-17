@@ -103,10 +103,13 @@ runs:
 
           # Releasing a commit that is not the tip of the deployment branch silently
           # drops the later commits on that branch (see the 4.0.2 revertme case).
-          # By default this is a hard error; allow-non-tip=true downgrades it to a
-          # warning for the deliberate "cut from behind HEAD" case. This is a
-          # provenance guarantee, independent of the release workflow's force/dry_run
-          # gates — so a non-tip release must opt in explicitly, even under force.
+          # allow-non-tip defaults to true, so by default the action warns and
+          # continues — the devnet/docker callers legitimately build non-tip commits.
+          # release.yml passes allow-non-tip=false to make this a hard error, so a
+          # non-tip release there must opt back in via its allow_non_tip_commit
+          # toggle. This is a provenance check, independent of the release workflow's
+          # force/dry_run gates — so a non-tip release must opt in explicitly, even
+          # under force.
           BRANCH_HEAD=$(git rev-parse "refs/remotes/$EXPECTED_BRANCH")
           COMMIT_FULL=$(git rev-parse "${COMMIT}^{commit}")
           if [ "$COMMIT_FULL" != "$BRANCH_HEAD" ]; then
