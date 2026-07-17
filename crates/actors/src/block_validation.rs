@@ -1574,21 +1574,31 @@ fn publish_ingress_proof_count_is_valid(
     let Some(proofs) = &publish_ledger.proofs else {
         return Ok(());
     };
-    let expected = publish_tx_count * number_of_ingress_proofs_total as usize;
-    if proofs.len() != expected {
-        return Err(PreValidationError::PublishLedgerProofCountMismatch {
-            proof_count: proofs.len(),
-            tx_count: publish_tx_count,
-        });
+    let proof_count = proofs.len();
+    let mismatch = || PreValidationError::PublishLedgerProofCountMismatch {
+        proof_count,
+        tx_count: publish_tx_count,
+    };
+    // Convert N to usize once and multiply with checked arithmetic. Overflow is
+    // unreachable for a valid block (tx count and N are bounded), so fail closed
+    // as a mismatch rather than relying on an `as` cast that could wrap.
+    let Ok(n) = usize::try_from(number_of_ingress_proofs_total) else {
+        return Err(mismatch());
+    };
+    let Some(expected) = publish_tx_count.checked_mul(n) else {
+        return Err(mismatch());
+    };
+    if proof_count != expected {
+        return Err(mismatch());
     }
     // Pin the peer-supplied `required_proof_count` to N. The per-tx signature
     // check in `prevalidate_block` slices proofs via `get_ingress_proofs`, which
     // trusts this field; an understated value would leave later proofs unverified
     // in prevalidation even though the aggregate length matches.
     let required_proof_count = publish_ledger.required_proof_count.map_or(0, usize::from);
-    if required_proof_count != number_of_ingress_proofs_total as usize {
+    if required_proof_count != n {
         return Err(PreValidationError::IngressProofCountMismatch {
-            expected: number_of_ingress_proofs_total as usize,
+            expected: n,
             actual: required_proof_count,
         });
     }

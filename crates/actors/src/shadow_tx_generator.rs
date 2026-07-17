@@ -471,8 +471,22 @@ impl<'a> ShadowTxGenerator<'a> {
             // consensus-invalid block, not a node fault. A raw slice would
             // panic on out-of-bounds input, letting one crafted block crash
             // every honest validator; classify as `Structural` instead.
-            let start_index = index * number_of_ingress_proofs_total as usize;
-            let end_index = start_index + number_of_ingress_proofs_total as usize;
+            // Compute the slice bounds with checked arithmetic. Overflow is
+            // unreachable for a valid block (index and N are bounded), so classify
+            // it as Structural rather than letting an `as` cast wrap.
+            let (start_index, end_index) = usize::try_from(number_of_ingress_proofs_total)
+                .ok()
+                .and_then(|n| {
+                    let start = index.checked_mul(n)?;
+                    let end = start.checked_add(n)?;
+                    Some((start, end))
+                })
+                .ok_or_else(|| {
+                    ShadowTxGenError::Structural(format!(
+                        "publish ledger tx {} ingress-proof slice offset overflowed for N={}",
+                        tx.id, number_of_ingress_proofs_total,
+                    ))
+                })?;
             let ingress_proofs = proofs.get(start_index..end_index).ok_or_else(|| {
                 ShadowTxGenError::Structural(format!(
                     "publish ledger tx {} expects {} ingress proofs at offset {}, but the \
