@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784239327786,
+  "lastUpdate": 1784293725629,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10627,6 +10627,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000118,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "955b9d596da68cba8cc7dd602014ff73ac62a2d1",
+          "message": "feat(release): enforce branch-tip commit + toggleable CI gate target (#1525)\n\n* feat(release): enforce branch-tip commit + toggleable CI gate target\n\nTwo release-workflow safeguards, both prompted by the 4.0.2 release cutting\nfrom behind the deployment branch tip and silently dropping later commits:\n\n- verify-commit-provenance now hard-fails when the release commit is not the\n  tip of release/<env>/<major>.x, reporting how many commits would be dropped.\n  Gated by a new allow-non-tip input (default true to preserve devnet/docker\n  ad-hoc builds); release.yml exposes an allow_non_tip_commit dispatch toggle\n  defaulting off, so a stale/non-tip SHA is rejected unless opted in.\n\n- New gate_ci_on_trunk dispatch toggle (default on = current behavior) selects\n  the CI-gate target: the release/<major>.x trunk merge-base, or the release\n  commit directly when the deployment branch is expected to be green itself.\n\nPlaybook updated with both toggles.\n\n* docs(release): fix non-tip default comment and 'gate target' wording\n\n- verify-commit-provenance: the non-tip comment said the action defaults to\n  a hard error, but allow-non-tip defaults to true (warn+continue); clarify\n  that release.yml passes false to make it a hard error.\n- release.yml: rename lingering 'release base' references to 'gate target'\n  (and 'trunk merge-base') now that the CI-gate target is toggle-dependent.\n\n* feat(release): re-verify branch-tip provenance before publish\n\nThe validate job checks provenance at dispatch, but the release job runs\nbehind the environment approval gate plus a multi-minute Docker build. If the\ndeployment branch advances during that window, the release would silently\npublish a behind-tip commit (the 4.0.2 class of bug). Re-run the read-only\nverify-commit-provenance check as the first publish-phase step, before any\ntag/image push, threading allow-non-tip so a deliberate non-tip release still\nonly warns.",
+          "timestamp": "2026-07-17T13:52:13+01:00",
+          "tree_id": "5a5c049cdea88f98690637056067502724782733",
+          "url": "https://github.com/Irys-xyz/irys/commit/955b9d596da68cba8cc7dd602014ff73ac62a2d1"
+        },
+        "date": 1784293724401,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015293,
+            "range": "± 0.000239",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153765,
+            "range": "± 0.008736",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.564674,
+            "range": "± 0.037275",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 9.824995,
+            "range": "± 1.032952",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07872,
+            "range": "± 0.000596",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 778.049586,
+            "range": "± 18.663012",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1048.49208,
+            "range": "± 44.564046",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12085,
+            "range": "± 0.003178",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1241.553909,
+            "range": "± 81.201701",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1553.568578,
+            "range": "± 10.466504",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033808,
+            "range": "± 0.001917",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.184456,
+            "range": "± 1.280241",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.533997,
+            "range": "± 1.638525",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000118,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
