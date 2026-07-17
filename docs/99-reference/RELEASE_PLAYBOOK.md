@@ -97,9 +97,9 @@ Or use the GitHub UI: **Actions → Release → Run workflow**.
 
 The workflow will:
 
-1. Verify the commit is on `release/testnet/<major>.x`.
+1. Verify the commit is on `release/testnet/<major>.x`, **and is the tip of that branch** — releasing a non-tip commit silently drops the later commits on the branch and is a hard error unless you dispatch with `allow_non_tip_commit=true`.
 2. Verify `crates/chain/Cargo.toml` version equals `1.2.3`.
-3. Verify the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside) had a fully passing CI run. Skipped with `force=true` or `dry_run=true`.
+3. Verify the CI gate target had a fully passing CI run. By default this is the commit's `release/1.x` merge-base (the upstream code being shipped, env-patches aside); dispatch with `gate_ci_on_trunk=false` to instead gate the release commit itself (use when the deployment branch is expected to be green in its own right). Skipped entirely with `force=true` or `dry_run=true`.
 4. Build `ghcr.io/<owner>/irys-testnet:1.2.3`.
 5. Push git tag `testnet-1.2.3`, push the Docker image, move the `testnet-latest` git tag.
 6. Auto-publish a GitHub **prerelease** with the auto-generated changelog body.
@@ -292,6 +292,8 @@ After publishing, deploy `irys-mainnet:1.2.3` to mainnet.
 | Critical mainnet hotfix without testnet? | Dispatch with `force=true`. See [`RELEASE_PROCESS.md` § Hotfixes](./RELEASE_PROCESS.md#hotfixes). |
 | Wrong changelog scope on mainnet? | Edit the draft before publishing — nothing assumes the auto-generated text is final. |
 | Need to roll back? | Dispatch `docker-retag.yml`. See [`RELEASE_PROCESS.md` § Rollback](./RELEASE_PROCESS.md#rollback). |
+| Intentionally releasing a commit behind the branch tip? | Dispatch with `allow_non_tip_commit=true`. Otherwise the release is rejected — a non-tip commit drops the later commits on `release/<env>/<major>.x` (this is what caused the 4.0.2 `revertme` commit to be excluded). |
+| Deployment branch itself passes CI (env patches don't break it)? | Dispatch with `gate_ci_on_trunk=false` to gate CI on the release commit directly instead of the `release/<major>.x` trunk merge-base — this way the env-specific patches get CI-verified too rather than trusted implicitly. |
 | Want to test the workflow without publishing? | Dispatch with `dry_run=true`. Validates and builds; skips tag/image push and GH Release creation, skips the release-base CI gate, and runs without the environment approval gate (so a mainnet dry-run needs no reviewer and won't block a queued real release). |
 
 ## Hotfixes and emergencies
