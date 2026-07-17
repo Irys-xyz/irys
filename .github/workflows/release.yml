@@ -394,6 +394,26 @@ jobs:
       # --- Publish phase: tag, push image, update head-tracking, create release ---
       # If any step here fails, cleanup steps at the bottom delete pushed git tags.
 
+      # Final provenance re-check at the last moment before the first publish write.
+      # The validate job verified provenance at dispatch, but the environment
+      # approval gate (and the Docker build above) can span a long window during
+      # which the deployment branch may advance — publishing a now-behind-tip
+      # release, the 4.0.2 class of bug. The release job's post-approval checkout
+      # (fetch-depth: 0) already captured the branch tip as of job start, so this
+      # re-run of the same read-only branch/tip/version check rejects a branch that
+      # moved out from under the release during the approval wait, unless the
+      # operator opted into a non-tip release (allow-non-tip threaded through, so a
+      # deliberate non-tip release still only warns). It runs before any tag/image
+      # push, so a rejection needs no cleanup.
+      - name: Re-verify commit provenance before publish
+        if: ${{ !inputs.dry_run }}
+        uses: ./.github/actions/verify-commit-provenance
+        with:
+          environment: ${{ inputs.release_type }}
+          commit: ${{ inputs.commit }}
+          version: ${{ inputs.version }}
+          allow-non-tip: ${{ inputs.allow_non_tip_commit }}
+
       - name: Push git tag
         id: push_tag
         if: ${{ !inputs.dry_run }}
