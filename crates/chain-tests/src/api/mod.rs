@@ -7,6 +7,7 @@ mod external_api;
 mod hardfork_tests;
 mod ledger_offset_endpoint;
 mod mempool_txs;
+mod partition_intervals_endpoint;
 mod pricing_endpoint;
 mod supply_endpoint;
 mod tx;
