@@ -191,6 +191,10 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(storage::get_chunk_counts),
         )
         .route(
+            storage::PARTITION_INTERVALS_ROUTE,
+            web::get().to(storage::get_partition_intervals),
+        )
+        .route(
             "/mempool/status",
             web::get().to(mempool::get_mempool_status),
         )
