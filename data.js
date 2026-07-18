@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784296833299,
+  "lastUpdate": 1784396655864,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10843,6 +10843,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "46b564893e33be81c4765791e3219b1fd2f145db",
+          "message": "feat(api): partition-hash intervals endpoint for capacity storage modules (#1526)\n\nExpose local coalesced chunk intervals keyed by partition hash so capacity\npartitions (no ledger/slot) can be queried the same way as data partitions.",
+          "timestamp": "2026-07-18T10:27:40-07:00",
+          "tree_id": "171f20dde29ab8851b5155e6727ca4f95459705b",
+          "url": "https://github.com/Irys-xyz/irys/commit/46b564893e33be81c4765791e3219b1fd2f145db"
+        },
+        "date": 1784396654659,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012522,
+            "range": "± 0.000366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127074,
+            "range": "± 0.005655",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.259308,
+            "range": "± 0.030354",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.877569,
+            "range": "± 0.208934",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082335,
+            "range": "± 0.000696",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 747.167062,
+            "range": "± 15.859796",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 978.443618,
+            "range": "± 5.195846",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120294,
+            "range": "± 0.002636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1307.994005,
+            "range": "± 104.880351",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1580.20914,
+            "range": "± 16.740357",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034659,
+            "range": "± 0.000882",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.623603,
+            "range": "± 0.816544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.295379,
+            "range": "± 1.824337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
