@@ -64,12 +64,12 @@ runs:
         # single network blip / 5xx would otherwise abort the whole gate — and the
         # poll loop below makes ~120 calls over a 60-min window, so one such blip
         # anywhere would force a full release re-run. Retry transient failures with
-        # backoff. A non-retryable HTTP status (4xx other than 429) is a terminal
-        # configuration error — the caller fails fast on it (return 2 →
-        # fail_nonretryable_api); an exhausted transient read (return 1) is re-polled
-        # in waiting mode, not fatal (see api_error).
+        # backoff. A non-retryable HTTP status (4xx other than 429 and rate-limited
+        # 403) is a terminal configuration error — the caller fails fast on it
+        # (return 2 → fail_nonretryable_api); an exhausted transient read (return 1)
+        # is re-polled in waiting mode, not fatal (see api_error).
         gh_api() {
-          local attempt=1 max_attempts=3 out status err_file
+          local attempt=1 max_attempts=3 out status err_file rate_limited
           err_file=$(mktemp)
           while true; do
             # Buffer the attempt's output and emit only on success, so a failure
@@ -83,13 +83,19 @@ runs:
               printf '%s\n' "${out}"
               return 0
             fi
-            # gh reports HTTP errors as "... (HTTP <code>)" on stderr. A 4xx other
-            # than rate-limiting (429) is a terminal config error — bad SHA, missing
-            # checks:read/statuses:read scope, 403/404/422 — that neither a retry nor
-            # waiting can fix, so signal the caller to fail fast (return 2). 5xx / 429
-            # / network errors (no HTTP code) are transient and worth retrying.
+            # gh reports HTTP errors as "... (HTTP <code>)" on stderr. A 4xx is a
+            # terminal config error — bad SHA, missing checks:read/statuses:read
+            # scope, 403/404/422 — that neither a retry nor waiting can fix, so signal
+            # the caller to fail fast (return 2). The exception is rate limiting, which
+            # GitHub returns as 429 *or* 403 (primary and secondary limits): a re-poll
+            # clears it, so it is transient like 5xx / network errors (no HTTP code). A
+            # rate-limit 403 carries a "rate limit" message; a permission 403 does not.
             status=$(grep -oE '\(HTTP [0-9]{3}\)' "${err_file}" | grep -oE '[0-9]{3}' | tail -n1 || true)
-            if [ -n "${status}" ] && [ "${status}" -ge 400 ] && [ "${status}" -lt 500 ] && [ "${status}" -ne 429 ]; then
+            rate_limited=0
+            if grep -qiE 'rate limit' "${err_file}"; then rate_limited=1; fi
+            if [ -n "${status}" ] && [ "${status}" -ge 400 ] && [ "${status}" -lt 500 ] \
+               && [ "${status}" -ne 429 ] \
+               && ! { [ "${status}" -eq 403 ] && [ "${rate_limited}" -eq 1 ]; }; then
               cat "${err_file}" >&2
               rm -f "${err_file}"
               return 2
