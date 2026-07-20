@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784558352259,
+  "lastUpdate": 1784565923006,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11167,6 +11167,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fe7b7f0660d2a4883286ab6c684bf85e8dae2388",
+          "message": "feat: epoch ledger endpoints (#1519)\n\n* Add LedgerMeta accessor to Ledgers for uniform perm/term ledger views\n\n* Add GET /v1/epoch/latest endpoint\n\n* Add GET /v1/epoch/latest/ledger/{id}/info endpoint\n\n* Assert optional_string_u64 epoch_length wire encoding in endpoint test\n\n* Add expiry_frontier_for accessor to Ledgers\n\n* Document expiry_frontier_for precondition; cover multi-slot prefixes\n\n* Replace GET /v1/epoch/latest/ledger/{id}/info with a light frontier summary\n\n* Add GET /v1/epoch/latest/ledger/{id}/slot/{slot_number} endpoint\n\n* Move GET /v1/epoch/latest to camelCase wire casing",
+          "timestamp": "2026-07-20T17:26:50+01:00",
+          "tree_id": "cac585327b8f37c90d8c78e67cbc038f9552104c",
+          "url": "https://github.com/Irys-xyz/irys/commit/fe7b7f0660d2a4883286ab6c684bf85e8dae2388"
+        },
+        "date": 1784565920156,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011902,
+            "range": "± 0.000072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119473,
+            "range": "± 0.002327",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.202043,
+            "range": "± 0.019961",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.32325,
+            "range": "± 0.189732",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075155,
+            "range": "± 0.001174",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 756.074151,
+            "range": "± 7.013072",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1015.321788,
+            "range": "± 34.058649",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117482,
+            "range": "± 0.001652",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1177.81417,
+            "range": "± 9.603337",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1553.771934,
+            "range": "± 17.888269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034671,
+            "range": "± 0.001269",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.092332,
+            "range": "± 0.462527",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.530036,
+            "range": "± 2.248996",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000124,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
