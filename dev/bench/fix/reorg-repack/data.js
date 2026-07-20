@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784565923006,
+  "lastUpdate": 1784566785531,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11275,6 +11275,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000124,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "d1811fff37c40acac1704ff329052356cf5c72fc",
+          "message": "fix: repack orphaned ranges after reorg rollback + correct PoA offset over Uninitialized holes",
+          "timestamp": "2026-07-20T16:27:02Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1528/commits/d1811fff37c40acac1704ff329052356cf5c72fc"
+        },
+        "date": 1784566784019,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015238,
+            "range": "± 0.000595",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153331,
+            "range": "± 0.008089",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.553995,
+            "range": "± 0.127442",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.547498,
+            "range": "± 0.260365",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077676,
+            "range": "± 0.001872",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 771.665185,
+            "range": "± 13.913421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 980.75066,
+            "range": "± 6.838585",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117613,
+            "range": "± 0.000758",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1174.355878,
+            "range": "± 2.398807",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1524.854464,
+            "range": "± 1.834547",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034785,
+            "range": "± 0.00074",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.290666,
+            "range": "± 4.716115",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 285.252795,
+            "range": "± 13.861698",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
