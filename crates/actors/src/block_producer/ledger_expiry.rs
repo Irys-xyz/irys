@@ -467,9 +467,10 @@ pub async fn expired_submit_tx_ids(
         return Ok(std::collections::BTreeSet::new());
     }
 
-    // Sentinel miner: `find_block_range` / `filter_transactions_by_chunk_range`
-    // require a non-empty miner list to include a slot's txs, but we only need the
-    // tx ids here. The address value is never read (we take `.keys()`).
+    // Miners are irrelevant here — only the tx-id keys are read. The walk
+    // includes a slot's txs whenever the slot is present in the map (an empty
+    // miner list works too — see the minerless-slot settlement path); the
+    // sentinel address is never read.
     let expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>> = slot_indexes
         .into_iter()
         .map(|i| (SlotIndex::new(i as u64), vec![IrysAddress::ZERO]))
@@ -1194,61 +1195,51 @@ fn collect_expired_partitions(
     // touch) is not paid here and then again when it later recycles. Pre-Cascade
     // the touch is gated off, so `cascade_active=false` disables the exclusion
     // and settlement matches the original master set.
-    let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(
+    //
+    // Slot-keyed, NOT partition-keyed: a slot whose replicas were all unpledged
+    // before expiry (and never backfilled) recycles with an empty `partitions`
+    // vec. It must still settle — its unpromoted txs are refunded — even though
+    // there are no miners to pay term fees to. A partition-keyed walk would
+    // never see the slot, stranding the refunds while the slot's txs stay
+    // promotion-blocked forever (`get_all_expired_slot_indexes`).
+    let expiring_slots = parent_epoch_snapshot.get_expiring_slot_partitions(
         block_height,
         target_ledger_type,
         new_total_chunks,
         cascade_active,
     );
     let mut expired_ledger_slot_indexes = BTreeMap::new();
-    if expired_partition_info.is_empty() {
-        return Ok(expired_ledger_slot_indexes);
-    }
 
     tracing::debug!(
-        "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expired partition hashes",
+        "collect_expired_partitions: block_height={}, target_ledger={:?}, found {} expiring slots",
         block_height,
         target_ledger_type,
-        expired_partition_info.len()
+        expiring_slots.len()
     );
 
-    for expired_partition in expired_partition_info {
-        let ledger_id = expired_partition.ledger_id;
-        let slot_index = SlotIndex::new(expired_partition.slot_index as u64);
-
-        // Filter by ledger type FIRST — before any lookup that could fail.
-        // This prevents a Publish partition state inconsistency from blocking
-        // Submit fee distribution (or vice versa).
-        if ledger_id != target_ledger_type {
-            tracing::debug!(
-                "Skipping partition with ledger_id={:?} (looking for {:?})",
-                ledger_id,
-                target_ledger_type
-            );
-            continue;
-        }
-
-        let partition = partition_assignments
-            .get_assignment(expired_partition.partition_hash)
-            .ok_or_eyre("could not get expired partition")?;
-
-        tracing::info!(
-            "Found expired partition for {:?} ledger at slot_index={}, miner={:?}",
-            ledger_id,
-            slot_index.0,
-            partition.miner_address
-        );
+    for (slot_index, partition_hashes) in expiring_slots {
+        let slot_index = SlotIndex::new(slot_index as u64);
 
         // Store miner_address (not reward_address) to preserve unique miner identities
         // for correct fee distribution. Reward address resolution is deferred to
         // aggregate_balance_deltas to ensure pooled miners (sharing a reward address)
         // are counted individually for fee splitting.
-        expired_ledger_slot_indexes
-            .entry(slot_index)
-            .and_modify(|miners: &mut Vec<IrysAddress>| {
-                miners.push(partition.miner_address);
-            })
-            .or_insert(vec![partition.miner_address]);
+        let mut miners = Vec::with_capacity(partition_hashes.len());
+        for partition_hash in partition_hashes {
+            let partition = partition_assignments
+                .get_assignment(partition_hash)
+                .ok_or_eyre("could not get expired partition")?;
+
+            tracing::info!(
+                "Found expired partition for {:?} ledger at slot_index={}, miner={:?}",
+                target_ledger_type,
+                slot_index.0,
+                partition.miner_address
+            );
+            miners.push(partition.miner_address);
+        }
+
+        expired_ledger_slot_indexes.insert(slot_index, miners);
     }
 
     Ok(expired_ledger_slot_indexes)
@@ -1709,7 +1700,10 @@ fn aggregate_balance_deltas(
             .ok_or_else(|| eyre!("Missing miner list for transaction {}", data_tx.id))?;
 
         // process miner balance increments for storing the term tx
-        {
+        // (skipped when the expired slot has NO miners — every replica unpledged
+        // before expiry. There is no one to distribute term fees to, so they
+        // stay in the treasury; the user perm-fee refunds below still settle.)
+        if !miners_that_stored_this_tx.is_empty() {
             // Deduplicate miners - each address should only get one share.
             // BTreeSet ensures deterministic iteration order across all nodes,
             // which is critical because the fee remainder is assigned to the
@@ -3913,6 +3907,243 @@ mod tests {
             ),
             vec![0],
             "the refilled slot stays out of the expired set for a fresh term"
+        );
+
+        Ok(())
+    }
+
+    /// An expired Submit slot with an EMPTY `partitions` vec — its sole replica
+    /// unpledged before expiry and never backfilled — must still settle: its
+    /// unpromoted txs are perm-fee refunded even though there are no miners to
+    /// pay term fees to (those stay in the treasury). Settlement must be
+    /// slot-keyed, not partition-keyed: the slot is marked `is_expired` and its
+    /// txs are promotion-blocked forever (`get_all_expired_slot_indexes`), so a
+    /// partition-keyed settlement walk that never sees the slot would leave its
+    /// users charged, non-promotable, and unsettled.
+    #[test_log::test(tokio::test)]
+    async fn empty_partition_expired_slot_still_refunds_unpromoted_txs() -> eyre::Result<()> {
+        use irys_database::{
+            IrysDatabaseArgs as _, insert_block_header, insert_tx_header, open_or_create_db,
+            tables::IrysTables,
+        };
+        use irys_domain::{BlockIndex, BlockTree, BlockTreeReadGuard};
+        use irys_testing_utils::{IrysBlockHeaderTestExt as _, utils::TempDirBuilder};
+        use irys_types::{
+            ConsensusConfig, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            DataTransactionMetadata, H256List, LedgerIndexItem, app_state::DatabaseProvider,
+        };
+        use reth_db::{mdbx::DatabaseArguments, transaction::DbTxMut as _};
+        use std::sync::{Arc, RwLock};
+
+        fn submit_chain_header(
+            height: u64,
+            total_chunks: u64,
+            tx_ids: Vec<H256>,
+        ) -> IrysBlockHeader {
+            let mut h = IrysBlockHeader::new_mock_header();
+            h.height = height;
+            h.data_ledgers[DataLedger::Submit].total_chunks = total_chunks;
+            h.data_ledgers[DataLedger::Submit].tx_ids = H256List(tx_ids);
+            h
+        }
+
+        let config = config_with_cascade();
+        let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
+        let blocks_per_cycle =
+            config.consensus.epoch.submit_ledger_epoch_length * num_blocks_in_epoch;
+        // Slot 0 is written (and its expiry clock stamped) at the first epoch;
+        // it expires a full slot lifetime later.
+        let write_epoch_height = num_blocks_in_epoch;
+        let expiry_height = write_epoch_height + blocks_per_cycle;
+        let submit_total = config.consensus.num_chunks_in_partition; // slot 0 exactly full
+
+        // --- Epoch snapshot: slot 0 fully written at the first epoch, then aged
+        //     through the cycle WITHOUT ever holding a partition assignment (no
+        //     pledges in this fixture — the state an unpledged sole replica
+        //     leaves behind). Evolution stops at the last epoch BEFORE expiry:
+        //     the parent snapshot of the expiry epoch block. ---
+        let mut epoch = empty_epoch_snapshot(&config);
+        let mut prev_epoch = submit_epoch_header(0, 0);
+        prev_epoch.test_sign();
+        epoch.perform_epoch_tasks(&None, &prev_epoch, vec![])?;
+        for height in (num_blocks_in_epoch..expiry_height).step_by(num_blocks_in_epoch as usize) {
+            let mut next = submit_epoch_header(height, submit_total);
+            next.test_sign();
+            epoch.perform_epoch_tasks(&Some(prev_epoch.clone()), &next, vec![])?;
+            prev_epoch = next;
+        }
+
+        {
+            let slots = epoch.ledgers.get_slots(DataLedger::Submit);
+            assert!(
+                slots.len() >= 2,
+                "fixture: slot 0 must be non-last (got {} slots)",
+                slots.len()
+            );
+            let slot0 = &slots[0];
+            assert!(slot0.has_been_written && !slot0.is_expired);
+            assert!(
+                slot0.partitions.is_empty(),
+                "fixture: slot 0 must have no partition assignment"
+            );
+        }
+        // The slot IS in the non-promotability set at the expiry epoch (its txs
+        // are blocked) ...
+        assert_eq!(
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                expiry_height,
+                true,
+                submit_total
+            ),
+            vec![0],
+            "the minerless slot must be in the blocked set at its expiry epoch"
+        );
+        // ... while the partition-keyed view is blind to it, so settlement must
+        // not be derived from partition infos.
+        assert!(
+            epoch
+                .get_expiring_partition_info(expiry_height, DataLedger::Submit, submit_total, true)
+                .is_empty(),
+            "partition-keyed expiring set has no entry for a partition-less slot"
+        );
+
+        // --- Two unpromoted Submit txs exactly fill slot 0 (chunk_size = 1). ---
+        let mk_tx = |data_size: u64, perm_fee: u64| {
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256::random(),
+                    signer: IrysAddress::random(),
+                    data_size,
+                    term_fee: U256::from(1000).into(),
+                    perm_fee: Some(U256::from(perm_fee).into()),
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            })
+        };
+        let tx_a = mk_tx(6, 7001); // chunks [0,6)
+        let tx_b = mk_tx(4, 7002); // chunks [6,10)
+
+        let mut inclusion_genesis = submit_chain_header(0, 0, vec![]);
+        inclusion_genesis.cumulative_diff = 0.into();
+        inclusion_genesis.test_sign();
+        let mut inclusion_block = submit_chain_header(1, submit_total, vec![tx_a.id, tx_b.id]);
+        inclusion_block.previous_block_hash = inclusion_genesis.block_hash;
+        inclusion_block.cumulative_diff = 1.into();
+        inclusion_block.test_sign();
+
+        let temp_dir = TempDirBuilder::new().build();
+        let db_env = open_or_create_db(
+            &temp_dir,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        db.update_eyre(|wtx| {
+            insert_tx_header(wtx, &tx_a)?;
+            insert_tx_header(wtx, &tx_b)?;
+            insert_block_header(wtx, &inclusion_genesis)?;
+            insert_block_header(wtx, &inclusion_block)?;
+            wtx.put::<irys_database::tables::MigratedBlockHashes>(0, inclusion_genesis.block_hash)?;
+            wtx.put::<irys_database::tables::MigratedBlockHashes>(1, inclusion_block.block_hash)?;
+            Ok(())
+        })?;
+
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        for (height, (hash, total)) in [
+            (inclusion_genesis.block_hash, 0_u64),
+            (inclusion_block.block_hash, submit_total),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            block_index.push_item(
+                &BlockIndexItem {
+                    block_hash: hash,
+                    num_ledgers: 2,
+                    ledgers: vec![
+                        LedgerIndexItem {
+                            total_chunks: 0,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Publish,
+                        },
+                        LedgerIndexItem {
+                            total_chunks: total,
+                            tx_root: H256::random(),
+                            ledger: DataLedger::Submit,
+                        },
+                    ],
+                },
+                height as u64,
+            )?;
+        }
+
+        // Parent-ancestry chain for the promotion-suppression walk
+        // (`resolve_promoted_on_branch` descends by hash from the parent to the
+        // walk floor; none of these blocks promotes anything).
+        let walk_floor = expiry_height
+            .saturating_sub(crate::block_validation::prior_inclusion_walk_depth(&config))
+            .saturating_sub(2);
+        let mut walk_prev: Option<H256> = None;
+        let mut parent_header: Option<IrysBlockHeader> = None;
+        for height in walk_floor..expiry_height {
+            let mut hdr = submit_chain_header(height, submit_total, vec![]);
+            if let Some(prev_hash) = walk_prev {
+                hdr.previous_block_hash = prev_hash;
+            }
+            hdr.cumulative_diff = height.into();
+            hdr.test_sign();
+            db.update_eyre(|wtx| {
+                insert_block_header(wtx, &hdr)?;
+                Ok(())
+            })?;
+            walk_prev = Some(hdr.block_hash);
+            parent_header = Some(hdr);
+        }
+        let parent_header = parent_header.expect("walk chain is non-empty");
+
+        let tree = BlockTree::new(&inclusion_genesis, ConsensusConfig::testing());
+        let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
+
+        let delta = calculate_expired_ledger_fees(
+            &epoch,
+            &parent_header,
+            expiry_height,
+            DataLedger::Submit,
+            &config,
+            block_index,
+            &guard,
+            &MempoolReadGuard::stub(),
+            &db,
+            true, // Submit: refund the perm fee for unpromoted txs
+            submit_total,
+            true,
+        )
+        .await?;
+
+        let refunds: std::collections::BTreeMap<_, _> = delta
+            .user_perm_fee_refunds
+            .iter()
+            .map(|(id, amount, addr)| (*id, (*amount, *addr)))
+            .collect();
+        assert_eq!(
+            refunds.len(),
+            2,
+            "both unpromoted txs in the minerless expired slot must be refunded, got {:?}",
+            delta.user_perm_fee_refunds
+        );
+        for tx in [&tx_a, &tx_b] {
+            assert_eq!(
+                refunds.get(&tx.id).copied(),
+                Some((tx.perm_fee.expect("fixture sets perm_fee").get(), tx.signer)),
+                "tx {} must be refunded exactly its perm_fee to its signer",
+                tx.id
+            );
+        }
+        assert!(
+            delta.reward_balance_increment.is_empty(),
+            "no miners stored the slot, so no term-fee rewards may be distributed"
         );
 
         Ok(())

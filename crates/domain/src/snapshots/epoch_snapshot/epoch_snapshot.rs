@@ -1347,6 +1347,36 @@ impl EpochSnapshot {
         new_total_chunks: u64,
         cascade_active: bool,
     ) -> Vec<ExpiringPartitionInfo> {
+        // Flattened per-partition view of the slot-keyed set, so the two can
+        // never diverge. A slot with no partitions contributes nothing here.
+        self.get_expiring_slot_partitions(epoch_height, ledger, new_total_chunks, cascade_active)
+            .into_iter()
+            .flat_map(|(slot_index, partition_hashes)| {
+                partition_hashes
+                    .into_iter()
+                    .map(move |partition_hash| ExpiringPartitionInfo {
+                        partition_hash,
+                        ledger_id: ledger,
+                        slot_index,
+                    })
+            })
+            .collect()
+    }
+
+    /// Slot-keyed sibling of [`Self::get_expiring_partition_info`] (same
+    /// write-window rescue exclusion): the slots of `ledger` that will actually
+    /// recycle at `epoch_height`, each with its partition hashes — INCLUDING
+    /// slots whose `partitions` vec is empty (every replica unpledged before
+    /// expiry, never backfilled). Fee settlement keys on this so a
+    /// partition-less expired slot still refunds its unpromoted txs; the
+    /// flattened per-partition view is structurally blind to such slots.
+    pub fn get_expiring_slot_partitions(
+        &self,
+        epoch_height: u64,
+        ledger: DataLedger,
+        new_total_chunks: u64,
+        cascade_active: bool,
+    ) -> Vec<(usize, Vec<PartitionHash>)> {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
 
@@ -1371,7 +1401,7 @@ impl EpochSnapshot {
         };
 
         self.ledgers
-            .get_expiring_partitions(
+            .get_expiring_slots(
                 epoch_height,
                 cascade_active,
                 // LOCKSTEP with `expire_ledger_slots`: the target ledger uses the
@@ -1389,7 +1419,10 @@ impl EpochSnapshot {
                 chunks_per_slot,
             )
             .into_iter()
-            .filter(|info| info.ledger_id == ledger && !written_this_epoch(info.slot_index))
+            .filter(|(ledger_id, slot_index, _)| {
+                *ledger_id == ledger && !written_this_epoch(*slot_index)
+            })
+            .map(|(_, slot_index, partition_hashes)| (slot_index, partition_hashes))
             .collect()
     }
 

@@ -557,19 +557,23 @@ impl Ledgers {
         expired_partitions
     }
 
-    /// Get all partition hashes that would expire at this epoch height (read-only).
-    /// Unlike `expire_partitions`, this does NOT mark slots as expired.
+    /// All slots that would expire at this epoch height (read-only), each with
+    /// its partition hashes — INCLUDING slots whose `partitions` vec is empty
+    /// (every replica unpledged before expiry and never backfilled). Fee
+    /// settlement keys on this slot-keyed view: a partition-less slot still
+    /// recycles and its unpromoted txs must still be refunded, but the
+    /// flattened per-partition view below is structurally blind to it.
     ///
     /// `total_chunks` / `chunks_per_slot`: see [`Self::expire_partitions`] — pass
     /// the same per-ledger totals so the two sets cannot diverge.
-    pub fn get_expiring_partitions(
+    pub fn get_expiring_slots(
         &self,
         epoch_height: u64,
         cascade_active: bool,
         total_chunks: impl Fn(DataLedger) -> u64,
         chunks_per_slot: u64,
-    ) -> Vec<ExpiringPartitionInfo> {
-        let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
+    ) -> Vec<(DataLedger, usize, Vec<PartitionHash>)> {
+        let mut expiring_slots = Vec::new();
 
         // Check perm ledger slots using shared helper
         for (slot_index, partition_hashes, ledger_id) in self.get_perm_expiring_slots(
@@ -578,16 +582,10 @@ impl Ledgers {
             total_chunks(DataLedger::Publish),
             chunks_per_slot,
         ) {
-            for partition_hash in partition_hashes {
-                expired_partitions.push(ExpiringPartitionInfo {
-                    partition_hash,
-                    ledger_id,
-                    slot_index,
-                });
-            }
+            expiring_slots.push((ledger_id, slot_index, partition_hashes));
         }
 
-        // Collect from term ledgers (existing logic)
+        // Collect from term ledgers
         for term_ledger in &self.term {
             let ledger_id = DataLedger::try_from(term_ledger.ledger_id)
                 .expect("term ledger_id is always constructed from a valid DataLedger variant");
@@ -597,17 +595,42 @@ impl Ledgers {
                 total_chunks(ledger_id),
                 chunks_per_slot,
             ) {
-                for partition_hash in term_ledger.slots[expiring_slot_index].partitions.iter() {
-                    expired_partitions.push(ExpiringPartitionInfo {
-                        partition_hash: *partition_hash,
-                        ledger_id,
-                        slot_index: expiring_slot_index,
-                    });
-                }
+                expiring_slots.push((
+                    ledger_id,
+                    expiring_slot_index,
+                    term_ledger.slots[expiring_slot_index].partitions.clone(),
+                ));
             }
         }
 
-        expired_partitions
+        expiring_slots
+    }
+
+    /// Get all partition hashes that would expire at this epoch height (read-only).
+    /// Unlike `expire_partitions`, this does NOT mark slots as expired.
+    ///
+    /// Flattened per-partition view of [`Self::get_expiring_slots`] (a slot with
+    /// no partitions contributes nothing here — settlement must use the
+    /// slot-keyed view).
+    pub fn get_expiring_partitions(
+        &self,
+        epoch_height: u64,
+        cascade_active: bool,
+        total_chunks: impl Fn(DataLedger) -> u64,
+        chunks_per_slot: u64,
+    ) -> Vec<ExpiringPartitionInfo> {
+        self.get_expiring_slots(epoch_height, cascade_active, total_chunks, chunks_per_slot)
+            .into_iter()
+            .flat_map(|(ledger_id, slot_index, partition_hashes)| {
+                partition_hashes
+                    .into_iter()
+                    .map(move |partition_hash| ExpiringPartitionInfo {
+                        partition_hash,
+                        ledger_id,
+                        slot_index,
+                    })
+            })
+            .collect()
     }
 
     /// Slot indexes of the given term `ledger` whose storage has expired as of
