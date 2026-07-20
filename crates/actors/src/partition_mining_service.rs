@@ -256,10 +256,8 @@ impl PartitionMiningServiceInner {
             );
         }
 
-        for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
+        for (&partition_chunk_offset, (chunk_bytes, chunk_type)) in chunks.iter() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-            let partition_chunk_offset =
-                PartitionChunkOffset::from(start_chunk_offset + index as u32);
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
@@ -288,7 +286,7 @@ impl PartitionMiningServiceInner {
                     self.storage_module.id,
                     partition_chunk_offset,
                     self.config.consensus.num_chunks_in_partition,
-                    index,
+                    *partition_chunk_offset - start_chunk_offset,
                     chunks.len(),
                     self.difficulty
                 );
