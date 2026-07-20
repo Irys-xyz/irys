@@ -242,12 +242,14 @@ async fn heavy_multi_replica_slot_expiry_splits_reward_and_refunds_once() -> eyr
         sum, treasury,
         "the two shares must sum exactly to the slot's term-fee treasury"
     );
-    for (miner, amount) in &rewards {
-        assert!(
-            *amount >= base_share && *amount < treasury,
-            "miner {miner} must get a genuine share (got {amount}, treasury {treasury})"
-        );
-    }
+    let mut shares: Vec<U256> = rewards.values().copied().collect();
+    shares.sort_unstable();
+    let mut expected = vec![base_share, treasury - base_share];
+    expected.sort_unstable();
+    assert_eq!(
+        shares, expected,
+        "the two shares must be exactly floor/ceil of treasury/2 (got {rewards:?}, treasury {treasury})"
+    );
 
     info!(
         "multi-replica slot settled: refund={refund_total}, rewards={rewards:?}, treasury={treasury}"

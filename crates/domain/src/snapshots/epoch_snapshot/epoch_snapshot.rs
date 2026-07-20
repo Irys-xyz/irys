@@ -1340,6 +1340,9 @@ impl EpochSnapshot {
     /// the new epoch block. When false, the window exclusion is skipped and the
     /// result reproduces the original (pre-Cascade) master set, so pre-activation
     /// history replays bit-identically.
+    ///
+    /// Flattened (per-partition) diagnostic/test view; the settlement path uses
+    /// the slot-keyed `get_expiring_slot_partitions` instead.
     pub fn get_expiring_partition_info(
         &self,
         epoch_height: u64,

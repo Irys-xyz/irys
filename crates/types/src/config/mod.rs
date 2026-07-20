@@ -452,13 +452,13 @@ impl Config {
             }
 
             // Real networks only (test fixtures deliberately use tiny epochs).
-            // Expiry and settlement are committed at epoch blocks. An epoch block is
-            // irreversible only once it falls block_tree_depth behind the head and is
-            // pruned from the tree (finalized_height in forkchoice_markers). Requiring
-            // the epoch to span more blocks than the reorg window keeps at most one
-            // epoch transition unfinalized at a time, so no admissible reorg can
-            // straddle a settled expiry and the per-branch expiry recompute only ever
-            // spans a single epoch.
+            // Expiry/settlement is committed at epoch blocks. The reorg-mutable
+            // window is exactly block_tree_depth heights (finalized_height =
+            // head - block_tree_depth in forkchoice_markers). Epoch boundaries are
+            // num_blocks_in_epoch apart, so num_blocks_in_epoch >= block_tree_depth
+            // already leaves at most one boundary reorg-mutable — no reorg can
+            // straddle a settled expiry. `>=` is the exact bound; the strict `>`
+            // below keeps one extra block of margin.
             ensure!(
                 self.consensus.epoch.num_blocks_in_epoch > self.consensus.block_tree_depth,
                 "num_blocks_in_epoch ({}) must be > block_tree_depth ({}) so no reorg can straddle a finalized epoch-block expiry",
@@ -1536,9 +1536,10 @@ mod tests {
             "expected the reorg-window guard, got: {err}"
         );
 
-        // Boundary: EQUAL must also be rejected — the guard is strict `>`, since an
-        // epoch exactly as long as the reorg window still leaves the transition
-        // unfinalized. Guards against a future weakening of `>` to `>=`.
+        // Boundary: EQUAL must also be rejected — the guard is strict `>`. At
+        // num_blocks_in_epoch == block_tree_depth at most one epoch transition is
+        // reorg-mutable (so `>=` would already be safe); the strict `>` keeps one
+        // block of margin, and this pins that we don't weaken it without intent.
         let mut equal_config = NodeConfig::testing().with_run_mode(RunMode::Production);
         {
             let c = equal_config.consensus.get_mut();

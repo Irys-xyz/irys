@@ -606,33 +606,6 @@ impl Ledgers {
         expiring_slots
     }
 
-    /// Get all partition hashes that would expire at this epoch height (read-only).
-    /// Unlike `expire_partitions`, this does NOT mark slots as expired.
-    ///
-    /// Flattened per-partition view of [`Self::get_expiring_slots`] (a slot with
-    /// no partitions contributes nothing here — settlement must use the
-    /// slot-keyed view).
-    pub fn get_expiring_partitions(
-        &self,
-        epoch_height: u64,
-        cascade_active: bool,
-        total_chunks: impl Fn(DataLedger) -> u64,
-        chunks_per_slot: u64,
-    ) -> Vec<ExpiringPartitionInfo> {
-        self.get_expiring_slots(epoch_height, cascade_active, total_chunks, chunks_per_slot)
-            .into_iter()
-            .flat_map(|(ledger_id, slot_index, partition_hashes)| {
-                partition_hashes
-                    .into_iter()
-                    .map(move |partition_hash| ExpiringPartitionInfo {
-                        partition_hash,
-                        ledger_id,
-                        slot_index,
-                    })
-            })
-            .collect()
-    }
-
     /// Slot indexes of the given term `ledger` whose storage has expired as of
     /// `epoch_height`, inclusive of already-expired slots. Used by the NC-0042
     /// publish-candidate filter (producer) and validator check, which must treat
@@ -1206,10 +1179,11 @@ mod tests {
         ledgers.perm.slots[1].has_been_written = true;
 
         // Read-only: should report slot 0 as expiring without marking it
-        let expiring = ledgers.get_expiring_partitions(30, true, |_| 20, 10);
+        let expiring = ledgers.get_expiring_slots(30, true, |_| 20, 10);
         let perm_expiring: Vec<_> = expiring
             .iter()
-            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .filter(|(ledger_id, _, _)| *ledger_id == DataLedger::Publish)
+            .flat_map(|(_, _, partition_hashes)| partition_hashes)
             .collect();
         assert_eq!(perm_expiring.len(), 1);
         // Verify NOT marked as expired (read-only)
@@ -1241,8 +1215,12 @@ mod tests {
         ledgers.perm.allocate_slots(1, 1);
         ledgers.perm.slots[0].partitions.push(H256::random());
 
-        let expiring = ledgers.get_expiring_partitions(1000, true, |_| 10, 10);
-        assert!(expiring.iter().all(|e| e.ledger_id != DataLedger::Publish));
+        let expiring = ledgers.get_expiring_slots(1000, true, |_| 10, 10);
+        assert!(
+            expiring
+                .iter()
+                .all(|(ledger_id, _, _)| *ledger_id != DataLedger::Publish)
+        );
     }
 
     /// Allocate `count` Submit slots, all stamped with `last_height = alloc_height`.
@@ -1830,6 +1808,8 @@ mod tests {
                 }
                 // is_expired is a prefix and only ever set on slots the expiry path
                 // could have expired (written + non-last); model it as a leading run.
+                // (Excludes the pre-Cascade legacy state — is_expired on an unwritten
+                // slot — which the runtime is_expired short-circuit still handles.)
                 slot.is_expired = i < exp && i < frontier && i != num_slots - 1;
             }
 

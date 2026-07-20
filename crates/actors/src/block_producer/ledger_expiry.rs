@@ -105,9 +105,11 @@ pub async fn calculate_expired_ledger_fees(
     // rescued by the `last_height` touch and must not be settled here).
     new_total_chunks: u64,
     // Cascade status of the epoch block being produced/validated (its own
-    // timestamp — NOT the parent snapshot's). Gates the write-window exclusion
-    // so it mirrors the Cascade-gated `touch_active_ledger_slots`. When false,
-    // settlement matches pre-Cascade master exactly (no exclusion).
+    // timestamp — NOT the parent snapshot's). Gates ONLY the write-window
+    // exclusion, mirroring the Cascade-gated `touch_active_ledger_slots`. The
+    // slot-keyed minerless-slot refund (empty-`partitions` expired slots) is
+    // unconditional, so for such a slot the settled set differs from pre-Cascade
+    // master.
     cascade_active: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Fee distribution is only implemented for Submit ledger. Publish expiry
