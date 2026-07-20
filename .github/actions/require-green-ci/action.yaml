@@ -63,21 +63,46 @@ runs:
         # gh has no built-in retry for transient API failures. Under `set -e` a
         # single network blip / 5xx would otherwise abort the whole gate — and the
         # poll loop below makes ~120 calls over a 60-min window, so one such blip
-        # anywhere would force a full release re-run. Retry with backoff; only a
-        # persistent failure (all attempts exhausted) fails the step, still closed.
+        # anywhere would force a full release re-run. Retry transient failures with
+        # backoff. A non-retryable HTTP status (4xx other than 429 and rate-limited
+        # 403) is a terminal configuration error — the caller fails fast on it
+        # (return 2 → fail_nonretryable_api); an exhausted transient read (return 1)
+        # is re-polled in waiting mode, not fatal (see api_error).
         gh_api() {
-          local attempt=1 max_attempts=3 out
+          local attempt=1 max_attempts=3 out status err_file rate_limited
+          err_file=$(mktemp)
           while true; do
             # Buffer the attempt's output and emit only on success, so a failure
             # part-way through pagination is discarded rather than concatenated
-            # onto the retry's (re-fetched-from-page-1) output.
-            if out=$(gh api "$@"); then
+            # onto the retry's (re-fetched-from-page-1) output. Capture stderr so a
+            # failure can be classified by its HTTP status.
+            if out=$(gh api "$@" 2>"${err_file}"); then
               # Re-add the trailing newline `$(...)` strips: gh's `-q @tsv` output is
               # newline-terminated and the downstream `read` relies on that delimiter.
+              rm -f "${err_file}"
               printf '%s\n' "${out}"
               return 0
             fi
+            # gh reports HTTP errors as "... (HTTP <code>)" on stderr. A 4xx is a
+            # terminal config error — bad SHA, missing checks:read/statuses:read
+            # scope, 403/404/422 — that neither a retry nor waiting can fix, so signal
+            # the caller to fail fast (return 2). The exception is rate limiting, which
+            # GitHub returns as 429 *or* 403 (primary and secondary limits): a re-poll
+            # clears it, so it is transient like 5xx / network errors (no HTTP code). A
+            # rate-limit 403 carries a "rate limit" message; a permission 403 does not.
+            status=$(grep -oE '\(HTTP [0-9]{3}\)' "${err_file}" | grep -oE '[0-9]{3}' | tail -n1 || true)
+            rate_limited=0
+            if grep -qiE 'rate limit' "${err_file}"; then rate_limited=1; fi
+            if [ -n "${status}" ] && [ "${status}" -ge 400 ] && [ "${status}" -lt 500 ] \
+               && [ "${status}" -ne 429 ] \
+               && ! { [ "${status}" -eq 403 ] && [ "${rate_limited}" -eq 1 ]; }; then
+              cat "${err_file}" >&2
+              rm -f "${err_file}"
+              return 2
+            fi
             if [ "${attempt}" -ge "${max_attempts}" ]; then
+              cat "${err_file}" >&2
+              rm -f "${err_file}"
               return 1
             fi
             echo "gh api call failed (attempt ${attempt}/${max_attempts}); retrying in $((attempt * 2))s..." >&2
@@ -86,18 +111,36 @@ runs:
           done
         }
 
+        # A gh_api read failed with a non-retryable HTTP status (4xx other than
+        # rate-limiting): a bad SHA, a repo/permission problem, or a token missing
+        # checks:read / statuses:read. Waiting cannot fix a configuration error, so
+        # surface it immediately instead of burning the whole wait window first.
+        fail_nonretryable_api() {
+          echo "::error::GitHub API returned a non-retryable error reading CI status for ${SHA} (e.g. HTTP 404 bad SHA, or a token missing checks:read/statuses:read). Cannot gate the release (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+          exit 1
+        }
+
         # SECONDS is bash's monotonic elapsed-seconds counter since shell start;
         # the poll loop below waits until SECONDS exceeds this deadline.
         deadline=$((SECONDS + WAIT_TIMEOUT))
 
         while true; do
+          api_error=0    # a read failed after its retries (transient API error)
+
           # GitHub Actions jobs surface as "check runs"; external CI / bots surface
           # as legacy "commit statuses". A fully passing CI result must satisfy both.
           # filter=latest (the API default) collapses re-runs to the most recent run
           # per check name, so a red run that was later re-run green is not counted.
-          runs_tsv=$(gh_api --paginate \
+          if runs_tsv=$(gh_api --paginate \
             "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" \
-            -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')
+            -q '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'); then
+            :
+          else
+            rc=$?
+            runs_tsv=""
+            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+            api_error=1
+          fi
 
           fail=0          # a check reached a real, terminal non-pass conclusion
           pending=0       # a check is still running (waitable)
@@ -135,9 +178,17 @@ runs:
           # One call returns both fields as a TSV (via gh's embedded jq, so no system
           # jq dependency); splitting it into two `gh api` calls would risk reading an
           # inconsistent state/total across a status update mid-poll.
-          IFS=$'\t' read -r status_state status_total < <(
-            gh_api "repos/${REPO}/commits/${SHA}/status" -q '[.state, .total_count] | @tsv'
-          )
+          status_state=""
+          status_total=0
+          if status_tsv=$(gh_api "repos/${REPO}/commits/${SHA}/status" \
+            -q '[.state, .total_count] | @tsv'); then
+            IFS=$'\t' read -r status_state status_total <<< "${status_tsv}"
+          else
+            rc=$?
+            if [ "${rc}" -eq 2 ]; then fail_nonretryable_api; fi
+            api_error=1
+          fi
+
           if [ "${status_total}" -gt 0 ]; then
             case "${status_state}" in
               success)
@@ -155,6 +206,33 @@ runs:
             esac
           fi
 
+          # A real failure is terminal — waiting cannot turn it green, so fail fast
+          # even if other checks are still in flight, or if an unrelated status read
+          # hit a transient API error this same poll: a check that already concluded
+          # red is proven red regardless of the other endpoint. Checked before the
+          # api_error branch so a known failure is never deferred behind a read blip.
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
+            exit 1
+          fi
+
+          # A read failed after exhausting its retries on a transient error (5xx /
+          # rate-limit / network — a non-retryable 4xx already exited above via
+          # fail_nonretryable_api). We could not observe CI state this poll and no
+          # observed check has failed; that is not a CI failure. In waiting mode, treat
+          # it like a pending check and re-poll until the deadline rather than aborting
+          # the release over an API outage. With WAIT_TIMEOUT=0 the deadline is already
+          # past, so a persistent outage still fails fast and closed.
+          if [ "${api_error}" -ne 0 ]; then
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::Could not read CI status for ${SHA} from the GitHub API after retries (transient error, e.g. 5xx). Cannot prove the release base passed CI (${CHECKS_URL}). (Emergency hotfixes can bypass with force=true.)"
+              exit 1
+            fi
+            echo "GitHub API read failed (likely transient); waiting ${POLL_INTERVAL}s before retry (elapsed ${SECONDS}s / timeout ${WAIT_TIMEOUT}s) — ${CHECKS_URL}"
+            sleep "${POLL_INTERVAL}"
+            continue
+          fi
+
           # No checks/statuses observed yet. When waiting is enabled this is likely a
           # race — the release was dispatched just as the merge-base landed, before CI
           # registered — so treat it as waitable and let later polls see them appear.
@@ -164,13 +242,6 @@ runs:
             echo "No CI check runs or commit statuses found yet for ${SHA}."
             no_results=1
             pending=$((pending + 1))
-          fi
-
-          # A real failure is terminal — waiting cannot turn it green, so fail fast
-          # even if other checks are still in flight.
-          if [ "${fail}" -ne 0 ]; then
-            echo "::error::CI for ${SHA} is not fully green; refusing to release. (Emergency hotfixes can bypass with force=true.)"
-            exit 1
           fi
 
           # No failures, but something is still settling (in-progress checks, a
