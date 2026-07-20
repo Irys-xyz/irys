@@ -67,7 +67,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     // Test storage transaction
     let id: String = storage_tx.id.to_string();
     let req = actix_web::test::TestRequest::get()
-        .uri(&format!("/v1/tx/{}", &id))
+        .uri(&format!("/v1/tx/{}", id))
         .to_request();
 
     let resp = actix_web::test::call_service(&app, req).await;
@@ -87,7 +87,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     // Test commitment transaction
     let id: String = commitment_tx.id().to_string();
     let req = actix_web::test::TestRequest::get()
-        .uri(&format!("/v1/tx/{}", &id))
+        .uri(&format!("/v1/tx/{}", id))
         .to_request();
 
     let resp = actix_web::test::call_service(&app, req).await;

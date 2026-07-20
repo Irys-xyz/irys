@@ -613,7 +613,7 @@ impl BlockDiscoveryServiceInner {
                         return Err(BlockDiscoveryError::InternalError(
                             BlockDiscoveryInternalError::BlockIndexInconsistency(format!(
                                 "Unable to get entry for height {height} from block index (reorg_floor {reorg_floor}, validating block height {}, hash {}, block tree finished height {bt_finished_height}, remaining {remaining})",
-                                &new_block_header.height, &new_block_header.block_hash
+                                new_block_header.height, new_block_header.block_hash
                             )),
                         ));
                     }
@@ -627,9 +627,9 @@ impl BlockDiscoveryServiceInner {
                         BlockDiscoveryInternalError::BlockIndexInconsistency(format!(
                             "block height: {} hash: {} doesn't match block_index height: {} hash: {}",
                             &parent_block.height - 1,
-                            &parent_block.previous_block_hash,
-                            &height,
-                            &block_index_item.block_hash
+                            parent_block.previous_block_hash,
+                            height,
+                            block_index_item.block_hash
                         )),
                     ));
                 }

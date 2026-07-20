@@ -493,6 +493,9 @@ large-enum-variant = "allow"
 doc-lazy-continuation = "allow"
 result-large-err = "allow"
 uninlined-format-args = "allow"
+# `sort_by(|a, b| b.x.cmp(&a.x))` reads more clearly than the suggested
+# `sort_by_key(|b| Reverse(b.x))` rewrite.
+unnecessary-sort-by = "allow"
 # to enable in the future
 type-complexity = "allow"
 needless-range-loop = "allow"

@@ -95,11 +95,11 @@ async fn external_api() -> eyre::Result<()> {
         }
     }
 
-    let response = client_request(&format!("{}/v1/block/1", &address)).await;
+    let response = client_request(&format!("{}/v1/block/1", address)).await;
     let json: IrysBlockHeader = response.json().await.unwrap();
     assert!(json.poa.chunk.is_none());
 
-    let response = client_request(&format!("{}/v1/block/1/full", &address)).await;
+    let response = client_request(&format!("{}/v1/block/1/full", address)).await;
     let json: IrysBlockHeader = response.json().await.unwrap();
     assert!(json.poa.chunk.is_some());
 

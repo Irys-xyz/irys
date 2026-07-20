@@ -457,6 +457,10 @@ fn apply_reanchor(
         return ReanchorOutcome::Skipped;
     }
     // At most one boundary fold past the tip (second is unpinned).
+    #[expect(
+        clippy::manual_checked_ops,
+        reason = "explicit != 0 guard reads clearer than checked_div here"
+    )]
     if reset_frequency != 0 {
         let second_boundary_after_tip = (c_step / reset_frequency)
             .saturating_add(2)

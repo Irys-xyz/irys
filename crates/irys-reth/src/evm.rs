@@ -737,7 +737,7 @@ where
         if !self.state.is_empty() {
             return Err(Self::create_internal_error(format!(
                 "Custom IrysEVM state should be empty, but got: {:?}",
-                &self.state.iter().collect::<Vec<_>>()
+                self.state.iter().collect::<Vec<_>>()
             )));
         }
 

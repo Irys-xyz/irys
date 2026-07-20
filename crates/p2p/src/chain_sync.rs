@@ -127,7 +127,7 @@ impl Drop for VdfSyncPause {
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
-            GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
+            GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", err)),
             GossipError::Network(msg) => Self::Network(msg),
             GossipError::CircuitBreakerOpen(peer_id) => {
                 Self::Network(format!("Circuit breaker open for peer {}", peer_id))

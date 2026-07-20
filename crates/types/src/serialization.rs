@@ -900,7 +900,7 @@ pub mod unix_timestamp_string_serde {
 
         Ok(UnixTimestamp::from_secs(
             DateTime::parse_from_rfc3339(&s)
-                .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", &e)))?
+                .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", e)))?
                 .timestamp() as u64,
         ))
     }

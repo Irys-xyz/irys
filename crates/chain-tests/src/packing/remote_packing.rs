@@ -43,11 +43,8 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
         max_pending: NonZero::new(1).unwrap(),
     };
 
-    let addr: SocketAddr = format!(
-        "{}:{}",
-        &packing_config.bind_addr, &packing_config.bind_port
-    )
-    .parse()?;
+    let addr: SocketAddr =
+        format!("{}:{}", packing_config.bind_addr, packing_config.bind_port).parse()?;
     let listener = create_listener(addr)?;
 
     let local_addr = listener.local_addr()?;
@@ -56,7 +53,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
     let exit_handle = tokio::spawn(start_worker(packing_config.clone(), listener, rx));
 
     // Wait for remote packing worker to be ready
-    let base_url = format!("http://{}:{}/v1", &local_addr.ip(), &local_addr.port());
+    let base_url = format!("http://{}:{}/v1", local_addr.ip(), local_addr.port());
     wait_for_packing_worker_ready(&base_url, Duration::from_secs(10)).await?;
 
     // setup
@@ -84,7 +81,7 @@ pub(crate) async fn packing_worker_full_node_test() -> eyre::Result<()> {
                 gpu_packing_batch_size: 0,
             },
             remote: vec![RemotePackingConfig {
-                url: format!("http://{}:{}", &local_addr.ip(), &local_addr.port()),
+                url: format!("http://{}:{}", local_addr.ip(), local_addr.port()),
                 timeout: Some(Duration::from_secs(10)),
             }],
         },

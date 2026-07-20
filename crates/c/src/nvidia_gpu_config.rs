@@ -101,7 +101,7 @@ pub fn set_current_cuda_device_for_thread(device_id: i32) -> Result<(), String> 
         0 => Ok(()),
         n => Err(format!(
             "Switching thread to CUDA device {} failed - error code {}",
-            &device_id, n
+            device_id, n
         )),
     }
 }
@@ -244,6 +244,6 @@ impl NvidiaGpuConfig {
             "  Max Blocks per Multiprocessor: {}",
             self.max_blocks_per_multiprocessor
         );
-        println!(" registers per SM: {}", &self.regs_per_multiprocessor);
+        println!(" registers per SM: {}", self.regs_per_multiprocessor);
     }
 }

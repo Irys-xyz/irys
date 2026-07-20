@@ -538,7 +538,7 @@ fn calculate_cpu_stats(samples: &[CpuSample], duration_ms: u64) -> CalculatedCpu
     }
 
     let mut cpu_values: Vec<f64> = samples.iter().map(|s| s.cpu_threads).collect();
-    cpu_values.sort_by(|a, b| a.total_cmp(b));
+    cpu_values.sort_by(f64::total_cmp);
 
     let n = cpu_values.len();
     let peak_cpu = cpu_values[n - 1];
@@ -560,7 +560,7 @@ fn calculate_cpu_stats(samples: &[CpuSample], duration_ms: u64) -> CalculatedCpu
         mut time_above_3t_ms,
         mut time_above_4t_ms,
     ) = samples.iter().zip(deltas.iter()).fold(
-        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
+        (0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64),
         |(p90, near_peak, a1, a2, a3, a4), (s, &d)| {
             (
                 p90 + if s.cpu_threads >= p90_cpu { d } else { 0 },
@@ -661,7 +661,7 @@ fn calculate_memory_stats(samples: &[MemorySample], duration_ms: u64) -> Calcula
     let (mut time_above_100mb_ms, mut time_above_500mb_ms, mut time_above_1gb_ms) = samples
         .iter()
         .zip(deltas.iter())
-        .fold((0u64, 0u64, 0u64), |(a100, a500, a1g), (s, &d)| {
+        .fold((0_u64, 0_u64, 0_u64), |(a100, a500, a1g), (s, &d)| {
             (
                 a100 + if s.rss_bytes > MB_100 { d } else { 0 },
                 a500 + if s.rss_bytes > MB_500 { d } else { 0 },

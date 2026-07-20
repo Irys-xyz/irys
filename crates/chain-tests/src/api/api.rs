@@ -131,7 +131,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     // polls for tx being stored
     while attempts < max_attempts {
         let req = test::TestRequest::get()
-            .uri(&format!("/v1/tx/{}", &id))
+            .uri(&format!("/v1/tx/{}", id))
             .to_request();
 
         let resp = test::call_service(&app, req).await;

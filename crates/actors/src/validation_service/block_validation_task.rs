@@ -1337,10 +1337,8 @@ impl StageFaultCaptures {
                     self.node_fault = Some(inner.clone());
                 }
             }
-            ValidationResult::Invalid(rejection) => {
-                if self.invalid.is_none() {
-                    self.invalid = Some(rejection.clone());
-                }
+            ValidationResult::Invalid(rejection) if self.invalid.is_none() => {
+                self.invalid = Some(rejection.clone());
             }
             // Valid: nothing to capture.
             // Soft InternalFailure: deliberately not captured (see

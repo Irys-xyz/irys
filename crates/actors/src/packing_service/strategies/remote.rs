@@ -133,7 +133,7 @@ impl RemotePackingStrategy {
 
         // Check connectivity
         debug!("Attempting to connect to remote packing host {}", &v1_url);
-        if let Err(e) = client.get(format!("{}/info", &v1_url)).send().await {
+        if let Err(e) = client.get(format!("{}/info", v1_url)).send().await {
             return Err(format!(
                 "Unable to connect to remote packing host {} - {}",
                 url, e
@@ -152,11 +152,11 @@ impl RemotePackingStrategy {
 
         // Send packing request
         let response = client
-            .post(format!("{}/pack", &v1_url))
+            .post(format!("{}/pack", v1_url))
             .json(&request)
             .send()
             .await
-            .map_err(|e| format!("Error sending packing request to {} - {}", &v1_url, e))?;
+            .map_err(|e| format!("Error sending packing request to {} - {}", v1_url, e))?;
 
         let stream = response.bytes_stream();
 

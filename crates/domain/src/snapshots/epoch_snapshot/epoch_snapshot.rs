@@ -1112,7 +1112,7 @@ impl EpochSnapshot {
 
         // Sort all the unassigned pledges by their ids, having a sorted list
         // of pledges and unassigned hashes leads to deterministic pledge assignment
-        unassigned_pledges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        unassigned_pledges.sort_unstable_by_key(|a| a.id);
 
         // Loop through both lists assigning capacity partitions to pledges
         for pledge in &unassigned_pledges {
@@ -1300,11 +1300,9 @@ impl EpochSnapshot {
                 .iter()
                 .enumerate()
                 .filter(|(_, (_, params))| {
-                    params.is_none()
-                    // if an assignment exists, and is from the future, we pass it through
-                        || params.is_some_and(|pa| {
-                            pa.last_updated_height.unwrap_or(self.epoch_height + 1) > self.epoch_height
-                        })
+                    params.is_none_or(|pa| {
+                        pa.last_updated_height.unwrap_or(self.epoch_height + 1) > self.epoch_height
+                    })
                 })
         {
             module_infos.push(StorageModuleInfo {

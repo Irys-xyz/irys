@@ -815,22 +815,24 @@ pub async fn select_best_txs(
     let total_available = total_commitments_available + total_data_available;
     let total_selected = commitment_tx.len() + submit_tx.len();
 
-    if total_available > 0 {
-        const REJECTION_RATE_THRESHOLD: usize = 70;
-        let rejection_rate = ((total_available - total_selected) * 100) / total_available;
-        if rejection_rate > REJECTION_RATE_THRESHOLD {
-            warn!(
-                mempool_selected.rejection_rate = rejection_rate,
-                mempool_selected.total_available = total_available,
-                mempool_selected.total_selected = total_selected,
-                mempool_selected.commitments_available = total_commitments_available,
-                mempool_selected.commitments_selected = commitment_tx.len(),
-                mempool_selected.data_available = total_data_available,
-                mempool_selected.data_selected = submit_tx.len(),
-                mempool_selected.unfunded_addresses = unfunded_address.len(),
-                "High transaction rejection rate detected"
-            );
-        }
+    const REJECTION_RATE_THRESHOLD: usize = 70;
+    // `checked_div` yields `None` on an empty mempool (total_available == 0),
+    // skipping the warning — nothing to reject when there's nothing available.
+    if let Some(rejection_rate) =
+        ((total_available - total_selected) * 100).checked_div(total_available)
+        && rejection_rate > REJECTION_RATE_THRESHOLD
+    {
+        warn!(
+            mempool_selected.rejection_rate = rejection_rate,
+            mempool_selected.total_available = total_available,
+            mempool_selected.total_selected = total_selected,
+            mempool_selected.commitments_available = total_commitments_available,
+            mempool_selected.commitments_selected = commitment_tx.len(),
+            mempool_selected.data_available = total_data_available,
+            mempool_selected.data_selected = submit_tx.len(),
+            mempool_selected.unfunded_addresses = unfunded_address.len(),
+            "High transaction rejection rate detected"
+        );
     }
 
     // Return selected transactions grouped by type
@@ -953,7 +955,7 @@ async fn get_publish_txs_and_proofs(
         }
 
         // Sort the resulting publish_txs & proofs
-        tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+        tx_headers.sort_by_key(|a| a.id);
 
         // Filter out any tx headers with the wrong data_size for this data_root
         tx_headers.retain(|tx| {
@@ -1428,11 +1430,7 @@ async fn get_data_txs(
         })?;
 
     let mut found_txs: Vec<Option<DataTransactionHeader>> = Vec::with_capacity(txids.len());
-    for ((tx_id, mempool_result), db_result) in txids
-        .iter()
-        .zip(mempool_results.into_iter())
-        .zip(db_results.into_iter())
-    {
+    for ((tx_id, mempool_result), db_result) in txids.iter().zip(mempool_results).zip(db_results) {
         let db_header = match db_result {
             Ok(header) => header,
             Err(e) => {

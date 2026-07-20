@@ -120,7 +120,7 @@ impl StorageSubmodulesConfig {
                     if sm_path.exists() && sm_path.is_dir() && !sm_path.is_symlink() {
                         panic!(
                             "Found unexpected folder {:?} in storage submodule path {:?} - please remove this folder, or set `is_using_hardcoded_paths` to `true`",
-                            &sm_path, &base_path
+                            sm_path, base_path
                         )
                     }
 

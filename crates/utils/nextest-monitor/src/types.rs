@@ -104,7 +104,7 @@ impl AggregatedStats {
         let dir = stats_dir(path);
         let mut tests = parse_stats_dir(&dir)?;
         tests.sort_by_key(|t| t.started_at);
-        Ok(AggregatedStats { tests })
+        Ok(Self { tests })
     }
 
     /// Load stats from the `.d/` directory, returning empty default if it
@@ -124,7 +124,7 @@ impl AggregatedStats {
             }
         };
         tests.sort_by_key(|t| t.started_at);
-        AggregatedStats { tests }
+        Self { tests }
     }
 
     pub fn append(&mut self, stats: TestStats) {
@@ -230,7 +230,7 @@ mod tests {
             heap_profile_path: None,
         };
 
-        append_stats(&path, stats.clone()).unwrap();
+        append_stats(&path, stats).unwrap();
 
         let loaded = AggregatedStats::load_or_default(&path);
         assert_eq!(loaded.tests.len(), 1);

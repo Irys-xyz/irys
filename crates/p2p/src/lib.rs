@@ -1,3 +1,7 @@
+// Deeply-nested `tracing::instrument` async blocks (e.g. the sync task in
+// `chain_sync`) exceed the default type-layout query depth of 128.
+#![recursion_limit = "256"]
+
 mod block_pool;
 mod block_status_provider;
 mod cache;

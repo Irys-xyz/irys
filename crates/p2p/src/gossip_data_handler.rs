@@ -501,7 +501,7 @@ where
                 &serde_json::to_string(&block_header).unwrap_or_else(|e| format!(
                     // fallback to debug printing the header
                     "error serializing block header: {}\n{:#}",
-                    &e, &block_header
+                    e, block_header
                 ))
             );
 
