@@ -173,6 +173,21 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         .await?;
     let evil_height = evil_parent_block.height + 1;
     let parent_submit_total = evil_parent_block.ledger_total_chunks(DataLedger::Submit);
+    // Derive Cascade status from the parent tip's timestamp against the activation
+    // boundary (set to the pre-restart tip + 1s), as production does — don't hardcode
+    // it. Assert it holds so the oracle checks below genuinely run on the post-activation
+    // gate and can't silently pass on a pre-activation (transparent-gate) parent.
+    let cascade_active = node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_cascade_active_at(evil_parent_block.timestamp_secs());
+    assert!(
+        cascade_active,
+        "evil block's parent tip must be cascade-active post-activation \
+         (activation anchored at the pre-restart tip + 1s)"
+    );
     let tip_snapshot = node
         .node_ctx
         .block_tree_guard
@@ -207,7 +222,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
     let inclusive_expired = tip_snapshot.get_all_expired_term_slot_indexes(
         DataLedger::Submit,
         evil_height,
-        true, // cascade active
+        cascade_active,
         parent_submit_total,
     );
     assert!(
@@ -225,7 +240,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         &tip_snapshot,
         &evil_parent_block,
         &node.node_ctx.config,
-        true, // cascade active
+        cascade_active,
         &node.node_ctx.block_producer_inner.block_index,
         &node.node_ctx.block_tree_guard,
         &node.node_ctx.mempool_guard,
@@ -246,7 +261,21 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
     let target_data = tx.data.clone().expect(
         "posted tx payload must be retained to build the ingress proof (fixture invariant)",
     );
-    let chunks: Vec<Vec<u8>> = vec![target_data.into()];
+    // Split into chunk_size leaves so the ingress-proof root matches the real
+    // multi-chunk tx (data_size=96, chunk_size=32 -> 3 chunks). Passing the whole
+    // payload as one leaf would compute a root that never matches tx.data_root, so
+    // the block could be rejected for a bad proof instead of only the §4c rule.
+    let target_bytes: Vec<u8> = target_data.into();
+    let chunks: Vec<Vec<u8>> = target_bytes
+        .chunks(chunk_size as usize)
+        .map(<[u8]>::to_vec)
+        .collect();
+    assert_eq!(
+        chunks.len(),
+        3,
+        "fixture expects a 3-chunk (96B / 32B) payload, got {} chunks",
+        chunks.len()
+    );
     let proof = generate_ingress_proof(
         &genesis_signer,
         tx.header.data_root,

@@ -867,12 +867,14 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     // block — the property the fully-written-gate fix guarantees by feeding all three
     // the same write-frontier inputs. Uses the snapshot wrapper (chunks_per_slot is
     // supplied internally).
-    // Note: this feeds the epoch block's own total (e_total); the production §4c
-    // promotion validator passes the PARENT header's total. They are equal here because
-    // no data is written in the expiry epoch, so this stays a faithful gate-family
-    // consistency check (blocked vs recycle computed from one snapshot's inputs).
+    // Feed the PARENT header's ThirtyDay total — the exact input the production §4c
+    // promotion validator uses (it keys off the parent header, pre-this-epoch-touch).
+    // The rescue write lands in epoch block E, so parent_total (pre-write) differs from
+    // e_total; using the parent keeps this a faithful check of the consensus input
+    // contract rather than the post-touch epoch-block total.
+    let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
     let blocked: std::collections::BTreeSet<usize> = parent_snap
-        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, e_total)
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, parent_total)
         .into_iter()
         .collect();
     let recycled: std::collections::BTreeSet<usize> = actual_set.iter().copied().collect();
@@ -1279,6 +1281,15 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         3,
         "exactly the three unpromoted rescued-slot txs must be refunded at recycle, \
          got {refunds:?}"
+    );
+    // Settlement side of the same deferral: the TermFeeReward the rescued slot was
+    // denied at the skipped epoch E (Phase A asserted zero there) must now be emitted
+    // when the slot actually recycles — the term fees are distributed, not lost.
+    let (rewards_at_recycle, _) = expiry_shadow_counts(&ctx, recycle).await?;
+    assert!(
+        rewards_at_recycle >= 1,
+        "the deferred TermFeeReward must be emitted when slot 0 actually recycles at \
+         F+{window}={recycle} (got {rewards_at_recycle})"
     );
 
     ctx.stop().await;

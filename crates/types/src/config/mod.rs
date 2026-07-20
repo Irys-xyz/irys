@@ -1535,6 +1535,25 @@ mod tests {
             err.contains("straddle"),
             "expected the reorg-window guard, got: {err}"
         );
+
+        // Boundary: EQUAL must also be rejected — the guard is strict `>`, since an
+        // epoch exactly as long as the reorg window still leaves the transition
+        // unfinalized. Guards against a future weakening of `>` to `>=`.
+        let mut equal_config = NodeConfig::testing().with_run_mode(RunMode::Production);
+        {
+            let c = equal_config.consensus.get_mut();
+            c.epoch.num_blocks_in_epoch = 50;
+            c.block_tree_depth = 50; // 50 == 50 must still be rejected (strict >)
+            c.epoch.submit_ledger_epoch_length = 6; // 6*50=300 > 50 so NC-0042 passes first
+        }
+        let equal_err = Config::new_with_random_peer_id(equal_config)
+            .validate()
+            .expect_err("epoch equal to block_tree_depth must be rejected in production")
+            .to_string();
+        assert!(
+            equal_err.contains("straddle"),
+            "expected the reorg-window guard for the equality case, got: {equal_err}"
+        );
     }
 
     #[test]

@@ -427,9 +427,14 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
             }
         })
         .collect();
+    // No perm-fee refund at all for the user at this epoch: slot 0 already recycled
+    // (and settled) at its own earlier expiry epoch, and slot 1 is rescued (written
+    // this epoch), so nothing recycles here. A non-empty set would mean either T's
+    // rescued slot was wrongly refunded or a sibling slot leaked a refund (NC-0042).
     assert!(
-        !refunded_tx_ids.contains(&target.header.id),
-        "no perm-fee refund may be emitted for a rescued-slot tx at the epoch block (NC-0042)"
+        refunded_tx_ids.is_empty(),
+        "no perm-fee refund may be emitted for the user at the rescue epoch block \
+         (rescued slot 1, slot 0 settled earlier) (NC-0042); got {refunded_tx_ids:?}"
     );
 
     // --- 7. After the rescue, T becomes promotable (eventually promoted). ---
