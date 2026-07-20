@@ -1,3 +1,4 @@
+mod multi_replica_expiry;
 mod perm_refund;
 mod perm_refund_multi_miner;
 mod perm_refund_unpledged_slot;
