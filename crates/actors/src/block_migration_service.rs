@@ -509,156 +509,178 @@ impl BlockMigrationService {
             });
         }
 
-        // Phase 2: Unassign storage module offsets and clear orphaned index entries
-        for info in &rollback_infos {
-            for (ledger, range) in &info.ledger_ranges {
-                let modules = get_overlapped_storage_modules(storage_modules_guard, *ledger, range);
+        // Phases 2-4 mutate three stores that cannot share a transaction — the
+        // per-submodule DBs, the block index, and in-memory supply state — so a
+        // failure partway leaves them inconsistent. Once mutation begins we abort
+        // the node rather than return an error and keep running on a
+        // partially-rolled-back state; a clean restart re-runs the (idempotent)
+        // rollback. Crash-safe journaled recovery is the proper fix, tracked for
+        // the storage-module rework. Everything above this point is read-only, so
+        // its failures propagate normally.
+        let apply_rollback = || -> eyre::Result<()> {
+            // Phase 2: Unassign storage module offsets and clear orphaned index entries
+            for info in &rollback_infos {
+                for (ledger, range) in &info.ledger_ranges {
+                    let modules =
+                        get_overlapped_storage_modules(storage_modules_guard, *ledger, range);
 
-                for module in modules {
-                    // `modules` merely overlap `range`: clip to each module's own
-                    // ledger range before converting (as `index_transaction_data`
-                    // does), otherwise partially covered modules are skipped and
-                    // their orphaned offsets never unassigned.
-                    let module_range = match module.get_storage_module_ledger_offsets() {
-                        Ok(r) => r,
-                        Err(err) => {
-                            warn!(
-                                module_id = module.id,
-                                ?ledger,
-                                %err,
-                                "skipping storage module with no ledger offsets during rollback"
-                            );
-                            continue;
-                        }
-                    };
-                    // Fully qualified method call: importing `InclusiveInterval`
-                    // module-wide breaks inference on `PartitionChunkRange`,
-                    // which implements the trait for two point types.
-                    let Some(overlap) =
-                        nodit::InclusiveInterval::intersection(&module_range, range)
-                    else {
-                        warn!(
-                            module_id = module.id,
-                            ?ledger,
-                            ?range,
-                            ?module_range,
-                            "skipping storage module: orphaned range no longer overlaps during rollback"
-                        );
-                        continue;
-                    };
-                    // The clipped range is contained by construction, so this
-                    // only fails if the module's assignment changed mid-loop.
-                    let partition_range = match module.make_range_partition_relative(overlap) {
-                        Ok(r) => r,
-                        Err(err) => {
-                            warn!(
-                                module_id = module.id,
-                                ?ledger,
-                                %err,
-                                "skipping storage module: clipped range conversion failed during rollback"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let range_start = *partition_range.start();
-                    let range_end = *partition_range.end();
-
-                    // Drop queued (not-yet-synced) writes in the orphaned range
-                    // first: a later `sync_pending_chunks` would otherwise replay
-                    // them and flip the intervals we clear below back to `Data`
-                    // over a now-empty offset index. This closes the queued-write
-                    // path; a sync already mid-flush (its batch snapshotted before
-                    // this drop) can still replay, but that window is transient and
-                    // healed by the repack enqueued below.
-                    module.drop_pending_writes_in_range(
-                        PartitionChunkOffset::from(range_start),
-                        PartitionChunkOffset::from(range_end),
-                    );
-
-                    // Clear per-offset tx/data path index entries for orphaned txs.
-                    module.clear_offset_index_in_range(
-                        PartitionChunkOffset::from(range_start),
-                        PartitionChunkOffset::from(range_end),
-                    )?;
-
-                    // Scope the DataRootInfos clear to the orphaned placements so
-                    // a data_root shared with a still-canonical block keeps its
-                    // canonical placement.
-                    module.clear_data_root_infos_in_range(
-                        PartitionChunkOffset::from(range_start),
-                        PartitionChunkOffset::from(range_end),
-                        &info.data_roots,
-                    )?;
-
-                    // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
-                    {
-                        let mut intervals = module.intervals().write().unwrap();
-                        for offset in range_start..=range_end {
-                            let part_offset = PartitionChunkOffset::from(offset);
-                            StorageModule::cut_then_insert_interval_if_touching(
-                                &mut intervals,
-                                part_offset,
-                                ChunkType::Uninitialized,
-                            );
-                        }
-                    }
-                    module.write_intervals_to_submodules()?;
-
-                    // Re-request packing for the re-marked range. These offsets
-                    // are now `Uninitialized` with no entropy on disk; packing is
-                    // otherwise only requested at startup / assignment
-                    // transitions, so without this the canonical fork's
-                    // re-migrated chunks would have no entropy to XOR against and
-                    // silently fail to write. The packing channel is buffered and
-                    // a rollback enqueues only a handful of ranges, so a
-                    // non-blocking `try_send` from this sync path suffices; warn
-                    // (don't fail the module) if it can't be enqueued.
-                    //
-                    // Known limitation: packing is asynchronous, so canonical
-                    // chunks re-migrated into this range *before* packing
-                    // completes still find no entropy and are silently skipped by
-                    // `write_data_chunk`. This is not permanent — the range stays
-                    // `Uninitialized` and is recovered by the startup repack plus
-                    // data-sync. Closing the window (gating re-migration on
-                    // entropy presence) is left to the packing-reconciler rework.
-                    match PackingRequest::new(
-                        module.clone(),
-                        PartitionChunkRange(ii(
-                            PartitionChunkOffset::from(*partition_range.start()),
-                            PartitionChunkOffset::from(*partition_range.end()),
-                        )),
-                    ) {
-                        Ok(req) => {
-                            if let Err(err) = self.packing_sender.try_send(req) {
+                    for module in modules {
+                        // `modules` merely overlap `range`: clip to each module's own
+                        // ledger range before converting (as `index_transaction_data`
+                        // does), otherwise partially covered modules are skipped and
+                        // their orphaned offsets never unassigned.
+                        let module_range = match module.get_storage_module_ledger_offsets() {
+                            Ok(r) => r,
+                            Err(err) => {
                                 warn!(
                                     module_id = module.id,
+                                    ?ledger,
                                     %err,
-                                    "failed to enqueue repacking request during partition recovery"
+                                    "skipping storage module with no ledger offsets during rollback"
+                                );
+                                continue;
+                            }
+                        };
+                        // Fully qualified method call: importing `InclusiveInterval`
+                        // module-wide breaks inference on `PartitionChunkRange`,
+                        // which implements the trait for two point types.
+                        let Some(overlap) =
+                            nodit::InclusiveInterval::intersection(&module_range, range)
+                        else {
+                            warn!(
+                                module_id = module.id,
+                                ?ledger,
+                                ?range,
+                                ?module_range,
+                                "skipping storage module: orphaned range no longer overlaps during rollback"
+                            );
+                            continue;
+                        };
+                        // The clipped range is contained by construction, so this
+                        // only fails if the module's assignment changed mid-loop.
+                        let partition_range = match module.make_range_partition_relative(overlap) {
+                            Ok(r) => r,
+                            Err(err) => {
+                                warn!(
+                                    module_id = module.id,
+                                    ?ledger,
+                                    %err,
+                                    "skipping storage module: clipped range conversion failed during rollback"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let range_start = *partition_range.start();
+                        let range_end = *partition_range.end();
+
+                        // Drop queued (not-yet-synced) writes in the orphaned range
+                        // first: a later `sync_pending_chunks` would otherwise replay
+                        // them and flip the intervals we clear below back to `Data`
+                        // over a now-empty offset index. This closes the queued-write
+                        // path; a sync already mid-flush (its batch snapshotted before
+                        // this drop) can still replay, but that window is transient and
+                        // healed by the repack enqueued below.
+                        module.drop_pending_writes_in_range(
+                            PartitionChunkOffset::from(range_start),
+                            PartitionChunkOffset::from(range_end),
+                        );
+
+                        // Clear per-offset tx/data path index entries for orphaned txs.
+                        module.clear_offset_index_in_range(
+                            PartitionChunkOffset::from(range_start),
+                            PartitionChunkOffset::from(range_end),
+                        )?;
+
+                        // Scope the DataRootInfos clear to the orphaned placements so
+                        // a data_root shared with a still-canonical block keeps its
+                        // canonical placement.
+                        module.clear_data_root_infos_in_range(
+                            PartitionChunkOffset::from(range_start),
+                            PartitionChunkOffset::from(range_end),
+                            &info.data_roots,
+                        )?;
+
+                        // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
+                        {
+                            let mut intervals = module.intervals().write().unwrap();
+                            for offset in range_start..=range_end {
+                                let part_offset = PartitionChunkOffset::from(offset);
+                                StorageModule::cut_then_insert_interval_if_touching(
+                                    &mut intervals,
+                                    part_offset,
+                                    ChunkType::Uninitialized,
                                 );
                             }
                         }
-                        Err(err) => {
-                            warn!(
-                                module_id = module.id,
-                                %err,
-                                "failed to build repacking request during partition recovery"
-                            );
+                        module.write_intervals_to_submodules()?;
+
+                        // Re-request packing for the re-marked range. These offsets
+                        // are now `Uninitialized` with no entropy on disk; packing is
+                        // otherwise only requested at startup / assignment
+                        // transitions, so without this the canonical fork's
+                        // re-migrated chunks would have no entropy to XOR against and
+                        // silently fail to write. The packing channel is buffered and
+                        // a rollback enqueues only a handful of ranges, so a
+                        // non-blocking `try_send` from this sync path suffices; warn
+                        // (don't fail the module) if it can't be enqueued.
+                        //
+                        // Known limitation: packing is asynchronous, so canonical
+                        // chunks re-migrated into this range *before* packing
+                        // completes still find no entropy and are silently skipped by
+                        // `write_data_chunk`. This is not permanent — the range stays
+                        // `Uninitialized` and is recovered by the startup repack plus
+                        // data-sync. Closing the window (gating re-migration on
+                        // entropy presence) is left to the packing-reconciler rework.
+                        match PackingRequest::new(
+                            module.clone(),
+                            PartitionChunkRange(ii(
+                                PartitionChunkOffset::from(*partition_range.start()),
+                                PartitionChunkOffset::from(*partition_range.end()),
+                            )),
+                        ) {
+                            Ok(req) => {
+                                if let Err(err) = self.packing_sender.try_send(req) {
+                                    warn!(
+                                        module_id = module.id,
+                                        %err,
+                                        "failed to enqueue repacking request during partition recovery"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                warn!(
+                                    module_id = module.id,
+                                    %err,
+                                    "failed to build repacking request during partition recovery"
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Phase 3: Truncate block index
-        block_index.truncate_to_height(fork_parent_height)?;
+            // Phase 3: Truncate block index
+            block_index.truncate_to_height(fork_parent_height)?;
 
-        // Phase 4: Roll back supply state
-        if let Some(supply_state) = &self.supply_state {
-            let reward_sum: U256 = rollback_infos.iter().fold(U256::zero(), |acc, info| {
-                acc.saturating_add(info.reward_amount)
-            });
-            supply_state.rollback_reward(fork_parent_height, reward_sum);
+            // Phase 4: Roll back supply state
+            if let Some(supply_state) = &self.supply_state {
+                let reward_sum: U256 = rollback_infos.iter().fold(U256::zero(), |acc, info| {
+                    acc.saturating_add(info.reward_amount)
+                });
+                supply_state.rollback_reward(fork_parent_height, reward_sum);
+            }
+
+            Ok(())
+        };
+
+        if let Err(err) = apply_rollback() {
+            panic!(
+                "network-partition rollback failed after mutation began; aborting the \
+                 node to avoid running on partially-rolled-back state (storage modules \
+                 and the block index may be left inconsistent until a restart re-runs \
+                 recovery): {err:#}"
+            );
         }
 
         info!(
