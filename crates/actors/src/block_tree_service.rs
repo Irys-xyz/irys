@@ -2261,6 +2261,7 @@ mod tests {
                 config.consensus.block_migration_depth as u64,
                 cache.clone(),
                 chunk_migration_sender,
+                service_senders.packing_sender(),
             );
 
             // Real (not mocked) VDF state pinned at `live_step`; the gate only

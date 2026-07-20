@@ -1656,6 +1656,7 @@ impl IrysNode {
             u64::from(config.consensus.block_migration_depth),
             Arc::clone(&block_tree_cache),
             service_senders.chunk_migration.clone(),
+            service_senders.packing_sender(),
         );
 
         // Create the VDF state before the block tree service: its re-anchor

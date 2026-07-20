@@ -1,4 +1,5 @@
 use crate::chunk_migration_service::ChunkMigrationServiceMessage;
+use crate::packing_service::{PackingRequest, PackingSender};
 use eyre::{OptionExt as _, ensure};
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header,
@@ -12,8 +13,8 @@ use irys_domain::{
 use irys_storage::ii;
 use irys_types::{
     DataLedger, DataTransactionHeader, H256, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
-    PartitionChunkOffset, SealedBlock, SendTraced as _, SystemLedger, Traced, U256,
-    app_state::DatabaseProvider,
+    PartitionChunkOffset, PartitionChunkRange, SealedBlock, SendTraced as _, SystemLedger, Traced,
+    U256, app_state::DatabaseProvider,
 };
 use std::{
     collections::HashMap,
@@ -37,6 +38,10 @@ pub struct BlockMigrationService {
     block_migration_depth: u64,
     cache: Arc<RwLock<BlockTree>>,
     chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
+    /// Used by `recover_from_network_partition` to re-request packing for
+    /// offsets re-marked `Uninitialized` during a deep-reorg rollback (packing
+    /// is otherwise only requested at startup / assignment transitions).
+    packing_sender: PackingSender,
     storage_modules_guard: Option<StorageModulesReadGuard>,
 }
 
@@ -140,6 +145,7 @@ impl BlockMigrationService {
         block_migration_depth: u64,
         cache: Arc<RwLock<BlockTree>>,
         chunk_migration_sender: UnboundedSender<Traced<ChunkMigrationServiceMessage>>,
+        packing_sender: PackingSender,
     ) -> Self {
         Self {
             db,
@@ -151,6 +157,7 @@ impl BlockMigrationService {
             block_migration_depth,
             cache,
             chunk_migration_sender,
+            packing_sender,
             storage_modules_guard: None,
         }
     }
@@ -412,6 +419,10 @@ impl BlockMigrationService {
         })?;
 
         let block_index = self.block_index_guard.read();
+        // HAZARD: `latest_height()` maps a transient DB read error to 0. If that
+        // happens the `fork_parent_height >= latest` guard trips and the whole
+        // rollback is silently skipped; recovery then relies on a later reorg
+        // tick retrying. There is no fallible public variant to propagate.
         let latest = block_index.latest_height();
         if fork_parent_height >= latest {
             return Ok(());
@@ -475,13 +486,15 @@ impl BlockMigrationService {
                 }
             }
 
-            // Collect data_roots from orphaned block's transactions
+            // Collect data_roots from orphaned block's transactions. Propagate
+            // DB read errors rather than swallowing them — a swallowed error
+            // would silently drop the tx's data_root from the clear set,
+            // leaving its orphaned placement in the offset index.
             let mut data_roots = Vec::new();
             let tx_id_map = header.get_data_ledger_tx_ids();
             for tx_ids in tx_id_map.values() {
                 for txid in tx_ids {
-                    if let Ok(Some(tx_header)) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))
-                    {
+                    if let Some(tx_header) = self.db.view_eyre(|tx| tx_header_by_txid(tx, txid))? {
                         data_roots.push(tx_header.data_root);
                     }
                 }
@@ -546,37 +559,37 @@ impl BlockMigrationService {
                         }
                     };
 
-                    // Clear offset index entries and data_root mappings for orphaned txs
-                    for offset in *partition_range.start()..=*partition_range.end() {
-                        let part_offset = PartitionChunkOffset::from(offset);
-                        let (_, submodule) = module.get_submodule_for_offset(part_offset)?;
-                        submodule.db.update_eyre(|tx| {
-                            irys_database::submodule::add_tx_path_hash_to_offset_index(
-                                tx,
-                                part_offset,
-                                None,
-                            )?;
-                            irys_database::submodule::add_data_path_hash_to_offset_index(
-                                tx,
-                                part_offset,
-                                None,
-                            )?;
-                            // Clear DataRootInfosByDataRoot for orphaned txs' data_roots
-                            for data_root in &info.data_roots {
-                                irys_database::submodule::set_data_root_infos_for_data_root(
-                                    tx,
-                                    *data_root,
-                                    irys_database::submodule::tables::DataRootInfos(Vec::new()),
-                                )?;
-                            }
-                            Ok(())
-                        })?;
-                    }
+                    let range_start = *partition_range.start();
+                    let range_end = *partition_range.end();
+
+                    // Drop queued (not-yet-synced) writes in the orphaned range
+                    // first: otherwise a later `sync_pending_chunks` would replay
+                    // them and flip the intervals we clear below back to `Data`
+                    // over a now-empty offset index.
+                    module.drop_pending_writes_in_range(
+                        PartitionChunkOffset::from(range_start),
+                        PartitionChunkOffset::from(range_end),
+                    );
+
+                    // Clear per-offset tx/data path index entries for orphaned txs.
+                    module.clear_offset_index_in_range(
+                        PartitionChunkOffset::from(range_start),
+                        PartitionChunkOffset::from(range_end),
+                    )?;
+
+                    // Scope the DataRootInfos clear to the orphaned placements so
+                    // a data_root shared with a still-canonical block keeps its
+                    // canonical placement.
+                    module.clear_data_root_infos_in_range(
+                        PartitionChunkOffset::from(range_start),
+                        PartitionChunkOffset::from(range_end),
+                        &info.data_roots,
+                    )?;
 
                     // Mark offsets as Uninitialized (not Entropy — on-disk bytes are packed data)
                     {
                         let mut intervals = module.intervals().write().unwrap();
-                        for offset in *partition_range.start()..=*partition_range.end() {
+                        for offset in range_start..=range_end {
                             let part_offset = PartitionChunkOffset::from(offset);
                             StorageModule::cut_then_insert_interval_if_touching(
                                 &mut intervals,
@@ -586,6 +599,48 @@ impl BlockMigrationService {
                         }
                     }
                     module.write_intervals_to_submodules()?;
+
+                    // Re-request packing for the re-marked range. These offsets
+                    // are now `Uninitialized` with no entropy on disk; packing is
+                    // otherwise only requested at startup / assignment
+                    // transitions, so without this the canonical fork's
+                    // re-migrated chunks would have no entropy to XOR against and
+                    // silently fail to write. The packing channel is buffered and
+                    // a rollback enqueues only a handful of ranges, so a
+                    // non-blocking `try_send` from this sync path suffices; warn
+                    // (don't fail the module) if it can't be enqueued.
+                    //
+                    // Known limitation: packing is asynchronous, so canonical
+                    // chunks re-migrated into this range *before* packing
+                    // completes still find no entropy and are silently skipped by
+                    // `write_data_chunk`. This is not permanent — the range stays
+                    // `Uninitialized` and is recovered by the startup repack plus
+                    // data-sync. Closing the window (gating re-migration on
+                    // entropy presence) is left to the packing-reconciler rework.
+                    match PackingRequest::new(
+                        module.clone(),
+                        PartitionChunkRange(ii(
+                            PartitionChunkOffset::from(*partition_range.start()),
+                            PartitionChunkOffset::from(*partition_range.end()),
+                        )),
+                    ) {
+                        Ok(req) => {
+                            if let Err(err) = self.packing_sender.try_send(req) {
+                                warn!(
+                                    module_id = module.id,
+                                    %err,
+                                    "failed to enqueue repacking request during partition recovery"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                module_id = module.id,
+                                %err,
+                                "failed to build repacking request during partition recovery"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -848,11 +903,12 @@ mod tests {
     };
     use irys_domain::{BlockTree, StorageModuleInfo};
     use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::partition::PartitionAssignment;
     use irys_types::{
         BlockIndexItem, BlockTransactions, ConsensusConfig, DataTransactionHeader,
         DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
         H256, H256List, IrysBlockHeader, LedgerIndexItem, NodeConfig, U256,
-        partition::PartitionAssignment, partition_chunk_offset_ii,
+        partition_chunk_offset_ii,
     };
     use reth_db::Database as _;
     use reth_db::mdbx::DatabaseArguments;
@@ -895,6 +951,10 @@ mod tests {
         let cache = Arc::new(RwLock::new(tree));
 
         let (chunk_migration_sender, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Packing sender: these tests don't assert on packing, so a buffered
+        // channel whose receiver is held (not dropped) is sufficient (enqueue
+        // failures are warn-and-continue).
+        let (packing_sender, _packing_rx) = tokio::sync::mpsc::channel(16);
 
         // Return a dummy tempdir alongside so callers can keep it alive if
         // they want; in practice the test owns its own tempdir for the DB.
@@ -909,6 +969,7 @@ mod tests {
             ConsensusConfig::testing().block_migration_depth as u64,
             cache,
             chunk_migration_sender,
+            packing_sender,
         );
         (svc, tmp)
     }
@@ -2181,6 +2242,124 @@ mod tests {
         assert!(
             index.get_item(finalized_height).is_some(),
             "the finalized block at height {finalized_height} must survive the rejected reorg",
+        );
+
+        Ok(())
+    }
+
+    /// Regression test: the rollback must clear only the orphaned
+    /// `DataRootInfo` placements, not wipe the whole list for a data_root that
+    /// is also placed by a still-canonical block.
+    #[test]
+    fn recover_from_network_partition_scopes_data_root_infos_clear() -> eyre::Result<()> {
+        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        let (db, _db_tmp) = open_db()?;
+        let (mut svc, _svc_tmp) = make_service(db.clone());
+
+        let sm_tmp = irys_testing_utils::utils::TempDirBuilder::new()
+            .prefix("recover_scoped_dri")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: sm_tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = irys_types::Config::new_with_random_peer_id(node_config);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                ledger_id: Some(DataLedger::Submit as u32),
+                slot_index: Some(0),
+                ..PartitionAssignment::default()
+            }),
+            submodules: vec![(partition_chunk_offset_ii!(0, 9), "submodule-0".into())],
+        };
+        let module = Arc::new(StorageModule::new(&info, &config)?);
+        module.pack_with_zeros();
+        svc.set_storage_modules_guard(StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![
+            module.clone(),
+        ]))));
+
+        // The same data_root placed twice: a canonical placement at partition
+        // offset 0 (below the orphaned range) and an orphaned placement at
+        // offset 3 (inside it).
+        let shared_data_root = H256::random();
+        let orphan_txid = H256::random();
+        {
+            let (_, submodule) = module.get_submodule_for_offset(PartitionChunkOffset::from(3))?;
+            submodule.db.update_eyre(|tx| {
+                add_data_root_info(
+                    tx,
+                    shared_data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(0),
+                        data_size: 32,
+                    },
+                )?;
+                add_data_root_info(
+                    tx,
+                    shared_data_root,
+                    &DataRootInfo {
+                        start_offset: RelativeChunkOffset(3),
+                        data_size: 32,
+                    },
+                )
+            })?;
+        }
+
+        // The orphaned block carries the tx whose data_root is shared; its
+        // header must be resolvable so recovery adds it to the clear set.
+        let orphan_tx = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: orphan_txid,
+                data_root: shared_data_root,
+                ledger_id: DataLedger::Submit as u32,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
+        });
+
+        // Genesis leaves Submit at 3 chunks; the orphan takes it to 6, so the
+        // orphaned range is ledger/partition [3, 5].
+        let genesis = make_block_header(0, H256::zero(), 3, vec![]);
+        let orphan = make_block_header(1, genesis.block_hash, 6, vec![orphan_txid]);
+        db.update_eyre(|tx| {
+            irys_database::insert_block_header(tx, &genesis)?;
+            irys_database::insert_block_header(tx, &orphan)?;
+            insert_tx_header(tx, &orphan_tx)
+        })?;
+        let submit_index_item = |header: &IrysBlockHeader, total_chunks| BlockIndexItem {
+            block_hash: header.block_hash,
+            num_ledgers: 1,
+            ledgers: vec![LedgerIndexItem {
+                total_chunks,
+                tx_root: H256::zero(),
+                ledger: DataLedger::Submit,
+            }],
+        };
+        {
+            let index = svc.block_index_guard.read();
+            index.push_item(&submit_index_item(&genesis, 3), 0)?;
+            index.push_item(&submit_index_item(&orphan, 6), 1)?;
+        }
+
+        svc.recover_from_network_partition(0)?;
+
+        let infos = module.collect_data_root_infos(shared_data_root)?;
+        assert_eq!(
+            infos.0,
+            vec![DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 32,
+            }],
+            "canonical placement (start_offset 0, below the orphaned range) survives; \
+             orphaned placement (start_offset 3, inside it) is removed"
         );
 
         Ok(())
