@@ -419,12 +419,13 @@ impl BlockMigrationService {
         })?;
 
         let block_index = self.block_index_guard.read();
-        // HAZARD: `latest_height()` maps a transient DB read error to 0. If that
-        // happens the `fork_parent_height >= latest` guard trips and the whole
-        // rollback is silently skipped for this invocation, with no self-retry —
-        // it only reruns if a later reorg happens to re-invoke recovery. There is
-        // no fallible public variant to propagate.
-        let latest = block_index.latest_height();
+        // Use the fallible height read so a transient DB error propagates rather
+        // than masquerading as height 0 — which would trip the guard below and
+        // silently skip the rollback. An empty index (`None`) is a genuine
+        // nothing-to-roll-back case and returns early.
+        let Some(latest) = block_index.try_latest_height()? else {
+            return Ok(());
+        };
         if fork_parent_height >= latest {
             return Ok(());
         }

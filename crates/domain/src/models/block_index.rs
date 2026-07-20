@@ -96,6 +96,15 @@ impl BlockIndex {
             .unwrap_or(0)
     }
 
+    /// Fallible variant of [`Self::latest_height`]. `Ok(None)` means the index
+    /// is empty; a DB read error propagates instead of being masked as height
+    /// `0` (which [`Self::latest_height`] cannot distinguish from an empty
+    /// index). Callers that must not treat a read failure as "no blocks" — e.g.
+    /// the deep-reorg rollback guard — should use this.
+    pub fn try_latest_height(&self) -> eyre::Result<Option<u64>> {
+        self.db.view_eyre(block_index_latest_height)
+    }
+
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
     pub fn get_item(&self, block_height: u64) -> Option<BlockIndexItem> {
         self.db
@@ -873,6 +882,27 @@ mod tests {
             block_index.push_item(&item, h).unwrap();
         }
         (tmp_dir, block_index)
+    }
+
+    /// `try_latest_height` must distinguish an empty index (`None`) from a
+    /// populated one (`Some(max_height)`) — the distinction the deep-reorg
+    /// rollback guard relies on to avoid treating "no blocks" and a masked DB
+    /// error alike. `latest_height` collapses both empty and genesis-only to 0.
+    #[test]
+    fn try_latest_height_distinguishes_empty_from_populated() {
+        let (_empty_tmp, empty) = build_uniform_index(0);
+        assert_eq!(
+            empty.try_latest_height().expect("empty index read"),
+            None,
+            "an empty index reports no latest height, not 0"
+        );
+
+        let (_tmp, populated) = build_uniform_index(3);
+        assert_eq!(
+            populated.try_latest_height().expect("populated index read"),
+            Some(2),
+            "3 blocks occupy heights 0..=2"
+        );
     }
 
     /// Builds a `BlockIndex` where the Publish ledger is introduced at
