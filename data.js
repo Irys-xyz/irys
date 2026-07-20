@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784396655864,
+  "lastUpdate": 1784551470508,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -10951,6 +10951,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000113,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f089d6d09de7588c2dffa47c81eedb467a3aab5e",
+          "message": "fix(ci): make release CI gate resilient to transient GitHub API errors (#1527)\n\n* fix(ci): make release CI gate resilient to transient GitHub API errors\n\nThe require-green-ci gate polls the GitHub API ~120 times over the release\nwait window. Handle read failures so a transient outage no longer forces a\nrelease re-run, while a real problem still fails closed:\n\n- Classify gh api failures by HTTP status: retry only 5xx / 429 / network\n  errors; a 4xx configuration error (bad SHA, missing checks:read /\n  statuses:read scope, 403/404/422) fails fast instead of being waited out\n  for the full timeout.\n- On an exhausted transient read, re-poll until the deadline rather than\n  aborting the step. WAIT_TIMEOUT=0 keeps the original fail-fast-closed\n  behavior.\n- Check for an already-observed terminal check failure before the transient\n  re-poll, so a proven-red base is never deferred behind an unrelated\n  status-read blip.\n\n* fix(ci): treat rate-limited 403 as transient in release gate\n\nGitHub returns 403 (not only 429) for primary and secondary rate limits.\nClassifying every non-429 4xx as terminal made a rate-limited read fail the\nrelease fast instead of being re-polled until the limit reset. Distinguish a\nrate-limit 403 (carries a \"rate limit\" message) from a permission 403 and let\nthe retry/re-poll flow handle it; permission and other 4xx stay terminal.",
+          "timestamp": "2026-07-20T13:29:36+01:00",
+          "tree_id": "8008b8753bed448b0eec93d06bff5046e6fa8047",
+          "url": "https://github.com/Irys-xyz/irys/commit/f089d6d09de7588c2dffa47c81eedb467a3aab5e"
+        },
+        "date": 1784551469271,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015512,
+            "range": "± 0.000671",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152933,
+            "range": "± 0.008374",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.554496,
+            "range": "± 0.089041",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.505483,
+            "range": "± 0.512328",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082711,
+            "range": "± 0.001262",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 799.233114,
+            "range": "± 27.017725",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.357656,
+            "range": "± 33.156525",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117401,
+            "range": "± 0.001605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1218.779144,
+            "range": "± 84.993501",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1531.65324,
+            "range": "± 10.416725",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035127,
+            "range": "± 0.001999",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.999376,
+            "range": "± 1.510865",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.277509,
+            "range": "± 1.417258",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
+            "range": "± 0.000005",
             "unit": "ms/iter"
           }
         ]
