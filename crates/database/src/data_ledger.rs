@@ -405,6 +405,17 @@ pub struct Ledgers {
     num_blocks_in_epoch: u64,
 }
 
+/// Uniform, read-only view of a single ledger's slot-expiry configuration,
+/// independent of whether it is backed by `PermanentLedger` or `TermLedger`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerMeta {
+    pub ledger_id: u32,
+    /// `None` => this ledger's slots never expire.
+    pub epoch_length: Option<u64>,
+    pub num_slots: usize,
+    pub num_partitions_per_slot: u64,
+}
+
 impl Ledgers {
     /// Instantiate a Ledgers struct with the correct Ledgers.
     /// When `cascade_active` is true, includes OneYear and ThirtyDay term ledgers.
@@ -724,6 +735,60 @@ impl Ledgers {
         self.slots_mut(ledger)[slot_index]
             .partitions
             .retain(|p| p != partition_hash);
+    }
+
+    /// Blocks per epoch, shared across all ledgers — the denominator used to
+    /// convert an epoch-scale `epoch_length` into an absolute block-height
+    /// expiry cutoff.
+    pub const fn num_blocks_in_epoch(&self) -> u64 {
+        self.num_blocks_in_epoch
+    }
+
+    /// Uniform metadata for a single ledger, or `None` if `ledger` is not
+    /// currently active (e.g. a Cascade term ledger before activation).
+    pub fn ledger_meta_for(&self, ledger: DataLedger) -> Option<LedgerMeta> {
+        if self.perm.ledger_id == ledger as u32 {
+            return Some(LedgerMeta {
+                ledger_id: self.perm.ledger_id,
+                epoch_length: self.publish_ledger_epoch_length,
+                num_slots: self.perm.slots.len(),
+                num_partitions_per_slot: self.perm.num_partitions_per_slot,
+            });
+        }
+        self.term
+            .iter()
+            .find(|t| t.ledger_id == ledger as u32)
+            .map(|t| LedgerMeta {
+                ledger_id: t.ledger_id,
+                epoch_length: Some(t.epoch_length),
+                num_slots: t.slots.len(),
+                num_partitions_per_slot: t.num_partitions_per_slot,
+            })
+    }
+
+    /// Uniform metadata for every currently active ledger, in
+    /// `active_ledgers()` order (perm first, then term ledgers).
+    pub fn ledger_meta(&self) -> Vec<LedgerMeta> {
+        self.active_ledgers()
+            .into_iter()
+            .filter_map(|ledger| self.ledger_meta_for(ledger))
+            .collect()
+    }
+
+    /// Lowest slot index that has not expired — the boundary between the
+    /// contiguous expired prefix and the live tail. The last slot never
+    /// expires, so when `ledger` has any slots at all this always resolves
+    /// to a real index; `0` when it has none.
+    ///
+    /// Precondition: `ledger` must be currently active — callers should
+    /// confirm via `ledger_meta_for` (which returns `None` for inactive
+    /// ledgers) or `active_ledgers()` first. Panics otherwise, consistent
+    /// with `get_slots`.
+    pub fn expiry_frontier_for(&self, ledger: DataLedger) -> usize {
+        self.get_slots(ledger)
+            .iter()
+            .position(|slot| !slot.is_expired)
+            .unwrap_or(0)
     }
 
     /// Mark every slot that received new canonical data during this epoch as
@@ -1471,5 +1536,103 @@ mod tests {
                 )
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_ledger_meta_for_perm_epoch_length_none() {
+        let config = make_test_config(None);
+        let ledgers = Ledgers::new(&config, false);
+        let meta = ledgers.ledger_meta_for(DataLedger::Publish).unwrap();
+        assert_eq!(meta.ledger_id, DataLedger::Publish as u32);
+        assert_eq!(meta.epoch_length, None);
+        assert_eq!(meta.num_slots, 0);
+    }
+
+    #[test]
+    fn test_ledger_meta_for_perm_epoch_length_some() {
+        let config = make_test_config(Some(2));
+        let ledgers = Ledgers::new(&config, false);
+        let meta = ledgers.ledger_meta_for(DataLedger::Publish).unwrap();
+        assert_eq!(meta.epoch_length, Some(2));
+    }
+
+    #[test]
+    fn test_ledger_meta_for_term_ledger_epoch_length_always_some() {
+        let config = make_test_config(None);
+        let ledgers = Ledgers::new(&config, false);
+        let meta = ledgers.ledger_meta_for(DataLedger::Submit).unwrap();
+        assert_eq!(
+            meta.epoch_length,
+            Some(config.epoch.submit_ledger_epoch_length)
+        );
+    }
+
+    #[test]
+    fn test_ledger_meta_for_inactive_cascade_ledger_returns_none() {
+        let config = make_test_config(None); // cascade not activated
+        let ledgers = Ledgers::new(&config, false);
+        assert!(ledgers.ledger_meta_for(DataLedger::OneYear).is_none());
+    }
+
+    #[test]
+    fn test_ledger_meta_lists_all_active_ledgers_in_order() {
+        let config = config_with_cascade();
+        let ledgers = Ledgers::new(&config, true);
+        let ids: Vec<u32> = ledgers.ledger_meta().iter().map(|m| m.ledger_id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                DataLedger::Publish as u32,
+                DataLedger::Submit as u32,
+                DataLedger::OneYear as u32,
+                DataLedger::ThirtyDay as u32,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_num_blocks_in_epoch_accessor() {
+        let config = make_test_config(None); // make_test_config sets num_blocks_in_epoch = 10
+        let ledgers = Ledgers::new(&config, false);
+        assert_eq!(ledgers.num_blocks_in_epoch(), 10);
+    }
+
+    #[test]
+    fn expiry_frontier_for_returns_first_non_expired_slot() {
+        let mut ledgers = ledgers_with_submit_slots(3, 1);
+        ledgers.slots_mut(DataLedger::Submit)[0].is_expired = true;
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 1);
+    }
+
+    #[test]
+    fn expiry_frontier_for_zero_when_no_slots_expired() {
+        let ledgers = ledgers_with_submit_slots(2, 1);
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 0);
+    }
+
+    #[test]
+    fn expiry_frontier_for_zero_when_no_slots_allocated() {
+        let config = ConsensusConfig::testing();
+        let ledgers = Ledgers::new(&config, false); // Submit ledger active but empty
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 0);
+    }
+
+    #[test]
+    fn expiry_frontier_for_multi_slot_expired_prefix() {
+        let mut ledgers = ledgers_with_submit_slots(4, 1);
+        ledgers.slots_mut(DataLedger::Submit)[0].is_expired = true;
+        ledgers.slots_mut(DataLedger::Submit)[1].is_expired = true;
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 2);
+    }
+
+    #[test]
+    fn expiry_frontier_for_all_but_last_expired() {
+        let mut ledgers = ledgers_with_submit_slots(4, 1);
+        let slots = ledgers.slots_mut(DataLedger::Submit);
+        let last = slots.len() - 1;
+        for slot in slots.iter_mut().take(last) {
+            slot.is_expired = true;
+        }
+        assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 3);
     }
 }
