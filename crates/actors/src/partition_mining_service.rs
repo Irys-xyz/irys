@@ -287,7 +287,7 @@ impl PartitionMiningServiceInner {
                     partition_chunk_offset,
                     self.config.consensus.num_chunks_in_partition,
                     *partition_chunk_offset - start_chunk_offset,
-                    chunks.len(),
+                    self.config.consensus.num_chunks_in_recall_range,
                     self.difficulty
                 );
                 metrics::record_mining_solution_found();
