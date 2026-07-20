@@ -20,65 +20,16 @@
 // BlockTreeService. We drive the tx through the real Submit flow instead.
 
 use crate::utils::{assert_validation_error, solution_context};
-use crate::validation::{send_block_and_read_state, submit_expiry_two_node_setup};
-use irys_actors::block_validation::ValidationError;
-use irys_actors::{
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
-    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs,
+use crate::validation::{
+    EvilPublishStrategy, is_nc_0042_expiry_rejection, send_block_and_read_state,
+    submit_expiry_two_node_setup,
 };
-use irys_domain::BlockTreeReadGuard;
+use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_types::ingress::generate_ingress_proof;
-use irys_types::{
-    DataLedger, DataTransactionHeader, IngressProofsList, IrysBlockHeader, UnixTimestampMs,
-};
+use irys_types::{DataLedger, IngressProofsList};
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre::Result<()> {
-    /// Forces an already-expired Submit tx into the Publish ledger, with a valid
-    /// ingress proof so the block fails validation *only* on the §4c expiry rule
-    /// (not on a missing/invalid proof). No refund is scheduled in the bundle, so
-    /// the in-constructor defence-in-depth guard does not fire during production —
-    /// the block is built and must be caught at validation time.
-    struct EvilPublishStrategy {
-        prod: ProductionStrategy,
-        expired_tx: DataTransactionHeader,
-        proofs: IngressProofsList,
-        block_tree_guard: BlockTreeReadGuard,
-    }
-
-    #[async_trait::async_trait]
-    impl BlockProdStrategy for EvilPublishStrategy {
-        fn inner(&self) -> &BlockProducerInner {
-            &self.prod.inner
-        }
-
-        async fn get_mempool_txs(
-            &self,
-            _prev_block_header: &IrysBlockHeader,
-            _block_timestamp: UnixTimestampMs,
-        ) -> Result<
-            irys_actors::block_producer::MempoolTxsBundle,
-            irys_actors::tx_selector::TxSelectorError,
-        > {
-            Ok(irys_actors::block_producer::MempoolTxsBundle {
-                commitment_txs: vec![],
-                commitment_txs_to_bill: vec![],
-                submit_txs: vec![],
-                one_year_txs: vec![],
-                thirty_day_txs: vec![],
-                publish_txs: PublishLedgerWithTxs {
-                    txs: vec![self.expired_tx.clone()],
-                    proofs: Some(self.proofs.clone()),
-                },
-                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
-                commitment_refund_events: vec![],
-                unstake_refund_events: vec![],
-                epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
-            })
-        }
-    }
-
     // --- 1 + 2. Shared config + two-node startup + overflow data posting ---
     let setup = submit_expiry_two_node_setup(1).await?;
     let genesis_config = setup.genesis_config;
@@ -201,7 +152,7 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
 
     // --- 6. Evil producer builds a block at E+1 that promotes the expired tx ---
     let evil_strategy = EvilPublishStrategy {
-        expired_tx: expired_tx.clone(),
+        publish_tx: expired_tx.clone(),
         proofs: IngressProofsList(vec![proof]),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
@@ -221,13 +172,9 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         "evil block must promote the expired tx"
     );
 
-    // The §4c rejection message includes "See NC-0042." — match on that to ensure
-    // the block is rejected for the right reason and not an unrelated shadow-tx error.
-    let is_nc_0042_expiry_rejection = |e: &ValidationError| match e {
-        ValidationError::ShadowTransactionInvalid(msg) => msg.contains("NC-0042"),
-        _ => false,
-    };
-
+    // The §4c rejection message includes "See NC-0042." — the shared
+    // `is_nc_0042_expiry_rejection` matches on that so we assert the block is
+    // rejected for the right reason and not an unrelated shadow-tx error.
     // --- 7. Both nodes must reject it with ShadowTransactionInvalid (§4c) ---
     let genesis_outcome =
         send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;

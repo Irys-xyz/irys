@@ -1,10 +1,38 @@
 use crate::utils::IrysNodeTest;
+use crate::validation::next_epoch_boundary;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
     BoundedFee, DataLedger, H256, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
+
+/// Posts one ThirtyDay data tx (`bytes` of data, first byte tagged with `tag` for
+/// a unique tx id) at the fee oracle's quoted `term_fee`, and waits for it to land
+/// in the mempool. Shared by the fee-model / blocked-set expiry tests.
+async fn post_thirty_day(
+    ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    signer: &irys_types::irys::IrysSigner,
+    tag: u8,
+    bytes: usize,
+) -> eyre::Result<()> {
+    let mut data = vec![9_u8; bytes];
+    data[0] = tag;
+    let price = ctx
+        .get_data_price(DataLedger::ThirtyDay, bytes as u64)
+        .await?;
+    let tx = signer.create_transaction_with_fees(
+        data,
+        ctx.get_anchor().await?,
+        DataLedger::ThirtyDay,
+        BoundedFee::new(price.term_fee),
+        None,
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    ctx.ingest_data_tx(tx.header.clone()).await?;
+    ctx.wait_for_mempool(tx.header.id, 30).await?;
+    Ok(())
+}
 
 /// Verify that OneYear and ThirtyDay term ledgers expire at different rates
 /// based on their distinct epoch_length values from the Cascade hardfork config.
@@ -110,19 +138,14 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
         treasury_after_inclusion
     );
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     let thirty_day_expiry_blocks = thirty_day_epoch_length * num_blocks_in_epoch;
     let one_year_expiry_blocks = one_year_epoch_length * num_blocks_in_epoch;
 
     // Mine to the epoch boundary where ThirtyDay expires but OneYear does not
-    let mid_boundary = next_epoch_boundary(inclusion_height + thirty_day_expiry_blocks);
+    let mid_boundary = next_epoch_boundary(
+        inclusion_height + thirty_day_expiry_blocks,
+        num_blocks_in_epoch,
+    );
     while ctx.get_canonical_chain_height().await < mid_boundary {
         ctx.mine_block().await?;
     }
@@ -188,7 +211,10 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
     );
 
     // Mine to the epoch boundary where OneYear also expires
-    let late_boundary = next_epoch_boundary(inclusion_height + one_year_expiry_blocks);
+    let late_boundary = next_epoch_boundary(
+        inclusion_height + one_year_expiry_blocks,
+        num_blocks_in_epoch,
+    );
     while ctx.get_canonical_chain_height().await < late_boundary {
         ctx.mine_block().await?;
     }
@@ -315,14 +341,6 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Reads (slot0_last_height, slot0_expired, slot1_last_height, slot1_expired,
     // slot_count, first_unexpired) for the ThirtyDay ledger at `height`.
     async fn thirty_day_slots(
@@ -368,7 +386,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h1 = ctx.mine_block().await?.height;
-    let epoch_a = next_epoch_boundary(h1);
+    let epoch_a = next_epoch_boundary(h1, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < epoch_a {
         ctx.mine_block().await?;
     }
@@ -414,7 +432,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h2 = ctx.mine_block().await?.height;
-    let epoch_b = next_epoch_boundary(h2);
+    let epoch_b = next_epoch_boundary(h2, num_blocks_in_epoch);
     assert!(
         epoch_b > epoch_a,
         "E_b ({epoch_b}) must be after E_a ({epoch_a})"
@@ -501,7 +519,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h3 = ctx.mine_block().await?.height;
-    let epoch_c = next_epoch_boundary(h3);
+    let epoch_c = next_epoch_boundary(h3, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < epoch_c {
         ctx.mine_block().await?;
     }
@@ -591,14 +609,6 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let node = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Post one 1-chunk data tx. The Submit ledger is not user-targetable
     // directly; published data lands in Submit (pre-promotion), so a Publish
     // data tx is what grows Submit's `total_chunks`.
@@ -640,7 +650,10 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     // allocation last_height (0) despite receiving data.
     for tag in 0_u8..2 {
         post_submit_chunk(&node, &signer, chunk_size, tag).await?;
-        let boundary = next_epoch_boundary(node.get_canonical_chain_height().await + 1);
+        let boundary = next_epoch_boundary(
+            node.get_canonical_chain_height().await + 1,
+            num_blocks_in_epoch,
+        );
         while node.get_canonical_chain_height().await < boundary {
             node.mine_block().await?;
         }
@@ -693,7 +706,7 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     // === Post-activation write: the touch now advances last_height ===
     post_submit_chunk(&node, &signer, chunk_size, 200).await?;
     let write_height = node.mine_block().await?.height;
-    let boundary = next_epoch_boundary(write_height);
+    let boundary = next_epoch_boundary(write_height, num_blocks_in_epoch);
     while node.get_canonical_chain_height().await < boundary {
         node.mine_block().await?;
     }
@@ -769,38 +782,6 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
-    async fn post_thirty_day(
-        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-        signer: &irys_types::irys::IrysSigner,
-        tag: u8,
-        bytes: usize,
-    ) -> eyre::Result<()> {
-        let mut data = vec![9_u8; bytes];
-        data[0] = tag;
-        let price = ctx
-            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
-            .await?;
-        let tx = signer.create_transaction_with_fees(
-            data,
-            ctx.get_anchor().await?,
-            DataLedger::ThirtyDay,
-            BoundedFee::new(price.term_fee),
-            None,
-        )?;
-        let tx = signer.sign_transaction(tx)?;
-        ctx.ingest_data_tx(tx.header.clone()).await?;
-        ctx.wait_for_mempool(tx.header.id, 30).await?;
-        Ok(())
-    }
-
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
@@ -809,7 +790,7 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     for i in 0_u8..4 {
         post_thirty_day(&ctx, &signer, i, 96).await?;
     }
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -961,38 +942,6 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
-    async fn post_thirty_day(
-        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-        signer: &irys_types::irys::IrysSigner,
-        tag: u8,
-        bytes: usize,
-    ) -> eyre::Result<()> {
-        let mut data = vec![9_u8; bytes];
-        data[0] = tag;
-        let price = ctx
-            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
-            .await?;
-        let tx = signer.create_transaction_with_fees(
-            data,
-            ctx.get_anchor().await?,
-            DataLedger::ThirtyDay,
-            BoundedFee::new(price.term_fee),
-            None,
-        )?;
-        let tx = signer.sign_transaction(tx)?;
-        ctx.ingest_data_tx(tx.header.clone()).await?;
-        ctx.wait_for_mempool(tx.header.id, 30).await?;
-        Ok(())
-    }
-
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
@@ -1001,7 +950,7 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
     for i in 0_u8..4 {
         post_thirty_day(&ctx, &signer, i, 96).await?;
     }
-    let e_a = next_epoch_boundary(ctx.mine_block().await?.height);
+    let e_a = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < e_a {
         ctx.mine_block().await?;
     }
@@ -1030,7 +979,7 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
     for i in 0_u8..4 {
         post_thirty_day(&ctx, &signer, 100 + i, 96).await?;
     }
-    let e_b = next_epoch_boundary(ctx.mine_block().await?.height);
+    let e_b = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < e_b {
         ctx.mine_block().await?;
     }
@@ -1168,14 +1117,6 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Counts (TermFeeReward, PermFeeRefund) shadow txs in the block at `height`.
     async fn expiry_shadow_counts(
         ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -1236,7 +1177,7 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         .post_data_tx(anchor, vec![1_u8; 6 * chunk_size as usize], &signer)
         .await;
     ctx.wait_for_mempool(tx1.header.id, 30).await?;
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -1275,7 +1216,7 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         .post_data_tx(anchor, vec![3_u8; 3 * chunk_size as usize], &signer)
         .await;
     ctx.wait_for_mempool(tx3.header.id, 30).await?;
-    let f = next_epoch_boundary(ctx.mine_block().await?.height);
+    let f = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < f {
         ctx.mine_block().await?;
     }
@@ -1397,14 +1338,6 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Post one unpromoted publish-data tx (chunks never uploaded) -> grows the
     // Submit ledger's `total_chunks`. `chunks` controls how many chunks it spans.
     async fn post_submit(
@@ -1431,7 +1364,7 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
     for i in 0_u8..4 {
         post_submit(&ctx, &signer, chunk_size, i, 3).await?;
     }
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -1737,14 +1670,6 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let node = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // === Pre-activation phase: keep it the MAJORITY of the chain ===
     // The index binary search's first probe is `latest_height / 2`; making the
     // pre-activation span exceed half the chain at expiry guarantees that probe
@@ -1801,7 +1726,7 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
         node.wait_for_mempool(tx.header.id, 30).await?;
     }
     let write_height = node.mine_block().await?.height;
-    let write_epoch = next_epoch_boundary(write_height);
+    let write_epoch = next_epoch_boundary(write_height, num_blocks_in_epoch);
     while node.get_canonical_chain_height().await < write_epoch {
         node.mine_block().await?;
     }

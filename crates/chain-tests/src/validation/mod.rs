@@ -41,10 +41,11 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs,
 };
 use irys_chain::IrysNodeCtx;
+use irys_domain::BlockTreeReadGuard;
 use irys_types::{
     BlockBody, CommitmentTransaction, DataTransaction, DataTransactionHeader,
-    DataTransactionHeaderV1, H256, H256List, IrysBlockHeader, IrysTransactionCommon as _,
-    NodeConfig, SealedBlock, SystemTransactionLedger,
+    DataTransactionHeaderV1, H256, H256List, IngressProofsList, IrysBlockHeader,
+    IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger, UnixTimestampMs,
 };
 use irys_types::{DataLedger, SendTraced as _, SystemLedger};
 
@@ -206,6 +207,67 @@ fn send_block_to_block_validation(
         })
         .unwrap();
     Ok(())
+}
+
+/// Rounds `height` UP to the next `num_blocks_in_epoch` boundary, returning
+/// `height` unchanged when it already sits on a boundary. Shared by the expiry
+/// tests, which repeatedly compute "the epoch block that will process this write".
+pub(crate) fn next_epoch_boundary(height: u64, num_blocks_in_epoch: u64) -> u64 {
+    height.div_ceil(num_blocks_in_epoch) * num_blocks_in_epoch
+}
+
+/// True iff `e` is the NC-0042 expiry rejection: a `ShadowTransactionInvalid`
+/// whose message carries the "NC-0042" marker. The expiry-promotion tests match
+/// on it so they assert the block was rejected for the expiry rule specifically,
+/// not for an unrelated shadow-tx error.
+pub(crate) fn is_nc_0042_expiry_rejection(e: &ValidationError) -> bool {
+    matches!(e, ValidationError::ShadowTransactionInvalid(msg) if msg.contains("NC-0042"))
+}
+
+/// "Evil" block-production strategy shared by the Submit/Publish expiry tests:
+/// forces a single data tx into the Publish ledger with the given ingress
+/// proofs, leaving every other bundle field empty. No refund is scheduled in the
+/// bundle, so the in-constructor defence-in-depth guard does NOT fire during
+/// production — the block is built and must be caught at validation time, which
+/// is exactly what these tests exercise.
+pub(crate) struct EvilPublishStrategy {
+    pub prod: ProductionStrategy,
+    /// The tx illegally promoted into Publish (an expired / non-promotable Submit tx).
+    pub publish_tx: DataTransactionHeader,
+    pub proofs: IngressProofsList,
+    pub block_tree_guard: BlockTreeReadGuard,
+}
+
+#[async_trait::async_trait]
+impl BlockProdStrategy for EvilPublishStrategy {
+    fn inner(&self) -> &BlockProducerInner {
+        &self.prod.inner
+    }
+
+    async fn get_mempool_txs(
+        &self,
+        _prev_block_header: &IrysBlockHeader,
+        _block_timestamp: UnixTimestampMs,
+    ) -> Result<
+        irys_actors::block_producer::MempoolTxsBundle,
+        irys_actors::tx_selector::TxSelectorError,
+    > {
+        Ok(irys_actors::block_producer::MempoolTxsBundle {
+            commitment_txs: vec![],
+            commitment_txs_to_bill: vec![],
+            submit_txs: vec![],
+            one_year_txs: vec![],
+            thirty_day_txs: vec![],
+            publish_txs: PublishLedgerWithTxs {
+                txs: vec![self.publish_tx.clone()],
+                proofs: Some(self.proofs.clone()),
+            },
+            aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+            commitment_refund_events: vec![],
+            unstake_refund_events: vec![],
+            epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
+        })
+    }
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.

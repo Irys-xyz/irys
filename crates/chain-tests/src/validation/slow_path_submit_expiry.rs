@@ -15,66 +15,17 @@
 // by-hash walk resolved the un-migrated inclusion to the correct offsets.
 
 use crate::utils::{assert_validation_error, solution_context};
-use crate::validation::{send_block_and_read_state, submit_expiry_two_node_setup};
-use irys_actors::block_validation::ValidationError;
-use irys_actors::{
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
-    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs,
+use crate::validation::{
+    EvilPublishStrategy, is_nc_0042_expiry_rejection, send_block_and_read_state,
+    submit_expiry_two_node_setup,
 };
+use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_database::{canonical_submit_height, db::IrysDatabaseExt as _};
-use irys_domain::BlockTreeReadGuard;
 use irys_types::ingress::generate_ingress_proof;
-use irys_types::{
-    DataLedger, DataTransactionHeader, IngressProofsList, IrysBlockHeader, UnixTimestampMs,
-};
+use irys_types::{DataLedger, IngressProofsList};
 
 #[test_log::test(tokio::test)]
 async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> eyre::Result<()> {
-    /// Same evil producer as the §4c test: promotes an already-expired tx with a
-    /// valid ingress proof and schedules NO refund, so the block is built (the
-    /// in-constructor guard does not fire) and must be caught at validation by the
-    /// §4c rule — which here can only succeed if the SLOW path resolved the
-    /// un-migrated Submit inclusion correctly.
-    struct EvilPublishStrategy {
-        prod: ProductionStrategy,
-        expired_tx: DataTransactionHeader,
-        proofs: IngressProofsList,
-        block_tree_guard: BlockTreeReadGuard,
-    }
-
-    #[async_trait::async_trait]
-    impl BlockProdStrategy for EvilPublishStrategy {
-        fn inner(&self) -> &BlockProducerInner {
-            &self.prod.inner
-        }
-
-        async fn get_mempool_txs(
-            &self,
-            _prev_block_header: &IrysBlockHeader,
-            _block_timestamp: UnixTimestampMs,
-        ) -> Result<
-            irys_actors::block_producer::MempoolTxsBundle,
-            irys_actors::tx_selector::TxSelectorError,
-        > {
-            Ok(irys_actors::block_producer::MempoolTxsBundle {
-                commitment_txs: vec![],
-                commitment_txs_to_bill: vec![],
-                submit_txs: vec![],
-                one_year_txs: vec![],
-                thirty_day_txs: vec![],
-                publish_txs: PublishLedgerWithTxs {
-                    txs: vec![self.expired_tx.clone()],
-                    proofs: Some(self.proofs.clone()),
-                },
-                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
-                commitment_refund_events: vec![],
-                unstake_refund_events: vec![],
-                epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
-            })
-        }
-    }
-
     // --- 1 + 2. Shared setup, but with a LARGE block_migration_depth. The data
     //         block sits at height 1 and the slot expires at blocks_per_cycle (10),
     //         so a depth > (expiry_height - 1) keeps the inclusion un-migrated
@@ -176,7 +127,7 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
         proof_anchor,
     )?;
     let evil_strategy = EvilPublishStrategy {
-        expired_tx: expired_tx.clone(),
+        publish_tx: expired_tx.clone(),
         proofs: IngressProofsList(vec![proof]),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
@@ -196,11 +147,9 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
     );
 
     // --- 7. Both nodes must reject it (§4c) — only possible if the slow path
-    //         resolved the un-migrated inclusion to the correct offsets. ---
-    let is_nc_0042_expiry_rejection = |e: &ValidationError| match e {
-        ValidationError::ShadowTransactionInvalid(msg) => msg.contains("NC-0042"),
-        _ => false,
-    };
+    //         resolved the un-migrated inclusion to the correct offsets. The
+    //         shared `is_nc_0042_expiry_rejection` keys on the NC-0042 marker so
+    //         we reject for the expiry rule, not an unrelated shadow-tx error. ---
     let genesis_outcome =
         send_block_and_read_state(&genesis_node.node_ctx, block.clone(), false).await?;
     assert_validation_error(

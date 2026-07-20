@@ -33,69 +33,20 @@
 //     its full perm_fee pre-Cascade.
 
 use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
-use crate::validation::send_block_and_read_state;
-use irys_actors::block_validation::ValidationError;
-use irys_actors::{
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
-    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs,
+use crate::validation::{
+    EvilPublishStrategy, is_nc_0042_expiry_rejection, send_block_and_read_state,
 };
+use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
-    DataLedger, DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, U256,
-    UnixTimestamp, UnixTimestampMs, hardfork_config::Cascade,
+    DataLedger, IngressProofsList, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
 
 #[test_log::test(tokio::test)]
 async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result<()> {
-    /// Forces an already-expired+refunded Submit tx into the Publish ledger with a
-    /// valid ingress proof, so the block fails validation ONLY on the §4c expiry
-    /// rule. No refund is scheduled in the bundle, so the in-constructor guard does
-    /// not fire during production — the block is built and must be caught at
-    /// validation time.
-    struct EvilPublishStrategy {
-        prod: ProductionStrategy,
-        expired_tx: DataTransactionHeader,
-        proofs: IngressProofsList,
-        block_tree_guard: BlockTreeReadGuard,
-    }
-
-    #[async_trait::async_trait]
-    impl BlockProdStrategy for EvilPublishStrategy {
-        fn inner(&self) -> &BlockProducerInner {
-            &self.prod.inner
-        }
-
-        async fn get_mempool_txs(
-            &self,
-            _prev_block_header: &IrysBlockHeader,
-            _block_timestamp: UnixTimestampMs,
-        ) -> Result<
-            irys_actors::block_producer::MempoolTxsBundle,
-            irys_actors::tx_selector::TxSelectorError,
-        > {
-            Ok(irys_actors::block_producer::MempoolTxsBundle {
-                commitment_txs: vec![],
-                commitment_txs_to_bill: vec![],
-                submit_txs: vec![],
-                one_year_txs: vec![],
-                thirty_day_txs: vec![],
-                publish_txs: PublishLedgerWithTxs {
-                    txs: vec![self.expired_tx.clone()],
-                    proofs: Some(self.proofs.clone()),
-                },
-                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
-                commitment_refund_events: vec![],
-                unstake_refund_events: vec![],
-                epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
-            })
-        }
-    }
-
     // --- 1. Config: Cascade OFF (activated mid-chain below), small partitions so
     //         a single sub-partition tx leaves slot 0 partial. ---
     let num_blocks_in_epoch = 2_u64;
@@ -305,7 +256,7 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
     )?;
 
     let evil_strategy = EvilPublishStrategy {
-        expired_tx: tx.header.clone(),
+        publish_tx: tx.header.clone(),
         proofs: IngressProofsList(vec![proof]),
         prod: ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
@@ -325,13 +276,9 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         "evil block must promote the already-refunded tx"
     );
 
-    // The §4c rejection message carries the "NC-0042" marker — match on it so we
-    // reject for the right reason, not an unrelated shadow-tx error.
-    let is_nc_0042_expiry_rejection = |e: &ValidationError| match e {
-        ValidationError::ShadowTransactionInvalid(msg) => msg.contains("NC-0042"),
-        _ => false,
-    };
-
+    // The §4c rejection message carries the "NC-0042" marker — match on it (via the
+    // shared `is_nc_0042_expiry_rejection`) so we reject for the right reason, not an
+    // unrelated shadow-tx error.
     let outcome = send_block_and_read_state(&node.node_ctx, block.clone(), false).await?;
     assert_validation_error(
         outcome,

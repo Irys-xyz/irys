@@ -50,71 +50,24 @@
 // BlockTreeService, per the notes in the pre-Cascade §4b/§4c tests).
 
 use crate::utils::{IrysNodeTest, assert_validation_error, solution_context};
-use crate::validation::send_block_and_read_state;
-use irys_actors::block_validation::ValidationError;
-use irys_actors::{
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy, async_trait,
-    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    shadow_tx_generator::PublishLedgerWithTxs,
+use crate::validation::{
+    EvilPublishStrategy, is_nc_0042_expiry_rejection, next_epoch_boundary,
+    send_block_and_read_state,
 };
+use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{db::IrysDatabaseExt as _, store_external_ingress_proof_checked};
-use irys_domain::BlockTreeReadGuard;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{
-    DataLedger, DataTransaction, DataTransactionHeader, H256, IngressProofsList, IrysBlockHeader,
-    NodeConfig, UnixTimestamp, UnixTimestampMs, hardfork_config::Cascade,
+    DataLedger, DataTransaction, H256, IngressProofsList, NodeConfig, UnixTimestamp,
+    hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
 use std::collections::BTreeSet;
 
 #[test_log::test(tokio::test)]
 async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result<()> {
-    /// Promotes a chosen tx into the Publish ledger with a valid ingress proof so
-    /// the block fails validation ONLY on the §4c expiry rule (not on a
-    /// missing/invalid proof). No refund is scheduled in the bundle, so the
-    /// in-constructor defence-in-depth guard does not fire during production — the
-    /// block is built and must be caught at validation time.
-    struct EvilPublishStrategy {
-        prod: ProductionStrategy,
-        target_tx: DataTransactionHeader,
-        proofs: IngressProofsList,
-        block_tree_guard: BlockTreeReadGuard,
-    }
-
-    #[async_trait::async_trait]
-    impl BlockProdStrategy for EvilPublishStrategy {
-        fn inner(&self) -> &BlockProducerInner {
-            &self.prod.inner
-        }
-
-        async fn get_mempool_txs(
-            &self,
-            _prev_block_header: &IrysBlockHeader,
-            _block_timestamp: UnixTimestampMs,
-        ) -> Result<
-            irys_actors::block_producer::MempoolTxsBundle,
-            irys_actors::tx_selector::TxSelectorError,
-        > {
-            Ok(irys_actors::block_producer::MempoolTxsBundle {
-                commitment_txs: vec![],
-                commitment_txs_to_bill: vec![],
-                submit_txs: vec![],
-                one_year_txs: vec![],
-                thirty_day_txs: vec![],
-                publish_txs: PublishLedgerWithTxs {
-                    txs: vec![self.target_tx.clone()],
-                    proofs: Some(self.proofs.clone()),
-                },
-                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
-                commitment_refund_events: vec![],
-                unstake_refund_events: vec![],
-                epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
-            })
-        }
-    }
-
     // --- 1. Config: Cascade active from genesis + tight Submit-expiry aging ---
     let num_blocks_in_epoch: u64 = 5;
     let submit_ledger_epoch_length: u64 = 2;
@@ -157,14 +110,6 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
     let peer_node = {
         let peer_config = genesis_node.testing_peer_with_signer(&user_signer);
         IrysNodeTest::new(peer_config).start_with_name("PEER").await
-    };
-
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
     };
 
     // Reads (slot0_last_height, slot0_expired, slot1_last_height, slot1_expired,
@@ -210,7 +155,8 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
     }
 
     // --- 2. Write slot 0 full (10 chunks) + slot 1 partial (5 chunks) ---
-    let initial_txs = post_single_chunk_txs(
+    // Held only to keep the posted txs alive for the run; not referenced again.
+    let _initial_txs = post_single_chunk_txs(
         &genesis_node,
         &user_signer,
         (num_chunks_in_partition + num_chunks_in_partition / 2) as usize, // 15
@@ -228,7 +174,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
 
     // Mine to the first epoch touch E_w so slots 0 and 1 get `last_height = E_w`
     // and allocation adds slot 2 (so slot 1 is non-last).
-    let ew = next_epoch_boundary(data_block.height);
+    let ew = next_epoch_boundary(data_block.height, num_blocks_in_epoch);
     while genesis_node.get_canonical_chain_height().await < ew {
         genesis_node.mine_block().await?;
     }
@@ -250,7 +196,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
 
     // --- 3. Age WITHOUT Submit writes. Slot 0 recycles a full slot lifetime after
     //         E_w; slot 1 (partial frontier) survives with its stale last_height. ---
-    let slot0_expiry_epoch = next_epoch_boundary(ew + slot_lifetime);
+    let slot0_expiry_epoch = next_epoch_boundary(ew + slot_lifetime, num_blocks_in_epoch);
     while genesis_node.get_canonical_chain_height().await < slot0_expiry_epoch {
         genesis_node.mine_block().await?;
     }
@@ -372,7 +318,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         .wait_until_height(append_block.height, seconds_to_wait)
         .await?;
     let evil_strategy = EvilPublishStrategy {
-        target_tx: target.header.clone(),
+        publish_tx: target.header.clone(),
         proofs: IngressProofsList(vec![proof.clone()]),
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
@@ -400,10 +346,6 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         "evil block must promote T"
     );
 
-    let is_nc_0042_expiry_rejection = |e: &ValidationError| match e {
-        ValidationError::ShadowTransactionInvalid(msg) => msg.contains("NC-0042"),
-        _ => false,
-    };
     let genesis_outcome =
         send_block_and_read_state(&genesis_node.node_ctx, evil_block.clone(), false).await?;
     assert_validation_error(
@@ -448,7 +390,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
     // --- 6. Rescue: advance across the epoch boundary. The `touch` refreshes slot
     //         1's last_height and the write-window exclusion drops it from refunds,
     //         so NO perm-fee refund is emitted for T's slot at the epoch block. ---
-    let rescue_epoch = next_epoch_boundary(window_height);
+    let rescue_epoch = next_epoch_boundary(window_height, num_blocks_in_epoch);
     while genesis_node.get_canonical_chain_height().await < rescue_epoch {
         genesis_node.mine_block().await?;
     }
@@ -511,7 +453,6 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         "a rescued-slot tx must become promotable after the epoch (eventually promoted)"
     );
 
-    let _ = initial_txs;
     peer_node.stop().await;
     genesis_node.stop().await;
     Ok(())
