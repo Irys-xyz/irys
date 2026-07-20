@@ -421,8 +421,9 @@ impl BlockMigrationService {
         let block_index = self.block_index_guard.read();
         // HAZARD: `latest_height()` maps a transient DB read error to 0. If that
         // happens the `fork_parent_height >= latest` guard trips and the whole
-        // rollback is silently skipped; recovery then relies on a later reorg
-        // tick retrying. There is no fallible public variant to propagate.
+        // rollback is silently skipped for this invocation, with no self-retry —
+        // it only reruns if a later reorg happens to re-invoke recovery. There is
+        // no fallible public variant to propagate.
         let latest = block_index.latest_height();
         if fork_parent_height >= latest {
             return Ok(());
@@ -563,9 +564,12 @@ impl BlockMigrationService {
                     let range_end = *partition_range.end();
 
                     // Drop queued (not-yet-synced) writes in the orphaned range
-                    // first: otherwise a later `sync_pending_chunks` would replay
+                    // first: a later `sync_pending_chunks` would otherwise replay
                     // them and flip the intervals we clear below back to `Data`
-                    // over a now-empty offset index.
+                    // over a now-empty offset index. This closes the queued-write
+                    // path; a sync already mid-flush (its batch snapshotted before
+                    // this drop) can still replay, but that window is transient and
+                    // healed by the repack enqueued below.
                     module.drop_pending_writes_in_range(
                         PartitionChunkOffset::from(range_start),
                         PartitionChunkOffset::from(range_end),

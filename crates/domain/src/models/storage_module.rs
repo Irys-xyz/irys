@@ -2477,6 +2477,18 @@ mod tests {
                     start_offset: RelativeChunkOffset(4),
                     data_size: 32,
                 },
+            )?;
+            // Orphaned cross-partition placement anchored in a lower module:
+            // negative start_offset whose extent [-2, 3] (ceil(192 / 32) = 6
+            // chunks) reaches into the range. start_offset alone (-2 < 3) would
+            // wrongly keep it; this exercises the negative-i32 extent path.
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(-2),
+                    data_size: 192,
+                },
             )
         })?;
 
