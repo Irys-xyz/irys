@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784551470508,
+  "lastUpdate": 1784558352259,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11059,6 +11059,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000005",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "52c7d392325b646acaad81271ff212cee7ee6969",
+          "message": "chore: rust update (#1481)\n\n* chore: update rust-toolchain to 1.97.0\n\n* fix: resolve Rust 1.97.0 build errors\n\n- p2p: raise recursion_limit to 256 — the deeply-nested instrumented\n  async sync block in chain_sync overflows the default type-layout\n  query depth of 128\n- domain: rewrite the block_tree reorg walk as a while-let loop\n  (while_let_loop)\n- actors: guard the mempool rejection-rate log with checked_div\n  (manual_checked_ops)\n- allow unnecessary_sort_by workspace-wide\n\n* chore: apply clippy autofixes for Rust 1.97.0\n\nMechanical lint fixes surfaced by the toolchain bump: inline format\nargs, sort_unstable_by_key over manual comparators, map.values() for\nunused-key iteration, and dropped redundant .into_iter() conversions.\n\n* fix(nextest-monitor): adopt workspace lints\n\nnextest-monitor was the only workspace crate missing\n`[lints] workspace = true`, so it never picked up the workspace\n`unnecessary-sort-by = \"allow\"` and 1.97's clippy failed CI (-D warnings)\non its sort_by calls. Opt into the shared lint set and clear the\nviolations it surfaces: use Self in constructors, drop a redundant\nclone, separate literal type suffixes, drop needless raw-string\nprefixes and redundant closures, and switch #[allow] to #[expect].\n\n* chore: remove redundant references\n\n* chore: apply clippy autofixes for Rust 1.97.0\n\nRemove redundant references in formatting macro arguments flagged by\nclippy::useless_borrows_in_formatting in the packing crate.\n\n* chore: fmt\n\n* chore: suppress manual_checked_ops on VDF reanchor guard",
+          "timestamp": "2026-07-20T15:16:23+01:00",
+          "tree_id": "3f6b9fecd34697787aa67c2100a799ee7f9c8345",
+          "url": "https://github.com/Irys-xyz/irys/commit/52c7d392325b646acaad81271ff212cee7ee6969"
+        },
+        "date": 1784558348123,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012602,
+            "range": "± 0.000379",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123016,
+            "range": "± 0.002809",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.241393,
+            "range": "± 0.053465",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.944316,
+            "range": "± 0.271181",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077771,
+            "range": "± 0.001803",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 822.768092,
+            "range": "± 31.385053",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 974.877955,
+            "range": "± 9.494124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120199,
+            "range": "± 0.000909",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1220.506085,
+            "range": "± 56.819279",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1924.11859,
+            "range": "± 127.070046",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034434,
+            "range": "± 0.015616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 219.90101,
+            "range": "± 7.548387",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.732098,
+            "range": "± 3.493794",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
