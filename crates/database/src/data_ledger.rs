@@ -1348,6 +1348,18 @@ mod tests {
     }
 
     #[test]
+    fn test_touch_filled_slots_noop_when_window_beyond_allocated_slots() {
+        // The write window STARTS past every allocated slot (allocation lagging
+        // ingress by more than a full slot, so even `first` is out of range):
+        // the touch must be a no-op — no panic, no slot marked written or
+        // refreshed.
+        let mut ledgers = ledgers_with_submit_slots(2, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 30, 35, 10, 100, true);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 1]);
+        assert_eq!(submit_written_flags(&ledgers), vec![false, false]);
+    }
+
+    #[test]
     fn test_touch_filled_slots_refreshes_publish_perm_ledger() {
         // `touch_active_ledger_slots` iterates `active_ledgers()`, which INCLUDES
         // Publish. When `publish_ledger_epoch_length` makes perm slots expirable,
