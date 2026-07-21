@@ -402,7 +402,7 @@ mod tests {
         {
             let tx = db.tx_mut()?;
             // indexed 0,1 and 5..9 — hole at 2
-            for off in [0u32, 1, 5, 6, 7, 8, 9] {
+            for off in [0_u32, 1, 5, 6, 7, 8, 9] {
                 set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
             }
             tx.commit()?;
