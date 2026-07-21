@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784624851919,
+  "lastUpdate": 1784640246069,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11382,6 +11382,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fe3184957494e83913a4f5eead92df1942a66ea3",
+          "message": "feat: expiry tests (#1523)\n\n* feat(config): enforce num_blocks_in_epoch > block_tree_depth for expiry finality\n\n* test(expiry): pin perm-ledger fully-written frontier gate\n\n* test(expiry): proptest the three-set agreement + frontier invariants\n\n* test(expiry): pin blocked-set vs recycle-set agreement on the expiry block\n\n* test(expiry): add non-vacuous blocked-set surplus test; de-vacuum three-set check\n\n* test(expiry): E2E perm partial-frontier slot survives past its window\n\n* test(expiry): pin mid-epoch boundary-crossing defer-then-rescue window\n\n* test(expiry): assert exact deferred refunds + interim promotability for rescued slot\n\n* test(expiry): E2E reject promotion of pre-Cascade-refunded straddle tx + liveness\n\n* test(expiry): fix-wave — de-vacuum perm hygiene assertion label, correct stale comments\n\n* test(expiry): tighten perm-E2E + surplus assertions (fix-wave 2)\n\n* test(expiry): de-duplicate shared expiry-test helpers\n\nHoist three copy-pasted test helpers into validation/mod.rs:\n- EvilPublishStrategy: one shared struct (field `publish_tx`) replacing 5\n  byte-identical local copies.\n- is_nc_0042_expiry_rejection: one fn replacing 5 identical closures.\n- next_epoch_boundary(h, nbe): one fn (h.div_ceil(nbe) * nbe) replacing the\n  if/else closures (19 call sites).\n\nAlso hoist the two duplicate post_thirty_day fns in cascade_term_expiry.rs\ninto one file-level fn, and tidy an unused-binding keep-alive in\nmid_epoch_promotability.rs.\n\nBehavior-preserving: no test premise, assertion, config value, or mining\nsequence changed. cargo check + clippy clean on irys-chain-tests --tests.\n\n* test(expiry): address review — faithful §4c inputs + stronger assertions\n\n- cascade_term_expiry (fee_model): feed the PARENT header's ThirtyDay total to\n  get_all_expired_term_slot_indexes (the §4c input contract), not the post-touch\n  epoch total; correct the stale \"no data written at E\" comment.\n- cascade_term_expiry (rescued_slot): assert the deferred TermFeeReward IS emitted\n  at the actual recycle epoch (settlement side of the Phase A \"zero at skipped\n  epoch\" check).\n- mid_epoch_promotability: require the user's refund set at the rescue epoch to be\n  empty (slot 0 settled earlier, slot 1 rescued), not merely lacking T.\n- promote_after_activation_straddle: derive cascade_active from the parent tip\n  timestamp (assert it) and use it instead of hardcoded true; split the proof\n  payload into 32-byte chunks so the ingress proof matches the 3-chunk tx.\n- config: add the equality boundary case (num_blocks_in_epoch == block_tree_depth)\n  to pin the guard as strict >.\n\nValidated: 4 affected E2E tests pass; config unit tests pass; clippy clean.\n\n* fix(expiry): settle minerless expired slots via slot-keyed refund walk\n\nA slot whose replicas were all unpledged before expiry (and never\nbackfilled) recycles with an empty partitions vec. Settlement was\npartition-keyed — derived from ExpiringPartitionInfo entries — so such a\nslot never drove the block->tx->refund walk: its unpromoted txs stayed\nperm-fee-charged and promotion-blocked forever (the blocked set is\nslot-keyed and includes the slot), the exact charged/non-promotable/\nunsettled motif of the frontier bug through a different door.\n\nKey settlement on a slot-keyed expiring set instead:\n- Ledgers::get_expiring_slots / EpochSnapshot::get_expiring_slot_partitions\n  return every recycling slot with its (possibly empty) partition hashes;\n  the flattened per-partition views are now thin wrappers so the two can\n  never diverge.\n- collect_expired_partitions keeps minerless slots in the settlement map.\n- aggregate_balance_deltas skips term-fee distribution when a slot has no\n  miners (fees stay in the treasury) and still refunds unpromoted txs.\n\nProducer and validator share this code path, so the change is symmetric.\nLocked by a unit test on the settlement pipeline and an E2E driving the\nhonest unpledge flow (no last-replica guard) plus capacity starvation.\n\n* test(expiry): produced-block multi-replica slot settlement lock\n\nEvery expiry E2E ran with num_partitions_per_slot = 1 (production\nprofiles use 10), leaving the per-slot multi-miner settlement path —\none expired slot whose miner list carries two distinct addresses into\naggregate_balance_deltas — covered only by in-memory unit tests.\n\nTwo-replica slots, two distinct owners (deterministic: process_slot_needs\nfilters a slot's capacity candidates by miners already in the slot, so\nthe genesis miner can never fill both replicas; the second miner's\npledged capacity is the only eligible candidate). At expiry the on-chain\nshadow txs must show the slot's term-fee treasury split exactly between\nboth owners and the unpromoted tx refunded exactly once — not once per\nreplica.\n\n* test(expiry): pin three uncovered fail-safe/fallback expiry states\n\nBranch-coverage instrumentation over the full expiry suite showed three\nreachable decision arms with zero hits; lock each:\n\n- touch_filled_slots: a write window starting past every allocated slot\n  (allocation lagging ingress by more than a full slot) is a no-op, not\n  a panic or an out-of-range touch.\n- expired_submit_range: an expired Submit slot holding zero written\n  chunks (pre-Cascade allocation-anchored recycle of an unwritten slot)\n  yields no expired range at all — nothing to block — instead of\n  erroring or fabricating one.\n- resolve_promoted_on_branch: a promotion sitting BELOW the by-hash walk\n  window is found via the finalized canonical_promoted_height fallback,\n  so the refund is still suppressed when a slot expires long after its\n  tx was promoted.\n\n* fix(expiry): address branch review — docker config invariant + comment/test cleanups\n\n- docker clusters (agent_cluster + data-sync): block_tree_depth=20,\n  num_blocks_in_epoch=21 so they satisfy the production epoch > reorg-window\n  invariant instead of failing Config::validate() at startup\n- remove now-unused read-only Ledgers::get_expiring_partitions; migrate its\n  two tests to get_expiring_slots\n- correct stale comments: cascade_active gates only the write-window exclusion\n  (the minerless-slot refund is unconditional); epoch-invariant comment states\n  the exact >= bound and that the strict > is a one-block margin\n- tighten the multi-replica reward assertion to exact floor/ceil shares\n- relabel get_expiring_partition_info as a diagnostic/test-only view\n\n* test(expiry): feed parent-header total to §4c blocked-set check\n\nMatch the production §4c non-promotability input contract: the promotion\nvalidator keys get_all_expired_term_slot_indexes off the parent header's\nThirtyDay total, not the post-touch epoch-block total. Aligns the surplus\nfixture with expired_submit_range/expired_submit_tx_ids and the sibling\nfee-model fixture.",
+          "timestamp": "2026-07-21T14:04:35+01:00",
+          "tree_id": "158bb5577c86e7df180af49a4ecbf8add1b18a59",
+          "url": "https://github.com/Irys-xyz/irys/commit/fe3184957494e83913a4f5eead92df1942a66ea3"
+        },
+        "date": 1784640244794,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012636,
+            "range": "± 0.000312",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119909,
+            "range": "± 0.00109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.226287,
+            "range": "± 0.03926",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.943584,
+            "range": "± 0.106675",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074728,
+            "range": "± 0.000286",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 763.200143,
+            "range": "± 18.353723",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1059.302934,
+            "range": "± 28.262857",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.149593,
+            "range": "± 0.007641",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1291.010139,
+            "range": "± 104.206455",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1586.136549,
+            "range": "± 15.606448",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033919,
+            "range": "± 0.00199",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.681954,
+            "range": "± 0.745429",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.011465,
+            "range": "± 2.027921",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
