@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784647403672,
+  "lastUpdate": 1784666109629,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11599,6 +11599,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "045a674a5689d25ba26eae83ac34fd5c295470c1",
+          "message": "fix(data-sync): separate fetch from durable store; block missing data_root index (#1529)\n\n* fix(data-sync): separate fetch from durable store; block missing data_root index\n\nStop counting peer fetch success as storage success. On write failure with a\nmissing SM data_root index, mark the offset Blocked (no hot re-fetch thrash)\nand emit write_failed/blocked metrics plus structured warn logs.\n\n* fix(data-sync): harden write-path observability and cover block path\n\nDrop the fetch=store footgun API, unify metric reason labels, pin\nmissing-data_root classification, and unit-test orchestrator block/requeue.\n\n* fix(data-sync): classify missing data_root via typed write error\n\nReplace fragile string matching on write_data_chunk failures with\nWriteDataChunkError::DataRootNotFound so block-vs-requeue cannot\nsilently regress if the error message is reworded.\n\n* test(data-sync): sign mock genesis so ignored integration test is runnable again\n\n* fix(data-sync): require pending flush before marking chunk stored\n\nwrite_data_chunk only queues pending writes; get_chunk_type can report\nData before fsync. Force-sync and re-check durability before Stored so\norchestrator Completed means flush-confirmed persistence.",
+          "timestamp": "2026-07-21T13:19:39-07:00",
+          "tree_id": "4fbce22cb2f536120852e1253cf2f8fb3eb4b542",
+          "url": "https://github.com/Irys-xyz/irys/commit/045a674a5689d25ba26eae83ac34fd5c295470c1"
+        },
+        "date": 1784666107770,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.01562,
+            "range": "± 0.000497",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153577,
+            "range": "± 0.002799",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.562679,
+            "range": "± 0.026058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.485811,
+            "range": "± 0.187411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.083006,
+            "range": "± 0.000616",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.544194,
+            "range": "± 22.140752",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 973.625951,
+            "range": "± 6.735715",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117667,
+            "range": "± 0.002276",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1211.982,
+            "range": "± 81.626775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1530.63137,
+            "range": "± 8.796854",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033804,
+            "range": "± 0.003263",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.49082,
+            "range": "± 0.584291",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 278.70483,
+            "range": "± 11.389527",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000146,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
