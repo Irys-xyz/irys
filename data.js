@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784640246069,
+  "lastUpdate": 1784647403672,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11491,6 +11491,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0715ca61253fd7de1040c34020db4234e81fbcaf",
+          "message": "fix: Ingress-proof-count panic — steady-state remote node-crash DoS (0c / FC-core-B) (#1514)\n\n* fix(consensus): reject mis-sized ingress-proof lists instead of panicking\n\nA peer block whose flat ingress-proof list is shorter than\npublish_txs.len() * number_of_ingress_proofs_total (N) caused every honest\nvalidator to panic on an out-of-bounds slice in ShadowTxGenerator, a\nrepeatable remote node-crash DoS reachable in steady state.\n\nThe only guard forcing the list to N lived in data_txs_are_valid, which runs\nafter shadow-tx generation. prevalidate_block sliced only via\nget_ingress_proofs, keyed off the peer-supplied required_proof_count, so a\nblock with required_proof_count = Some(1) and one proof passed prevalidation\nand then panicked the generator (which slices the flat list by N).\n\nTwo independent defenses:\n\n- Make the generator slice checked: a short/mis-sized list becomes a\n  peer-attributable Structural consensus rejection, never a panic.\n- Add an aggregate proof-count guard in prevalidate_block, ahead of shadow-tx\n  generation, using N at the parent timestamp so the guard and the generator's\n  slice agree on N.\n\n* test: end-to-end prevalidate_block coverage for ingress-proof-count guard\n\nAdd an integration test that drives prevalidate_block with a crafted block\nwhose Publish ledger carries a flat proof list longer than\npublish_txs.len() * N, and asserts PublishLedgerProofCountMismatch. The unit\ntest covers the arithmetic; this proves the guard actually runs inside\nprevalidate_block. The orphan shape (proofs, zero txs) is already rejected by\nvalidate_ingress_proof_signers, so the fixture uses a non-empty Publish ledger\nwith required_proof_count = 0, isolating this guard as the sole rejecter.\n\nRefresh HANDOFF.md status to reflect the completed fix.\n\n* fix: drop parent/block-timestamp N debug_assert; it breaks at N-changing forks\n\nThe debug_assert_eq! comparing number_of_ingress_proofs_total at the parent vs\nblock timestamp fired unconditionally on every block. Parent-N == block-N is not\nan invariant: it is legitimately false at a hardfork that changes N, which the\nexisting heavy_pricing_endpoint_hardfork_changes_ingress_proofs test exercises\n(N 2->8). There the boundary block panicked the producer and timed the test out.\n\nThe divergence is a documented limitation (see the doc comment on\npublish_ingress_proof_count_is_valid), not a runtime invariant. The checked slice\nin ShadowTxGenerator is the actual defense in depth and is total on its own.\n\nAlso pin the generator regression test to the slice-specific error message so a\nfuture earlier Structural error can't silently drop OOB-slice coverage.\n\n* fix(consensus): size ingress-proof-count guard by block N and pin required_proof_count\n\nSize the prevalidation proof-count guard by number_of_ingress_proofs_total at\nthe block's own timestamp, matching block production and data_txs_are_valid.\nKeying it off the parent timestamp would reject an honestly-produced block at\nthe first block after a hardfork that changes N. The generator's checked slice\nis the panic-proof backstop, so the guard need not mirror the generator's N.\n\nAlso reject a publish ledger whose peer-supplied required_proof_count differs\nfrom N: the per-tx signature check slices proofs by that field, so an\nunderstated value would leave later proofs unverified in prevalidation even\nwhen the aggregate list length matches.\n\n* fix(consensus): use checked arithmetic for ingress-proof slice math\n\nReplace wrapping `as usize` casts with usize::try_from + checked_mul/\nchecked_add in the prevalidation proof-count guard and the shadow-tx\ngenerator slice bounds. Overflow is unreachable for a valid block, so\nfail closed (proof-count mismatch / Structural error) rather than\nrelying on a cast that could wrap.\n\n* test(consensus): lock in block-timestamp N for ingress-proof guard across hardforks\n\nAdd a unit test asserting the prevalidation proof-count guard, sized by N at the\nblock's own timestamp, accepts an honestly-produced boundary block and would\nfalse-reject it under parent-timestamp N. Covers both an N increase and an N\ndecrease across an N-changing hardfork, pinning the deliberate block-N choice\nagainst a regression toward the ShadowTxGenerator's parent-N divergence.",
+          "timestamp": "2026-07-21T16:08:29+01:00",
+          "tree_id": "8671aef829084ad7f4fa829e7c9d7b23f4440503",
+          "url": "https://github.com/Irys-xyz/irys/commit/0715ca61253fd7de1040c34020db4234e81fbcaf"
+        },
+        "date": 1784647402374,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015729,
+            "range": "± 0.000475",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.157913,
+            "range": "± 0.009404",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.608108,
+            "range": "± 0.032916",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.829273,
+            "range": "± 0.112718",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077489,
+            "range": "± 0.001853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.904982,
+            "range": "± 18.169178",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1011.624135,
+            "range": "± 18.770516",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.127347,
+            "range": "± 0.002854",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1290.787013,
+            "range": "± 29.466569",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1569.314318,
+            "range": "± 156.048188",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034895,
+            "range": "± 0.003058",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.455581,
+            "range": "± 0.951849",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.423679,
+            "range": "± 1.304719",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
