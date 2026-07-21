@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784565923006,
+  "lastUpdate": 1784624851919,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11275,6 +11275,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000124,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0843813a384335b5ba6c4d7179591c39fcd70bd4",
+          "message": "fix: repack orphaned ranges after reorg rollback + correct PoA offset over Uninitialized holes (#1528)\n\n* fix(migration): repack orphaned ranges and scope rollback clears\n\nrecover_from_network_partition re-marks rolled-back chunk offsets\nUninitialized, but packing is otherwise only requested at startup and on\nassignment transitions, so those offsets stayed a dead zone while the\nnode ran: the canonical fork's re-migrated chunks found no entropy and\nwere silently dropped by write_data_chunk until the next restart.\n\nEnqueue a packing request for each re-marked range so the gap heals\nlive. Scope the offset-index and DataRootInfos clears to the orphaned\nrange — dropping a placement iff its on-disk extent intersects the range\n— so a data_root shared with a still-canonical block keeps its canonical\nplacement. Purge stale pending writes in the range so a later\nsync_pending_chunks cannot replay them over the cleared index.\n\nThreading a packing sender into the migration service is an interim home\nfor the repack; a per-storage-module reconciler is the intended owner.\n\n* fix(mining): key PoA partition offset off read_chunks map, not dense index\n\nread_chunks skips Uninitialized offsets, so iterating its result with\nenumerate() shifted every offset after a mid-partition hole and produced\nan invalid PoA solution. Key off the returned BTreeMap's partition offset\ninstead. Exposed by the rollback path, which now creates such holes.\n\n* fix(mining): use recall-range width as range_offset log denominator\n\nread_chunks returns a sparse map (Uninitialized offsets are skipped), so\nchunks.len() undercounts the requested range: the range_offset log could\nprint a position larger than its denominator (e.g. 8/3). Use the\nconfigured recall-range width, which is the read_range span.\n\n* test: cover PoA sparse-map offset + extent negative-start cases\n\n- Regression test for the mining-offset fix: mine over an Uninitialized\n  hole and assert the solution offset and PoA hash use the true map key,\n  not a dense index. Mutation-verified against the old code. Adds a\n  #[cfg(test)] hook to drive the mining loop directly.\n- Extend the DataRootInfos extent-clear test with a negative start_offset\n  placement whose extent reaches into the orphaned range.\n- Correct two comments that overstated guarantees: the pending-write\n  purge leaves a residual mid-flush sync window, and the latest_height()\n  error-skip path has no self-retry.\n\n* fix(migration): propagate DB errors from the reorg rollback height guard\n\nrecover_from_network_partition read the latest height via\nBlockIndex::latest_height, which maps both a transient DB read error and\nan empty index to 0 — so a read failure tripped the\n`fork_parent_height >= latest` guard and silently skipped the rollback.\n\nAdd BlockIndex::try_latest_height (Result<Option<u64>>) and use it: a DB\nerror now propagates, an empty index (None) is the genuine\nnothing-to-roll-back case, and rollback proceeds only on a successful\nheight read.\n\n* fix(migration): panic on mid-rollback failure instead of running on partial state\n\nrecover_from_network_partition clears storage-module DBs (Phase 2) then\ntruncates the block index (Phase 3). If a failure propagated, the node\ncould shut down or keep running with storage partially cleared.\n\nWrap the mutating phases so any failure once mutation begins panics the\nnode — matching the service's existing node-fault convention — rather\nthan propagating. Pre-mutation reads (the guards and Phase 1 collection)\nstill return Err gracefully.\n\nThe block-index truncation is last and atomic, and the block tree is\nrebuilt from the index on restart (mark_tip is in-memory only), so a\nmid-mutation panic leaves the canonical view unchanged: the node restarts\non the old chain and re-runs the idempotent rollback when it re-syncs the\ncanonical fork. Only the per-submodule storage clears can be left partial\n— transient (repack + re-migration converge it), and the piece a future\nstartup reconciler would make deterministic.",
+          "timestamp": "2026-07-21T09:50:57+01:00",
+          "tree_id": "64597c4254565961d45fef195ff83fc67be84221",
+          "url": "https://github.com/Irys-xyz/irys/commit/0843813a384335b5ba6c4d7179591c39fcd70bd4"
+        },
+        "date": 1784624850695,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012653,
+            "range": "± 0.001101",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126676,
+            "range": "± 0.003348",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.272735,
+            "range": "± 0.024352",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.996646,
+            "range": "± 0.274087",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082049,
+            "range": "± 0.001511",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 753.08002,
+            "range": "± 14.350334",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.966444,
+            "range": "± 6.498303",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120437,
+            "range": "± 0.002391",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1244.315428,
+            "range": "± 97.665407",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1571.553573,
+            "range": "± 17.299963",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034745,
+            "range": "± 0.001355",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.337264,
+            "range": "± 1.31242",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.327843,
+            "range": "± 1.352922",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
