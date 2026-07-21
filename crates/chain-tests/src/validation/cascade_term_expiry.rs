@@ -993,15 +993,7 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
         ctx.mine_block().await?;
     }
 
-    // ThirtyDay cumulative total_chunks at E2 (the value fed to the expiry calc).
     let epoch_block = ctx.get_block_by_height(e2).await?;
-    let e_total = epoch_block
-        .data_ledgers
-        .iter()
-        .find(|dl| dl.ledger_id == DataLedger::ThirtyDay as u32)
-        .map(|dl| dl.total_chunks)
-        .unwrap_or(0);
-
     let parent_block = ctx.get_block_by_height(e2 - 1).await?;
     let parent_snap = {
         let tree = ctx.node_ctx.block_tree_guard.read();
@@ -1024,9 +1016,13 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
             .collect()
     };
 
-    // Inclusive non-promotability set from the parent snapshot.
+    // Inclusive non-promotability set from the parent snapshot. Feed the PARENT
+    // header's ThirtyDay total — the exact input the production §4c promotion
+    // validator keys off (pre-this-epoch-touch), matching the sibling
+    // heavy_cascade_expiry_fee_model_matches_actual_recycle fixture.
+    let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
     let blocked: std::collections::BTreeSet<usize> = parent_snap
-        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e2, true, e_total)
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e2, true, parent_total)
         .into_iter()
         .collect();
 
