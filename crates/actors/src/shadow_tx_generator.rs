@@ -465,10 +465,38 @@ impl<'a> ShadowTxGenerator<'a> {
             )
             .map_err(|e| ShadowTxGenError::Structural(e.to_string()))?;
 
-            // Get all the ingress proofs for the transaction
-            let start_index = index * number_of_ingress_proofs_total as usize;
-            let end_index = start_index + number_of_ingress_proofs_total as usize;
-            let ingress_proofs = &proofs[start_index..end_index];
+            // Get all the ingress proofs for the transaction. The span is
+            // sized from `number_of_ingress_proofs_total` (N), but the flat
+            // `proofs` list is peer-supplied — a short/mis-sized list is a
+            // consensus-invalid block, not a node fault. A raw slice would
+            // panic on out-of-bounds input, letting one crafted block crash
+            // every honest validator; classify as `Structural` instead.
+            // Compute the slice bounds with checked arithmetic. Overflow is
+            // unreachable for a valid block (index and N are bounded), so classify
+            // it as Structural rather than letting an `as` cast wrap.
+            let (start_index, end_index) = usize::try_from(number_of_ingress_proofs_total)
+                .ok()
+                .and_then(|n| {
+                    let start = index.checked_mul(n)?;
+                    let end = start.checked_add(n)?;
+                    Some((start, end))
+                })
+                .ok_or_else(|| {
+                    ShadowTxGenError::Structural(format!(
+                        "publish ledger tx {} ingress-proof slice offset overflowed for N={}",
+                        tx.id, number_of_ingress_proofs_total,
+                    ))
+                })?;
+            let ingress_proofs = proofs.get(start_index..end_index).ok_or_else(|| {
+                ShadowTxGenError::Structural(format!(
+                    "publish ledger tx {} expects {} ingress proofs at offset {}, but the \
+                     proofs list has length {}",
+                    tx.id,
+                    number_of_ingress_proofs_total,
+                    start_index,
+                    proofs.len(),
+                ))
+            })?;
 
             // Get fee charges for all ingress proofs
             let fee_charges = publish_charges
@@ -2077,6 +2105,92 @@ mod tests {
             matches!(err, ShadowTxGenError::TreasuryArithmetic(_)),
             "publish-ledger underflow with NO snapshot-derived taint must classify as \
              TreasuryArithmetic (peer-attributable) — got: {err:?}",
+        );
+    }
+
+    /// Remote-panic DoS regression: a peer block whose flat ingress-proof
+    /// list is shorter than `publish_txs.len() * number_of_ingress_proofs_total`
+    /// must surface as a peer-attributable `Structural` consensus rejection —
+    /// NEVER an out-of-bounds slice panic. The generator slices the flat
+    /// proofs list by `N` (`number_of_ingress_proofs_total`, at the parent
+    /// timestamp); a short list is fully peer-controlled input, so panicking
+    /// on it would let one crafted block crash every honest validator.
+    #[test]
+    fn publish_ingress_short_proof_list_is_structural_not_panic() {
+        let mut config = ConsensusConfig::testing();
+        // N = 3, but the block will carry only 1 proof for its 1 tx.
+        config.hardforks.frontier.number_of_ingress_proofs_total = 3;
+        let parent_block = IrysBlockHeader::new_mock_header();
+
+        let term_fee = U256::from(100_000_u64);
+        // Ample perm_fee so `PublishFeeCharges::new` succeeds and execution
+        // reaches the ingress-proof slice (the panic site pre-fix).
+        let perm_fee = U256::from(10_000_000_u64);
+
+        let tx_signer = IrysSigner::random_signer(&config);
+        let publish_tx = create_data_tx_header(&tx_signer, term_fee, Some(perm_fee));
+
+        let proof_signer = IrysSigner::random_signer(&config);
+        let proof = create_test_ingress_proof(
+            &proof_signer,
+            H256::from([21_u8; 32]),
+            H256::from([22_u8; 32]),
+        );
+
+        // One tx, one proof — needs 3, has 1.
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![publish_tx],
+            proofs: Some(IngressProofsList(vec![proof])),
+        };
+
+        let initial_treasury = U256::from(100_000_000_u64);
+        let expired_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+
+        let block_height = 101_u64;
+        let reward_address = IrysAddress::from([20_u8; 20]);
+        let reward_amount = U256::from(5000_u64);
+        let solution_hash = H256::zero();
+        let epoch_snapshot = test_epoch_snapshot();
+
+        // `accumulate_ingress_rewards_for_init` runs inside `new`, so the OOB
+        // slice would panic here on pre-fix code. Post-fix it is a clean Err.
+        let result = ShadowTxGenerator::new(
+            &block_height,
+            &reward_address,
+            &reward_amount,
+            &parent_block,
+            &solution_hash,
+            &config,
+            &[],
+            &[],
+            &[],
+            &[],
+            &publish_ledger,
+            initial_treasury,
+            &expired_fees,
+            &[],
+            &[],
+            &epoch_snapshot,
+        );
+
+        let err = match result {
+            Ok(_) => panic!("a short ingress-proof list must be a Structural rejection, not Ok"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, ShadowTxGenError::Structural(_)),
+            "short ingress-proof list must classify as Structural (peer-attributable \
+             consensus rejection) — a panic here is a network-wide DoS; got: {err:?}",
+        );
+        // Pin the failure to the ingress-proof slice specifically, so a future
+        // earlier `Structural` (e.g. from `PublishFeeCharges::new`) can't silently
+        // shadow this coverage and let the OOB slice regress unnoticed.
+        assert!(
+            err.to_string().contains("ingress proofs at offset"),
+            "Structural error must originate at the ingress-proof slice; got: {err:?}",
         );
     }
 

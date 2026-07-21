@@ -1544,6 +1544,67 @@ fn expected_ledger_total_chunks(
         .saturating_add(calculate_chunks_added(txs, chunk_size))
 }
 
+/// Reject a publish ledger whose flat ingress-proof list length is not
+/// `publish_tx_count * number_of_ingress_proofs_total` (N), or whose
+/// peer-supplied `required_proof_count` is not N.
+///
+/// `ShadowTxGenerator` slices the flat proofs list as `[i*N .. i*N+N]` for each
+/// publish tx `i`. A short/mis-sized peer-supplied list is a consensus-invalid
+/// block; the per-tx `get_ingress_proofs` check keys off the peer-supplied
+/// `required_proof_count` and so passes a crafted block (e.g.
+/// `required_proof_count = 1`, one proof, N = 3). Running this aggregate check in
+/// `prevalidate_block` — ahead of shadow-tx generation — makes the rejection
+/// early and uniform. (The generator's checked slice is the total panic-proof
+/// backstop; this guard just moves the rejection earlier.)
+///
+/// N MUST be taken at the block's OWN timestamp so this guard agrees with block
+/// production and `data_txs_are_valid`, which both size proofs by N at the block
+/// timestamp. An honestly-produced block therefore always passes this guard,
+/// including the first block after a hardfork that changes N.
+///
+/// Note: the generator still slices by N at the PARENT timestamp, so at an
+/// N-changing boundary it groups proofs by the old N (a reward-attribution
+/// divergence). Reconciling the generator's N-source is a separate concern and
+/// is not required for this guard's correctness.
+fn publish_ingress_proof_count_is_valid(
+    publish_ledger: &DataTransactionLedger,
+    publish_tx_count: usize,
+    number_of_ingress_proofs_total: u64,
+) -> Result<(), PreValidationError> {
+    let Some(proofs) = &publish_ledger.proofs else {
+        return Ok(());
+    };
+    let proof_count = proofs.len();
+    let mismatch = || PreValidationError::PublishLedgerProofCountMismatch {
+        proof_count,
+        tx_count: publish_tx_count,
+    };
+    // Convert N to usize once and multiply with checked arithmetic. Overflow is
+    // unreachable for a valid block (tx count and N are bounded), so fail closed
+    // as a mismatch rather than relying on an `as` cast that could wrap.
+    let Ok(n) = usize::try_from(number_of_ingress_proofs_total) else {
+        return Err(mismatch());
+    };
+    let Some(expected) = publish_tx_count.checked_mul(n) else {
+        return Err(mismatch());
+    };
+    if proof_count != expected {
+        return Err(mismatch());
+    }
+    // Pin the peer-supplied `required_proof_count` to N. The per-tx signature
+    // check in `prevalidate_block` slices proofs via `get_ingress_proofs`, which
+    // trusts this field; an understated value would leave later proofs unverified
+    // in prevalidation even though the aggregate length matches.
+    let required_proof_count = publish_ledger.required_proof_count.map_or(0, usize::from);
+    if required_proof_count != n {
+        return Err(PreValidationError::IngressProofCountMismatch {
+            expected: n,
+            actual: required_proof_count,
+        });
+    }
+    Ok(())
+}
+
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
@@ -1939,6 +2000,16 @@ pub async fn prevalidate_block(
         })?;
 
     let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+
+    // Reject a mis-sized flat proof list before shadow-tx generation slices it
+    // by N. N is taken at the block's own timestamp to match block production and
+    // `data_txs_are_valid`, so an honestly-produced block always passes — see the
+    // doc comment on `publish_ingress_proof_count_is_valid`.
+    publish_ingress_proof_count_is_valid(
+        publish_ledger,
+        publish_txs.len(),
+        config.number_of_ingress_proofs_total_at(block.timestamp_secs()),
+    )?;
 
     // Flatten (proof, data_root) pairs across publish txs so the parallel
     // verify below fans out across every proof rather than per-tx batches.
@@ -7330,6 +7401,142 @@ mod tests {
             vdf_step_count_is_consistent(0, 1),
             Err(PreValidationError::VDFCheckpointsInvalid(_))
         ));
+    }
+
+    fn publish_ledger_with_proofs(
+        tx_ids: Vec<H256>,
+        proof_count: usize,
+        required_proof_count: Option<u8>,
+    ) -> DataTransactionLedger {
+        DataTransactionLedger {
+            ledger_id: DataLedger::Publish.into(),
+            tx_root: H256::zero(),
+            tx_ids: H256List(tx_ids),
+            total_chunks: 0,
+            expires: None,
+            proofs: Some(irys_types::IngressProofsList(vec![
+                irys_types::ingress::IngressProof::default();
+                proof_count
+            ])),
+            required_proof_count,
+        }
+    }
+
+    /// Remote-panic DoS regression: `prevalidate_block`'s proof-count guard must
+    /// reject a publish ledger whose flat proof list is shorter than
+    /// `publish_txs.len() * N` (N = `number_of_ingress_proofs_total`) BEFORE
+    /// shadow-tx generation slices that list by N. The confirmed attack sets
+    /// `required_proof_count = Some(1)` with a single valid proof while N = 3:
+    /// the per-tx `get_ingress_proofs` check passes, but the generator would
+    /// slice `[0..3]` on a length-1 list and panic. A mis-sized list is
+    /// peer-controlled input, so it must be a consensus rejection, uniform
+    /// across all validators — never a node-crashing panic.
+    #[test]
+    fn ingress_proof_count_guard_rejects_short_proof_list() {
+        let tx_id = H256::from([1_u8; 32]);
+        // The attack: 1 tx, N = 3, but only 1 proof supplied.
+        let short = publish_ledger_with_proofs(vec![tx_id], 1, Some(1));
+        assert!(matches!(
+            publish_ingress_proof_count_is_valid(&short, 1, 3),
+            Err(PreValidationError::PublishLedgerProofCountMismatch { .. })
+        ));
+
+        // Empty publish txs but proofs present is also a mismatch (0 * N == 0).
+        let orphan_proofs = publish_ledger_with_proofs(vec![], 1, Some(3));
+        assert!(matches!(
+            publish_ingress_proof_count_is_valid(&orphan_proofs, 0, 3),
+            Err(PreValidationError::PublishLedgerProofCountMismatch { .. })
+        ));
+
+        // Aggregate length matches (1 tx * N=3 = 3 proofs) but the peer
+        // understated `required_proof_count`, which would make the per-tx
+        // signature check verify only a subset. Must be rejected.
+        let understated = publish_ledger_with_proofs(vec![tx_id], 3, Some(1));
+        assert!(matches!(
+            publish_ingress_proof_count_is_valid(&understated, 1, 3),
+            Err(PreValidationError::IngressProofCountMismatch {
+                expected: 3,
+                actual: 1
+            })
+        ));
+
+        // Well-formed: exactly publish_txs.len() * N proofs validates.
+        let ok = publish_ledger_with_proofs(vec![tx_id], 3, Some(3));
+        assert!(publish_ingress_proof_count_is_valid(&ok, 1, 3).is_ok());
+
+        // No proofs at all is not this guard's concern (handled downstream);
+        // the generator short-circuits on an empty list, so it cannot panic.
+        let none = ledger_with_tx(DataLedger::Publish, tx_id);
+        assert!(publish_ingress_proof_count_is_valid(&none, 1, 3).is_ok());
+    }
+
+    /// `prevalidate_block` sizes N at the block's OWN timestamp
+    /// (`number_of_ingress_proofs_total_at(block.timestamp_secs())`), matching
+    /// block production and `data_txs_are_valid`. This must hold at an N-changing
+    /// hardfork boundary in BOTH directions: the first block after the fork carries
+    /// a proof list sized by the block's (new) N, so it passes the guard when N is
+    /// taken at the block timestamp — and would be wrongly rejected if N were taken
+    /// at the parent (pre-fork) timestamp. Keying off the parent is the
+    /// `ShadowTxGenerator`'s separate, documented divergence, not this guard's.
+    ///
+    /// This locks in the guard's arithmetic under each N-source; the call site's
+    /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.
+    #[test]
+    fn ingress_proof_count_guard_uses_block_timestamp_across_hardfork() {
+        use irys_types::UnixTimestamp;
+        use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
+
+        // Parent sits just before activation; the boundary block sits at
+        // activation, so parent-N and block-N differ.
+        let activation = UnixTimestamp::from_secs(1_000);
+        let parent_ts = UnixTimestamp::from_secs(999);
+        let block_ts = activation;
+        let tx_id = H256::from([7_u8; 32]);
+
+        // Exercise an N increase and an N decrease across the same boundary.
+        for (frontier_n, fork_n) in [(1_u64, 3_u64), (3_u64, 1_u64)] {
+            let hardforks = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: frontier_n,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: Some(NextNameTBD {
+                    activation_timestamp: activation,
+                    number_of_ingress_proofs_total: fork_n,
+                    number_of_ingress_proofs_from_assignees: 0,
+                }),
+                aurora: None,
+                borealis: None,
+                cascade: None,
+            };
+
+            let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
+            let block_n = hardforks.number_of_ingress_proofs_total_at(block_ts);
+            assert_eq!(parent_n, frontier_n);
+            assert_eq!(block_n, fork_n);
+            assert_ne!(parent_n, block_n, "boundary must actually change N");
+
+            // Honest boundary block: one publish tx, proof list and
+            // `required_proof_count` sized by the block's N (what the producer
+            // emits at `block_ts`).
+            let honest =
+                publish_ledger_with_proofs(vec![tx_id], block_n as usize, Some(block_n as u8));
+
+            // Sized at the block timestamp (the call-site's choice): passes.
+            assert!(
+                publish_ingress_proof_count_is_valid(&honest, 1, block_n).is_ok(),
+                "honest boundary block must pass when N is taken at the block timestamp \
+                 (frontier={frontier_n}, fork={fork_n})",
+            );
+
+            // Sized at the parent timestamp (the rejected alternative): would
+            // false-reject the same honest block because parent-N != block-N.
+            assert!(
+                publish_ingress_proof_count_is_valid(&honest, 1, parent_n).is_err(),
+                "parent-timestamp N would false-reject an honest boundary block \
+                 (frontier={frontier_n}, fork={fork_n})",
+            );
+        }
     }
 
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
