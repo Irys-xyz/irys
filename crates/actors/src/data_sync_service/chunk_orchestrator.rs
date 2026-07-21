@@ -16,6 +16,26 @@ use std::{
 };
 use tracing::{Instrument as _, debug, warn};
 
+/// Why a chunk offset is blocked from the hot re-fetch loop.
+///
+/// These are local progress blockers (not peer-delivery failures). Peers may
+/// have delivered the bytes; we still cannot place them until the underlying
+/// issue is repaired (e.g. SM data_root index rebuild).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkBlockReason {
+    /// `write_data_chunk` failed because `DataRootInfosByDataRoot` has no entry
+    /// for the chunk's data_root. Needs index rebuild / backfill.
+    MissingDataRootIndex,
+}
+
+impl ChunkBlockReason {
+    pub const fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::MissingDataRootIndex => "missing_data_root_index",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
     /// Chunk needs to be requested.
@@ -25,8 +45,15 @@ pub enum ChunkRequestState {
     /// Used for tracking timeouts and preventing duplicate requests.
     Requested(IrysAddress, Instant),
 
-    /// Chunk has been successfully retrieved and stored.
+    /// Chunk was successfully fetched **and** durably written as [`ChunkType::Data`].
+    ///
+    /// Fetch alone is not enough — see [`DataSyncServiceInner::on_chunk_completed`].
     Completed,
+
+    /// Locally blocked from hot re-fetch (index gap, etc.). Still retained while
+    /// the offset is Entropy so we do not thrash peers; not auto-cleared until
+    /// the offset becomes Data (gossip/heal) or the process restarts.
+    Blocked(ChunkBlockReason),
 }
 
 type ExcludedPeerAddresses = HashSet<IrysAddress>;
@@ -127,14 +154,20 @@ impl ChunkOrchestrator {
                 return true;
             }
 
-            // For non-requested states, only retain if the chunk is still Entropy
-            // and not Completed
-            matches!(
+            // Drop once the offset is no longer Entropy (stored as Data, or invalidated).
+            if !matches!(
                 self.storage_module.get_chunk_type(offset),
                 Some(ChunkType::Entropy)
-            ) && cr.request_state != ChunkRequestState::Completed
+            ) {
+                return false;
+            }
+
+            // Keep Pending / Blocked while still Entropy. Drop Completed.
+            !matches!(cr.request_state, ChunkRequestState::Completed)
         });
 
+        // Pending only — Blocked offsets intentionally do not consume the
+        // pending budget or get re-dispatched.
         let pending_count: usize = self
             .chunk_requests
             .values()
@@ -445,20 +478,26 @@ impl ChunkOrchestrator {
         );
     }
 
-    pub fn on_chunk_completed(
+    /// Peer delivered the chunk body. Credits peer bandwidth stats but leaves
+    /// the request in [`ChunkRequestState::Requested`] until
+    /// [`Self::mark_chunk_stored`] / [`Self::mark_chunk_blocked`] /
+    /// [`Self::requeue_after_local_write_failure`] decides the local outcome.
+    ///
+    /// Peer delivery success must not be conflated with durable local storage.
+    pub fn on_chunk_fetched(
         &mut self,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
     ) -> eyre::Result<ChunkTimeRecord> {
         let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
-            eyre::eyre!("Chunk completion for unknown offset: {:?}", chunk_offset)
+            eyre::eyre!("Chunk fetch completion for unknown offset: {:?}", chunk_offset)
         })?;
 
         let (expected_peer, start_instant) = match request.request_state {
             ChunkRequestState::Requested(addr, started) => (addr, started),
             ref invalid_state => {
                 return Err(eyre::eyre!(
-                    "Invalid state for chunk request completion at offset {}: expected Requested, got {:?}",
+                    "Invalid state for chunk fetch at offset {}: expected Requested, got {:?}",
                     chunk_offset,
                     invalid_state
                 ));
@@ -472,8 +511,6 @@ impl ChunkOrchestrator {
         let completion_time = Instant::now();
         let duration = completion_time.duration_since(start_instant);
 
-        request.request_state = ChunkRequestState::Completed;
-
         let completion_record = ChunkTimeRecord {
             chunk_offset,
             start_time: start_instant,
@@ -483,6 +520,7 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
+        // Credit the peer for successful delivery regardless of local write outcome.
         if let Ok(mut peers) = self.active_sync_peers.write()
             && let Some(peer_manager) = peers.get_mut(&peer_addr)
         {
@@ -490,6 +528,80 @@ impl ChunkOrchestrator {
         }
 
         Ok(completion_record)
+    }
+
+    /// Durable local store succeeded — offset is (or will be observed as) Data.
+    pub fn mark_chunk_stored(&mut self, chunk_offset: PartitionChunkOffset) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!("mark_chunk_stored for unknown offset: {:?}", chunk_offset)
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "mark_chunk_stored expected Requested state at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Completed;
+        Ok(())
+    }
+
+    /// Locally blocked; stop hot re-fetching this offset.
+    pub fn mark_chunk_blocked(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        reason: ChunkBlockReason,
+    ) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!("mark_chunk_blocked for unknown offset: {:?}", chunk_offset)
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "mark_chunk_blocked expected Requested state at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Blocked(reason);
+        // Clear peer exclusions — the failure is local, not peer-specific.
+        request.excluded = None;
+        Ok(())
+    }
+
+    /// Local write failed for a non-blocking reason; re-queue without blaming the peer
+    /// that just delivered the bytes.
+    pub fn requeue_after_local_write_failure(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!(
+                "requeue_after_local_write_failure for unknown offset: {:?}",
+                chunk_offset
+            )
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "requeue_after_local_write_failure expected Requested at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Pending;
+        // Do not add the delivering peer to `excluded` — they succeeded.
+        Ok(())
+    }
+
+    /// Backward-compatible name: treat as fetch success + immediate store mark.
+    /// Prefer the explicit fetch/store helpers from data-sync write path.
+    pub fn on_chunk_completed(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: IrysAddress,
+    ) -> eyre::Result<ChunkTimeRecord> {
+        let record = self.on_chunk_fetched(chunk_offset, peer_addr)?;
+        self.mark_chunk_stored(chunk_offset)?;
+        Ok(record)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(
@@ -565,14 +677,15 @@ impl ChunkOrchestrator {
     }
 
     pub fn get_metrics(&self) -> OrchestrationMetrics {
-        let (pending, active, completed) =
+        let (pending, active, completed, blocked) =
             self.chunk_requests
                 .values()
-                .fold((0, 0, 0), |(p, a, c), request| {
+                .fold((0, 0, 0, 0), |(p, a, c, b), request| {
                     match request.request_state {
-                        ChunkRequestState::Pending => (p + 1, a, c),
-                        ChunkRequestState::Requested(_, _) => (p, a + 1, c),
-                        ChunkRequestState::Completed => (p, a, c + 1),
+                        ChunkRequestState::Pending => (p + 1, a, c, b),
+                        ChunkRequestState::Requested(_, _) => (p, a + 1, c, b),
+                        ChunkRequestState::Completed => (p, a, c + 1, b),
+                        ChunkRequestState::Blocked(_) => (p, a, c, b + 1),
                     }
                 });
 
@@ -591,6 +704,7 @@ impl ChunkOrchestrator {
             pending_requests: pending,
             active_requests: active,
             completed_requests: completed,
+            blocked_requests: blocked,
             total_throughput_bps,
         }
     }
@@ -602,5 +716,6 @@ pub struct OrchestrationMetrics {
     pub pending_requests: usize,
     pub active_requests: usize,
     pub completed_requests: usize,
+    pub blocked_requests: usize,
     pub total_throughput_bps: u64,
 }
