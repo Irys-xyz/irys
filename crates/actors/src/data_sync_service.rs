@@ -5,7 +5,7 @@ pub mod peer_stats;
 
 use crate::{chunk_fetcher::ChunkFetcherFactory, metrics, services::ServiceSenders};
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator};
-use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
+use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule, WriteDataChunkError};
 use irys_packing::unpack;
 use irys_types::{
     Config, IrysAddress, PackedChunk, PartitionChunkOffset, SendTraced as _, TokioServiceHandle,
@@ -34,27 +34,14 @@ enum DataSyncWriteOutcome {
     Other(String),
 }
 
-/// Substring of `StorageModule::write_data_chunk`'s eyre message when
-/// `DataRootInfosByDataRoot` has no entry. Keep in sync with domain
-/// `storage_module.rs` (`"Chunks data_root not found in storage module"`).
-/// Prefer a typed error in a follow-up; until then this pin + unit test
-/// prevents silent thrash if the message is reworded.
-const DATA_ROOT_NOT_FOUND_MSG: &str = "data_root not found";
-
 fn attempt_data_sync_write(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
     expected_offset: PartitionChunkOffset,
 ) -> DataSyncWriteOutcome {
     match sm.write_data_chunk(unpacked) {
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains(DATA_ROOT_NOT_FOUND_MSG) {
-                DataSyncWriteOutcome::MissingDataRootIndex
-            } else {
-                DataSyncWriteOutcome::Other(msg)
-            }
-        }
+        Err(WriteDataChunkError::DataRootNotFound) => DataSyncWriteOutcome::MissingDataRootIndex,
+        Err(e) => DataSyncWriteOutcome::Other(e.to_string()),
         Ok(()) => {
             // write_data_chunk can return Ok(()) without writing when there are
             // no Entropy targets at the resolved offsets — verify the requested
@@ -65,7 +52,7 @@ fn attempt_data_sync_write(
                 sm.collect_data_root_infos(unpacked.data_root),
                 Ok(infos) if infos.0.is_empty()
             ) {
-                // Defensive: empty infos should have been Err, but classify if not.
+                // Defensive: empty infos should have been DataRootNotFound Err.
                 DataSyncWriteOutcome::MissingDataRootIndex
             } else {
                 DataSyncWriteOutcome::NoWriteableOffset
@@ -851,8 +838,8 @@ impl DataSyncService {
 
 #[cfg(test)]
 mod write_outcome_tests {
-    use super::{DATA_ROOT_NOT_FOUND_MSG, DataSyncWriteOutcome, attempt_data_sync_write};
-    use irys_domain::{StorageModule, StorageModuleInfo};
+    use super::{DataSyncWriteOutcome, attempt_data_sync_write};
+    use irys_domain::{StorageModule, StorageModuleInfo, WriteDataChunkError};
     use irys_testing_utils::TempDirBuilder;
     use irys_types::{
         Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
@@ -860,8 +847,7 @@ mod write_outcome_tests {
     };
     use std::sync::Arc;
 
-    /// Pins the load-bearing string coupling: unindexed data_root must classify
-    /// as MissingDataRootIndex (not Other/requeue thrash).
+    /// Unindexed data_root must classify as MissingDataRootIndex (not Other/requeue thrash).
     #[test]
     fn unindexed_data_root_classifies_as_missing_index() {
         let tmp = TempDirBuilder::new().with_tracing().build();
@@ -908,14 +894,12 @@ mod write_outcome_tests {
             tx_offset: TxChunkOffset::from(0_u32),
         };
 
-        // Domain error must still contain the substring we classify on.
         let err = sm
             .write_data_chunk(&chunk)
             .expect_err("unindexed data_root must fail write");
         assert!(
-            err.to_string().contains(DATA_ROOT_NOT_FOUND_MSG),
-            "write_data_chunk message changed; update DATA_ROOT_NOT_FOUND_MSG and \
-             classification. got: {err}"
+            matches!(err, WriteDataChunkError::DataRootNotFound),
+            "expected DataRootNotFound, got: {err:?}"
         );
 
         let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32));
