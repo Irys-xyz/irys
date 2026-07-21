@@ -529,6 +529,12 @@ impl TestSetup {
         // Make sure the genesis block track the ledger size
         let mut fake_genesis = IrysBlockHeader::new_mock_header();
         fake_genesis.data_ledgers[DataLedger::Publish].total_chunks = num_chunks;
+        // Sign AFTER mutating: BlockTree::new seals genesis and rejects
+        // invalid signatures (test stays #[ignore]d; this keeps it runnable)
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            fake_genesis.test_sign();
+        }
 
         let data_tx = signer
             .create_transaction(data, fake_genesis.block_hash)
