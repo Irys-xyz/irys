@@ -702,14 +702,17 @@ impl ConsensusConfig {
                 }),
             },
             genesis: GenesisConfig {
+                // CONSENSUS-FROZEN — do not edit. Baked into keccak256_hash /
+                // expected_genesis_hash. miner_address is overwritten at signing;
+                // genesis reward_amount is 0 (chainspec).
                 // The timestamp in milliseconds used for the genesis block
                 timestamp_millis: 1763749823171,
                 // Address that signs the genesis block
                 miner_address: IrysAddress::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
-                    .unwrap(), // todo()
+                    .unwrap(),
                 // Address that receives the genesis block reward
                 reward_address: IrysAddress::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
-                    .unwrap(), // todo()
+                    .unwrap(),
                 // The initial last_epoch_hash used by the genesis block
                 last_epoch_hash: H256::from_base58("4eiVupeZoaBgxyDMacRHnvbbzodLRTEcGUG3yjXpAE4i"),
                 // The initial VDF seed used by the genesis block Must be explicitly set for deterministic VDF output at genesis.
@@ -1149,6 +1152,62 @@ mod tests {
             genesis_config.keccak256_hash(),
             peer_config.keccak256_hash(),
             "Genesis and Peer nodes with same expected_genesis_hash must have matching consensus hashes"
+        );
+    }
+
+    /// Pins mainnet genesis inputs + wire-level `keccak256_hash` (signing key
+    /// is private, so a full rebuild golden is impossible).
+    #[test]
+    fn test_mainnet_genesis_constants_are_frozen() {
+        let config = ConsensusConfig::mainnet();
+
+        assert_eq!(config.chain_id, 3282);
+        assert_eq!(
+            config.expected_genesis_hash,
+            Some(H256::from_base58(
+                "2Pgf5vJvvFifTnyJy9gTg31Yba2HFh2hC6imqsmJqdF7"
+            )),
+            "mainnet expected_genesis_hash is consensus-frozen"
+        );
+
+        assert_eq!(config.genesis.timestamp_millis, 1763749823171);
+        let genesis_signer =
+            IrysAddress::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e").unwrap();
+        assert_eq!(config.genesis.miner_address, genesis_signer);
+        assert_eq!(config.genesis.reward_address, genesis_signer);
+        assert_eq!(
+            config.genesis.last_epoch_hash,
+            H256::from_base58("4eiVupeZoaBgxyDMacRHnvbbzodLRTEcGUG3yjXpAE4i")
+        );
+        assert_eq!(
+            config.genesis.vdf_seed,
+            H256::from_base58("3peqVpX6VF8GjEsSeFk6XPN19bSn7fQbjgT6PJMkpzDo")
+        );
+        assert_eq!(config.genesis.vdf_next_seed, None);
+
+        // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
+        assert_eq!(
+            config.keccak256_hash(),
+            H256::from_base58("3isK1RK4URjA5oYEQhqt3CnGf5TKZTFyC3CgJfFvD9jA"),
+            "mainnet consensus-config hash is consensus-frozen"
+        );
+    }
+
+    /// Pins testnet genesis hash + wire-level `keccak256_hash`.
+    #[test]
+    fn test_testnet_genesis_constants_are_frozen() {
+        let config = ConsensusConfig::testnet();
+        assert_eq!(
+            config.expected_genesis_hash,
+            Some(H256::from_base58(
+                "DoAEJ8R2CZw6QUFVXzAoPNXjGL8m6uQFEBGweagrUMMP" // spellchecker:disable-line
+            )),
+            "testnet expected_genesis_hash is consensus-frozen"
+        );
+        assert_eq!(
+            config.keccak256_hash(),
+            H256::from_base58("GFHyRkCukwbVcWRsQWtHkBiwkyxW7TmyqRHfeoGZZAEv"),
+            "testnet consensus-config hash is consensus-frozen"
         );
     }
 
