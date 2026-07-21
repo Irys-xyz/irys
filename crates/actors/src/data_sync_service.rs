@@ -24,7 +24,7 @@ use tracing::{Instrument as _, debug, error, warn};
 /// Local write outcome after a successful peer fetch.
 #[derive(Debug, PartialEq, Eq)]
 enum DataSyncWriteOutcome {
-    /// Offset is now (or is about to be observed as) [`ChunkType::Data`].
+    /// Offset is durably [`ChunkType::Data`] after pending flush + fsync.
     Stored,
     /// SM has no `DataRootInfos` entry for this data_root — needs index rebuild.
     MissingDataRootIndex,
@@ -43,11 +43,22 @@ fn attempt_data_sync_write(
         Err(WriteDataChunkError::DataRootNotFound) => DataSyncWriteOutcome::MissingDataRootIndex,
         Err(e) => DataSyncWriteOutcome::Other(e.to_string()),
         Ok(()) => {
-            // write_data_chunk can return Ok(()) without writing when there are
-            // no Entropy targets at the resolved offsets — verify the requested
-            // offset actually became Data.
+            // write_data_chunk only enqueues into pending_writes; get_chunk_type
+            // can report Data before persistence. Do not mark Stored (or
+            // Completed in the orchestrator) until force_sync flushes + fsyncs.
+            // On flush failure we return Other → requeue; the request stays
+            // Requested until this function returns an outcome that advances it.
             if matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data)) {
-                DataSyncWriteOutcome::Stored
+                if let Err(e) = sm.force_sync_pending_chunks() {
+                    return DataSyncWriteOutcome::Other(e.to_string());
+                }
+                if matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data)) {
+                    DataSyncWriteOutcome::Stored
+                } else {
+                    DataSyncWriteOutcome::Other(
+                        "chunk not Data after force_sync_pending_chunks".into(),
+                    )
+                }
             } else if matches!(
                 sm.collect_data_root_infos(unpacked.data_root),
                 Ok(infos) if infos.0.is_empty()
