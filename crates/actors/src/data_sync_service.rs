@@ -22,7 +22,7 @@ use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{Instrument as _, debug, error, warn};
 
 /// Local write outcome after a successful peer fetch.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum DataSyncWriteOutcome {
     /// Offset is now (or is about to be observed as) [`ChunkType::Data`].
     Stored,
@@ -34,6 +34,13 @@ enum DataSyncWriteOutcome {
     Other(String),
 }
 
+/// Substring of `StorageModule::write_data_chunk`'s eyre message when
+/// `DataRootInfosByDataRoot` has no entry. Keep in sync with domain
+/// `storage_module.rs` (`"Chunks data_root not found in storage module"`).
+/// Prefer a typed error in a follow-up; until then this pin + unit test
+/// prevents silent thrash if the message is reworded.
+const DATA_ROOT_NOT_FOUND_MSG: &str = "data_root not found";
+
 fn attempt_data_sync_write(
     sm: &StorageModule,
     unpacked: &UnpackedChunk,
@@ -42,7 +49,7 @@ fn attempt_data_sync_write(
     match sm.write_data_chunk(unpacked) {
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("data_root not found") {
+            if msg.contains(DATA_ROOT_NOT_FOUND_MSG) {
                 DataSyncWriteOutcome::MissingDataRootIndex
             } else {
                 DataSyncWriteOutcome::Other(msg)
@@ -52,10 +59,7 @@ fn attempt_data_sync_write(
             // write_data_chunk can return Ok(()) without writing when there are
             // no Entropy targets at the resolved offsets — verify the requested
             // offset actually became Data.
-            if matches!(
-                sm.get_chunk_type(&expected_offset),
-                Some(ChunkType::Data)
-            ) {
+            if matches!(sm.get_chunk_type(&expected_offset), Some(ChunkType::Data)) {
                 DataSyncWriteOutcome::Stored
             } else if matches!(
                 sm.collect_data_root_infos(unpacked.data_root),
@@ -71,9 +75,10 @@ fn attempt_data_sync_write(
 }
 
 fn try_send_chunk_to_ingress(service_senders: &ServiceSenders, unpacked: UnpackedChunk) {
-    if let Err(e) = service_senders.chunk_ingress.send_traced(
-        crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(unpacked, None),
-    ) {
+    if let Err(e) = service_senders
+        .chunk_ingress
+        .send_traced(crate::chunk_ingress_service::ChunkIngressMessage::IngestChunk(unpacked, None))
+    {
         warn!(
             error = %e,
             "Failed to send ChunkIngressMessage to chunk ingress channel after data_sync write failure"
@@ -348,10 +353,9 @@ impl DataSyncServiceInner {
                 );
             }
             DataSyncWriteOutcome::MissingDataRootIndex => {
-                metrics::record_data_sync_chunk_write_failed("data_root_missing");
-                metrics::record_data_sync_chunk_blocked(
-                    ChunkBlockReason::MissingDataRootIndex.as_metric_label(),
-                );
+                let reason = ChunkBlockReason::MissingDataRootIndex.as_metric_label();
+                metrics::record_data_sync_chunk_write_failed(reason);
+                metrics::record_data_sync_chunk_blocked(reason);
                 warn!(
                     storage_module.id = storage_module_id,
                     chunk.offset = %chunk_offset,
@@ -361,15 +365,13 @@ impl DataSyncServiceInner {
                     ?slot_index,
                     ?partition_hash,
                     peer.address = %peer_addr,
-                    reason = "data_root_missing",
+                    reason,
                     "data_sync write blocked: data_root not indexed in storage module; \
                      stopping hot re-fetch for this offset (needs index rebuild)"
                 );
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
-                    orchestrator.mark_chunk_blocked(
-                        chunk_offset,
-                        ChunkBlockReason::MissingDataRootIndex,
-                    )?;
+                    orchestrator
+                        .mark_chunk_blocked(chunk_offset, ChunkBlockReason::MissingDataRootIndex)?;
                 }
                 // Best-effort: mempool/ingress may still place the chunk if another
                 // path holds indexes; do not treat handoff as durable success.
@@ -844,5 +846,79 @@ impl DataSyncService {
 
         tracing::info!("shutting down DataSync Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod write_outcome_tests {
+    use super::{DATA_ROOT_NOT_FOUND_MSG, DataSyncWriteOutcome, attempt_data_sync_write};
+    use irys_domain::{StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
+        TxChunkOffset, UnpackedChunk, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use std::sync::Arc;
+
+    /// Pins the load-bearing string coupling: unindexed data_root must classify
+    /// as MissingDataRootIndex (not Other/requeue thrash).
+    #[test]
+    fn unindexed_data_root_classifies_as_missing_index() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 4_u64;
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([7_u8; 20]),
+            partition_hash: H256::random(),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(pa),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        // Packed entropy, but deliberately no index_transaction_data — peer-4 hole case.
+        sm.pack_with_zeros();
+
+        let chunk = UnpackedChunk {
+            data_root: H256::random(),
+            data_size: chunk_size,
+            data_path: vec![1, 2, 3, 4].into(),
+            bytes: vec![0xcd; chunk_size as usize].into(),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+
+        // Domain error must still contain the substring we classify on.
+        let err = sm
+            .write_data_chunk(&chunk)
+            .expect_err("unindexed data_root must fail write");
+        assert!(
+            err.to_string().contains(DATA_ROOT_NOT_FOUND_MSG),
+            "write_data_chunk message changed; update DATA_ROOT_NOT_FOUND_MSG and \
+             classification. got: {err}"
+        );
+
+        let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32));
+        assert_eq!(outcome, DataSyncWriteOutcome::MissingDataRootIndex);
     }
 }

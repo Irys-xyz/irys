@@ -261,13 +261,6 @@ pub(crate) fn record_producer_parent_wait_target_switch() {
     PRODUCER_PARENT_WAIT_TARGET_SWITCHES.add(1, &[]);
 }
 
-/// Legacy alias: counts durable store success (not mere fetch). Prefer
-/// [`record_data_sync_chunk_stored`]. Kept for call sites / bisect friendliness.
-#[allow(dead_code)]
-pub(crate) fn record_data_sync_chunk_completed() {
-    record_data_sync_chunk_stored();
-}
-
 pub(crate) fn record_data_sync_chunk_fetched() {
     DATA_SYNC_CHUNKS_FETCHED.add(1, &[]);
 }
@@ -281,12 +274,13 @@ pub(crate) fn record_data_sync_chunk_failure() {
     DATA_SYNC_CHUNK_FAILURES.add(1, &[]);
 }
 
-/// `reason` values: `data_root_missing`, `no_writeable_offset`, `other`.
+/// `reason` values: `missing_data_root_index` (via `ChunkBlockReason::as_metric_label`),
+/// `no_writeable_offset`, `other`.
 pub(crate) fn record_data_sync_chunk_write_failed(reason: &'static str) {
     DATA_SYNC_CHUNK_WRITE_FAILED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
-/// `reason` values: `missing_data_root_index`.
+/// `reason` values: `missing_data_root_index` (via `ChunkBlockReason::as_metric_label`).
 pub(crate) fn record_data_sync_chunk_blocked(reason: &'static str) {
     DATA_SYNC_CHUNK_BLOCKED.add(1, &[KeyValue::new("reason", reason)]);
 }
