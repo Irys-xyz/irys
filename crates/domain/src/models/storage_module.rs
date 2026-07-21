@@ -261,6 +261,17 @@ pub enum ChunkType {
     Interrupted,
 }
 
+/// Errors from [`StorageModule::write_data_chunk`].
+#[derive(Debug, thiserror::Error)]
+pub enum WriteDataChunkError {
+    /// No `DataRootInfos` entry for this chunk's data_root (needs index rebuild).
+    #[error("Chunks data_root not found in storage module")]
+    DataRootNotFound,
+    /// Any other write failure (IO, index update, packing, etc.).
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
+
 // we can't put this in `types` due to dependency cycles
 #[derive(Debug, Clone, Deref, DerefMut)]
 pub struct StorageModules(pub StorageModuleVec);
@@ -1293,7 +1304,7 @@ impl StorageModule {
     }
 
     /// Writes chunk data and its data_path to relevant storage locations
-    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> eyre::Result<()> {
+    pub fn write_data_chunk(&self, chunk: &UnpackedChunk) -> Result<(), WriteDataChunkError> {
         let data_path = &chunk.data_path.0;
         let data_path_hash = UnpackedChunk::hash_data_path(data_path);
 
@@ -1301,7 +1312,7 @@ impl StorageModule {
         let data_root_infos = self.collect_data_root_infos(chunk.data_root)?;
 
         if data_root_infos.0.is_empty() {
-            return Err(eyre::eyre!("Chunks data_root not found in storage module"));
+            return Err(WriteDataChunkError::DataRootNotFound);
         }
 
         // Lists for both types of offsets to process

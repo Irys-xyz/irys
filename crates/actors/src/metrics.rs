@@ -21,8 +21,14 @@ irys_utils::define_metrics! {
     gauge CACHE_CHUNK_SIZE_BYTES("irys.cache.chunk_size_bytes", "Total size of cached chunks in bytes");
     counter BLOCK_DISCOVERY_ERRORS("irys.block_discovery.errors_total", "Block discovery errors by type");
     counter BLOCK_DISCOVERY_SUCCESS("irys.block_discovery.success_total", "Successful block pre-validations");
-    counter DATA_SYNC_CHUNKS_COMPLETED("irys.data_sync.chunks_completed_total", "Data sync chunks completed");
-    counter DATA_SYNC_CHUNK_FAILURES("irys.data_sync.chunk_failures_total", "Data sync chunk failures");
+    // `chunks_completed_total` is kept as a durable-store success counter (historical name).
+    // Prefer `chunks_fetched_total` / `chunks_stored_total` for new dashboards.
+    counter DATA_SYNC_CHUNKS_COMPLETED("irys.data_sync.chunks_completed_total", "Data sync chunks durably stored as Data (legacy name; same as chunks_stored_total)");
+    counter DATA_SYNC_CHUNKS_FETCHED("irys.data_sync.chunks_fetched_total", "Data sync chunks successfully fetched from a peer (HTTP/body OK; not yet written)");
+    counter DATA_SYNC_CHUNKS_STORED("irys.data_sync.chunks_stored_total", "Data sync chunks durably written (interval is Data)");
+    counter DATA_SYNC_CHUNK_FAILURES("irys.data_sync.chunk_failures_total", "Data sync peer fetch failures/timeouts");
+    counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
+    counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
@@ -255,12 +261,28 @@ pub(crate) fn record_producer_parent_wait_target_switch() {
     PRODUCER_PARENT_WAIT_TARGET_SWITCHES.add(1, &[]);
 }
 
-pub(crate) fn record_data_sync_chunk_completed() {
+pub(crate) fn record_data_sync_chunk_fetched() {
+    DATA_SYNC_CHUNKS_FETCHED.add(1, &[]);
+}
+
+pub(crate) fn record_data_sync_chunk_stored() {
+    DATA_SYNC_CHUNKS_STORED.add(1, &[]);
     DATA_SYNC_CHUNKS_COMPLETED.add(1, &[]);
 }
 
 pub(crate) fn record_data_sync_chunk_failure() {
     DATA_SYNC_CHUNK_FAILURES.add(1, &[]);
+}
+
+/// `reason` values: `missing_data_root_index` (via `ChunkBlockReason::as_metric_label`),
+/// `no_writeable_offset`, `other`.
+pub(crate) fn record_data_sync_chunk_write_failed(reason: &'static str) {
+    DATA_SYNC_CHUNK_WRITE_FAILED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
+/// `reason` values: `missing_data_root_index` (via `ChunkBlockReason::as_metric_label`).
+pub(crate) fn record_data_sync_chunk_blocked(reason: &'static str) {
+    DATA_SYNC_CHUNK_BLOCKED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_data_sync_active_peers(count: u64) {

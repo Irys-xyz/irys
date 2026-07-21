@@ -16,6 +16,26 @@ use std::{
 };
 use tracing::{Instrument as _, debug, warn};
 
+/// Why a chunk offset is blocked from the hot re-fetch loop.
+///
+/// These are local progress blockers (not peer-delivery failures). Peers may
+/// have delivered the bytes; we still cannot place them until the underlying
+/// issue is repaired (e.g. SM data_root index rebuild).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkBlockReason {
+    /// `write_data_chunk` failed because `DataRootInfosByDataRoot` has no entry
+    /// for the chunk's data_root. Needs index rebuild / backfill.
+    MissingDataRootIndex,
+}
+
+impl ChunkBlockReason {
+    pub const fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::MissingDataRootIndex => "missing_data_root_index",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ChunkRequestState {
     /// Chunk needs to be requested.
@@ -25,8 +45,16 @@ pub enum ChunkRequestState {
     /// Used for tracking timeouts and preventing duplicate requests.
     Requested(IrysAddress, Instant),
 
-    /// Chunk has been successfully retrieved and stored.
+    /// Chunk was successfully fetched **and** durably written as [`ChunkType::Data`].
+    ///
+    /// Fetch alone is not enough — see [`Self::on_chunk_fetched`] then
+    /// [`Self::mark_chunk_stored`].
     Completed,
+
+    /// Locally blocked from hot re-fetch (index gap, etc.). Still retained while
+    /// the offset is Entropy so we do not thrash peers; not auto-cleared until
+    /// the offset becomes Data (gossip/heal) or the process restarts.
+    Blocked(ChunkBlockReason),
 }
 
 type ExcludedPeerAddresses = HashSet<IrysAddress>;
@@ -127,14 +155,20 @@ impl ChunkOrchestrator {
                 return true;
             }
 
-            // For non-requested states, only retain if the chunk is still Entropy
-            // and not Completed
-            matches!(
+            // Drop once the offset is no longer Entropy (stored as Data, or invalidated).
+            if !matches!(
                 self.storage_module.get_chunk_type(offset),
                 Some(ChunkType::Entropy)
-            ) && cr.request_state != ChunkRequestState::Completed
+            ) {
+                return false;
+            }
+
+            // Keep Pending / Blocked while still Entropy. Drop Completed.
+            !matches!(cr.request_state, ChunkRequestState::Completed)
         });
 
+        // Pending only — Blocked offsets intentionally do not consume the
+        // pending budget or get re-dispatched.
         let pending_count: usize = self
             .chunk_requests
             .values()
@@ -436,29 +470,36 @@ impl ChunkOrchestrator {
                     },
                 };
 
-                // Send the message to the DataSyncService so it can update the PeerBandwidthManagers and
-                // then call back into the orchestrator using `on_chunk_completed(...)` to mark the request as
-                // completed
+                // Service handles fetch credit + local write outcome (store / block / requeue).
                 let _ = tx.send_traced(message);
             }
             .instrument(tracing::Span::current()),
         );
     }
 
-    pub fn on_chunk_completed(
+    /// Peer delivered the chunk body. Credits peer bandwidth stats but leaves
+    /// the request in [`ChunkRequestState::Requested`] until
+    /// [`Self::mark_chunk_stored`] / [`Self::mark_chunk_blocked`] /
+    /// [`Self::requeue_after_local_write_failure`] decides the local outcome.
+    ///
+    /// Peer delivery success must not be conflated with durable local storage.
+    pub fn on_chunk_fetched(
         &mut self,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
     ) -> eyre::Result<ChunkTimeRecord> {
         let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
-            eyre::eyre!("Chunk completion for unknown offset: {:?}", chunk_offset)
+            eyre::eyre!(
+                "Chunk fetch completion for unknown offset: {:?}",
+                chunk_offset
+            )
         })?;
 
         let (expected_peer, start_instant) = match request.request_state {
             ChunkRequestState::Requested(addr, started) => (addr, started),
             ref invalid_state => {
                 return Err(eyre::eyre!(
-                    "Invalid state for chunk request completion at offset {}: expected Requested, got {:?}",
+                    "Invalid state for chunk fetch at offset {}: expected Requested, got {:?}",
                     chunk_offset,
                     invalid_state
                 ));
@@ -472,8 +513,6 @@ impl ChunkOrchestrator {
         let completion_time = Instant::now();
         let duration = completion_time.duration_since(start_instant);
 
-        request.request_state = ChunkRequestState::Completed;
-
         let completion_record = ChunkTimeRecord {
             chunk_offset,
             start_time: start_instant,
@@ -483,6 +522,7 @@ impl ChunkOrchestrator {
 
         self.recent_chunk_times.push(completion_record.clone());
 
+        // Credit the peer for successful delivery regardless of local write outcome.
         if let Ok(mut peers) = self.active_sync_peers.write()
             && let Some(peer_manager) = peers.get_mut(&peer_addr)
         {
@@ -490,6 +530,68 @@ impl ChunkOrchestrator {
         }
 
         Ok(completion_record)
+    }
+
+    /// Durable local store succeeded — offset is (or will be observed as) Data.
+    pub fn mark_chunk_stored(&mut self, chunk_offset: PartitionChunkOffset) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!("mark_chunk_stored for unknown offset: {:?}", chunk_offset)
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "mark_chunk_stored expected Requested state at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Completed;
+        Ok(())
+    }
+
+    /// Locally blocked; stop hot re-fetching this offset.
+    pub fn mark_chunk_blocked(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        reason: ChunkBlockReason,
+    ) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!("mark_chunk_blocked for unknown offset: {:?}", chunk_offset)
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "mark_chunk_blocked expected Requested state at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Blocked(reason);
+        // Clear peer exclusions — the failure is local, not peer-specific.
+        request.excluded = None;
+        Ok(())
+    }
+
+    /// Local write failed for a non-blocking reason; re-queue without blaming the peer
+    /// that just delivered the bytes.
+    pub fn requeue_after_local_write_failure(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
+            eyre::eyre!(
+                "requeue_after_local_write_failure for unknown offset: {:?}",
+                chunk_offset
+            )
+        })?;
+        if !matches!(request.request_state, ChunkRequestState::Requested(..)) {
+            return Err(eyre::eyre!(
+                "requeue_after_local_write_failure expected Requested at {:?}, got {:?}",
+                chunk_offset,
+                request.request_state
+            ));
+        }
+        request.request_state = ChunkRequestState::Pending;
+        // Do not add the delivering peer to `excluded` — they succeeded.
+        Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(
@@ -565,14 +667,15 @@ impl ChunkOrchestrator {
     }
 
     pub fn get_metrics(&self) -> OrchestrationMetrics {
-        let (pending, active, completed) =
+        let (pending, active, completed, blocked) =
             self.chunk_requests
                 .values()
-                .fold((0, 0, 0), |(p, a, c), request| {
+                .fold((0, 0, 0, 0), |(p, a, c, b), request| {
                     match request.request_state {
-                        ChunkRequestState::Pending => (p + 1, a, c),
-                        ChunkRequestState::Requested(_, _) => (p, a + 1, c),
-                        ChunkRequestState::Completed => (p, a, c + 1),
+                        ChunkRequestState::Pending => (p + 1, a, c, b),
+                        ChunkRequestState::Requested(_, _) => (p, a + 1, c, b),
+                        ChunkRequestState::Completed => (p, a, c + 1, b),
+                        ChunkRequestState::Blocked(_) => (p, a, c, b + 1),
                     }
                 });
 
@@ -591,6 +694,7 @@ impl ChunkOrchestrator {
             pending_requests: pending,
             active_requests: active,
             completed_requests: completed,
+            blocked_requests: blocked,
             total_throughput_bps,
         }
     }
@@ -602,5 +706,272 @@ pub struct OrchestrationMetrics {
     pub pending_requests: usize,
     pub active_requests: usize,
     pub completed_requests: usize,
+    pub blocked_requests: usize,
     pub total_throughput_bps: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{chunk_fetcher::MockChunkFetcher, test_helpers::build_test_service_senders};
+    use irys_domain::{BlockTree, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+
+    fn test_config(base_directory: std::path::PathBuf, num_chunks: u64) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                block_migration_depth: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory,
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn packed_sm(config: &Config, num_chunks: u64) -> Arc<StorageModule> {
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(pa),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, config).expect("storage module"));
+        sm.pack_with_zeros();
+        sm
+    }
+
+    fn make_orchestrator(sm: Arc<StorageModule>, config: &Config) -> ChunkOrchestrator {
+        let genesis = irys_testing_utils::new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let (service_senders, _receivers) = build_test_service_senders();
+        let ledger_id: u32 = DataLedger::Publish.into();
+        ChunkOrchestrator::new(
+            sm,
+            Arc::new(RwLock::new(HashMap::new())),
+            block_tree_guard,
+            &service_senders,
+            Arc::new(MockChunkFetcher::new(ledger_id as usize)),
+            config.node_config.clone(),
+            tokio::runtime::Handle::current(),
+        )
+    }
+
+    fn insert_requested(
+        orch: &mut ChunkOrchestrator,
+        offset: PartitionChunkOffset,
+        peer: IrysAddress,
+    ) {
+        orch.chunk_requests.insert(
+            offset,
+            ChunkRequest {
+                ledger_id: 0,
+                slot_index: 0,
+                chunk_offset: offset,
+                excluded: None,
+                request_state: ChunkRequestState::Requested(peer, Instant::now()),
+            },
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn mark_helpers_require_requested_state() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 4;
+        let config = test_config(tmp.path().to_path_buf(), num_chunks);
+        let sm = packed_sm(&config, num_chunks);
+        let mut orch = make_orchestrator(sm, &config);
+        let peer = IrysAddress::from([2_u8; 20]);
+        let offset = PartitionChunkOffset::from(0_u32);
+
+        // Unknown offset
+        assert!(orch.mark_chunk_stored(offset).is_err());
+        assert!(
+            orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+                .is_err()
+        );
+        assert!(orch.requeue_after_local_write_failure(offset).is_err());
+
+        // Pending is not Requested
+        orch.chunk_requests.insert(
+            offset,
+            ChunkRequest {
+                ledger_id: 0,
+                slot_index: 0,
+                chunk_offset: offset,
+                excluded: None,
+                request_state: ChunkRequestState::Pending,
+            },
+        );
+        assert!(orch.mark_chunk_stored(offset).is_err());
+        assert!(
+            orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+                .is_err()
+        );
+        assert!(orch.requeue_after_local_write_failure(offset).is_err());
+
+        // Requested accepts each transition
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_stored(offset).expect("store");
+        assert_eq!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Completed
+        );
+
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .expect("block");
+        assert_eq!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+        );
+
+        insert_requested(&mut orch, offset, peer);
+        orch.requeue_after_local_write_failure(offset)
+            .expect("requeue");
+        assert_eq!(
+            orch.chunk_requests[&offset].request_state,
+            ChunkRequestState::Pending
+        );
+        // Requeue must not blame the delivering peer.
+        assert!(orch.chunk_requests[&offset].excluded.is_none());
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn on_chunk_fetched_does_not_mark_stored() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 4;
+        let config = test_config(tmp.path().to_path_buf(), num_chunks);
+        let sm = packed_sm(&config, num_chunks);
+        let mut orch = make_orchestrator(sm, &config);
+        let peer = IrysAddress::from([3_u8; 20]);
+        let offset = PartitionChunkOffset::from(1_u32);
+        insert_requested(&mut orch, offset, peer);
+
+        orch.on_chunk_fetched(offset, peer).expect("fetched");
+        assert!(
+            matches!(
+                orch.chunk_requests[&offset].request_state,
+                ChunkRequestState::Requested(..)
+            ),
+            "fetch success must not imply durable store (Completed)"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn blocked_retained_while_entropy_dropped_when_data() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 4;
+        let config = test_config(tmp.path().to_path_buf(), num_chunks);
+        let sm = packed_sm(&config, num_chunks);
+        let mut orch = make_orchestrator(sm.clone(), &config);
+        let peer = IrysAddress::from([4_u8; 20]);
+        let offset = PartitionChunkOffset::from(0_u32);
+
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .unwrap();
+
+        // Still Entropy → retain Blocked
+        orch.populate_request_queue();
+        assert!(
+            matches!(
+                orch.chunk_requests[&offset].request_state,
+                ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+            ),
+            "Blocked must stay while offset is Entropy"
+        );
+
+        // Become Data (e.g. gossip/heal) → drop request
+        let data_bytes = vec![0xab; config.consensus.chunk_size as usize];
+        sm.write_chunk(offset, data_bytes, ChunkType::Data);
+        sm.sync_pending_chunks().unwrap();
+        assert!(matches!(sm.get_chunk_type(&offset), Some(ChunkType::Data)));
+
+        orch.populate_request_queue();
+        assert!(
+            !orch.chunk_requests.contains_key(&offset),
+            "Blocked must drop once offset is Data"
+        );
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn blocked_excluded_from_pending_budget_and_dispatch_selection() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 4;
+        let config = test_config(tmp.path().to_path_buf(), num_chunks);
+        let sm = packed_sm(&config, num_chunks);
+        let mut orch = make_orchestrator(sm, &config);
+        let peer = IrysAddress::from([5_u8; 20]);
+
+        // Fill with Blocked offsets — must not count as pending budget consumers.
+        for i in 0..3_u32 {
+            let offset = PartitionChunkOffset::from(i);
+            insert_requested(&mut orch, offset, peer);
+            orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+                .unwrap();
+        }
+
+        let metrics = orch.get_metrics();
+        assert_eq!(metrics.blocked_requests, 3);
+        assert_eq!(metrics.pending_requests, 0);
+        assert_eq!(metrics.active_requests, 0);
+
+        // Only Pending is eligible for dispatch.
+        let pending_for_dispatch: Vec<_> = orch
+            .chunk_requests
+            .iter()
+            .filter_map(|(&offset, req)| {
+                matches!(req.request_state, ChunkRequestState::Pending).then_some(offset)
+            })
+            .collect();
+        assert!(
+            pending_for_dispatch.is_empty(),
+            "Blocked offsets must not be selected for re-dispatch"
+        );
+
+        // Pending budget counts only Pending, so a fresh Pending can still be inserted
+        // even when many offsets are Blocked (Vacant entries only — offset 3 is free).
+        let offset3 = PartitionChunkOffset::from(3_u32);
+        orch.chunk_requests.insert(
+            offset3,
+            ChunkRequest {
+                ledger_id: 0,
+                slot_index: 0,
+                chunk_offset: offset3,
+                excluded: None,
+                request_state: ChunkRequestState::Pending,
+            },
+        );
+        let metrics = orch.get_metrics();
+        assert_eq!(metrics.pending_requests, 1);
+        assert_eq!(metrics.blocked_requests, 3);
+    }
+
+    #[test]
+    fn metric_label_stable() {
+        assert_eq!(
+            ChunkBlockReason::MissingDataRootIndex.as_metric_label(),
+            "missing_data_root_index"
+        );
+    }
 }
