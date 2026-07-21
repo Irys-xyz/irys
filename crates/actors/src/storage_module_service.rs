@@ -18,7 +18,7 @@ use crate::{
 };
 use eyre::{OptionExt as _, eyre};
 use irys_config::StorageSubmodulesConfig;
-use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
+use irys_database::submodule::get_path_hashes_by_offset;
 use irys_domain::{
     BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME,
     PackingParams, StorageModule, StorageModuleInfo,
@@ -321,9 +321,8 @@ impl StorageModuleServiceInner {
             let max_partition_offset = self.get_max_partition_offset(assigned_sm.clone());
             let partition_range = PartitionChunkOffset::from(0)..max_partition_offset;
 
-            // Use a binary search to find the first chunk in that range without a tx_path_hash
-            // We have to do this because we don't know if we're resuming this indexing from a crash
-            // or restart of the node.
+            // First offset without path hashes (resume after crash / restart).
+            // Must tolerate non-suffix holes — see find_first_unindexed_chunk.
             let first_unindexed_chunk_offset =
                 Self::find_first_unindexed_chunk(assigned_sm.clone(), partition_range);
 
@@ -568,34 +567,23 @@ impl StorageModuleServiceInner {
         PartitionChunkOffset::from(part_end)
     }
 
+    /// First partition-relative offset in `range` with no path-hash index entry.
+    ///
+    /// Linear scan (not binary search): the indexed set is not necessarily a
+    /// prefix of the range. Binary search assumes "indexed ⇒ all lower offsets
+    /// are indexed", which skips non-prefix holes (indexed after an unindexed
+    /// gap) and can also fail the final check when `path_hashes` is left stale
+    /// from a prior mid probe.
     fn find_first_unindexed_chunk(
         storage_module: Arc<StorageModule>,
         range: Range<PartitionChunkOffset>,
     ) -> Option<PartitionChunkOffset> {
-        let mut lo = range.start;
-        let mut hi = range.end;
-
-        let mut path_hashes: Option<ChunkPathHashes> = None;
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-
-            path_hashes = storage_module
-                .query_submodule_db_by_offset(mid, |tx| get_path_hashes_by_offset(tx, mid))
-                .expect("to be able to query submodule db");
-
-            if path_hashes.is_some() {
-                lo = mid + 1; // skip initialized
-            } else {
-                hi = mid; // candidate for first uninitialized
-            }
-        }
-
-        if lo < range.end && path_hashes.is_none() {
-            Some(lo)
-        } else {
-            None
-        }
+        find_first_unindexed_in_range(range.start, range.end, |offset| {
+            storage_module
+                .query_submodule_db_by_offset(offset, |tx| get_path_hashes_by_offset(tx, offset))
+                .expect("to be able to query submodule db")
+                .is_some()
+        })
     }
 
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
@@ -678,6 +666,24 @@ impl StorageModuleServiceInner {
             mismatches.join(", ")
         ))
     }
+}
+
+/// First offset in `[start, end)` for which `is_indexed` is false.
+///
+/// Pure helper so hole patterns can be unit-tested without a full storage module.
+fn find_first_unindexed_in_range(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    is_indexed: impl Fn(PartitionChunkOffset) -> bool,
+) -> Option<PartitionChunkOffset> {
+    let mut offset = start;
+    while offset < end {
+        if !is_indexed(offset) {
+            return Some(offset);
+        }
+        offset = offset + 1;
+    }
+    None
 }
 
 /// mpsc style service wrapper for the Storage Module Service
@@ -773,5 +779,81 @@ impl StorageModuleService {
 
         tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod find_first_unindexed_tests {
+    use super::find_first_unindexed_in_range;
+    use irys_types::PartitionChunkOffset;
+    use std::collections::HashSet;
+
+    fn o(v: u32) -> PartitionChunkOffset {
+        PartitionChunkOffset::from(v)
+    }
+
+    fn indexed_set(offsets: &[u32]) -> impl Fn(PartitionChunkOffset) -> bool + '_ {
+        let set: HashSet<u32> = offsets.iter().copied().collect();
+        move |offset: PartitionChunkOffset| set.contains(&u32::from(offset))
+    }
+
+    #[test]
+    fn empty_range_returns_none() {
+        assert_eq!(find_first_unindexed_in_range(o(0), o(0), |_| false), None);
+    }
+
+    #[test]
+    fn all_unindexed_returns_start() {
+        assert_eq!(
+            find_first_unindexed_in_range(o(0), o(10), |_| false),
+            Some(o(0))
+        );
+    }
+
+    #[test]
+    fn all_indexed_returns_none() {
+        assert_eq!(find_first_unindexed_in_range(o(0), o(10), |_| true), None);
+    }
+
+    #[test]
+    fn trailing_suffix_hole_finds_first_unindexed() {
+        // Indexed prefix [0,5), unindexed [5,10) — old binary search handled this.
+        let is_indexed = indexed_set(&[0, 1, 2, 3, 4]);
+        assert_eq!(
+            find_first_unindexed_in_range(o(0), o(10), is_indexed),
+            Some(o(5))
+        );
+    }
+
+    #[test]
+    fn non_prefix_middle_hole_is_found() {
+        // Indexed, hole, indexed again — binary search skipped this hole.
+        let is_indexed = indexed_set(&[0, 1, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            find_first_unindexed_in_range(o(0), o(10), is_indexed),
+            Some(o(2))
+        );
+    }
+
+    #[test]
+    fn unindexed_prefix_then_indexed_finds_zero() {
+        // peer-4-style: hole at head, data later.
+        let is_indexed = indexed_set(&[5, 6, 7, 8, 9]);
+        assert_eq!(
+            find_first_unindexed_in_range(o(0), o(10), is_indexed),
+            Some(o(0))
+        );
+    }
+
+    #[test]
+    fn multiple_holes_returns_first() {
+        assert_eq!(
+            find_first_unindexed_in_range(o(0), o(6), indexed_set(&[1, 3, 5])),
+            Some(o(0))
+        );
+        assert_eq!(
+            find_first_unindexed_in_range(o(1), o(6), indexed_set(&[1, 3, 5])),
+            Some(o(2))
+        );
     }
 }
