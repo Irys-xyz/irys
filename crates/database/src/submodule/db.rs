@@ -5,6 +5,7 @@ use irys_types::{
 };
 use reth_db::{
     DatabaseEnv,
+    cursor::DbCursorRO as _,
     mdbx::DatabaseArguments,
     transaction::{DbTx, DbTxMut},
 };
@@ -63,6 +64,67 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
     offset: PartitionChunkOffset,
 ) -> eyre::Result<Option<ChunkPathHashes>> {
     Ok(tx.get::<ChunkPathHashesByOffset>(offset)?)
+}
+
+/// First offset in half-open `[start, end)` absent from a sorted key stream.
+///
+/// `keys` must be strictly increasing and within or past `start` (as MDBX walk
+/// from `start` yields). Used by the cursor path and unit-tested directly.
+pub fn first_gap_in_sorted_keys(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    keys: impl IntoIterator<Item = PartitionChunkOffset>,
+) -> Option<PartitionChunkOffset> {
+    if start >= end {
+        return None;
+    }
+    let mut expected = start;
+    for key in keys {
+        if key >= end {
+            break;
+        }
+        if key > expected {
+            return Some(expected);
+        }
+        expected = expected + 1;
+        if expected >= end {
+            return None;
+        }
+    }
+    if expected < end { Some(expected) } else { None }
+}
+
+/// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
+///
+/// Cursor walk over the sorted keyspace (one RO tx): O(#indexed keys in range),
+/// correct for non-prefix holes. Dense linear point-gets are not used.
+pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Option<PartitionChunkOffset>> {
+    if start >= end {
+        return Ok(None);
+    }
+
+    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
+    let mut walker = cursor.walk(Some(start))?;
+    let mut expected = start;
+
+    while let Some((key, _)) = walker.next().transpose()? {
+        if key >= end {
+            break;
+        }
+        if key > expected {
+            return Ok(Some(expected));
+        }
+        expected = expected + 1;
+        if expected >= end {
+            return Ok(None);
+        }
+    }
+
+    Ok(if expected < end { Some(expected) } else { None })
 }
 
 pub fn get_full_data_path<T: DbTx>(
@@ -267,6 +329,93 @@ mod tests {
             db.view_eyre(|tx| get_data_root_infos_for_data_root(tx, random_data_root))?;
 
         assert!(missing_infos.is_none());
+
+        Ok(())
+    }
+
+    fn o(v: u32) -> irys_types::PartitionChunkOffset {
+        irys_types::PartitionChunkOffset::from(v)
+    }
+
+    #[test]
+    fn first_gap_in_sorted_keys_covers_hole_patterns() {
+        use super::first_gap_in_sorted_keys;
+
+        assert_eq!(first_gap_in_sorted_keys(o(0), o(0), []), None);
+        assert_eq!(first_gap_in_sorted_keys(o(0), o(10), []), Some(o(0)));
+        assert_eq!(
+            first_gap_in_sorted_keys(
+                o(0),
+                o(10),
+                [o(0), o(1), o(2), o(3), o(4), o(5), o(6), o(7), o(8), o(9)]
+            ),
+            None
+        );
+        // trailing suffix hole
+        assert_eq!(
+            first_gap_in_sorted_keys(o(0), o(10), [o(0), o(1), o(2), o(3), o(4)]),
+            Some(o(5))
+        );
+        // middle hole (binary-search failure mode)
+        assert_eq!(
+            first_gap_in_sorted_keys(o(0), o(10), [o(0), o(1), o(5), o(6), o(7), o(8), o(9)]),
+            Some(o(2))
+        );
+        // unindexed prefix
+        assert_eq!(
+            first_gap_in_sorted_keys(o(0), o(10), [o(5), o(6), o(7), o(8), o(9)]),
+            Some(o(0))
+        );
+        // multi-hole from offset 1
+        assert_eq!(
+            first_gap_in_sorted_keys(o(1), o(6), [o(1), o(3), o(5)]),
+            Some(o(2))
+        );
+    }
+
+    #[test]
+    fn first_missing_path_hash_offset_cursor_finds_middle_hole() -> eyre::Result<()> {
+        use super::{
+            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
+        };
+        use crate::submodule::tables::SubmoduleTables;
+        use crate::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::H256;
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let temp_dir = TempDirBuilder::new()
+            .prefix("path_hash_gap")
+            .with_tracing()
+            .build();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let path_hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        };
+        {
+            let tx = db.tx_mut()?;
+            // indexed 0,1 and 5..9 — hole at 2
+            for off in [0u32, 1, 5, 6, 7, 8, 9] {
+                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
+            }
+            tx.commit()?;
+        }
+
+        let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
+        assert_eq!(gap, Some(o(2)));
+
+        let none = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(5), o(10)))?;
+        assert_eq!(none, None);
+
+        let head = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(5)))?;
+        assert_eq!(head, Some(o(2)));
 
         Ok(())
     }
