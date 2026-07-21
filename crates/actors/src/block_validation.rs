@@ -7470,6 +7470,75 @@ mod tests {
         assert!(publish_ingress_proof_count_is_valid(&none, 1, 3).is_ok());
     }
 
+    /// `prevalidate_block` sizes N at the block's OWN timestamp
+    /// (`number_of_ingress_proofs_total_at(block.timestamp_secs())`), matching
+    /// block production and `data_txs_are_valid`. This must hold at an N-changing
+    /// hardfork boundary in BOTH directions: the first block after the fork carries
+    /// a proof list sized by the block's (new) N, so it passes the guard when N is
+    /// taken at the block timestamp — and would be wrongly rejected if N were taken
+    /// at the parent (pre-fork) timestamp. Keying off the parent is the
+    /// `ShadowTxGenerator`'s separate, documented divergence, not this guard's.
+    ///
+    /// This locks in the guard's arithmetic under each N-source; the call site's
+    /// choice of `block.timestamp_secs()` is covered end-to-end elsewhere.
+    #[test]
+    fn ingress_proof_count_guard_uses_block_timestamp_across_hardfork() {
+        use irys_types::UnixTimestamp;
+        use irys_types::hardfork_config::{FrontierParams, IrysHardforkConfig, NextNameTBD};
+
+        // Parent sits just before activation; the boundary block sits at
+        // activation, so parent-N and block-N differ.
+        let activation = UnixTimestamp::from_secs(1_000);
+        let parent_ts = UnixTimestamp::from_secs(999);
+        let block_ts = activation;
+        let tx_id = H256::from([7_u8; 32]);
+
+        // Exercise an N increase and an N decrease across the same boundary.
+        for (frontier_n, fork_n) in [(1_u64, 3_u64), (3_u64, 1_u64)] {
+            let hardforks = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: frontier_n,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: Some(NextNameTBD {
+                    activation_timestamp: activation,
+                    number_of_ingress_proofs_total: fork_n,
+                    number_of_ingress_proofs_from_assignees: 0,
+                }),
+                aurora: None,
+                borealis: None,
+                cascade: None,
+            };
+
+            let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
+            let block_n = hardforks.number_of_ingress_proofs_total_at(block_ts);
+            assert_eq!(parent_n, frontier_n);
+            assert_eq!(block_n, fork_n);
+            assert_ne!(parent_n, block_n, "boundary must actually change N");
+
+            // Honest boundary block: one publish tx, proof list and
+            // `required_proof_count` sized by the block's N (what the producer
+            // emits at `block_ts`).
+            let honest =
+                publish_ledger_with_proofs(vec![tx_id], block_n as usize, Some(block_n as u8));
+
+            // Sized at the block timestamp (the call-site's choice): passes.
+            assert!(
+                publish_ingress_proof_count_is_valid(&honest, 1, block_n).is_ok(),
+                "honest boundary block must pass when N is taken at the block timestamp \
+                 (frontier={frontier_n}, fork={fork_n})",
+            );
+
+            // Sized at the parent timestamp (the rejected alternative): would
+            // false-reject the same honest block because parent-N != block-N.
+            assert!(
+                publish_ingress_proof_count_is_valid(&honest, 1, parent_n).is_err(),
+                "parent-timestamp N would false-reject an honest boundary block \
+                 (frontier={frontier_n}, fork={fork_n})",
+            );
+        }
+    }
+
     /// A commitment tx carrying a foreign `chain_id` is rejected by prevalidation:
     /// `find_commitment_chain_id_mismatch` reports the offending tx (with its position) so the
     /// commitment-ledger validation fails the block with `CommitmentChainIdMismatch`.
