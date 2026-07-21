@@ -54,6 +54,11 @@ fn fully_written_slot_count(total_chunks: u64, chunks_per_slot: u64) -> u64 {
 /// written — the write frontier has moved past it (`slot_index < fully_written`),
 /// which also implies it has been written at all. Pre-Cascade the gate is
 /// transparent so replay stays bit-identical to the allocation-anchored behavior.
+///
+/// Per-branch recompute of this gate is sound only because expiry is committed at
+/// epoch blocks and no reorg can straddle a finalized epoch block; the config
+/// invariant `num_blocks_in_epoch > block_tree_depth` (see `Config::validate`)
+/// keeps at most one epoch transition unfinalized at a time.
 fn cascade_expiry_gate(
     cascade_active: bool,
     slot: &LedgerSlot,
@@ -552,19 +557,23 @@ impl Ledgers {
         expired_partitions
     }
 
-    /// Get all partition hashes that would expire at this epoch height (read-only).
-    /// Unlike `expire_partitions`, this does NOT mark slots as expired.
+    /// All slots that would expire at this epoch height (read-only), each with
+    /// its partition hashes — INCLUDING slots whose `partitions` vec is empty
+    /// (every replica unpledged before expiry and never backfilled). Fee
+    /// settlement keys on this slot-keyed view: a partition-less slot still
+    /// recycles and its unpromoted txs must still be refunded, but the
+    /// flattened per-partition view below is structurally blind to it.
     ///
     /// `total_chunks` / `chunks_per_slot`: see [`Self::expire_partitions`] — pass
     /// the same per-ledger totals so the two sets cannot diverge.
-    pub fn get_expiring_partitions(
+    pub fn get_expiring_slots(
         &self,
         epoch_height: u64,
         cascade_active: bool,
         total_chunks: impl Fn(DataLedger) -> u64,
         chunks_per_slot: u64,
-    ) -> Vec<ExpiringPartitionInfo> {
-        let mut expired_partitions: Vec<ExpiringPartitionInfo> = Vec::new();
+    ) -> Vec<(DataLedger, usize, Vec<PartitionHash>)> {
+        let mut expiring_slots = Vec::new();
 
         // Check perm ledger slots using shared helper
         for (slot_index, partition_hashes, ledger_id) in self.get_perm_expiring_slots(
@@ -573,16 +582,10 @@ impl Ledgers {
             total_chunks(DataLedger::Publish),
             chunks_per_slot,
         ) {
-            for partition_hash in partition_hashes {
-                expired_partitions.push(ExpiringPartitionInfo {
-                    partition_hash,
-                    ledger_id,
-                    slot_index,
-                });
-            }
+            expiring_slots.push((ledger_id, slot_index, partition_hashes));
         }
 
-        // Collect from term ledgers (existing logic)
+        // Collect from term ledgers
         for term_ledger in &self.term {
             let ledger_id = DataLedger::try_from(term_ledger.ledger_id)
                 .expect("term ledger_id is always constructed from a valid DataLedger variant");
@@ -592,17 +595,15 @@ impl Ledgers {
                 total_chunks(ledger_id),
                 chunks_per_slot,
             ) {
-                for partition_hash in term_ledger.slots[expiring_slot_index].partitions.iter() {
-                    expired_partitions.push(ExpiringPartitionInfo {
-                        partition_hash: *partition_hash,
-                        ledger_id,
-                        slot_index: expiring_slot_index,
-                    });
-                }
+                expiring_slots.push((
+                    ledger_id,
+                    expiring_slot_index,
+                    term_ledger.slots[expiring_slot_index].partitions.clone(),
+                ));
             }
         }
 
-        expired_partitions
+        expiring_slots
     }
 
     /// Slot indexes of the given term `ledger` whose storage has expired as of
@@ -892,6 +893,7 @@ mod tests {
     use irys_types::{
         DataLedger, UnixTimestamp, config::consensus::ConsensusConfig, hardfork_config::Cascade,
     };
+    use proptest::prelude::*;
 
     fn config_with_cascade() -> ConsensusConfig {
         let mut config = ConsensusConfig::testing();
@@ -1057,6 +1059,116 @@ mod tests {
     }
 
     #[test]
+    fn perm_partial_frontier_slot_does_not_expire_post_cascade() {
+        // 3 perm slots: slot 0 full, slot 1 the partially-written frontier, slot 2
+        // empty headroom (last). With Publish total_chunks=15 and chunks_per_slot=10,
+        // fully_written_slots = 1, so only slot 0 (index 0 < 1) may expire. Slot 1 is
+        // the write frontier — aged and written, not the last slot — yet must survive
+        // because it is not fully written. This is the perm-ledger analogue of the
+        // Submit frontier protection.
+        let config = make_test_config(Some(2)); // publish expiry enabled; min_blocks = 2*10 = 20
+        let mut ledgers = Ledgers::new(&config, false);
+        ledgers.perm.allocate_slots(3, 1); // slots 0,1,2 all allocated at height 1
+        for i in 0..2 {
+            ledgers.perm.slots[i].partitions.push(H256::random());
+            ledgers.perm.slots[i].has_been_written = true;
+            ledgers.perm.slots[i].last_height = 1; // aged well below expiry_height
+        }
+        // slot 2 stays unwritten headroom (the last slot)
+
+        // epoch_height = 100 -> expiry_height = 100 - 20 = 80; slots 0 and 1 are aged.
+        // Publish total = 15 (frontier inside slot 1); a term ledger reports 100 so a
+        // ledger-swap bug that read the wrong total would make the gate permissive.
+        let expired = ledgers.expire_partitions(
+            100,
+            true,
+            |l| if l == DataLedger::Publish { 15 } else { 100 },
+            10,
+        );
+        let perm_expired: Vec<_> = expired
+            .iter()
+            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .map(|e| e.slot_index)
+            .collect();
+        assert_eq!(
+            perm_expired,
+            vec![0],
+            "only the fully-written slot 0 may expire"
+        );
+        assert!(ledgers.perm.slots[0].is_expired);
+        assert!(
+            !ledgers.perm.slots[1].is_expired,
+            "partial frontier perm slot must survive"
+        );
+        assert!(!ledgers.perm.slots[2].is_expired);
+    }
+
+    #[test]
+    fn perm_frontier_slot_expires_once_fully_written_post_cascade() {
+        // Same layout, but now the frontier has moved past slot 1 (Publish total=20 ->
+        // fully_written_slots=2). Slot 1 (index 1 < 2) is now fully written and aged,
+        // and slot 2 is the protected last slot, so slot 1 becomes eligible.
+        let config = make_test_config(Some(2));
+        let mut ledgers = Ledgers::new(&config, false);
+        ledgers.perm.allocate_slots(3, 1);
+        for i in 0..2 {
+            ledgers.perm.slots[i].partitions.push(H256::random());
+            ledgers.perm.slots[i].has_been_written = true;
+            ledgers.perm.slots[i].last_height = 1;
+        }
+        let expired = ledgers.expire_partitions(
+            100,
+            true,
+            |l| if l == DataLedger::Publish { 20 } else { 100 },
+            10,
+        );
+        let mut perm_expired: Vec<_> = expired
+            .iter()
+            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .map(|e| e.slot_index)
+            .collect();
+        perm_expired.sort_unstable();
+        assert_eq!(
+            perm_expired,
+            vec![0, 1],
+            "both fully-written non-last slots expire"
+        );
+    }
+
+    #[test]
+    fn perm_partial_frontier_pre_cascade_replay_identity() {
+        // Pre-Cascade (cascade_active=false) the gate is transparent: the partial
+        // frontier slot still ages out by last_height, preserving replay identity with
+        // the allocation-anchored behavior. Locks that Task-2's post-Cascade change did
+        // not alter pre-Cascade expiry.
+        let config = make_test_config(Some(2));
+        let mut ledgers = Ledgers::new(&config, false);
+        ledgers.perm.allocate_slots(3, 1);
+        for i in 0..2 {
+            ledgers.perm.slots[i].partitions.push(H256::random());
+            ledgers.perm.slots[i].has_been_written = true;
+            ledgers.perm.slots[i].last_height = 1;
+        }
+        let expired = ledgers.expire_partitions(
+            100,
+            false, // pre-Cascade
+            |l| if l == DataLedger::Publish { 15 } else { 100 },
+            10,
+        );
+        let mut perm_expired: Vec<_> = expired
+            .iter()
+            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .map(|e| e.slot_index)
+            .collect();
+        perm_expired.sort_unstable();
+        assert_eq!(
+            perm_expired,
+            vec![0, 1],
+            "pre-Cascade: aged non-last slots expire regardless of fill"
+        );
+    }
+
+    #[test]
     fn test_get_expiring_partitions_includes_perm() {
         let config = make_test_config(Some(2));
         let mut ledgers = Ledgers::new(&config, false);
@@ -1067,10 +1179,11 @@ mod tests {
         ledgers.perm.slots[1].has_been_written = true;
 
         // Read-only: should report slot 0 as expiring without marking it
-        let expiring = ledgers.get_expiring_partitions(30, true, |_| 20, 10);
+        let expiring = ledgers.get_expiring_slots(30, true, |_| 20, 10);
         let perm_expiring: Vec<_> = expiring
             .iter()
-            .filter(|e| e.ledger_id == DataLedger::Publish)
+            .filter(|(ledger_id, _, _)| *ledger_id == DataLedger::Publish)
+            .flat_map(|(_, _, partition_hashes)| partition_hashes)
             .collect();
         assert_eq!(perm_expiring.len(), 1);
         // Verify NOT marked as expired (read-only)
@@ -1102,8 +1215,12 @@ mod tests {
         ledgers.perm.allocate_slots(1, 1);
         ledgers.perm.slots[0].partitions.push(H256::random());
 
-        let expiring = ledgers.get_expiring_partitions(1000, true, |_| 10, 10);
-        assert!(expiring.iter().all(|e| e.ledger_id != DataLedger::Publish));
+        let expiring = ledgers.get_expiring_slots(1000, true, |_| 10, 10);
+        assert!(
+            expiring
+                .iter()
+                .all(|(ledger_id, _, _)| *ledger_id != DataLedger::Publish)
+        );
     }
 
     /// Allocate `count` Submit slots, all stamped with `last_height = alloc_height`.
@@ -1206,6 +1323,18 @@ mod tests {
         ledgers.touch_filled_slots(DataLedger::Submit, 0, 50, 10, 100, true);
         assert_eq!(submit_last_heights(&ledgers), vec![100, 100]);
         assert_eq!(submit_written_flags(&ledgers), vec![true, true]);
+    }
+
+    #[test]
+    fn test_touch_filled_slots_noop_when_window_beyond_allocated_slots() {
+        // The write window STARTS past every allocated slot (allocation lagging
+        // ingress by more than a full slot, so even `first` is out of range):
+        // the touch must be a no-op — no panic, no slot marked written or
+        // refreshed.
+        let mut ledgers = ledgers_with_submit_slots(2, 1);
+        ledgers.touch_filled_slots(DataLedger::Submit, 30, 35, 10, 100, true);
+        assert_eq!(submit_last_heights(&ledgers), vec![1, 1]);
+        assert_eq!(submit_written_flags(&ledgers), vec![false, false]);
     }
 
     #[test]
@@ -1634,5 +1763,91 @@ mod tests {
             slot.is_expired = true;
         }
         assert_eq!(ledgers.expiry_frontier_for(DataLedger::Submit), 3);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// For any canonical (prefix-written, prefix-expired) term ledger state, the
+        /// newly-expiring set and the inclusive set must satisfy the invariants the
+        /// three consumers rely on. chunks_per_slot is fixed; total_chunks and the
+        /// written/expired/aged prefixes vary.
+        #[test]
+        fn expiry_sets_are_mutually_consistent(
+            num_slots in 2_usize..=8,
+            // frontier: how many chunks written, in [0, num_slots*CPS]
+            total_chunks in 0_u64..=80,
+            // how many leading slots are already is_expired (prefix), capped later
+            already_expired in 0_usize..=8,
+            // how many leading slots are aged at-or-below expiry_height (prefix)
+            aged_prefix in 0_usize..=8,
+        ) {
+            const CPS: u64 = 10;
+            let config = ConsensusConfig::testing();
+            // epoch_length=1, num_blocks_in_epoch from config; pick epoch_height well
+            // above min_blocks so the aging gate is satisfiable.
+            let epoch_length = 1_u64;
+            let mut ledger = TermLedger::new(DataLedger::Submit, &config, epoch_length);
+            let min_blocks = epoch_length * config.epoch.num_blocks_in_epoch;
+            let epoch_height = min_blocks + 1_000;
+            let expiry_height = epoch_height - min_blocks;
+
+            ledger.allocate_slots(num_slots as u64, epoch_height); // default: unaged, unwritten
+
+            let frontier = fully_written_slot_count(total_chunks, CPS) as usize;
+            let aged = aged_prefix.min(num_slots);
+            let exp = already_expired.min(num_slots);
+
+            for (i, slot) in ledger.slots.iter_mut().enumerate() {
+                // canonical: a slot is written iff it is at or below the write frontier
+                slot.has_been_written = i < frontier;
+                if i < aged {
+                    slot.last_height = expiry_height; // aged: last_height <= expiry_height
+                } else {
+                    slot.last_height = epoch_height;  // fresh
+                }
+                // is_expired is a prefix and only ever set on slots the expiry path
+                // could have expired (written + non-last); model it as a leading run.
+                // (Excludes the pre-Cascade legacy state — is_expired on an unwritten
+                // slot — which the runtime is_expired short-circuit still handles.)
+                slot.is_expired = i < exp && i < frontier && i != num_slots - 1;
+            }
+
+            let newly = ledger.get_expired_slot_indexes(epoch_height, true, total_chunks, CPS);
+            let inclusive = ledger.get_all_expired_slot_indexes(epoch_height, true, total_chunks, CPS);
+
+            // (a) both sets are strictly ascending & contiguous. The inclusive set
+            // starts at 0 (already-expired slots always pass). The newly-expiring set
+            // may start ABOVE 0 because get_expired_slot_indexes filters out
+            // is_expired slots — so instead assert every slot below its first
+            // entry is already expired (a contiguous expired prefix).
+            for w in newly.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
+            for w in inclusive.windows(2) { prop_assert_eq!(w[1], w[0] + 1); }
+            if let Some(&first) = inclusive.first() { prop_assert_eq!(first, 0); }
+            if let Some(&first) = newly.first() {
+                for i in 0..first {
+                    prop_assert!(ledger.slots[i].is_expired,
+                        "slot {i} below the first newly-expiring slot must already be expired");
+                }
+            }
+
+            // (b) newly-expiring is a subset of the inclusive (non-promotability) set
+            for idx in &newly { prop_assert!(inclusive.contains(idx)); }
+
+            // (c) post-Cascade no NEWLY expired slot may sit at or beyond the frontier,
+            //     and the last slot never newly expires
+            for &idx in &newly {
+                prop_assert!(idx < frontier, "newly-expired slot {idx} must be fully written (frontier={frontier})");
+                prop_assert_ne!(idx, num_slots - 1, "last slot must never newly expire");
+            }
+
+            // (d) the inclusive set exceeds `newly` only by already-`is_expired` slots
+            for &idx in &inclusive {
+                let is_newly = newly.contains(&idx);
+                let was_expired = ledger.slots[idx].is_expired;
+                prop_assert!(is_newly || was_expired,
+                    "inclusive slot {idx} is neither newly-expiring nor previously is_expired");
+            }
+        }
     }
 }

@@ -1,8 +1,11 @@
 use crate::utils::IrysNodeTest;
 use alloy_genesis::GenesisAccount;
 use alloy_rpc_types_eth::TransactionTrait as _;
+use irys_config::submodules::StorageSubmodulesConfig;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{DataLedger, NodeConfig, U256, irys::IrysSigner};
+use irys_types::{
+    DataLedger, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade, irys::IrysSigner,
+};
 use tracing::info;
 
 /// Tests that publish ledger slots expire when publish_ledger_epoch_length is configured.
@@ -1169,6 +1172,252 @@ async fn heavy_perm_expiry_disabled_nothing_expires() -> eyre::Result<()> {
     info!("Verified all Publish partition assignments remain active");
 
     info!("Perm expiry disabled (mainnet safety) test passed!");
+    node.stop().await;
+    Ok(())
+}
+
+/// End-to-end proof that a partially-written PERMANENT (Publish) frontier slot is
+/// never recycled past its allocation window under Cascade — the live
+/// epoch-snapshot complement to the pure-function coverage.
+///
+/// Post-Cascade `cascade_expiry_gate` only lets a slot recycle once it is *fully
+/// written* (`slot_index < total_chunks / num_chunks_in_partition`). A slot whose
+/// write frontier still sits inside it is structurally non-expirable, independent
+/// of age or last-slot protection. This drives a real node so:
+/// - Publish slot 0 is fully filled (fully written → may legitimately recycle),
+/// - Publish slot 1 is partially filled (the frontier sits inside it),
+/// - Publish slot 2 is preallocated headroom (so slot 1 is NOT the last slot,
+///   ruling out last-slot protection as the reason it survives).
+///
+/// Then it mines far past where slot 1's allocation-anchored — and even its
+/// last-write-anchored — age would recycle it under the pre-gate behavior, and
+/// asserts slot 1 survives with its partition assignment, plus a fixture-hygiene
+/// guard that no term-ledger settlement shadow txs leaked into the window (Publish
+/// recycle never emits these tx types, so this does not test the Publish gate
+/// itself — that's covered by the is_expired/partitions assertions above).
+#[test_log::test(tokio::test)]
+async fn slow_heavy_perm_partial_frontier_survives_cascade() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let publish_ledger_epoch_length = 2_u64; // k
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 4_u64; // perm slot capacity = 4 chunks
+    let window = publish_ledger_epoch_length * num_blocks_in_epoch; // 4
+    let full_slot_bytes = (num_chunks_in_partition * chunk_size) as usize; // fills one slot (4 chunks)
+    let half_slot_bytes = (2 * chunk_size) as usize; // partial fill (2 of 4 chunks)
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.epoch.publish_ledger_epoch_length = Some(publish_ledger_epoch_length);
+        // Keep Submit far from expiry so the only ledger under test is Publish;
+        // any expiry fee/refund shadow tx observed is then unambiguously a perm defect.
+        c.epoch.submit_ledger_epoch_length = 100;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.num_chunks_in_recall_range = 1;
+        // 1 partition per slot keeps partition demand low so the partial frontier
+        // slot deterministically retains its assignment across recycles.
+        c.num_partitions_per_slot = 1;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length: 8,
+            thirty_day_epoch_length: 2,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    // Cascade activates all four data ledgers; pre-configure enough submodules so
+    // every ledger (plus capacity) has partitions available.
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let node = test_node.start_and_wait_for_packing("test", 30).await;
+
+    // Post and fully promote one publish-data tx (Submit -> Publish), growing the
+    // Publish ledger's `total_chunks` by `bytes`-worth of chunks.
+    async fn promote_publish(
+        node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        signer: &IrysSigner,
+        bytes: usize,
+        tag: u8,
+    ) -> eyre::Result<()> {
+        let mut data = vec![7_u8; bytes];
+        data[0] = tag;
+        let anchor = node.get_anchor().await?;
+        let tx = node.post_data_tx(anchor, data, signer).await;
+        node.wait_for_mempool(tx.header.id, 30).await?;
+        node.upload_chunks(&tx).await?;
+        node.mine_block().await?; // confirm in Submit, trigger ingress-proof generation
+        node.wait_for_ingress_proofs_no_mining(vec![tx.header.id], 30)
+            .await?;
+        node.mine_block().await?; // promote Submit -> Publish
+        Ok(())
+    }
+
+    // Counts TermFeeReward / PermFeeRefund shadow txs in the block at `height`.
+    // Publish-ledger recycle never emits either of these tx types (perm fees are
+    // never refunded and Publish expiry emits no fee distribution), so this cannot
+    // discriminate a recycling Publish slot from a non-recycling one — it does not
+    // test the Publish frontier gate. Its value is fixture hygiene: guarding that
+    // no term-ledger (Submit/OneYear/ThirtyDay) settlement leaked into the window,
+    // since Submit is configured far from expiry.
+    async fn count_publish_expiry_shadow_txs(
+        node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        height: u64,
+    ) -> eyre::Result<usize> {
+        let block = node.get_block_by_height(height).await?;
+        let evm = node.wait_for_evm_block(block.evm_block_hash, 30).await?;
+        let mut count = 0_usize;
+        for tx in evm.body.transactions {
+            let mut input = tx.input().as_ref();
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+                && let Some(packet) = shadow.as_v1()
+                && matches!(
+                    packet,
+                    TransactionPacket::TermFeeReward(_) | TransactionPacket::PermFeeRefund(_)
+                )
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    // Mine past Cascade activation so the perm/term expiry machinery is live.
+    while node.get_canonical_chain_height().await <= activation_height {
+        node.mine_block().await?;
+    }
+
+    // --- Fill perm slot 0 fully; the epoch allocates headroom slots. ---
+    promote_publish(&node, &signer, full_slot_bytes, 1).await?;
+    node.mine_until_next_epoch().await?;
+    let a1 = node.get_canonical_chain_height().await;
+    {
+        let snapshot = node.get_canonical_epoch_snapshot();
+        let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+        assert!(
+            slots.len() >= 2,
+            "expected >=2 perm slots after filling slot 0 (got {})",
+            slots.len()
+        );
+    }
+
+    // --- Partially fill perm slot 1 (the frontier); slot 2 stays headroom. ---
+    promote_publish(&node, &signer, half_slot_bytes, 2).await?;
+    let a2 = node.mine_until_next_epoch().await?.1;
+    assert!(
+        a2 > a1,
+        "batch 2 epoch (a2={a2}) must be after batch 1 epoch (a1={a1})"
+    );
+
+    // Verify the intended fixture state: slot 0 fully written, slot 1 the partial
+    // frontier, slot 2 headroom — i.e. exactly one fully-written slot.
+    let fixture_block = node.get_block_by_height(a2).await?;
+    let publish_total = fixture_block.ledger_total_chunks(DataLedger::Publish);
+    assert_eq!(
+        publish_total / num_chunks_in_partition,
+        1,
+        "exactly one Publish slot must be fully written (total_chunks={publish_total}, C={num_chunks_in_partition})"
+    );
+    assert_ne!(
+        publish_total % num_chunks_in_partition,
+        0,
+        "slot 1 must be a PARTIAL frontier (total_chunks={publish_total} should not be a slot multiple)"
+    );
+    {
+        let snapshot = node.get_canonical_epoch_snapshot();
+        let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+        assert!(
+            slots.len() >= 3,
+            "slot 1 must be non-last (slot 2 headroom) so survival is the fully-written \
+             gate, not last-slot protection (got {} slots)",
+            slots.len()
+        );
+        assert!(
+            !slots[1].is_expired,
+            "partial frontier slot 1 must not be expired right after being written"
+        );
+        assert!(
+            !slots[1].partitions.is_empty(),
+            "partial frontier slot 1 must have a partition assignment"
+        );
+    }
+
+    // --- Mine far past where slot 1 would recycle under age-anchored behavior. ---
+    // Allocation-anchored expiry would be a1+window; last-write-anchored a2+window.
+    // Mine well past BOTH (5x its own write window) to prove survival is the
+    // fully-written gate — the frontier still sits inside slot 1 — not age.
+    let target_height = a2 + 5 * window;
+    let alloc_anchored_expiry = a1 + window;
+    assert!(
+        target_height > alloc_anchored_expiry && target_height > a2 + window,
+        "target {target_height} must exceed both allocation ({alloc_anchored_expiry}) \
+         and last-write ({}) anchored expiry",
+        a2 + window
+    );
+    let current_height = node.get_canonical_chain_height().await;
+    for _ in current_height..target_height {
+        node.mine_block().await?;
+    }
+    let final_height = node.get_canonical_chain_height().await;
+    assert!(
+        final_height >= target_height,
+        "should have reached target height {target_height} (got {final_height})"
+    );
+
+    // --- Load-bearing assertions on the tip snapshot. ---
+    let snapshot = node.get_canonical_epoch_snapshot();
+    let publish_slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+    assert!(
+        publish_slots.len() >= 3,
+        "slot 1 must remain non-last at the tip (got {} slots)",
+        publish_slots.len()
+    );
+    assert!(
+        !publish_slots[1].is_expired,
+        "partial Publish frontier slot must not expire at height {final_height}: its write \
+         frontier still sits inside it, so the fully-written gate keeps it alive even past \
+         its age-anchored expiry"
+    );
+    assert!(
+        !publish_slots[1].partitions.is_empty(),
+        "the surviving partial frontier slot's partition assignment must be retained"
+    );
+    // Discriminating anchor: slot 0 (fully written at batch 1, non-last, mined far past
+    // its allocation-anchored expiry) MUST have expired. Without this, slot 1's survival
+    // could pass on a dead or over-strong gate that never expires anything — this proves
+    // the expiry machinery is live, so slot 1 surviving is the fully-written gate at work.
+    assert!(
+        publish_slots[0].is_expired,
+        "slot 0 (fully written, non-last, aged well past its window) must expire — else \
+         slot 1's survival is not discriminating"
+    );
+
+    // --- Fixture hygiene: no term-ledger settlement shadow txs leaked into the
+    //     window. (Publish recycle never emits these tx types, so this does not
+    //     test the Publish frontier gate — that's covered by the
+    //     is_expired/partitions assertions above.) ---
+    let mut epoch_height = a2;
+    while epoch_height <= final_height {
+        let count = count_publish_expiry_shadow_txs(&node, epoch_height).await?;
+        assert_eq!(
+            count, 0,
+            "no term-ledger (Submit/OneYear/ThirtyDay) expiry settlement shadow txs should \
+             appear while Submit is held non-expiring (found {count} at epoch height \
+             {epoch_height}); Publish recycle never emits these tx types, so this is a \
+             fixture-hygiene guard, not a check on the Publish frontier slot"
+        );
+        epoch_height += num_blocks_in_epoch;
+    }
+
+    info!(
+        "Partial Publish frontier slot survived to height {} with its partition assignment; \
+         zero perm expiry shadow txs",
+        final_height
+    );
     node.stop().await;
     Ok(())
 }

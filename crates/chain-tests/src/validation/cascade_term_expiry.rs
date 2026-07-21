@@ -1,10 +1,38 @@
 use crate::utils::IrysNodeTest;
+use crate::validation::next_epoch_boundary;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
-    BoundedFee, DataLedger, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
+    BoundedFee, DataLedger, H256, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
 };
 use reth::rpc::types::TransactionTrait as _;
+
+/// Posts one ThirtyDay data tx (`bytes` of data, first byte tagged with `tag` for
+/// a unique tx id) at the fee oracle's quoted `term_fee`, and waits for it to land
+/// in the mempool. Shared by the fee-model / blocked-set expiry tests.
+async fn post_thirty_day(
+    ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    signer: &irys_types::irys::IrysSigner,
+    tag: u8,
+    bytes: usize,
+) -> eyre::Result<()> {
+    let mut data = vec![9_u8; bytes];
+    data[0] = tag;
+    let price = ctx
+        .get_data_price(DataLedger::ThirtyDay, bytes as u64)
+        .await?;
+    let tx = signer.create_transaction_with_fees(
+        data,
+        ctx.get_anchor().await?,
+        DataLedger::ThirtyDay,
+        BoundedFee::new(price.term_fee),
+        None,
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    ctx.ingest_data_tx(tx.header.clone()).await?;
+    ctx.wait_for_mempool(tx.header.id, 30).await?;
+    Ok(())
+}
 
 /// Verify that OneYear and ThirtyDay term ledgers expire at different rates
 /// based on their distinct epoch_length values from the Cascade hardfork config.
@@ -110,19 +138,14 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
         treasury_after_inclusion
     );
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     let thirty_day_expiry_blocks = thirty_day_epoch_length * num_blocks_in_epoch;
     let one_year_expiry_blocks = one_year_epoch_length * num_blocks_in_epoch;
 
     // Mine to the epoch boundary where ThirtyDay expires but OneYear does not
-    let mid_boundary = next_epoch_boundary(inclusion_height + thirty_day_expiry_blocks);
+    let mid_boundary = next_epoch_boundary(
+        inclusion_height + thirty_day_expiry_blocks,
+        num_blocks_in_epoch,
+    );
     while ctx.get_canonical_chain_height().await < mid_boundary {
         ctx.mine_block().await?;
     }
@@ -188,7 +211,10 @@ async fn heavy_cascade_term_ledger_expiry_respects_distinct_epoch_lengths() -> e
     );
 
     // Mine to the epoch boundary where OneYear also expires
-    let late_boundary = next_epoch_boundary(inclusion_height + one_year_expiry_blocks);
+    let late_boundary = next_epoch_boundary(
+        inclusion_height + one_year_expiry_blocks,
+        num_blocks_in_epoch,
+    );
     while ctx.get_canonical_chain_height().await < late_boundary {
         ctx.mine_block().await?;
     }
@@ -315,14 +341,6 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Reads (slot0_last_height, slot0_expired, slot1_last_height, slot1_expired,
     // slot_count, first_unexpired) for the ThirtyDay ledger at `height`.
     async fn thirty_day_slots(
@@ -368,7 +386,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h1 = ctx.mine_block().await?.height;
-    let epoch_a = next_epoch_boundary(h1);
+    let epoch_a = next_epoch_boundary(h1, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < epoch_a {
         ctx.mine_block().await?;
     }
@@ -414,7 +432,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h2 = ctx.mine_block().await?.height;
-    let epoch_b = next_epoch_boundary(h2);
+    let epoch_b = next_epoch_boundary(h2, num_blocks_in_epoch);
     assert!(
         epoch_b > epoch_a,
         "E_b ({epoch_b}) must be after E_a ({epoch_a})"
@@ -501,7 +519,7 @@ async fn heavy_cascade_spanning_tx_last_write_expiry() -> eyre::Result<()> {
         ctx.wait_for_mempool(tx.header.id, 30).await?;
     }
     let h3 = ctx.mine_block().await?.height;
-    let epoch_c = next_epoch_boundary(h3);
+    let epoch_c = next_epoch_boundary(h3, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < epoch_c {
         ctx.mine_block().await?;
     }
@@ -591,14 +609,6 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let node = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Post one 1-chunk data tx. The Submit ledger is not user-targetable
     // directly; published data lands in Submit (pre-promotion), so a Publish
     // data tx is what grows Submit's `total_chunks`.
@@ -640,7 +650,10 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     // allocation last_height (0) despite receiving data.
     for tag in 0_u8..2 {
         post_submit_chunk(&node, &signer, chunk_size, tag).await?;
-        let boundary = next_epoch_boundary(node.get_canonical_chain_height().await + 1);
+        let boundary = next_epoch_boundary(
+            node.get_canonical_chain_height().await + 1,
+            num_blocks_in_epoch,
+        );
         while node.get_canonical_chain_height().await < boundary {
             node.mine_block().await?;
         }
@@ -693,7 +706,7 @@ async fn slow_heavy_cascade_midchain_activation_submit_last_height_transition() 
     // === Post-activation write: the touch now advances last_height ===
     post_submit_chunk(&node, &signer, chunk_size, 200).await?;
     let write_height = node.mine_block().await?.height;
-    let boundary = next_epoch_boundary(write_height);
+    let boundary = next_epoch_boundary(write_height, num_blocks_in_epoch);
     while node.get_canonical_chain_height().await < boundary {
         node.mine_block().await?;
     }
@@ -769,38 +782,6 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
-    async fn post_thirty_day(
-        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-        signer: &irys_types::irys::IrysSigner,
-        tag: u8,
-        bytes: usize,
-    ) -> eyre::Result<()> {
-        let mut data = vec![9_u8; bytes];
-        data[0] = tag;
-        let price = ctx
-            .get_data_price(DataLedger::ThirtyDay, bytes as u64)
-            .await?;
-        let tx = signer.create_transaction_with_fees(
-            data,
-            ctx.get_anchor().await?,
-            DataLedger::ThirtyDay,
-            BoundedFee::new(price.term_fee),
-            None,
-        )?;
-        let tx = signer.sign_transaction(tx)?;
-        ctx.ingest_data_tx(tx.header.clone()).await?;
-        ctx.wait_for_mempool(tx.header.id, 30).await?;
-        Ok(())
-    }
-
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
@@ -809,7 +790,7 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     for i in 0_u8..4 {
         post_thirty_day(&ctx, &signer, i, 96).await?;
     }
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -839,14 +820,16 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     // Fee-predicted expiring set: the PARENT epoch snapshot (as the producer
     // sees it) asked which ThirtyDay slots will actually recycle at height E.
     let parent_block = ctx.get_block_by_height(e - 1).await?;
-    let mut fee_set = {
+    let parent_snap = {
         let tree = ctx.node_ctx.block_tree_guard.read();
-        let snap = tree
-            .get_epoch_snapshot(&parent_block.block_hash)
-            .expect("parent epoch snapshot");
+        tree.get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot")
+    };
+    let mut fee_set = {
         // cascade_active=true: this scenario runs post-activation (cascade
         // activated at timestamp 0), matching the producer/validator gate.
-        snap.get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
+        parent_snap
+            .get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
@@ -876,6 +859,205 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
         "fee-distribution expiring set (parent, get_expiring_partition_info) must \
          equal the actual recycle set (expired_partition_infos) at epoch E={e}; \
          a mismatch means fees are distributed for a slot that did not recycle"
+    );
+
+    // Third leg: the inclusive non-promotability set (get_all_expired_...) must
+    // contain every slot that actually recycled at E, and may exceed it only by
+    // slots already is_expired from a prior epoch. Pins all three expiry sets on one
+    // block — the property the fully-written-gate fix guarantees by feeding all three
+    // the same write-frontier inputs. Uses the snapshot wrapper (chunks_per_slot is
+    // supplied internally).
+    // Feed the PARENT header's ThirtyDay total — the exact input the production §4c
+    // promotion validator uses (it keys off the parent header, pre-this-epoch-touch).
+    // The rescue write lands in epoch block E, so parent_total (pre-write) differs from
+    // e_total; using the parent keeps this a faithful check of the consensus input
+    // contract rather than the post-touch epoch-block total.
+    let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
+    let blocked: std::collections::BTreeSet<usize> = parent_snap
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, parent_total)
+        .into_iter()
+        .collect();
+    let recycled: std::collections::BTreeSet<usize> = actual_set.iter().copied().collect();
+    assert!(
+        recycled.is_subset(&blocked),
+        "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
+    );
+    // blocked ⊇ recycled is the safety-critical (double-pay) direction, cross-checked
+    // here between two independently-computed functions. The complementary
+    // "surplus is only previously-expired slots" direction needs a prior-epoch-expired
+    // slot, which this fixture never produces — it is exercised by
+    // heavy_cascade_expiry_blocked_set_surplus_is_previously_expired (below) and by the
+    // data_ledger proptest invariant (d) / get_all_expired_slot_indexes_includes_already_expired_slots.
+
+    ctx.stop().await;
+    Ok(())
+}
+
+/// Non-vacuous companion to `heavy_cascade_expiry_fee_model_matches_actual_recycle`:
+/// drives the ThirtyDay ledger through TWO expiry epochs so the inclusive
+/// non-promotability set (`get_all_expired_term_slot_indexes`) STRICTLY exceeds
+/// the set that newly recycles at the second expiry, and the surplus is exactly
+/// the slot that already recycled at the first expiry.
+///
+/// Scenario (nbe=2, thirty_day_epoch_length=2 -> window=4 blocks, C=10 chunks):
+/// 1. Epoch E_a: write 12 chunks -> slot A(=0) fully written (chunks 0-9), slot
+///    B(=1) partial frontier (10-11); extra empty slots so slot 0 is non-last.
+///    Both get last_height=E_a.
+/// 2. Epoch E1 = E_a + window: slot A (fully written, aged) recycles. It is now
+///    `is_expired` and drops OUT of every later newly-recycling set.
+/// 3. Epoch E_b (> E_a): write more ThirtyDay data so slot B fills fully (chunks
+///    10-19) and spills into slot C(=2) (the new frontier / trailing headroom).
+///    The touch advances slots B and C to E_b; slot A is frozen (frontier long
+///    past it) so it stays expired.
+/// 4. Epoch E2 = E_b + window: slot B recycles.
+///
+/// At E2 the inclusive blocked set = {A, B} but the newly-recycled set = {B}, so
+/// the surplus {A} is non-empty AND is a previously-expired slot — the direction
+/// the sibling test's fixture cannot reach.
+#[test_log::test(tokio::test)]
+async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2_u64;
+    let activation_height = num_blocks_in_epoch;
+    let one_year_epoch_length = 8_u64;
+    let thirty_day_epoch_length = 2_u64;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+    let window = thirty_day_epoch_length * num_blocks_in_epoch; // 4
+
+    let mut config = NodeConfig::testing().with_consensus(|c| {
+        c.block_migration_depth = 1;
+        c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = chunk_size;
+        c.num_chunks_in_partition = num_chunks_in_partition;
+        c.hardforks.cascade = Some(Cascade {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            one_year_epoch_length,
+            thirty_day_epoch_length,
+            annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+        });
+    });
+
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let test_node = IrysNodeTest::new_genesis(config);
+    StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
+    let ctx = test_node.start_and_wait_for_packing("test", 30).await;
+
+    while ctx.get_canonical_chain_height().await <= activation_height {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch E_a: 4 txs × 3 chunks = 12 chunks -> slot A(0) full, slot B(1) partial.
+    for i in 0_u8..4 {
+        post_thirty_day(&ctx, &signer, i, 96).await?;
+    }
+    let e_a = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
+    while ctx.get_canonical_chain_height().await < e_a {
+        ctx.mine_block().await?;
+    }
+
+    // Epoch E1 = E_a + window: the fully-written aged slot A recycles.
+    let e1 = e_a + window;
+    while ctx.get_canonical_chain_height().await < e1 {
+        ctx.mine_block().await?;
+    }
+    {
+        let e1_block = ctx.get_block_by_height(e1).await?;
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&e1_block.block_hash)
+            .expect("epoch snapshot at E1");
+        assert!(
+            snap.ledgers.get_slots(DataLedger::ThirtyDay)[0].is_expired,
+            "slot A(0) must have recycled at E1={e1}"
+        );
+    }
+
+    // Epoch E_b (> E_a): fill slot B fully and spill into slot C(2) so B is a
+    // fully-written non-last slot, and its expiry clock is refreshed to E_b.
+    // 4 txs × 3 chunks brings total 12 -> 24: slot B(10-19) full, slot C(20-23)
+    // partial frontier / trailing headroom.
+    for i in 0_u8..4 {
+        post_thirty_day(&ctx, &signer, 100 + i, 96).await?;
+    }
+    let e_b = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
+    while ctx.get_canonical_chain_height().await < e_b {
+        ctx.mine_block().await?;
+    }
+    assert!(e_b > e_a, "E_b({e_b}) must be after E_a({e_a})");
+
+    // Epoch E2 = E_b + window: slot B recycles while slot A is already expired.
+    let e2 = e_b + window;
+    while ctx.get_canonical_chain_height().await < e2 {
+        ctx.mine_block().await?;
+    }
+
+    let epoch_block = ctx.get_block_by_height(e2).await?;
+    let parent_block = ctx.get_block_by_height(e2 - 1).await?;
+    let parent_snap = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        tree.get_epoch_snapshot(&parent_block.block_hash)
+            .expect("parent epoch snapshot")
+    };
+
+    // Newly-recycled set at E2 (post-touch epoch snapshot).
+    let recycled: std::collections::BTreeSet<usize> = {
+        let tree = ctx.node_ctx.block_tree_guard.read();
+        let snap = tree
+            .get_epoch_snapshot(&epoch_block.block_hash)
+            .expect("epoch snapshot at E2");
+        snap.expired_partition_infos
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.ledger_id == DataLedger::ThirtyDay)
+            .map(|p| p.slot_index)
+            .collect()
+    };
+
+    // Inclusive non-promotability set from the parent snapshot. Feed the PARENT
+    // header's ThirtyDay total — the exact input the production §4c promotion
+    // validator keys off (pre-this-epoch-touch), matching the sibling
+    // heavy_cascade_expiry_fee_model_matches_actual_recycle fixture.
+    let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
+    let blocked: std::collections::BTreeSet<usize> = parent_snap
+        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e2, true, parent_total)
+        .into_iter()
+        .collect();
+
+    assert!(
+        recycled.is_subset(&blocked),
+        "every recycled slot must be in the non-promotability set: recycled={recycled:?} blocked={blocked:?}"
+    );
+    // Pin the newly-recycled set exactly, so the surplus checks below cannot silently
+    // degrade to a vacuous form if fixture drift ever stops slot B(1) recycling at E2
+    // (recycled={} would satisfy subset, strict-surplus, and the surplus checks trivially).
+    assert_eq!(
+        recycled,
+        std::collections::BTreeSet::from([1]),
+        "slot B(1) must be the sole newly-recycled slot at E2 (got {recycled:?})"
+    );
+    // Non-vacuity: the blocked set STRICTLY exceeds the newly-recycled set — this
+    // is the surplus the sibling fixture never produces.
+    assert!(
+        blocked.len() > recycled.len(),
+        "blocked set must strictly exceed the recycle set (surplus non-empty): \
+         recycled={recycled:?} blocked={blocked:?}"
+    );
+    // Every surplus slot must be a previously-expired slot.
+    let parent_slots = parent_snap.ledgers.get_slots(DataLedger::ThirtyDay);
+    for extra in blocked.difference(&recycled) {
+        assert!(
+            parent_slots[*extra].is_expired,
+            "blocked slot {extra} not in the recycle set must be a previously-expired slot"
+        );
+    }
+    // Slot A(0) specifically is the surplus: expired at E1, not newly recycling at E2.
+    assert!(
+        blocked.contains(&0) && !recycled.contains(&0),
+        "slot A(0) must be in the blocked surplus (expired at E1, not recycling at E2): \
+         recycled={recycled:?} blocked={blocked:?}"
     );
 
     ctx.stop().await;
@@ -933,14 +1115,6 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Counts (TermFeeReward, PermFeeRefund) shadow txs in the block at `height`.
     async fn expiry_shadow_counts(
         ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
@@ -964,6 +1138,33 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         Ok((rewards, refunds))
     }
 
+    // Maps each PermFeeRefund in the block at `height` to its CL tx id -> amount.
+    // Keys on the refund's `irys_ref` (the CL tx id), NOT `target`: every tx in
+    // this test shares one signer, so address keying cannot tell them apart.
+    // Asserts each CL tx is refunded at most once per block (no double-settlement).
+    async fn refund_amounts_by_tx(
+        ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+        height: u64,
+    ) -> eyre::Result<std::collections::HashMap<H256, U256>> {
+        let block = ctx.get_block_by_height(height).await?;
+        let evm = ctx.wait_for_evm_block(block.evm_block_hash, 30).await?;
+        let mut refunds = std::collections::HashMap::new();
+        for tx in evm.body.transactions {
+            let mut input = tx.input().as_ref();
+            if let Ok(shadow) = ShadowTransaction::decode(&mut input)
+                && let Some(TransactionPacket::PermFeeRefund(refund)) = shadow.as_v1()
+            {
+                let tx_id = H256::from_slice(refund.irys_ref.as_slice());
+                let amount = U256::from_le_bytes(refund.amount.to_le_bytes());
+                assert!(
+                    refunds.insert(tx_id, amount).is_none(),
+                    "duplicate PermFeeRefund for CL tx {tx_id} in block {height}"
+                );
+            }
+        }
+        Ok(refunds)
+    }
+
     while ctx.get_canonical_chain_height().await <= activation_height {
         ctx.mine_block().await?;
     }
@@ -974,7 +1175,7 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         .post_data_tx(anchor, vec![1_u8; 6 * chunk_size as usize], &signer)
         .await;
     ctx.wait_for_mempool(tx1.header.id, 30).await?;
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -1013,7 +1214,7 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
         .post_data_tx(anchor, vec![3_u8; 3 * chunk_size as usize], &signer)
         .await;
     ctx.wait_for_mempool(tx3.header.id, 30).await?;
-    let f = next_epoch_boundary(ctx.mine_block().await?.height);
+    let f = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < f {
         ctx.mine_block().await?;
     }
@@ -1033,6 +1234,14 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
             slot0.last_height, f,
             "the fill must refresh slot 0's expiry clock to F={f}"
         );
+        // Interim promotability: while live (after the rescued-slot tx was
+        // appended, before the recycle epoch), slot 0 must retain a partition
+        // assignment — the third bug leg (permanently non-promotable rescued
+        // slot) does not recur.
+        assert!(
+            !slot0.partitions.is_empty(),
+            "rescued slot 0 must retain its partition assignment while live at F={f}"
+        );
     }
 
     // Phase B: when the slot ACTUALLY recycles (F + window), the deferred refund
@@ -1041,11 +1250,42 @@ async fn heavy_cascade_rescued_slot_defers_reward_and_refund() -> eyre::Result<(
     while ctx.get_canonical_chain_height().await < recycle {
         ctx.mine_block().await?;
     }
-    let (_, refunds_at_recycle) = expiry_shadow_counts(&ctx, recycle).await?;
+    // The deferred refunds settle exactly once per unpromoted tx in the rescued
+    // slot, each for its full perm_fee — the outcome the fully-written-gate fix
+    // preserves: charged txs are honored, never stranded, never doubled. All three
+    // txs (tx1/tx2/tx3) are unpromoted here (chunks never uploaded), so each must
+    // be refunded; a promoted tx would instead be absent from the refund set.
+    let refunds = refund_amounts_by_tx(&ctx, recycle).await?;
+    for tx in [&tx1, &tx2, &tx3] {
+        let perm_fee: U256 = tx
+            .header
+            .perm_fee
+            .expect("unpromoted data tx must carry a perm_fee")
+            .into();
+        let tx_id = tx.header.id;
+        assert_eq!(
+            refunds.get(&tx_id).copied(),
+            Some(perm_fee),
+            "unpromoted tx {tx_id} must be refunded exactly its perm_fee once when \
+             slot 0 recycles at F+{window}={recycle}"
+        );
+    }
+    // Exactly the three rescued-slot txs are refunded: no spurious or duplicate
+    // settlement of any other tx.
+    assert_eq!(
+        refunds.len(),
+        3,
+        "exactly the three unpromoted rescued-slot txs must be refunded at recycle, \
+         got {refunds:?}"
+    );
+    // Settlement side of the same deferral: the TermFeeReward the rescued slot was
+    // denied at the skipped epoch E (Phase A asserted zero there) must now be emitted
+    // when the slot actually recycles — the term fees are distributed, not lost.
+    let (rewards_at_recycle, _) = expiry_shadow_counts(&ctx, recycle).await?;
     assert!(
-        refunds_at_recycle >= 1,
-        "deferred PermFeeRefund for the unpromoted txs must land when slot 0 \
-         actually recycles at F+{window}={recycle} (got {refunds_at_recycle})"
+        rewards_at_recycle >= 1,
+        "the deferred TermFeeReward must be emitted when slot 0 actually recycles at \
+         F+{window}={recycle} (got {rewards_at_recycle})"
     );
 
     ctx.stop().await;
@@ -1105,14 +1345,6 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let ctx = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // Post one unpromoted publish-data tx (chunks never uploaded) -> grows the
     // Submit ledger's `total_chunks`. `chunks` controls how many chunks it spans.
     async fn post_submit(
@@ -1139,7 +1371,7 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
     for i in 0_u8..4 {
         post_submit(&ctx, &signer, chunk_size, i, 3).await?;
     }
-    let l = next_epoch_boundary(ctx.mine_block().await?.height);
+    let l = next_epoch_boundary(ctx.mine_block().await?.height, num_blocks_in_epoch);
     while ctx.get_canonical_chain_height().await < l {
         ctx.mine_block().await?;
     }
@@ -1445,14 +1677,6 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
     StorageSubmodulesConfig::load_for_test(test_node.cfg.base_directory.clone(), 5)?;
     let node = test_node.start_and_wait_for_packing("test", 30).await;
 
-    let next_epoch_boundary = |h: u64| -> u64 {
-        if h.is_multiple_of(num_blocks_in_epoch) {
-            h
-        } else {
-            h + (num_blocks_in_epoch - (h % num_blocks_in_epoch))
-        }
-    };
-
     // === Pre-activation phase: keep it the MAJORITY of the chain ===
     // The index binary search's first probe is `latest_height / 2`; making the
     // pre-activation span exceed half the chain at expiry guarantees that probe
@@ -1509,7 +1733,7 @@ async fn slow_heavy_cascade_midchain_thirty_day_expiry_resolves_through_index() 
         node.wait_for_mempool(tx.header.id, 30).await?;
     }
     let write_height = node.mine_block().await?.height;
-    let write_epoch = next_epoch_boundary(write_height);
+    let write_epoch = next_epoch_boundary(write_height, num_blocks_in_epoch);
     while node.get_canonical_chain_height().await < write_epoch {
         node.mine_block().await?;
     }
