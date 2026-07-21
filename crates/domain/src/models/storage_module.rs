@@ -47,6 +47,7 @@ use irys_database::{
         clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
         get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
         get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
+        set_data_root_infos_for_data_root,
         tables::{DataRootInfo, DataRootInfos, TxLeafBinding},
     },
 };
@@ -1030,6 +1031,120 @@ impl StorageModule {
     pub fn print_pending_writes(&self) {
         let pending = self.pending_writes.read().unwrap();
         debug!("pending_writes: {:?}", pending);
+    }
+
+    /// Drops any queued (not-yet-synced) chunk writes whose partition offset
+    /// falls in the inclusive range `[start, end]`.
+    ///
+    /// Used by network-partition rollback: after orphaned offsets are cleared
+    /// and re-marked `Uninitialized`, a stale pending write left in the queue
+    /// would be replayed by `sync_pending_chunks` and flip the interval back to
+    /// `Data` with a now-empty offset index.
+    pub fn drop_pending_writes_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) {
+        let mut pending = self.pending_writes.write().unwrap();
+        pending.retain(|offset, _| *offset < start || *offset > end);
+    }
+
+    /// Clears the per-offset tx-path and data-path offset-index entries in the
+    /// inclusive partition range `[start, end]`, so orphaned chunk offsets no
+    /// longer resolve to a tx/data path.
+    ///
+    /// Used by network-partition rollback alongside
+    /// [`Self::clear_data_root_infos_in_range`]. Walks each submodule covering
+    /// the range once, clearing its slice of the range in a single write
+    /// transaction.
+    pub fn clear_offset_index_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+    ) -> eyre::Result<()> {
+        let range_start = *start;
+        let range_end = *end;
+        let mut cursor = range_start;
+        while cursor <= range_end {
+            let (interval, submodule) =
+                self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
+            let submodule_end = *interval.end();
+            let slice_end = submodule_end.min(range_end);
+            submodule.db.update_eyre(|tx| {
+                for offset in cursor..=slice_end {
+                    let part_offset = PartitionChunkOffset::from(offset);
+                    add_tx_path_hash_to_offset_index(tx, part_offset, None)?;
+                    add_data_path_hash_to_offset_index(tx, part_offset, None)?;
+                }
+                Ok(())
+            })?;
+            // Advance to the next submodule covering the range.
+            if submodule_end >= range_end {
+                break;
+            }
+            cursor = submodule_end + 1;
+        }
+        Ok(())
+    }
+
+    /// Removes the `DataRootInfo` placements whose on-disk extent
+    /// `[start_offset, start_offset + ceil(data_size / chunk_size) - 1]`
+    /// intersects the inclusive range `[start, end]`, for each of `data_roots`,
+    /// leaving placements that lie entirely outside the range intact.
+    ///
+    /// Used by network-partition rollback to un-index only the *orphaned*
+    /// placement of a data_root. A data_root shared with a still-canonical
+    /// block (a Submit→Publish promotion, or a duplicate upload of identical
+    /// data) keeps its canonical placement, whose extent sits outside the
+    /// orphaned range. Walks each submodule covering the range once, so it
+    /// does not depend on the per-chunk offset.
+    pub fn clear_data_root_infos_in_range(
+        &self,
+        start: PartitionChunkOffset,
+        end: PartitionChunkOffset,
+        data_roots: &[H256],
+    ) -> eyre::Result<()> {
+        let range_start = *start;
+        let range_end = *end;
+        let mut cursor = range_start;
+        while cursor <= range_end {
+            let (interval, submodule) =
+                self.get_submodule_for_offset(PartitionChunkOffset::from(cursor))?;
+            let submodule_end = *interval.end();
+            submodule.db.update_eyre(|tx| {
+                for data_root in data_roots {
+                    let Some(infos) = get_data_root_infos_for_data_root(tx, *data_root)? else {
+                        continue;
+                    };
+                    let remaining: Vec<_> = infos
+                        .0
+                        .into_iter()
+                        .filter(|di| {
+                            // Keep the placement iff its full on-disk extent
+                            // [start_offset, start_offset + ceil(data_size / chunk_size) - 1]
+                            // does NOT intersect the orphaned range. Matching on
+                            // start_offset alone would leave a stale entry for a
+                            // placement that begins before the range (e.g. a
+                            // cross-partition placement in a higher module, whose
+                            // start_offset is negative) but extends into it.
+                            let extent_start = di.start_offset.0;
+                            let extent_chunks =
+                                di.data_size.div_ceil(self.config.consensus.chunk_size) as i32;
+                            let extent_end = (extent_start + extent_chunks).saturating_sub(1);
+                            extent_end < range_start as i32 || extent_start > range_end as i32
+                        })
+                        .collect();
+                    set_data_root_infos_for_data_root(tx, *data_root, DataRootInfos(remaining))?;
+                }
+                Ok(())
+            })?;
+            // Advance to the next submodule covering the range.
+            if submodule_end >= range_end {
+                break;
+            }
+            cursor = submodule_end + 1;
+        }
+        Ok(())
     }
 
     /// Indexes transaction data by mapping chunks to transaction paths across storage submodules.
@@ -2245,6 +2360,154 @@ mod tests {
             storage_module
                 .make_range_partition_relative(LedgerChunkRange(ledger_chunk_offset_ii!(25, 45)))
                 .is_err()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn drop_pending_writes_in_range_purges_only_the_range() -> eyre::Result<()> {
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
+        }];
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("drop_pending_writes_test")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Queue writes at offsets 0..6.
+        let bytes = vec![0_u8; config.consensus.chunk_size as usize];
+        for offset in 0..6_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                bytes.clone(),
+                ChunkType::Entropy,
+            );
+        }
+
+        // Purge the orphaned range [2, 4] (inclusive).
+        storage_module.drop_pending_writes_in_range(
+            PartitionChunkOffset::from(2),
+            PartitionChunkOffset::from(4),
+        );
+
+        let remaining: Vec<u32> = storage_module
+            .pending_writes
+            .read()
+            .unwrap()
+            .keys()
+            .map(|o| **o)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![0, 1, 5],
+            "only offsets inside [2, 4] are dropped; those outside remain queued"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn clear_data_root_infos_in_range_drops_placements_overlapping_by_extent() -> eyre::Result<()> {
+        use irys_database::submodule::{add_data_root_info, tables::DataRootInfo};
+        use irys_types::RelativeChunkOffset;
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
+        }];
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("clear_dri_extent_test")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Three placements of the same (orphaned) data_root; orphaned range is [3, 5].
+        let data_root = H256::random();
+        let (_, submodule) =
+            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update_eyre(|tx| {
+            // Canonical: extent [0, 0], entirely below the orphaned range.
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(0),
+                    data_size: 32,
+                },
+            )?;
+            // Orphaned: starts at offset 2 (below range_start 3) but spans 3
+            // chunks → extent [2, 4], reaching into the range. `start_offset`
+            // alone (2 < 3) would wrongly keep it; extent overlap drops it.
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(2),
+                    data_size: 96,
+                },
+            )?;
+            // Orphaned: extent [4, 4], fully inside the range.
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(4),
+                    data_size: 32,
+                },
+            )?;
+            // Orphaned cross-partition placement anchored in a lower module:
+            // negative start_offset whose extent [-2, 3] (ceil(192 / 32) = 6
+            // chunks) reaches into the range. start_offset alone (-2 < 3) would
+            // wrongly keep it; this exercises the negative-i32 extent path.
+            add_data_root_info(
+                tx,
+                data_root,
+                &DataRootInfo {
+                    start_offset: RelativeChunkOffset(-2),
+                    data_size: 192,
+                },
+            )
+        })?;
+
+        storage_module.clear_data_root_infos_in_range(
+            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(5),
+            &[data_root],
+        )?;
+
+        let remaining = storage_module.collect_data_root_infos(data_root)?;
+        assert_eq!(
+            remaining.0,
+            vec![DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 32,
+            }],
+            "only the canonical placement whose extent lies entirely outside [3, 5] \
+             survives; the placement starting at offset 2 but extending into the \
+             range is dropped by extent overlap"
         );
 
         Ok(())

@@ -256,10 +256,8 @@ impl PartitionMiningServiceInner {
             );
         }
 
-        for (index, (_chunk_offset, (chunk_bytes, chunk_type))) in chunks.iter().enumerate() {
+        for (&partition_chunk_offset, (chunk_bytes, chunk_type)) in chunks.iter() {
             // TODO: check if difficulty higher now. Will look in DB for latest difficulty info and update difficulty
-            let partition_chunk_offset =
-                PartitionChunkOffset::from(start_chunk_offset + index as u32);
 
             // Only include the tx_path and data_path for chunks that contain data
             let (tx_path, data_path) = match chunk_type {
@@ -288,8 +286,8 @@ impl PartitionMiningServiceInner {
                     self.storage_module.id,
                     partition_chunk_offset,
                     self.config.consensus.num_chunks_in_partition,
-                    index,
-                    chunks.len(),
+                    *partition_chunk_offset - start_chunk_offset,
+                    self.config.consensus.num_chunks_in_recall_range,
                     self.difficulty
                 );
                 metrics::record_mining_solution_found();
@@ -394,6 +392,19 @@ impl PartitionMiningServiceInner {
     ) -> u64 {
         self.get_recall_range(step, &seed, &partition_hash)
             .expect("test_get_recall_range failed")
+    }
+
+    /// Test-only helper to drive the mining loop directly (bypassing the
+    /// service event loop) so a sparse recall range with an `Uninitialized`
+    /// hole can be exercised.
+    pub fn test_mine_partition_with_seed(
+        &mut self,
+        mining_seed: irys_types::H256,
+        vdf_step: u64,
+        checkpoints: &H256List,
+    ) -> Option<SolutionContext> {
+        self.mine_partition_with_seed(mining_seed, vdf_step, checkpoints)
+            .expect("test_mine_partition_with_seed failed")
     }
 }
 
@@ -690,6 +701,104 @@ mod tests {
         assert_eq!(
             got, expected,
             "a behind-the-iterator step must rebuild the rotation, not answer from stale state"
+        );
+    }
+
+    /// Regression test for the sparse-map PoA offset bug. `read_chunks` skips
+    /// `Uninitialized` offsets, so the mining loop must key the solution's
+    /// partition offset off the returned map key, not a dense index. Offset 0
+    /// is left `Uninitialized` (a hole at the start of the recall range), so
+    /// the first returned chunk is offset 1 at dense index 0 — the old
+    /// `start + index` code produced offset 0 and a PoA over the wrong offset.
+    /// Difficulty 0 makes the first chunk win.
+    #[test]
+    fn solution_offset_keys_off_map_over_uninitialized_hole() {
+        let tmp_dir = TempDirBuilder::new().build();
+        let node_config = NodeConfig {
+            consensus: ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                // single recall range spanning the whole partition → index 0,
+                // so get_recall_range needs no VDF reconstruction
+                num_chunks_in_recall_range: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let partition_hash = H256::repeat_byte(0x77);
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment {
+                partition_hash,
+                miner_address: config.node_config.miner_address(),
+                ledger_id: None,
+                slot_index: None,
+            }),
+            submodules: vec![(partition_chunk_offset_ie!(0, 10), "hdd0".into())],
+        };
+        let storage_module =
+            Arc::new(StorageModule::new(&info, &config).expect("test storage module"));
+
+        // Pack offsets 1..10 as Entropy, leaving offset 0 Uninitialized (the hole).
+        let chunk = vec![0_u8; config.consensus.chunk_size as usize];
+        for offset in 1..10_u32 {
+            storage_module.write_chunk(
+                PartitionChunkOffset::from(offset),
+                chunk.clone(),
+                ChunkType::Entropy,
+            );
+        }
+        storage_module
+            .force_sync_pending_chunks()
+            .expect("sync entropy writes");
+
+        // Sanity: read_chunks skips offset 0, so the first key is 1 at dense index 0.
+        let chunks = storage_module
+            .read_chunks(partition_chunk_offset_ie!(0, 10))
+            .expect("read chunks");
+        assert!(
+            !chunks.contains_key(&PartitionChunkOffset::from(0)),
+            "offset 0 must be an Uninitialized hole"
+        );
+        assert_eq!(
+            *chunks.keys().next().expect("a returned chunk"),
+            PartitionChunkOffset::from(1),
+            "first returned chunk is offset 1"
+        );
+
+        let vdf_state = Arc::new(RwLock::new(VdfState::new(
+            8,
+            0,
+            Arc::new(AtomicBool::new(false)),
+        )));
+        let (service_senders, _receivers) = ServiceSenders::new();
+        let mut inner = PartitionMiningServiceInner::new(
+            &config,
+            service_senders,
+            storage_module,
+            false,
+            VdfStateReadonly::new(Arc::clone(&vdf_state)),
+            U256::zero(), // difficulty 0 → the first chunk wins
+        );
+
+        let seed = H256::repeat_byte(0x11);
+        // step = 1 hits get_recall_range's consecutive fast path (no VDF reads).
+        let solution = inner
+            .test_mine_partition_with_seed(seed, 1, &H256List::default())
+            .expect("a solution at difficulty 0");
+
+        assert_eq!(
+            solution.chunk_offset, 1,
+            "solution offset must be the true map key (1), not the dense index (0)"
+        );
+        // The PoA hash must be computed over that same true offset.
+        assert_eq!(
+            solution.solution_hash,
+            irys_types::compute_solution_hash(&chunk, solution.chunk_offset, &seed),
+            "solution hash must be over the true offset"
         );
     }
 }
