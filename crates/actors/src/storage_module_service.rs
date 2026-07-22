@@ -357,7 +357,10 @@ impl StorageModuleServiceInner {
                 IndexRepairPlan::SoftSkipped => {
                     heal_issues += 1;
                 }
-                IndexRepairPlan::NeedsRepair { height_spans } => {
+                IndexRepairPlan::NeedsRepair {
+                    height_spans,
+                    partial,
+                } => {
                     let bi = self.block_index.read();
                     let mut planned_any = false;
                     let mut missing_height = false;
@@ -379,9 +382,9 @@ impl StorageModuleServiceInner {
                             planned_any = true;
                         }
                     }
-                    // Incomplete materialization (empty span or mid-range gap) —
-                    // count once, not on both the miss and the empty check.
-                    if missing_height || !planned_any {
+                    // Incomplete plan (some holes unplannable) or incomplete materialization
+                    // → count as heal issue (suppresses unblock) but still migrate what we can.
+                    if partial || missing_height || !planned_any {
                         heal_issues += 1;
                     }
                 }
@@ -552,7 +555,7 @@ impl StorageModuleServiceInner {
         }
 
         if height_spans.is_empty() {
-            // All holes past frontier → complete; unresolved bounds → soft-skip.
+            // All holes past frontier → complete; only unplannable holes → soft-skip.
             return if any_soft_skip {
                 IndexRepairPlan::SoftSkipped
             } else {
@@ -560,13 +563,13 @@ impl StorageModuleServiceInner {
             };
         }
 
-        // Prefer reporting SoftSkipped if some holes could not be planned, so we
-        // do not claim a full successful heal / unblock.
-        if any_soft_skip {
-            return IndexRepairPlan::SoftSkipped;
+        // Migrate plannable spans even if some holes failed bounds resolution.
+        // `partial` counts as a heal issue so we do not mass-unblock until every
+        // hole is addressable — without forfeiting progress on the rest.
+        IndexRepairPlan::NeedsRepair {
+            height_spans,
+            partial: any_soft_skip,
         }
-
-        IndexRepairPlan::NeedsRepair { height_spans }
     }
 
     /// Map a ledger chunk offset to a block height, or soft-skip on bounds errors.
@@ -859,8 +862,16 @@ enum IndexRepairPlan {
     /// Path-hash scan found no gap (or no data in range).
     Complete,
     /// Inclusive block-height spans covering path-hash holes only (not full tail).
-    NeedsRepair { height_spans: Vec<(u64, u64)> },
-    /// Gap or bounds uncertainty; heal must not claim success / unblock.
+    ///
+    /// `partial` is true when some holes could not be planned (bounds errors).
+    /// Callers should still migrate `height_spans` but count a heal issue so
+    /// unblock stays suppressed until planning is complete.
+    NeedsRepair {
+        height_spans: Vec<(u64, u64)>,
+        partial: bool,
+    },
+    /// No plannable spans and at least one unresolvable hole; heal must not claim
+    /// success / unblock.
     SoftSkipped,
 }
 

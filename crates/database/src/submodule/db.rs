@@ -86,6 +86,11 @@ pub fn first_gap_with(
         if key >= end {
             break;
         }
+        // Keys below the window (or behind expected) must not rewind `expected`
+        // or invent a false gap (e.g. stream [0,5,6,…] with start=5).
+        if key < expected {
+            continue;
+        }
         if key > expected {
             return Ok(Some(expected));
         }
@@ -115,6 +120,9 @@ pub fn gaps_with(
     while let Some(key) = next_key()? {
         if key >= end {
             break;
+        }
+        if key < expected {
+            continue;
         }
         if key > expected {
             gaps.push((expected, key));
@@ -473,6 +481,11 @@ mod tests {
             first_gap_in_sorted_keys(o(1), o(6), [o(1), o(3), o(5)]),
             Some(o(2))
         );
+        // Keys below start must not invent a false gap in a dense window.
+        assert_eq!(
+            first_gap_in_sorted_keys(o(5), o(10), [o(0), o(5), o(6), o(7), o(8), o(9)]),
+            None
+        );
     }
 
     #[test]
@@ -494,6 +507,9 @@ mod tests {
             gaps_in_sorted_keys(o(0), o(10), [o(0), o(1), o(5), o(6), o(7), o(9)]),
             vec![(o(2), o(5)), (o(8), o(9))]
         );
+
+        // Below-start keys ignored: dense [5,10) despite a leading key 0.
+        assert!(gaps_in_sorted_keys(o(5), o(10), [o(0), o(5), o(6), o(7), o(8), o(9)]).is_empty());
 
         // Prefix + middle
         assert_eq!(
