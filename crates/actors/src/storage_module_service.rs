@@ -36,6 +36,15 @@ use std::{
 use tokio::sync::{mpsc::UnboundedReceiver /*, oneshot*/};
 use tracing::{Instrument as _, debug, error, warn};
 
+/// Max blocks re-indexed in one heal pass. Remaining path-hash holes retry on
+/// the next assignment update / restart so a first-gap→frontier repair cannot
+/// monopolize startup or the assignment path for unbounded wall time.
+const INDEX_HEAL_MAX_BLOCKS_PER_PASS: usize = 128;
+
+/// Per-block wait for `UpdateStorageModuleIndexes`. If migration neither
+/// responds nor drops the oneshot, heal soft-skips and continues.
+const INDEX_HEAL_MIGRATE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
 // Messages that the StorageModuleService service supports
 #[derive(Debug)]
 pub enum StorageModuleServiceMessage {
@@ -313,7 +322,9 @@ impl StorageModuleServiceInner {
     ///
     /// Startup and every partition-assignment update. Dense indexes → density
     /// fast path / no migrate. Soft-skips bounds/index inconsistency and per-block
-    /// migration errors; hard-fails only if the migration channel is closed.
+    /// migration errors (including response timeouts); hard-fails only if the
+    /// migration channel is closed. Large repairs are chunked
+    /// ([`INDEX_HEAL_MAX_BLOCKS_PER_PASS`]) so startup cannot hang unbounded.
     ///
     /// Marker is path-hash completeness; `UpdateStorageModuleIndexes` also writes
     /// DataRootInfos when it runs. Residual: dense path-hashes with empty
@@ -562,15 +573,40 @@ impl StorageModuleServiceInner {
 
     /// Sequential `UpdateStorageModuleIndexes` for each block (BTreeMap order).
     ///
-    /// Returns the number of per-block failures (missing data / index write /
-    /// oneshot drop). Hard-fails only if the migration mpsc is closed.
+    /// Caps work at [`INDEX_HEAL_MAX_BLOCKS_PER_PASS`] and awaits each response
+    /// with [`INDEX_HEAL_MIGRATE_RESPONSE_TIMEOUT`] so startup / assignment heal
+    /// cannot hang indefinitely if migration stalls. Deferred and failed blocks
+    /// count toward the returned failure total (suppresses unblock).
+    ///
+    /// Hard-fails only if the migration mpsc is closed.
     async fn migrate_storage_module_indexes(
         &self,
         blocks_to_migrate: BTreeMap<u64, BlockHash>,
     ) -> eyre::Result<usize> {
-        let migration_service = &self.service_senders.chunk_migration;
+        let total_planned = blocks_to_migrate.len();
         let mut failures = 0_usize;
-        for (block_height, block_hash) in blocks_to_migrate {
+
+        let blocks_this_pass: BTreeMap<u64, BlockHash> =
+            if total_planned > INDEX_HEAL_MAX_BLOCKS_PER_PASS {
+                let deferred = total_planned - INDEX_HEAL_MAX_BLOCKS_PER_PASS;
+                warn!(
+                    index_heal.planned = total_planned,
+                    index_heal.pass_limit = INDEX_HEAL_MAX_BLOCKS_PER_PASS,
+                    index_heal.deferred = deferred,
+                    "capping index heal migrate pass; remaining holes retry on next heal"
+                );
+                // Count deferred as incomplete heal so we do not mass-unblock early.
+                failures += deferred;
+                blocks_to_migrate
+                    .into_iter()
+                    .take(INDEX_HEAL_MAX_BLOCKS_PER_PASS)
+                    .collect()
+            } else {
+                blocks_to_migrate
+            };
+
+        let migration_service = &self.service_senders.chunk_migration;
+        for (block_height, block_hash) in blocks_this_pass {
             let (tx, rx) = tokio::sync::oneshot::channel();
 
             if let Err(e) = migration_service.send_traced(
@@ -589,9 +625,9 @@ impl StorageModuleServiceInner {
                 ));
             }
 
-            match rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
+            match tokio::time::timeout(INDEX_HEAL_MIGRATE_RESPONSE_TIMEOUT, rx).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => {
                     warn!(
                         block.hash = %block_hash,
                         block.height = block_height,
@@ -600,10 +636,19 @@ impl StorageModuleServiceInner {
                     );
                     failures += 1;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!(
                         "Failed to receive migration response for block {} (height {}): {}",
                         block_hash, block_height, e
+                    );
+                    failures += 1;
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        block.hash = %block_hash,
+                        block.height = block_height,
+                        timeout_secs = INDEX_HEAL_MIGRATE_RESPONSE_TIMEOUT.as_secs(),
+                        "UpdateStorageModuleIndexes response timed out; soft-skipping block"
                     );
                     failures += 1;
                 }
@@ -865,7 +910,9 @@ impl StorageModuleService {
         tracing::info!("starting StorageModule Service");
 
         // Crash-resume / long-lived ledger assigns never see Capacity→LedgerSlot
-        // again. Soft-skips per-SM index issues; only migration channel failure is fatal.
+        // again. Soft-skips per-SM issues; only migration channel closed is fatal.
+        // Migrate is chunked + per-response timeout so first-gap→frontier repair
+        // cannot block this start path indefinitely (see migrate_storage_module_indexes).
         if let Err(e) = self.inner.heal_ledger_data_indexes().await {
             error!("startup data-index heal failed: {e:?}");
             return Err(e);
