@@ -4,7 +4,7 @@ pub mod peer_bandwidth_manager;
 pub mod peer_stats;
 
 use crate::{chunk_fetcher::ChunkFetcherFactory, metrics, services::ServiceSenders};
-use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator};
+use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule, WriteDataChunkError};
 use irys_packing::unpack;
 use irys_types::{
@@ -105,7 +105,17 @@ pub struct DataSyncServiceInner {
 }
 
 pub enum DataSyncServiceMessage {
-    SyncPartitions,
+    /// Refresh peer/orchestrator membership for current ledger-assigned SMs.
+    ///
+    /// When `unblock_missing_data_root_index` is true, also re-queues
+    /// [`ChunkBlockReason::MissingDataRootIndex`] offsets (capped by free pending
+    /// budget). Only set that after index heal finished with zero issues (every
+    /// SM plan Complete or fully migrated; no plan soft-skips, no migrate
+    /// failures) — otherwise mass-unblock on a still-broken index becomes an
+    /// epoch refetch/re-block thrash.
+    SyncPartitions {
+        unblock_missing_data_root_index: bool,
+    },
     ChunkCompleted {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
@@ -157,8 +167,13 @@ impl DataSyncServiceInner {
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
-            DataSyncServiceMessage::SyncPartitions => {
+            DataSyncServiceMessage::SyncPartitions {
+                unblock_missing_data_root_index,
+            } => {
                 self.synchronize_peers_and_orchestrators();
+                if unblock_missing_data_root_index {
+                    self.unblock_missing_data_root_indexes();
+                }
             }
             DataSyncServiceMessage::ChunkCompleted {
                 storage_module_id,
@@ -221,6 +236,34 @@ impl DataSyncServiceInner {
         }
         self.optimize_peer_concurrency();
         Ok(())
+    }
+
+    /// Re-queue offsets blocked on missing data_root indexes, capped per
+    /// orchestrator at free pending-budget slots so one heal cannot flood dispatch.
+    fn unblock_missing_data_root_indexes(&mut self) {
+        let max_pending = self.config.node_config.data_sync.max_pending_chunk_requests as usize;
+        let mut total = 0_usize;
+        for (id, orchestrator) in self.chunk_orchestrators.iter_mut() {
+            let pending = orchestrator
+                .chunk_requests
+                .values()
+                .filter(|r| matches!(r.request_state, ChunkRequestState::Pending))
+                .count();
+            let free_slots = max_pending.saturating_sub(pending);
+            let unblocked = orchestrator.unblock_missing_data_root_index(free_slots);
+            if unblocked > 0 {
+                debug!(
+                    storage_module.id = id,
+                    data_sync.unblocked = unblocked,
+                    data_sync.unblock_cap = free_slots,
+                    "re-queued offsets blocked on missing data_root index"
+                );
+                total += unblocked;
+            }
+        }
+        if total > 0 {
+            metrics::record_data_sync_chunk_unblocked(total as u64);
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -365,7 +408,7 @@ impl DataSyncServiceInner {
                     peer.address = %peer_addr,
                     reason,
                     "data_sync write blocked: data_root not indexed in storage module; \
-                     stopping hot re-fetch for this offset (needs index rebuild)"
+                     stopping hot re-fetch until SyncPartitions after a successful index heal"
                 );
                 if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
                     orchestrator

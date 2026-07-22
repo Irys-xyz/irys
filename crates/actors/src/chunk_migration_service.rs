@@ -54,6 +54,10 @@ pub enum MigrationError {
     /// Failed to write chunk index data to submodule database
     #[error("Failed to write chunk index data to submodule database")]
     ChunkIndexWrite,
+    /// Block header or tx missing from DB (legacy import / corruption / mixed restore).
+    /// Callers should soft-skip the block rather than panic the service.
+    #[error("Missing block or tx data for migration: {0}")]
+    MissingData(String),
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
@@ -116,12 +120,16 @@ impl ChunkMigrationServiceInner {
         &mut self,
         block_hash: BlockHash,
     ) -> Result<(), MigrationError> {
-        // Retrieve the block from the db
+        // Soft-fail on missing/corrupt data so startup heal cannot panic-loop the node.
         let block_header = self
             .db
             .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))
-            .expect("db query to succeed")
-            .expect("header should exist in db");
+            .map_err(|e| {
+                MigrationError::Other(format!("db query for block {block_hash} failed: {e}"))
+            })?
+            .ok_or_else(|| {
+                MigrationError::MissingData(format!("block header not found for {block_hash}"))
+            })?;
 
         // For each data ledger, retrieve the tx headers and build a map
         let data_ledger_txids = block_header.get_data_ledger_tx_ids();
@@ -133,8 +141,14 @@ impl ChunkMigrationServiceInner {
                 let tx = self
                     .db
                     .view_eyre(|tx| tx_header_by_txid(tx, &txid))
-                    .unwrap()
-                    .unwrap();
+                    .map_err(|e| {
+                        MigrationError::Other(format!("db query for tx {txid} failed: {e}"))
+                    })?
+                    .ok_or_else(|| {
+                        MigrationError::MissingData(format!(
+                            "tx {txid} not found for block {block_hash}"
+                        ))
+                    })?;
                 txs.push(tx);
             }
             block_tx_map.insert(ledger, txs);
@@ -240,7 +254,9 @@ pub fn process_ledger_transactions(
     storage_modules_guard: &StorageModulesReadGuard,
     db: &Arc<DatabaseProvider>,
 ) -> Result<(), MigrationError> {
-    let path_pairs = get_tx_path_pairs(block, ledger, txs).unwrap();
+    let path_pairs = get_tx_path_pairs(block, ledger, txs).map_err(|e| {
+        MigrationError::Other(format!("tx path merklization failed for {ledger:?}: {e}"))
+    })?;
     let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index);
     let mut prev_chunk_offset = block_offsets.start();
 
@@ -249,7 +265,12 @@ pub fn process_ledger_transactions(
             .data_size
             .div_ceil(chunk_size as u64)
             .try_into()
-            .expect("Value exceeds u32::MAX");
+            .map_err(|_| {
+                MigrationError::Other(format!(
+                    "tx {} data_size {} exceeds u32 chunk count",
+                    tx.id, tx.data_size
+                ))
+            })?;
 
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
