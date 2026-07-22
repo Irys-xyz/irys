@@ -53,8 +53,9 @@ pub enum ChunkRequestState {
 
     /// Locally blocked from hot re-fetch (index gap, etc.). Still retained while
     /// the offset is Entropy so we do not thrash peers. Cleared when the offset
-    /// becomes Data, when `SyncPartitions { unblock_missing_data_root_index: true }`
-    /// re-queues [`ChunkBlockReason::MissingDataRootIndex`], or on process restart.
+    /// becomes Data, when this SM's id is in `SyncPartitions { unblock_sm_ids }`
+    /// (immediately, and again on each tick while the SM stays healed) re-queues
+    /// [`ChunkBlockReason::MissingDataRootIndex`], or on process restart.
     Blocked(ChunkBlockReason),
 }
 
@@ -572,31 +573,38 @@ impl ChunkOrchestrator {
     }
 
     /// After a successful index heal, re-queue offsets blocked solely on
-    /// [`ChunkBlockReason::MissingDataRootIndex`], up to `max` offsets.
+    /// [`ChunkBlockReason::MissingDataRootIndex`], up to `max` offsets, lowest
+    /// offset first (deterministic — not HashMap iteration order).
     ///
-    /// Cap prevents one `SyncPartitions` from flipping an unbounded Blocked
-    /// backlog into Pending and storming the 250ms dispatch tick. Remaining
-    /// Blocked offsets stay until a later successful heal/SyncPartitions.
+    /// Cap prevents one call from flipping an unbounded Blocked backlog into
+    /// Pending and storming the 250ms dispatch tick. Remaining Blocked offsets
+    /// stay until a later call (immediate `SyncPartitions` unblock or the
+    /// per-tick re-arm) drains them further.
     ///
     /// Returns the number of requests moved to [`ChunkRequestState::Pending`].
     pub fn unblock_missing_data_root_index(&mut self, max: usize) -> usize {
         if max == 0 {
             return 0;
         }
-        let mut count = 0_usize;
-        for request in self.chunk_requests.values_mut() {
-            if count >= max {
-                break;
-            }
-            if matches!(
-                request.request_state,
-                ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
-            ) {
+        let mut offsets: Vec<PartitionChunkOffset> = self
+            .chunk_requests
+            .iter()
+            .filter_map(|(&offset, request)| {
+                matches!(
+                    request.request_state,
+                    ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+                )
+                .then_some(offset)
+            })
+            .collect();
+        offsets.sort_unstable();
+        offsets.truncate(max);
+        for offset in &offsets {
+            if let Some(request) = self.chunk_requests.get_mut(offset) {
                 request.request_state = ChunkRequestState::Pending;
-                count += 1;
             }
         }
-        count
+        offsets.len()
     }
 
     /// Local write failed for a non-blocking reason; re-queue without blaming the peer
@@ -741,3 +749,104 @@ pub struct OrchestrationMetrics {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod deterministic_unblock_order_tests {
+    use super::*;
+    use crate::{chunk_fetcher::MockChunkFetcher, test_helpers::build_test_service_senders};
+    use irys_domain::{BlockTree, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, partition::PartitionAssignment,
+        partition_chunk_offset_ie,
+    };
+
+    /// With Blocked offsets {5, 1, 3} and `max = 2`, the lowest two offsets
+    /// (1, 3) must be unblocked — not an arbitrary HashMap-order pair.
+    #[test_log::test(tokio::test)]
+    async fn unblock_missing_data_root_index_picks_lowest_offsets_first() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let num_chunks = 8_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: num_chunks,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                block_migration_depth: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(pa),
+            submodules: vec![(
+                partition_chunk_offset_ie!(0, num_chunks as u32),
+                "chunks".into(),
+            )],
+        };
+        let sm = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        sm.pack_with_zeros();
+
+        let genesis = irys_testing_utils::new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let (service_senders, _receivers) = build_test_service_senders();
+        let ledger_id: u32 = DataLedger::Publish.into();
+        let mut orch = ChunkOrchestrator::new(
+            sm,
+            Arc::new(RwLock::new(HashMap::new())),
+            block_tree_guard,
+            &service_senders,
+            Arc::new(MockChunkFetcher::new(ledger_id as usize)),
+            config.node_config.clone(),
+            tokio::runtime::Handle::current(),
+        );
+
+        for i in [5_u32, 1_u32, 3_u32] {
+            let offset = PartitionChunkOffset::from(i);
+            orch.chunk_requests.insert(
+                offset,
+                ChunkRequest {
+                    ledger_id: 0,
+                    slot_index: 0,
+                    chunk_offset: offset,
+                    excluded: None,
+                    request_state: ChunkRequestState::Blocked(
+                        ChunkBlockReason::MissingDataRootIndex,
+                    ),
+                },
+            );
+        }
+
+        let n = orch.unblock_missing_data_root_index(2);
+        assert_eq!(n, 2);
+        assert_eq!(
+            orch.chunk_requests[&PartitionChunkOffset::from(1_u32)].request_state,
+            ChunkRequestState::Pending,
+            "lowest offset must be unblocked"
+        );
+        assert_eq!(
+            orch.chunk_requests[&PartitionChunkOffset::from(3_u32)].request_state,
+            ChunkRequestState::Pending,
+            "second-lowest offset must be unblocked"
+        );
+        assert_eq!(
+            orch.chunk_requests[&PartitionChunkOffset::from(5_u32)].request_state,
+            ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
+            "highest offset must remain Blocked when capped below the full backlog"
+        );
+    }
+}
