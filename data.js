@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784741754877,
+  "lastUpdate": 1784749301888,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12355,6 +12355,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000145,
             "range": "± 0.000001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6203f3e0760c4cd79ac38b89d3bb6f169aed47db",
+          "message": "fix(storage): plan index heal per path-hash hole, not full SM tail (#1535)\n\n* fix(storage): plan index heal per path-hash hole, not full SM tail\n\nCollect all half-open path-hash gaps and map each hole to a minimal block\nheight span so already-dense segments between holes are not re-migrated.\nAdds a RO submodule index probe binary and a short follow-ups note.\n\n* chore: drop inspect probe and follow-ups note from heal PR\n\nKeep the PR focused on per-hole index heal planning only.\n\n* fix(storage): early-exit first path-hash gap lookups\n\nRestore short-circuit for first_gap_with and first_missing_path_hash_offset\nAPIs so single-hole callers do not full-scan after the first missing offset.\ngaps_with / missing_path_hash_ranges remain the multi-hole heal path.\n\n* fix(storage): partial heal on soft-skip holes; ignore below-window keys\n\nMigrate plannable height spans even when some holes fail bounds planning\n(partial flag still suppresses unblock). Gap helpers skip keys before\nexpected so below-start stream keys cannot invent false holes.\n\n* refactor(domain): remove unused StorageModule::first_missing_path_hash_offset\n\nHeal uses missing_path_hash_ranges only. Keep first_missing_path_hash_offset_in_tx\nfor early-exit single-hole DB lookups and unit tests.",
+          "timestamp": "2026-07-22T12:22:55-07:00",
+          "tree_id": "fa39abf0a163d14a3e8e75ceeb40a26a4df0c597",
+          "url": "https://github.com/Irys-xyz/irys/commit/6203f3e0760c4cd79ac38b89d3bb6f169aed47db"
+        },
+        "date": 1784749300625,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011892,
+            "range": "± 0.000118",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119038,
+            "range": "± 0.001413",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.27199,
+            "range": "± 0.046968",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.91896,
+            "range": "± 0.118155",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075242,
+            "range": "± 0.001423",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 759.722255,
+            "range": "± 7.340102",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1002.328541,
+            "range": "± 40.676982",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117797,
+            "range": "± 0.001957",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1177.981965,
+            "range": "± 13.027864",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1552.030478,
+            "range": "± 5.844443",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033682,
+            "range": "± 0.001535",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.211184,
+            "range": "± 0.796929",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.385831,
+            "range": "± 1.014442",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000115,
+            "range": "± 0.000004",
             "unit": "ms/iter"
           }
         ]
