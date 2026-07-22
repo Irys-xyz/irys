@@ -102,19 +102,35 @@ pub struct DataSyncServiceInner {
     pub service_senders: ServiceSenders,
     pub config: Config,
     pub runtime_handle: tokio::runtime::Handle,
+    /// SM ids whose path-hash index heal was last confirmed clean by
+    /// `SyncPartitions`. Re-armed on the slower re-arm cadence (see
+    /// [`REARM_EVERY_N_TICKS`]) until the set is replaced by a later
+    /// `SyncPartitions` (heal regressed or re-confirmed) or an SM in it
+    /// re-blocks a write on `MissingDataRootIndex` (index regressed).
+    healed_sm_ids: std::collections::HashSet<usize>,
+    /// Dispatch-tick counter, used to run re-arm every [`REARM_EVERY_N_TICKS`]
+    /// ticks instead of on every dispatch tick.
+    rearm_tick: u64,
 }
+
+/// Re-arm the healed-SM Blocked backlog once every N dispatch ticks. Dispatch
+/// runs on a 250ms interval (latency-sensitive), but draining a Blocked backlog
+/// only needs steady progress, so re-arm runs ~1s (4 × 250ms) apart to avoid the
+/// per-tick scan cost without slowing dispatch.
+const REARM_EVERY_N_TICKS: u64 = 4;
 
 pub enum DataSyncServiceMessage {
     /// Refresh peer/orchestrator membership for current ledger-assigned SMs.
     ///
-    /// When `unblock_missing_data_root_index` is true, also re-queues
+    /// `unblock_sm_ids` lists the SM ids whose path-hash index was confirmed
+    /// gap-free this heal pass; each such orchestrator re-queues its
     /// [`ChunkBlockReason::MissingDataRootIndex`] offsets (capped by free pending
-    /// budget). Only set that after index heal finished with zero issues (every
-    /// SM plan Complete or fully migrated; no plan soft-skips, no migrate
-    /// failures) — otherwise mass-unblock on a still-broken index becomes an
+    /// budget). An empty vec unblocks nobody. Per-SM confirmation (a
+    /// post-migration re-verify) prevents one still-broken module from either
+    /// suppressing unblock for healthy modules or being mass-unblocked into an
     /// epoch refetch/re-block thrash.
     SyncPartitions {
-        unblock_missing_data_root_index: bool,
+        unblock_sm_ids: Vec<usize>,
     },
     ChunkCompleted {
         storage_module_id: usize,
@@ -159,6 +175,8 @@ impl DataSyncServiceInner {
             service_senders,
             config,
             runtime_handle,
+            healed_sm_ids: Default::default(),
+            rearm_tick: 0,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -167,13 +185,15 @@ impl DataSyncServiceInner {
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
-            DataSyncServiceMessage::SyncPartitions {
-                unblock_missing_data_root_index,
-            } => {
+            DataSyncServiceMessage::SyncPartitions { unblock_sm_ids } => {
                 self.synchronize_peers_and_orchestrators();
-                if unblock_missing_data_root_index {
-                    self.unblock_missing_data_root_indexes();
+                if !unblock_sm_ids.is_empty() {
+                    self.unblock_missing_data_root_indexes(&unblock_sm_ids);
                 }
+                // Replace (not union) the healed set: an SM that dropped out of
+                // this heal pass's clean set must stop being re-armed by the
+                // tick loop, and an empty vec clears all re-arming.
+                self.healed_sm_ids = unblock_sm_ids.iter().copied().collect();
             }
             DataSyncServiceMessage::ChunkCompleted {
                 storage_module_id,
@@ -235,15 +255,65 @@ impl DataSyncServiceInner {
             orchestrator.tick()?;
         }
         self.optimize_peer_concurrency();
+        // Re-arm on a slower cadence than dispatch to keep dispatch latency-tight
+        // while still draining Blocked backlogs (see REARM_EVERY_N_TICKS).
+        self.rearm_tick = self.rearm_tick.wrapping_add(1);
+        if self.rearm_tick.is_multiple_of(REARM_EVERY_N_TICKS) {
+            self.rearm_healed_storage_modules();
+        }
         Ok(())
     }
 
-    /// Re-queue offsets blocked on missing data_root indexes, capped per
-    /// orchestrator at free pending-budget slots so one heal cannot flood dispatch.
-    fn unblock_missing_data_root_indexes(&mut self) {
+    /// Re-queue offsets blocked on missing data_root indexes for the
+    /// confirmed-clean SMs in `sm_ids`, capped per orchestrator at free
+    /// pending-budget slots so one heal cannot flood dispatch. Orchestrators
+    /// whose SM id is not in `sm_ids` are left untouched (still Blocked).
+    fn unblock_missing_data_root_indexes(&mut self, sm_ids: &[usize]) {
+        let sm_ids: std::collections::HashSet<usize> = sm_ids.iter().copied().collect();
+        let total = self.rearm_missing_data_root_indexes(|id| sm_ids.contains(id));
+        if total > 0 {
+            metrics::record_data_sync_chunk_unblocked(total as u64);
+        }
+    }
+
+    /// Continuous re-arm: every tick, re-queue offsets blocked on missing
+    /// data_root indexes for SMs whose heal is still considered clean
+    /// (`healed_sm_ids`), capped per orchestrator at free pending-budget
+    /// slots. This drains a large Blocked backlog across many ticks instead
+    /// of relying on a single capped pulse from `SyncPartitions`, which is a
+    /// no-op once dispatch is peer-starved (Pending already at cap).
+    // Runs on the slower re-arm cadence (every REARM_EVERY_N_TICKS ticks), so it
+    // no longer scans on every dispatch tick.
+    // FOLLOWUP: still scans each healed orchestrator's requests even when nothing
+    // is Blocked. For an O(1) skip, track a per-orchestrator
+    // Blocked(MissingDataRootIndex) count (inc on mark_chunk_blocked, dec on
+    // unblock and on the populate drop) and skip orchestrators whose count is 0.
+    fn rearm_healed_storage_modules(&mut self) {
+        if self.healed_sm_ids.is_empty() {
+            return;
+        }
+        let healed = self.healed_sm_ids.clone();
+        let total = self.rearm_missing_data_root_indexes(|id| healed.contains(id));
+        if total > 0 {
+            metrics::record_data_sync_chunk_unblocked(total as u64);
+        }
+    }
+
+    /// Shared cap math for re-queuing `MissingDataRootIndex`-blocked offsets:
+    /// for each orchestrator whose id satisfies `should_unblock`, unblock up
+    /// to its free pending-budget slots. Returns the total offsets unblocked
+    /// across all matching orchestrators (metric recording is the caller's
+    /// responsibility, since callers differ in when they consider 0 notable).
+    fn rearm_missing_data_root_indexes(
+        &mut self,
+        should_unblock: impl Fn(&usize) -> bool,
+    ) -> usize {
         let max_pending = self.config.node_config.data_sync.max_pending_chunk_requests as usize;
         let mut total = 0_usize;
         for (id, orchestrator) in self.chunk_orchestrators.iter_mut() {
+            if !should_unblock(id) {
+                continue;
+            }
             let pending = orchestrator
                 .chunk_requests
                 .values()
@@ -261,9 +331,7 @@ impl DataSyncServiceInner {
                 total += unblocked;
             }
         }
-        if total > 0 {
-            metrics::record_data_sync_chunk_unblocked(total as u64);
-        }
+        total
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -414,6 +482,13 @@ impl DataSyncServiceInner {
                     orchestrator
                         .mark_chunk_blocked(chunk_offset, ChunkBlockReason::MissingDataRootIndex)?;
                 }
+                // Index regressed for this SM after a prior heal marked it clean —
+                // stop the per-tick re-arm for it until the next heal re-confirms it.
+                // FOLLOWUP: one re-block drops the whole SM, freezing drain of its
+                // other still-healthy Blocked offsets until the next heal pass.
+                // Consider an N-reblock threshold or one more requeue before drop,
+                // trading a little anti-thrash strictness for faster backlog drain.
+                self.healed_sm_ids.remove(&storage_module_id);
                 // Best-effort: mempool/ingress may still place the chunk if another
                 // path holds indexes; do not treat handoff as durable success.
                 try_send_chunk_to_ingress(&self.service_senders, unpacked_chunk);
@@ -958,5 +1033,341 @@ mod write_outcome_tests {
 
         let outcome = attempt_data_sync_write(&sm, &chunk, PartitionChunkOffset::from(0_u32));
         assert_eq!(outcome, DataSyncWriteOutcome::MissingDataRootIndex);
+    }
+}
+
+#[cfg(test)]
+mod unblock_filter_tests {
+    use super::*;
+    use crate::chunk_fetcher::{ChunkFetcher, MockChunkFetcher};
+    use crate::chunk_orchestrator::ChunkRequest;
+    use crate::test_helpers::build_test_service_senders;
+    use irys_domain::{BlockTree, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        ConsensusConfig, DataLedger, H256, NodeConfig, TxChunkOffset,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+
+    fn test_config(base_directory: std::path::PathBuf) -> Config {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                block_migration_depth: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory,
+            ..NodeConfig::testing()
+        };
+        Config::new_with_random_peer_id(node_config)
+    }
+
+    fn ledger_sm(config: &Config, id: usize, dir: &str) -> Arc<StorageModule> {
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        };
+        let info = StorageModuleInfo {
+            id,
+            partition_assignment: Some(pa),
+            submodules: vec![(partition_chunk_offset_ie!(0, 4), dir.into())],
+        };
+        Arc::new(StorageModule::new(&info, config).expect("storage module"))
+    }
+
+    /// `unblock_missing_data_root_indexes(&[id])` must re-queue only the named
+    /// orchestrator's `MissingDataRootIndex` offsets and leave the others Blocked.
+    #[test_log::test(tokio::test)]
+    async fn unblock_targets_only_named_sm_ids() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = test_config(tmp.path().to_path_buf());
+
+        let sm0 = ledger_sm(&config, 0, "chunks0");
+        let sm1 = ledger_sm(&config, 1, "chunks1");
+        let storage_modules = Arc::new(RwLock::new(vec![sm0, sm1]));
+
+        let genesis = irys_testing_utils::new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
+        let (service_senders, _receivers) = build_test_service_senders();
+        let peer_list = PeerList::from_peers(
+            vec![],
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
+
+        let factory: ChunkFetcherFactory = Box::new(|ledger_id| {
+            Arc::new(MockChunkFetcher::new(ledger_id as usize)) as Arc<dyn ChunkFetcher>
+        });
+
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            storage_modules,
+            peer_list,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        // Both orchestrators should exist (one per ledger-assigned SM).
+        assert!(inner.chunk_orchestrators.contains_key(&0));
+        assert!(inner.chunk_orchestrators.contains_key(&1));
+
+        // Seed each with a MissingDataRootIndex-blocked offset.
+        for id in [0_usize, 1_usize] {
+            let offset = PartitionChunkOffset::from(0_u32);
+            let orch = inner.chunk_orchestrators.get_mut(&id).unwrap();
+            orch.chunk_requests.insert(
+                offset,
+                ChunkRequest {
+                    ledger_id: 0,
+                    slot_index: 0,
+                    chunk_offset: offset,
+                    excluded: None,
+                    request_state: ChunkRequestState::Blocked(
+                        ChunkBlockReason::MissingDataRootIndex,
+                    ),
+                },
+            );
+        }
+
+        // Unblock only SM 0.
+        inner.unblock_missing_data_root_indexes(&[0]);
+
+        let offset = PartitionChunkOffset::from(0_u32);
+        assert_eq!(
+            inner.chunk_orchestrators[&0].chunk_requests[&offset].request_state,
+            ChunkRequestState::Pending,
+            "SM 0 offset should be re-queued to Pending"
+        );
+        assert_eq!(
+            inner.chunk_orchestrators[&1].chunk_requests[&offset].request_state,
+            ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
+            "SM 1 offset must stay Blocked (not in unblock set)"
+        );
+    }
+
+    fn build_test_inner(
+        config: Config,
+        storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
+    ) -> DataSyncServiceInner {
+        let genesis = irys_testing_utils::new_mock_signed_header();
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
+        let (service_senders, _receivers) = build_test_service_senders();
+        let peer_list = PeerList::from_peers(
+            vec![],
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+        )
+        .expect("peer list");
+
+        let factory: ChunkFetcherFactory = Box::new(|ledger_id| {
+            Arc::new(MockChunkFetcher::new(ledger_id as usize)) as Arc<dyn ChunkFetcher>
+        });
+
+        DataSyncServiceInner::new(
+            block_tree_guard,
+            storage_modules,
+            peer_list,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        )
+    }
+
+    /// The tick-driven re-arm must drain a Blocked backlog larger than a single
+    /// pass's free-slot cap across multiple ticks (as Pending drains between
+    /// them), instead of stalling after one capped pulse.
+    #[test_log::test(tokio::test)]
+    async fn rearm_healed_storage_modules_drains_backlog_across_ticks() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 8,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                block_migration_depth: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            data_sync: irys_types::DataSyncServiceConfig {
+                max_pending_chunk_requests: 2,
+                ..Default::default()
+            },
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Publish.into()),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        };
+        let info = StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(pa),
+            submodules: vec![(partition_chunk_offset_ie!(0, 8), "chunks_backlog".into())],
+        };
+        let sm0 = Arc::new(StorageModule::new(&info, &config).expect("storage module"));
+        let storage_modules = Arc::new(RwLock::new(vec![sm0]));
+
+        let mut inner = build_test_inner(config, storage_modules);
+        assert!(inner.chunk_orchestrators.contains_key(&0));
+
+        // Seed 5 Blocked offsets — more than the free-slot cap (2) per pass.
+        let orch = inner.chunk_orchestrators.get_mut(&0).unwrap();
+        for i in 0..5_u32 {
+            let offset = PartitionChunkOffset::from(i);
+            orch.chunk_requests.insert(
+                offset,
+                ChunkRequest {
+                    ledger_id: 0,
+                    slot_index: 0,
+                    chunk_offset: offset,
+                    excluded: None,
+                    request_state: ChunkRequestState::Blocked(
+                        ChunkBlockReason::MissingDataRootIndex,
+                    ),
+                },
+            );
+        }
+        inner.healed_sm_ids.insert(0);
+
+        fn blocked_count(inner: &DataSyncServiceInner) -> usize {
+            inner.chunk_orchestrators[&0]
+                .chunk_requests
+                .values()
+                .filter(|r| {
+                    matches!(
+                        r.request_state,
+                        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+                    )
+                })
+                .count()
+        }
+
+        assert_eq!(blocked_count(&inner), 5);
+
+        let mut backlog_after_each_tick = Vec::new();
+        for _ in 0..4 {
+            inner.rearm_healed_storage_modules();
+
+            // Simulate Pending draining (dispatched + completed/removed) before
+            // the next tick, so free-slot budget is available again.
+            let orch = inner.chunk_orchestrators.get_mut(&0).unwrap();
+            let pending_offsets: Vec<_> = orch
+                .chunk_requests
+                .iter()
+                .filter_map(|(&offset, r)| {
+                    matches!(r.request_state, ChunkRequestState::Pending).then_some(offset)
+                })
+                .collect();
+            for offset in pending_offsets {
+                orch.chunk_requests.remove(&offset);
+            }
+
+            backlog_after_each_tick.push(blocked_count(&inner));
+        }
+
+        assert_eq!(
+            backlog_after_each_tick,
+            vec![3, 1, 0, 0],
+            "backlog must drain monotonically to zero across ticks, not stall after one capped pulse"
+        );
+    }
+
+    /// A prior heal marks SM 0 clean; a subsequent write on that SM re-blocks
+    /// on `MissingDataRootIndex` (index regressed). The id must drop out of
+    /// `healed_sm_ids` so the tick loop stops re-arming it.
+    #[test_log::test(tokio::test)]
+    async fn missing_data_root_index_reblock_clears_healed_sm_id() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let config = test_config(tmp.path().to_path_buf());
+        let sm0 = ledger_sm(&config, 0, "chunks_reblock");
+        let pa = sm0.partition_assignment().expect("partition assignment");
+        sm0.pack_with_zeros();
+        let storage_modules = Arc::new(RwLock::new(vec![sm0]));
+
+        let mut inner = build_test_inner(config.clone(), storage_modules);
+
+        // A heal pass confirms SM 0 clean.
+        inner
+            .handle_message(DataSyncServiceMessage::SyncPartitions {
+                unblock_sm_ids: vec![0],
+            })
+            .expect("handle SyncPartitions");
+        assert!(inner.healed_sm_ids.contains(&0));
+
+        // Simulate an in-flight fetch for offset 0 from `peer`.
+        let peer = IrysAddress::from([9_u8; 20]);
+        let offset = PartitionChunkOffset::from(0_u32);
+        inner
+            .chunk_orchestrators
+            .get_mut(&0)
+            .unwrap()
+            .chunk_requests
+            .insert(
+                offset,
+                ChunkRequest {
+                    ledger_id: 0,
+                    slot_index: 0,
+                    chunk_offset: offset,
+                    excluded: None,
+                    request_state: ChunkRequestState::Requested(peer, std::time::Instant::now()),
+                },
+            );
+
+        // Packed chunk whose data_root was never indexed on SM 0 — the write
+        // must fail with MissingDataRootIndex regardless of packing content.
+        let chunk_size = config.consensus.chunk_size as usize;
+        let mut entropy_chunk = Vec::with_capacity(chunk_size);
+        irys_packing::capacity_single::compute_entropy_chunk(
+            pa.miner_address,
+            0_u64,
+            pa.partition_hash.into(),
+            config.consensus.entropy_packing_iterations,
+            chunk_size,
+            &mut entropy_chunk,
+            config.consensus.chain_id,
+        );
+        let packed_bytes =
+            irys_packing::packing_xor_vec_u8(entropy_chunk, &vec![0xcd_u8; chunk_size]);
+        let packed_chunk = PackedChunk {
+            data_root: H256::random(),
+            data_size: chunk_size as u64,
+            data_path: vec![1, 2, 3, 4].into(),
+            bytes: packed_bytes.into(),
+            packing_address: pa.miner_address,
+            partition_offset: offset,
+            tx_offset: TxChunkOffset::from(0_u32),
+            partition_hash: pa.partition_hash,
+        };
+
+        inner
+            .on_chunk_completed(0, offset, peer, packed_chunk)
+            .expect("on_chunk_completed handles MissingDataRootIndex without erroring");
+
+        assert!(
+            !inner.healed_sm_ids.contains(&0),
+            "index regressed for SM 0 must clear it from healed_sm_ids"
+        );
     }
 }

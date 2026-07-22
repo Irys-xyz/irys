@@ -29,7 +29,8 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_FAILURES("irys.data_sync.chunk_failures_total", "Data sync peer fetch failures/timeouts");
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
-    counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync offsets re-queued on SyncPartitions when unblock_missing_data_root_index is true (MissingDataRootIndex → Pending)");
+    counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync offsets re-queued on SyncPartitions for confirmed-clean SMs (MissingDataRootIndex → Pending)");
+    counter DATA_INDEX_HEAL_UNREPAIRED("irys.storage.index_heal_unrepaired_total", "Ledger SMs still gapped/uncertain after a heal pass (labelled by reason)");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
@@ -286,10 +287,14 @@ pub(crate) fn record_data_sync_chunk_blocked(reason: &'static str) {
     DATA_SYNC_CHUNK_BLOCKED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
+/// `reason` values: `soft_skip` (plan uncertain), `gap_after_heal` (re-verify
+/// still found a gap).
+pub(crate) fn record_index_heal_unrepaired(reason: &'static str) {
+    DATA_INDEX_HEAL_UNREPAIRED.add(1, &[KeyValue::new("reason", reason)]);
+}
+
 pub(crate) fn record_data_sync_chunk_unblocked(count: u64) {
-    if count > 0 {
-        DATA_SYNC_CHUNK_UNBLOCKED.add(count, &[]);
-    }
+    DATA_SYNC_CHUNK_UNBLOCKED.add(count, &[]);
 }
 
 pub(crate) fn record_data_sync_active_peers(count: u64) {

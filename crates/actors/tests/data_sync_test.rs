@@ -246,11 +246,11 @@ impl DataSyncServiceTestHarness {
         self.inner.handle_message(message)
     }
 
-    /// Convenience method to start syncing
+    /// Convenience method to start syncing. Unblocks every current orchestrator
+    /// (initial-sync behavior: all local ledger SMs are treated as clean).
     fn start_sync(&mut self) -> eyre::Result<()> {
-        self.handle_message(DataSyncServiceMessage::SyncPartitions {
-            unblock_missing_data_root_index: true,
-        })
+        let unblock_sm_ids: Vec<usize> = self.inner.chunk_orchestrators.keys().copied().collect();
+        self.handle_message(DataSyncServiceMessage::SyncPartitions { unblock_sm_ids })
     }
 
     /// Get peers list
