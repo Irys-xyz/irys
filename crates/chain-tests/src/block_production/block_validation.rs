@@ -583,6 +583,64 @@ async fn test_prevalidation_rejects_prefix_size_exceeds_data_size() -> Result<()
     Ok(())
 }
 
+/// A block that includes a data tx whose size exceeds the consensus maximum
+/// (`ceil(data_size / chunk_size) > max_data_tx_chunks`) must be rejected with
+/// `DataSizeExceedsMax` at the authoritative gate (`prevalidate_block`), not only at mempool
+/// ingress. Companion to the `data_tx_validation` unit test `flags_data_size_exceeding_max`.
+#[tokio::test]
+async fn test_prevalidation_rejects_oversize_data_tx() -> Result<()> {
+    use irys_types::{DataTransactionLedger, H256List, IrysTransactionCommon as _};
+
+    let ctx = PrevalidationTestContext::new().await?;
+
+    let consensus = ctx.config.consensus_config();
+    let max_chunks = consensus.mempool.max_data_tx_chunks;
+    // One chunk past the limit: (max + 1) * chunk_size bytes -> max + 1 chunks.
+    let oversize_bytes = (max_chunks + 1) * consensus.chunk_size;
+
+    let signer = ctx.config.signer();
+    let mut otx = DataTransactionHeader::new(&consensus);
+    otx.data_size = oversize_bytes;
+    otx.ledger_id = DataLedger::Submit as u32;
+    let otx = otx.sign(&signer)?;
+
+    // Splice into the Submit ledger (tx_ids + matching folded tx_root) and re-sign. The size
+    // guard fires before the tx_root/total_chunks recompute, so the spliced values only keep
+    // SealedBlock construction valid.
+    let mut header = (**ctx.block.header()).clone();
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = H256List(vec![otx.id()]);
+    ledger.tx_root = DataTransactionLedger::compute_tx_root(std::slice::from_ref(&otx));
+    ctx.config.signer().sign_block_header(&mut header)?;
+
+    let mut body = ctx.block.to_block_body();
+    body.data_transactions = vec![otx.clone()];
+    body.block_hash = header.block_hash;
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    match ctx.prevalidate(&bad_block).await {
+        Err(PreValidationError::DataSizeExceedsMax {
+            ledger_id,
+            txid,
+            chunks,
+            max_chunks: reported_max,
+        }) => {
+            assert_eq!(ledger_id, DataLedger::Submit as u32);
+            assert_eq!(txid, otx.id());
+            assert_eq!(chunks, max_chunks + 1);
+            assert_eq!(reported_max, max_chunks);
+        }
+        other => panic!("expected DataSizeExceedsMax, got {:?}", other),
+    }
+
+    ctx.stop().await;
+    Ok(())
+}
+
 /// A block that includes a data tx carrying a foreign `chain_id` must be rejected with
 /// `DataTxChainIdMismatch`. `chain_id` is a signed field, so a tx signed for another chain
 /// must not be admitted into a block on this one — consensus refuses it at the authoritative
