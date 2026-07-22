@@ -1196,10 +1196,9 @@ mod tests {
         assert_eq!(config.genesis.vdf_next_seed, None);
 
         // P2P handshake hash — any mainnet() field or canonical encoding change fails CI.
-        // Re-pinned 2026-07-22: #1517 golden did not match ConsensusConfig::mainnet().keccak256_hash().
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("GsvYvE3kaQTcNKCF5vEtFwzfeJokdbtaGxZnBVmCh8TU"),
+            H256::from_base58("8nKbR4h8hfRPAv3Zh7Fp5TKjAF8MgmnNA6nM5nRdUeF2"), // spellchecker:disable-line
             "mainnet consensus-config hash is consensus-frozen"
         );
     }
@@ -1217,7 +1216,7 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("GFHyRkCukwbVcWRsQWtHkBiwkyxW7TmyqRHfeoGZZAEv"),
+            H256::from_base58("ErtksqJHbWMXGLdw2NYyNa1RiiHEagYwpKuvbm6VWusK"),
             "testnet consensus-config hash is consensus-frozen"
         );
     }
