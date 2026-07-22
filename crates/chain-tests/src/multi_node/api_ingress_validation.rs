@@ -842,6 +842,54 @@ async fn test_api_rejects_prefix_size_exceeds_data_size() -> eyre::Result<()> {
     Ok(())
 }
 
+/// The mempool ingress gate must reject a data tx whose size exceeds the consensus maximum
+/// (`ceil(data_size / chunk_size) > max_data_tx_chunks`), mirroring the `DataSizeExceedsMax`
+/// consensus prevalidation check, so such a tx is never admitted or gossiped onward. The
+/// header is hand-crafted and signed directly.
+#[test_log::test(tokio::test)]
+async fn test_api_rejects_oversize_data_tx() -> eyre::Result<()> {
+    use irys_types::{DataTransactionHeader, IrysTransactionCommon as _};
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let consensus = genesis_config.consensus_config();
+    let anchor = genesis_node.get_anchor().await?;
+
+    // One chunk past the limit: (max + 1) * chunk_size bytes -> max + 1 chunks.
+    let max_chunks = consensus.mempool.max_data_tx_chunks;
+    let oversize_bytes = (max_chunks + 1) * consensus.chunk_size;
+
+    let mut header = DataTransactionHeader::new(&consensus);
+    header.data_size = oversize_bytes;
+    header.ledger_id = DataLedger::Publish as u32;
+    header.anchor = anchor;
+    let header = header.sign(&signer)?;
+
+    let result = genesis_node.ingest_data_tx(header.clone()).await;
+
+    match result {
+        Err(AddTxError::TxIngress(TxIngressError::DataSizeExceedsMax {
+            tx_id,
+            chunks,
+            max_chunks: reported_max,
+        })) => {
+            assert_eq!(tx_id, header.id());
+            assert_eq!(chunks, max_chunks + 1);
+            assert_eq!(reported_max, max_chunks);
+        }
+        other => panic!("expected DataSizeExceedsMax rejection, got: {:?}", other),
+    }
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
 /// The mempool ingress gate must reject a data tx carrying a foreign `chain_id`, mirroring the
 /// `DataTxChainIdMismatch` consensus prevalidation check, so a tx signed for another chain is
 /// never admitted or gossiped onward.
