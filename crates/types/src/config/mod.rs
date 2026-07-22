@@ -1026,6 +1026,7 @@ mod tests {
 
         [mempool]
         max_data_txs_per_block = 100
+        max_data_tx_chunks = 20971520
         max_commitment_txs_per_block = 100
         tx_anchor_expiry_depth = 20
         ingress_proof_anchor_expiry_depth = 200
