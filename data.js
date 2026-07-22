@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784735236122,
+  "lastUpdate": 1784740834529,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12138,6 +12138,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "jesse.cruz.wright@gmail.com",
+            "name": "JesseTheRobot",
+            "username": "JesseTheRobot"
+          },
+          "distinct": true,
+          "id": "fa4d53c4075ac6c860911a89bebf66a4e41a4f59",
+          "message": "fix(storage): per-SM heal unblock, delete-key clears, shutdown-safe backfill\n\nReview-driven hardening of the startup index heal and data-sync unblock path:\n\n- Delete path-hash keys on clear instead of writing {None,None} placeholders,\n  so cleared ranges are visible to the gap scan and get re-indexed.\n- Decide unblock per storage module via a post-migration re-verify against a\n  plan-time offset snapshot: a migrate that returns Ok without closing the gap\n  (reorg orphan-skip / TOCTOU) withholds only that SM, and one broken module no\n  longer strands healthy ones. Complete SMs are re-verified too, closing the\n  plan->send clear-race window.\n- Re-arm the MissingDataRootIndex backlog from the data-sync tick (~1s,\n  decoupled from the 250ms dispatch cadence), clearing an SM on write re-block.\n- Bail startup and epoch backfill promptly on shutdown.\n- Soft-skip (not panic) on heal-path bounds/assignment uncertainty; add an\n  index-heal-unrepaired metric; checked conversions; deterministic unblock order.",
+          "timestamp": "2026-07-22T16:59:59Z",
+          "tree_id": "8473e87d5633fbc17d9f882cc95f10fe8bb22411",
+          "url": "https://github.com/Irys-xyz/irys/commit/fa4d53c4075ac6c860911a89bebf66a4e41a4f59"
+        },
+        "date": 1784740833286,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013325,
+            "range": "± 0.001955",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126973,
+            "range": "± 0.005407",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.264878,
+            "range": "± 0.078997",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.494758,
+            "range": "± 0.673785",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078818,
+            "range": "± 0.001357",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 783.650534,
+            "range": "± 21.015724",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1029.294254,
+            "range": "± 33.131679",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.147385,
+            "range": "± 0.009931",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1268.010426,
+            "range": "± 82.912229",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1622.709182,
+            "range": "± 128.267376",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033701,
+            "range": "± 0.000783",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.406422,
+            "range": "± 2.059133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.767971,
+            "range": "± 1.44817",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
