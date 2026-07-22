@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784690365340,
+  "lastUpdate": 1784715830097,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11923,6 +11923,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "95b6c2fca1fe468e1d7f8b4a6b5a9789c6ed0638",
+          "message": "test(promotion): characterization test for oversized-tx cache-eviction promotion flaw (#1532)\n\ntest(promotion): add oversized tx cache eviction characterization test\n\nCharacterizes a flaw in promotion: a submit tx larger than the bounded\nchunk cache can never be promoted, because ingress-proof generation\nrequires the whole data_root cached simultaneously while the cache evicts\nearly chunks before the last arrives.\n\nAsserts the current (buggy) behavior on purpose; when the flaw is fixed\nthis test should start failing and its final assertions should be flipped.",
+          "timestamp": "2026-07-22T11:07:02+01:00",
+          "tree_id": "7a864e86faf966e9260e89604d2677de946c2065",
+          "url": "https://github.com/Irys-xyz/irys/commit/95b6c2fca1fe468e1d7f8b4a6b5a9789c6ed0638"
+        },
+        "date": 1784715828698,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012577,
+            "range": "± 0.000643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.126245,
+            "range": "± 0.010575",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.269341,
+            "range": "± 0.130737",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.376978,
+            "range": "± 0.31363",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.082692,
+            "range": "± 0.003602",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.545628,
+            "range": "± 22.975905",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 988.212122,
+            "range": "± 8.519561",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.129717,
+            "range": "± 0.007308",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1249.400541,
+            "range": "± 108.072204",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1574.314361,
+            "range": "± 17.135758",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033963,
+            "range": "± 0.001068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.404616,
+            "range": "± 1.278255",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.085647,
+            "range": "± 1.410012",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
