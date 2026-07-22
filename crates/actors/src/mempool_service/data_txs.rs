@@ -34,7 +34,12 @@ impl Inner {
         // foreign chain_id) using the same shared predicate as consensus prevalidation
         // (`data_tx_structural_defect`), so ingress and consensus enforce identical rules.
         // Cheap and fork-independent, so it runs before signature/anchor work.
-        if let Some(defect) = data_tx_structural_defect(tx, self.config.consensus.chain_id) {
+        if let Some(defect) = data_tx_structural_defect(
+            tx,
+            self.config.consensus.chain_id,
+            self.config.consensus.chunk_size,
+            self.config.consensus.mempool.max_data_tx_chunks,
+        ) {
             return Err(match defect {
                 DataTxStructuralDefect::ZeroDataSize => TxIngressError::ZeroDataSize(tx.id),
                 DataTxStructuralDefect::PrefixSizeExceedsDataSize { .. } => {
@@ -45,6 +50,13 @@ impl Inner {
                         tx_id: tx.id,
                         expected,
                         actual,
+                    }
+                }
+                DataTxStructuralDefect::DataSizeExceedsMax { chunks, max_chunks } => {
+                    TxIngressError::DataSizeExceedsMax {
+                        tx_id: tx.id,
+                        chunks,
+                        max_chunks,
                     }
                 }
             });

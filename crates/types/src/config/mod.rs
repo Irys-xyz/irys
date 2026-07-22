@@ -126,6 +126,10 @@ impl Config {
         // also panic on a zero recall range. Reject loudly here. (NC-0042)
         ensure!(self.consensus.chunk_size > 0, "chunk_size must be > 0");
         ensure!(
+            self.consensus.mempool.max_data_tx_chunks > 0,
+            "mempool.max_data_tx_chunks must be > 0"
+        );
+        ensure!(
             self.consensus.num_chunks_in_partition > 0,
             "num_chunks_in_partition must be > 0"
         );
@@ -1022,6 +1026,7 @@ mod tests {
 
         [mempool]
         max_data_txs_per_block = 100
+        max_data_tx_chunks = 20971520
         max_commitment_txs_per_block = 100
         tx_anchor_expiry_depth = 20
         ingress_proof_anchor_expiry_depth = 200
@@ -1834,6 +1839,12 @@ mod validate_tests {
             c.difficulty_adjustment.block_time = u64::MAX / 2;
         },
         "overflows u64"
+    )]
+    #[case::zero_max_data_tx_chunks(
+        |c: &mut ConsensusConfig| {
+            c.mempool.max_data_tx_chunks = 0;
+        },
+        "max_data_tx_chunks"
     )]
     fn validate_rejects_runtime_panic_configs(
         #[case] mutate: fn(&mut ConsensusConfig),

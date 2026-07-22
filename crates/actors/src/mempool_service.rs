@@ -2427,6 +2427,15 @@ pub enum TxIngressError {
         expected: u64,
         actual: u64,
     },
+    /// A data transaction's size exceeds the consensus-enforced maximum: its chunk count
+    /// `ceil(data_size / chunk_size)` is greater than `max_data_tx_chunks`. Rejected at
+    /// ingress to mirror the `DataSizeExceedsMax` consensus prevalidation check.
+    #[error("Data transaction {tx_id} spans {chunks} chunks, exceeding the max of {max_chunks}")]
+    DataSizeExceedsMax {
+        tx_id: H256,
+        chunks: u64,
+        max_chunks: u64,
+    },
     /// Some database error occurred
     #[error("Database operation failed: {0}")]
     DatabaseError(String),

@@ -3,6 +3,7 @@ pub(crate) mod helpers;
 use crate::block_discovery::{TxLookupResult, get_data_tx_in_parallel_inner};
 use crate::block_validation::get_assigned_ingress_proofs;
 use crate::chunk_ingress_service::{ChunkIngressServiceInner, ChunkIngressState};
+use crate::data_tx_validation::data_tx_structural_defect;
 use crate::mempool_guard::MempoolReadGuard;
 use crate::mempool_service::{AtomicMempoolState, MempoolTxs, validate_commitment_transaction};
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -502,6 +503,14 @@ pub async fn select_best_txs(
         .max_data_txs_per_block
         .try_into()
         .expect("max_data_txs_per_block to fit into usize");
+    let (chain_id, chunk_size, max_data_tx_chunks) = {
+        let consensus = ctx.config.node_config.consensus_config();
+        (
+            consensus.chain_id,
+            consensus.chunk_size,
+            consensus.mempool.max_data_tx_chunks,
+        )
+    };
 
     balances.extend(
         helpers::fetch_balances_for_transactions(
@@ -524,6 +533,22 @@ pub async fn select_best_txs(
             );
             continue;
         };
+
+        // Never select a structurally-defective tx; consensus prevalidation would reject the
+        // resulting block. Uses the same shared predicate as ingress and prevalidation
+        // (`data_tx_structural_defect`) so block production can't drift from those gates.
+        // Ingress already rejects these, so this is defense-in-depth.
+        if let Some(defect) =
+            data_tx_structural_defect(&tx, chain_id, chunk_size, max_data_tx_chunks)
+        {
+            debug!(
+                tx.id = ?tx.id,
+                tx.data_size = tx.data_size,
+                ?defect,
+                "Skipping tx: structural defect"
+            );
+            continue;
+        }
         match ledger {
             irys_types::DataLedger::Publish => {
                 // For Publish ledger, validate both term and perm fees

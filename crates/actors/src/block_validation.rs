@@ -424,6 +424,20 @@ pub enum PreValidationError {
         actual: u64,
     },
 
+    /// A data transaction's size exceeds the consensus-enforced maximum. The tx spans
+    /// `chunks = ceil(data_size / chunk_size)` chunks, more than `max_chunks`
+    /// (`max_data_tx_chunks`). Rejected at the authoritative gate so a hand-crafted peer
+    /// block can't smuggle an oversize tx past what ingress rejects.
+    #[error(
+        "data tx {txid} in ledger {ledger_id} spans {chunks} chunks, exceeding the max of {max_chunks}"
+    )]
+    DataSizeExceedsMax {
+        ledger_id: u32,
+        txid: H256,
+        chunks: u64,
+        max_chunks: u64,
+    },
+
     /// A commitment transaction carries a `chain_id` that differs from this node's.
     /// `chain_id` is a signed field, so a mismatch means the tx was signed for another
     /// chain; rejected at consensus so a hand-crafted peer block can't smuggle one in.
@@ -631,6 +645,7 @@ impl PreValidationError {
             | Self::ZeroSizeDataTx { .. }
             | Self::PrefixSizeExceedsDataSize { .. }
             | Self::DataTxChainIdMismatch { .. }
+            | Self::DataSizeExceedsMax { .. }
             | Self::CommitmentChainIdMismatch { .. }
             | Self::TransactionIdMismatch { .. }
             | Self::TxFoundInMultipleBlocks { .. }
@@ -741,6 +756,7 @@ impl PreValidationError {
             Self::ZeroSizeDataTx { .. } => "zero_size_data_tx",
             Self::PrefixSizeExceedsDataSize { .. } => "prefix_size_exceeds_data_size",
             Self::DataTxChainIdMismatch { .. } => "data_tx_chain_id_mismatch",
+            Self::DataSizeExceedsMax { .. } => "data_size_exceeds_max",
             Self::CommitmentChainIdMismatch { .. } => "commitment_chain_id_mismatch",
             Self::TooManyCommitmentTxs { .. } => "too_many_commitment_txs",
             Self::MissingTransactions(_) => "missing_transactions",
@@ -1940,11 +1956,18 @@ pub async fn prevalidate_block(
         })?;
         let ledger_txs = transactions.get_ledger_txs(ledger);
         // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
-        // foreign chain_id) BEFORE recomputing the tx_root, using the same shared predicate
+        // foreign chain_id, or exceeding config.consensus.mempool.max_data_tx_chunks)
+        // BEFORE recomputing the tx_root, using the same shared predicate
         // as mempool ingress (`data_tx_structural_defect`) so the two gates can't drift and a
         // hand-crafted peer block can't smuggle past consensus what ingress rejects. One pass.
         if let Some((tx, defect)) = ledger_txs.iter().find_map(|tx| {
-            data_tx_structural_defect(tx, config.consensus.chain_id).map(|d| (tx, d))
+            data_tx_structural_defect(
+                tx,
+                config.consensus.chain_id,
+                chunk_size,
+                config.consensus.mempool.max_data_tx_chunks,
+            )
+            .map(|d| (tx, d))
         }) {
             return Err(match defect {
                 DataTxStructuralDefect::ZeroDataSize => PreValidationError::ZeroSizeDataTx {
@@ -1966,6 +1989,14 @@ pub async fn prevalidate_block(
                         txid: tx.id,
                         expected,
                         actual,
+                    }
+                }
+                DataTxStructuralDefect::DataSizeExceedsMax { chunks, max_chunks } => {
+                    PreValidationError::DataSizeExceedsMax {
+                        ledger_id: dl.ledger_id,
+                        txid: tx.id,
+                        chunks,
+                        max_chunks,
                     }
                 }
             });
