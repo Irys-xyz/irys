@@ -502,6 +502,10 @@ pub async fn select_best_txs(
         .max_data_txs_per_block
         .try_into()
         .expect("max_data_txs_per_block to fit into usize");
+    let (max_data_tx_chunks, chunk_size) = {
+        let consensus = ctx.config.node_config.consensus_config();
+        (consensus.mempool.max_data_tx_chunks, consensus.chunk_size)
+    };
 
     balances.extend(
         helpers::fetch_balances_for_transactions(
@@ -524,6 +528,18 @@ pub async fn select_best_txs(
             );
             continue;
         };
+
+        // Never select a tx over the consensus max data size; consensus prevalidation would
+        // reject the resulting block. Ingress already rejects these, so this is defense-in-depth.
+        if tx.data_size.div_ceil(chunk_size) > max_data_tx_chunks {
+            debug!(
+                tx.id = ?tx.id,
+                tx.data_size = tx.data_size,
+                max_data_tx_chunks,
+                "Skipping tx: exceeds max data-tx size"
+            );
+            continue;
+        }
         match ledger {
             irys_types::DataLedger::Publish => {
                 // For Publish ledger, validate both term and perm fees
