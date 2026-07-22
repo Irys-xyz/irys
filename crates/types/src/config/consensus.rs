@@ -500,6 +500,12 @@ pub struct MempoolConsensusConfig {
     /// Maximum number of data transactions that can be included in a single block
     pub max_data_txs_per_block: u64,
 
+    /// Maximum size of a single data transaction, expressed in chunks.
+    /// A data tx is rejected (at mempool ingress and consensus prevalidation) when
+    /// `ceil(data_size / chunk_size)` exceeds this value. On mainnet this is
+    /// 20_971_520 chunks = 5 TiB at the 256 KiB chunk size.
+    pub max_data_tx_chunks: u64,
+
     /// Maximum number of commitment transactions allowed in a single block
     pub max_commitment_txs_per_block: u64,
 
@@ -727,6 +733,8 @@ impl ConsensusConfig {
             mempool: MempoolConsensusConfig {
                 // Maximum number of data transactions that can be included in a single block
                 max_data_txs_per_block: 100,
+                // Maximum size of a single data transaction: 20_971_520 chunks = 5 TiB at 256 KiB chunks
+                max_data_tx_chunks: 20_971_520,
                 // Maximum number of commitment transactions allowed in a single block
                 max_commitment_txs_per_block: 100,
                 // The number of blocks a given anchor (tx or block hash) is valid for. The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
@@ -879,6 +887,7 @@ impl ConsensusConfig {
             pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
+                max_data_tx_chunks: 20_971_520,
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 20,
                 ingress_proof_anchor_expiry_depth: 200,
@@ -1021,6 +1030,7 @@ impl ConsensusConfig {
 
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
+                max_data_tx_chunks: 20_971_520,
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 50,
                 ingress_proof_anchor_expiry_depth: 200,
@@ -1408,7 +1418,7 @@ mod tests {
     #[test]
     fn test_consensus_hash_regression() {
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("ZRo1XRxuY4bYeuUKy2VPcBDpnuUsDGUBJk4uCYByaLE");
+        let expected_hash = H256::from_base58("65At1ZvKVtUPtR1jLtA8CcFYX2vHf7tT5TbhBEy3u2XE");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
