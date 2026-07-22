@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784740834529,
+  "lastUpdate": 1784741754877,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12247,6 +12247,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "946120d4b06fd06f849e6b65a5938e3b63eb1f87",
+          "message": "fix(storage): heal path-hash indexes on startup and reconnect data_sync (#1531)\n\n* fix(storage): heal path-hash indexes on startup and reconnect data_sync\n\nRun index repair for all ledger-assigned SMs at service start and on every\npartition assignment (not only Capacity→LedgerSlot). Soft-fail migration on\nmissing block/tx data, gate and cap MissingDataRootIndex unblock, and use an\nO(1) density fast path so healthy modules skip full key walks.\n\n* fix(storage): bound index-heal migrate with timeout and pass cap\n\nPer-block oneshot await now times out, and each heal pass migrates at most\n128 blocks so first-gap-to-frontier repair cannot hang startup indefinitely.",
+          "timestamp": "2026-07-22T08:30:39-07:00",
+          "tree_id": "049a1c3bc9844562dbd68f7e6a216f1ffc0883d6",
+          "url": "https://github.com/Irys-xyz/irys/commit/946120d4b06fd06f849e6b65a5938e3b63eb1f87"
+        },
+        "date": 1784741751593,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012128,
+            "range": "± 0.000366",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.120684,
+            "range": "± 0.005409",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.243097,
+            "range": "± 0.060229",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.719163,
+            "range": "± 0.285907",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078686,
+            "range": "± 0.00045",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 787.935964,
+            "range": "± 23.469385",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1017.901337,
+            "range": "± 25.242569",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119212,
+            "range": "± 0.002733",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1254.52943,
+            "range": "± 48.129335",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1549.758174,
+            "range": "± 102.178864",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033843,
+            "range": "± 0.000653",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.61749,
+            "range": "± 1.230316",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.734078,
+            "range": "± 6.927439",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000145,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
