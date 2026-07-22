@@ -68,6 +68,9 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
 
 /// First offset in half-open `[start, end)` absent from a fallible sorted key stream.
 ///
+/// Returns as soon as the first hole is found (does not scan past it). Use
+/// [`gaps_with`] when every hole is required.
+///
 /// `next_key` yields the next ascending key (or `None` when exhausted). Shared by
 /// the MDBX cursor path and pure unit tests so both stay identical.
 pub fn first_gap_with(
@@ -75,10 +78,23 @@ pub fn first_gap_with(
     end: PartitionChunkOffset,
     mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
-    Ok(gaps_with(start, end, &mut next_key)?
-        .into_iter()
-        .next()
-        .map(|(gap_start, _)| gap_start))
+    if start >= end {
+        return Ok(None);
+    }
+    let mut expected = start;
+    while let Some(key) = next_key()? {
+        if key >= end {
+            break;
+        }
+        if key > expected {
+            return Ok(Some(expected));
+        }
+        expected = key + 1;
+        if expected >= end {
+            return Ok(None);
+        }
+    }
+    Ok(if expected < end { Some(expected) } else { None })
 }
 
 /// All half-open missing ranges `[gap_start, gap_end)` inside `[start, end)`.
@@ -164,17 +180,25 @@ fn path_hash_table_is_dense_range<T: DbTx>(
 /// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
 ///
 /// Healthy full indexes take an O(1) density check (`first` + `last` + `entries`).
-/// Otherwise walks the sorted keyspace (one RO tx): O(#indexed keys in range),
-/// correct for non-prefix holes. Dense linear point-gets are not used.
+/// Otherwise walks the sorted keyspace until the first hole (one RO tx), not a
+/// full multi-hole collect — use [`missing_path_hash_ranges_in_tx`] for that.
 pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
-    Ok(missing_path_hash_ranges_in_tx(tx, start, end)?
-        .into_iter()
-        .next()
-        .map(|(gap_start, _)| gap_start))
+    if start >= end {
+        return Ok(None);
+    }
+    if path_hash_table_is_dense_range(tx, start, end)? {
+        return Ok(None);
+    }
+
+    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
+    let mut walker = cursor.walk(Some(start))?;
+    first_gap_with(start, end, || {
+        Ok(walker.next().transpose()?.map(|(key, _)| key))
+    })
 }
 
 /// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.

@@ -44,7 +44,8 @@ use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
         add_full_tx_path, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
-        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
+        clear_submodule_database, create_or_open_submodule_db,
+        first_missing_path_hash_offset_in_tx, get_data_path_by_offset,
         get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
         get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
         missing_path_hash_ranges_in_tx, set_data_root_infos_for_data_root,
@@ -1596,18 +1597,35 @@ impl StorageModule {
     }
 
     /// First partition-relative offset in half-open `[start, end)` with no path-hash
-    /// index entry. Walks each submodule's MDBX keyspace with a cursor (one RO
-    /// view per submodule), not per-offset point gets.
+    /// index entry. Stops at the first hole (per submodule, then returns); does not
+    /// collect every gap. Use [`Self::missing_path_hash_ranges`] for all holes.
     pub fn first_missing_path_hash_offset(
         &self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
     ) -> eyre::Result<Option<PartitionChunkOffset>> {
-        Ok(self
-            .missing_path_hash_ranges(start, end)?
-            .into_iter()
-            .next()
-            .map(|(gap_start, _)| gap_start))
+        if start >= end {
+            return Ok(None);
+        }
+
+        let mut offset = start;
+        while offset < end {
+            let (interval, submodule) = self.get_submodule_for_offset(offset)?;
+            // Submodule intervals are inclusive; convert end to exclusive for the scan.
+            // Deref of PartitionChunkOffset would make `+ 1` yield u32; construct explicitly.
+            let submodule_end_excl = PartitionChunkOffset(*interval.end() + 1);
+            let sub_end = std::cmp::min(end, submodule_end_excl);
+
+            let gap = submodule
+                .db
+                .view(|tx| first_missing_path_hash_offset_in_tx(tx, offset, sub_end))??;
+
+            if gap.is_some() {
+                return Ok(gap);
+            }
+            offset = sub_end;
+        }
+        Ok(None)
     }
 
     /// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.
