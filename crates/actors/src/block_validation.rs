@@ -1956,7 +1956,8 @@ pub async fn prevalidate_block(
         })?;
         let ledger_txs = transactions.get_ledger_txs(ledger);
         // Reject structurally-invalid data txs (zero data_size, prefix_size > data_size,
-        // foreign chain_id) BEFORE recomputing the tx_root, using the same shared predicate
+        // foreign chain_id, or exceeding config.consensus.mempool.max_data_tx_chunks)
+        // BEFORE recomputing the tx_root, using the same shared predicate
         // as mempool ingress (`data_tx_structural_defect`) so the two gates can't drift and a
         // hand-crafted peer block can't smuggle past consensus what ingress rejects. One pass.
         if let Some((tx, defect)) = ledger_txs.iter().find_map(|tx| {
