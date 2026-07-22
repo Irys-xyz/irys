@@ -180,6 +180,10 @@ impl From<TxIngressError> for GossipError {
                 // Tx signed for another chain, decrease source reputation
                 Self::InvalidData(InvalidDataError::TransactionChainIdMismatch(tx_id))
             }
+            TxIngressError::DataSizeExceedsMax { tx_id, .. } => {
+                // Structurally invalid tx (exceeds max data size), decrease source reputation
+                Self::InvalidData(InvalidDataError::TransactionDataSizeExceedsMax(tx_id))
+            }
         }
     }
 }
@@ -227,6 +231,8 @@ pub enum InvalidDataError {
     TransactionPrefixSizeExceedsDataSize(irys_types::H256),
     #[error("Transaction {0} has a foreign chain_id")]
     TransactionChainIdMismatch(irys_types::H256),
+    #[error("Transaction {0} exceeds the maximum data size")]
+    TransactionDataSizeExceedsMax(irys_types::H256),
     #[error("Invalid chunk proof")]
     ChunkInvalidProof,
     #[error("Invalid chunk data hash")]

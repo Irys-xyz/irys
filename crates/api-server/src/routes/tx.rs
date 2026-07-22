@@ -148,6 +148,9 @@ pub async fn post_tx(
             TxIngressError::ChainIdMismatch { .. } => {
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
+            TxIngressError::DataSizeExceedsMax { .. } => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
         };
     }
 

@@ -117,7 +117,9 @@ async fn process_commitment_transaction(
             // These variants are only produced by the data-tx ingress path, so they are
             // unreachable here, but the match must stay exhaustive over the shared
             // `TxIngressError`.
-            TxIngressError::ZeroDataSize(_) | TxIngressError::PrefixSizeExceedsDataSize(_) => {
+            TxIngressError::ZeroDataSize(_)
+            | TxIngressError::PrefixSizeExceedsDataSize(_)
+            | TxIngressError::DataSizeExceedsMax { .. } => {
                 Err(ApiError::from((err.to_string(), StatusCode::BAD_REQUEST)))
             }
             TxIngressError::BalanceFetchError { address, reason } => {

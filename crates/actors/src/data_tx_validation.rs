@@ -24,6 +24,10 @@ pub enum DataTxStructuralDefect {
     PrefixSizeExceedsDataSize { prefix_size: u64, data_size: u64 },
     /// The tx's signed `chain_id` differs from this node's — it was signed for another chain.
     ChainIdMismatch { expected: u64, actual: u64 },
+    /// `ceil(data_size / chunk_size) > max_data_tx_chunks`: the transaction's data exceeds
+    /// the consensus-enforced maximum size. `chunks` is the tx's chunk count, `max_chunks`
+    /// the configured cap.
+    DataSizeExceedsMax { chunks: u64, max_chunks: u64 },
 }
 
 /// The first structural defect of a data transaction (if any), given the node's
@@ -31,11 +35,13 @@ pub enum DataTxStructuralDefect {
 ///
 /// Shared by mempool ingress and consensus prevalidation so the two gates enforce
 /// byte-identical rules. The check order is load-bearing for which defect is reported
-/// (zero-size, then oversized prefix, then foreign chain_id), though any defect rejects the
-/// transaction either way.
+/// (zero-size, then oversized prefix, then foreign chain_id, then oversized data), though
+/// any defect rejects the transaction either way.
 pub fn data_tx_structural_defect(
     tx: &DataTransactionHeader,
     expected_chain_id: u64,
+    chunk_size: u64,
+    max_data_tx_chunks: u64,
 ) -> Option<DataTxStructuralDefect> {
     if tx.data_size == 0 {
         return Some(DataTxStructuralDefect::ZeroDataSize);
@@ -50,6 +56,14 @@ pub fn data_tx_structural_defect(
         return Some(DataTxStructuralDefect::ChainIdMismatch {
             expected: expected_chain_id,
             actual: tx.chain_id,
+        });
+    }
+    // data_size > 0 is guaranteed above, so chunks >= 1 here.
+    let chunks = tx.data_size.div_ceil(chunk_size);
+    if chunks > max_data_tx_chunks {
+        return Some(DataTxStructuralDefect::DataSizeExceedsMax {
+            chunks,
+            max_chunks: max_data_tx_chunks,
         });
     }
     None
@@ -78,11 +92,21 @@ mod tests {
         let c = ConsensusConfig::testing();
         // prefix_size == data_size (whole-data prefix) and prefix_size == 0 are both valid.
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 100, 100, c.chain_id), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 100, 100, c.chain_id),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             None
         );
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 100, 0, c.chain_id), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 100, 0, c.chain_id),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             None
         );
     }
@@ -91,7 +115,12 @@ mod tests {
     fn flags_zero_data_size() {
         let c = ConsensusConfig::testing();
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 0, 0, c.chain_id), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 0, 0, c.chain_id),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             Some(DataTxStructuralDefect::ZeroDataSize),
         );
     }
@@ -100,7 +129,12 @@ mod tests {
     fn flags_prefix_size_exceeding_data_size() {
         let c = ConsensusConfig::testing();
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 100, 101, c.chain_id), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 100, 101, c.chain_id),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             Some(DataTxStructuralDefect::PrefixSizeExceedsDataSize {
                 prefix_size: 101,
                 data_size: 100,
@@ -112,7 +146,12 @@ mod tests {
     fn flags_foreign_chain_id() {
         let c = ConsensusConfig::testing();
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 100, 0, c.chain_id + 1), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 100, 0, c.chain_id + 1),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             Some(DataTxStructuralDefect::ChainIdMismatch {
                 expected: c.chain_id,
                 actual: c.chain_id + 1,
@@ -125,16 +164,44 @@ mod tests {
         let c = ConsensusConfig::testing();
         // zero data_size wins even when prefix and chain_id are also wrong
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 0, 5, c.chain_id + 1), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 0, 5, c.chain_id + 1),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             Some(DataTxStructuralDefect::ZeroDataSize),
         );
         // oversized prefix wins over a foreign chain_id when data_size > 0
         assert_eq!(
-            data_tx_structural_defect(&header(&c, 10, 11, c.chain_id + 1), c.chain_id),
+            data_tx_structural_defect(
+                &header(&c, 10, 11, c.chain_id + 1),
+                c.chain_id,
+                c.chunk_size,
+                c.mempool.max_data_tx_chunks,
+            ),
             Some(DataTxStructuralDefect::PrefixSizeExceedsDataSize {
                 prefix_size: 11,
                 data_size: 10,
             }),
+        );
+    }
+
+    #[test]
+    fn flags_data_size_exceeding_max() {
+        let c = ConsensusConfig::testing(); // chunk_size = 32
+        // 129 bytes -> ceil(129/32) = 5 chunks > max of 4 -> rejected.
+        assert_eq!(
+            data_tx_structural_defect(&header(&c, 129, 0, c.chain_id), c.chain_id, c.chunk_size, 4),
+            Some(DataTxStructuralDefect::DataSizeExceedsMax {
+                chunks: 5,
+                max_chunks: 4,
+            }),
+        );
+        // Exactly 128 bytes -> 4 chunks == max -> allowed.
+        assert_eq!(
+            data_tx_structural_defect(&header(&c, 128, 0, c.chain_id), c.chain_id, c.chunk_size, 4),
+            None,
         );
     }
 }
