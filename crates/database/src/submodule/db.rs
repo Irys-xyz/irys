@@ -75,23 +75,44 @@ pub fn first_gap_with(
     end: PartitionChunkOffset,
     mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
+    Ok(gaps_with(start, end, &mut next_key)?
+        .into_iter()
+        .next()
+        .map(|(gap_start, _)| gap_start))
+}
+
+/// All half-open missing ranges `[gap_start, gap_end)` inside `[start, end)`.
+///
+/// Consecutive missing offsets form one range. Indexed runs between holes are
+/// **not** included — callers can re-index only the holes instead of the whole
+/// tail after the first gap.
+pub fn gaps_with(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
+) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
     if start >= end {
-        return Ok(None);
+        return Ok(Vec::new());
     }
+    let mut gaps = Vec::new();
     let mut expected = start;
     while let Some(key) = next_key()? {
         if key >= end {
             break;
         }
         if key > expected {
-            return Ok(Some(expected));
+            gaps.push((expected, key));
         }
-        expected = expected + 1;
+        // Advance past this present key (and any implied dense run of one).
+        expected = key + 1;
         if expected >= end {
-            return Ok(None);
+            return Ok(gaps);
         }
     }
-    Ok(if expected < end { Some(expected) } else { None })
+    if expected < end {
+        gaps.push((expected, end));
+    }
+    Ok(gaps)
 }
 
 /// First offset in half-open `[start, end)` absent from a sorted key stream.
@@ -106,6 +127,40 @@ pub fn first_gap_in_sorted_keys(
     first_gap_with(start, end, || Ok(iter.next())).expect("infallible key stream")
 }
 
+/// All half-open missing ranges in `[start, end)` from a sorted key stream.
+pub fn gaps_in_sorted_keys(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    keys: impl IntoIterator<Item = PartitionChunkOffset>,
+) -> Vec<(PartitionChunkOffset, PartitionChunkOffset)> {
+    let mut iter = keys.into_iter();
+    gaps_with(start, end, || Ok(iter.next())).expect("infallible key stream")
+}
+
+/// Returns true when the table is exactly the dense range `[start, end)`.
+fn path_hash_table_is_dense_range<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<bool> {
+    let expected_len = (*end as u64).saturating_sub(*start as u64);
+    if expected_len == 0 {
+        return Ok(true);
+    }
+    let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
+    let first = cursor.first()?;
+    let last = cursor.last()?;
+    let count = tx.entries::<ChunkPathHashesByOffset>()? as u64;
+    Ok(match (first, last) {
+        (Some((first_key, _)), Some((last_key, _))) => {
+            // Compare last == end-1 without wrapping u32::MAX + 1.
+            let last_is_range_end = *end > 0 && last_key == PartitionChunkOffset(*end - 1);
+            first_key == start && last_is_range_end && count == expected_len
+        }
+        _ => false,
+    })
+}
+
 /// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
 ///
 /// Healthy full indexes take an O(1) density check (`first` + `last` + `entries`).
@@ -116,32 +171,36 @@ pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
+    Ok(missing_path_hash_ranges_in_tx(tx, start, end)?
+        .into_iter()
+        .next()
+        .map(|(gap_start, _)| gap_start))
+}
+
+/// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.
+///
+/// Used by index heal to re-migrate **only** blocks overlapping holes, not the
+/// entire tail after the first gap.
+pub fn missing_path_hash_ranges_in_tx<T: DbTx>(
+    tx: &T,
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
     if start >= end {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     // Density fast path: prove the *entire table* is exactly the dense range
     // [start, end). Anchors on `cursor.first()` (table minimum), not `seek(start)`:
     // keys below `start` must not be allowed to pad `entries()` while holes sit
     // inside the range (e.g. keys {0,5,6,7,9} over [5,10) must not report dense).
-    let expected_len = (*end as u64).saturating_sub(*start as u64);
-    if expected_len > 0 {
-        let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
-        let first = cursor.first()?;
-        let last = cursor.last()?;
-        let count = tx.entries::<ChunkPathHashesByOffset>()? as u64;
-        if let (Some((first_key, _)), Some((last_key, _))) = (first, last) {
-            // Compare last == end-1 without wrapping u32::MAX + 1.
-            let last_is_range_end = *end > 0 && last_key == PartitionChunkOffset(*end - 1);
-            if first_key == start && last_is_range_end && count == expected_len {
-                return Ok(None);
-            }
-        }
+    if path_hash_table_is_dense_range(tx, start, end)? {
+        return Ok(Vec::new());
     }
 
     let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
     let mut walker = cursor.walk(Some(start))?;
-    first_gap_with(start, end, || {
+    gaps_with(start, end, || {
         Ok(walker.next().transpose()?.map(|(key, _)| key))
     })
 }
@@ -390,6 +449,36 @@ mod tests {
             first_gap_in_sorted_keys(o(1), o(6), [o(1), o(3), o(5)]),
             Some(o(2))
         );
+    }
+
+    #[test]
+    fn gaps_in_sorted_keys_reports_each_hole_not_full_tail() {
+        use super::gaps_in_sorted_keys;
+
+        // Dense
+        assert!(
+            gaps_in_sorted_keys(
+                o(0),
+                o(10),
+                [o(0), o(1), o(2), o(3), o(4), o(5), o(6), o(7), o(8), o(9)]
+            )
+            .is_empty()
+        );
+
+        // Two disjoint holes: [2,5) and [8,9) — not [2,10)
+        assert_eq!(
+            gaps_in_sorted_keys(o(0), o(10), [o(0), o(1), o(5), o(6), o(7), o(9)]),
+            vec![(o(2), o(5)), (o(8), o(9))]
+        );
+
+        // Prefix + middle
+        assert_eq!(
+            gaps_in_sorted_keys(o(0), o(10), [o(2), o(3), o(7), o(8), o(9)]),
+            vec![(o(0), o(2)), (o(4), o(7))]
+        );
+
+        // Fully empty
+        assert_eq!(gaps_in_sorted_keys(o(0), o(5), []), vec![(o(0), o(5))]);
     }
 
     #[test]
