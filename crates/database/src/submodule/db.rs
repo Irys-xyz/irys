@@ -66,32 +66,44 @@ pub fn get_path_hashes_by_offset<T: DbTx>(
     Ok(tx.get::<ChunkPathHashesByOffset>(offset)?)
 }
 
+/// First offset in half-open `[start, end)` absent from a fallible sorted key stream.
+///
+/// `next_key` yields the next ascending key (or `None` when exhausted). Shared by
+/// the MDBX cursor path and pure unit tests so both stay identical.
+pub fn first_gap_with(
+    start: PartitionChunkOffset,
+    end: PartitionChunkOffset,
+    mut next_key: impl FnMut() -> eyre::Result<Option<PartitionChunkOffset>>,
+) -> eyre::Result<Option<PartitionChunkOffset>> {
+    if start >= end {
+        return Ok(None);
+    }
+    let mut expected = start;
+    while let Some(key) = next_key()? {
+        if key >= end {
+            break;
+        }
+        if key > expected {
+            return Ok(Some(expected));
+        }
+        expected = expected + 1;
+        if expected >= end {
+            return Ok(None);
+        }
+    }
+    Ok(if expected < end { Some(expected) } else { None })
+}
+
 /// First offset in half-open `[start, end)` absent from a sorted key stream.
 ///
-/// `keys` must be strictly increasing and within or past `start` (as MDBX walk
-/// from `start` yields). Used by the cursor path and unit-tested directly.
+/// Infallible wrapper around [`first_gap_with`] for tests and pure call sites.
 pub fn first_gap_in_sorted_keys(
     start: PartitionChunkOffset,
     end: PartitionChunkOffset,
     keys: impl IntoIterator<Item = PartitionChunkOffset>,
 ) -> Option<PartitionChunkOffset> {
-    if start >= end {
-        return None;
-    }
-    let mut expected = start;
-    for key in keys {
-        if key >= end {
-            break;
-        }
-        if key > expected {
-            return Some(expected);
-        }
-        expected = expected + 1;
-        if expected >= end {
-            return None;
-        }
-    }
-    if expected < end { Some(expected) } else { None }
+    let mut iter = keys.into_iter();
+    first_gap_with(start, end, || Ok(iter.next())).expect("infallible key stream")
 }
 
 /// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
@@ -109,22 +121,9 @@ pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
 
     let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
     let mut walker = cursor.walk(Some(start))?;
-    let mut expected = start;
-
-    while let Some((key, _)) = walker.next().transpose()? {
-        if key >= end {
-            break;
-        }
-        if key > expected {
-            return Ok(Some(expected));
-        }
-        expected = expected + 1;
-        if expected >= end {
-            return Ok(None);
-        }
-    }
-
-    Ok(if expected < end { Some(expected) } else { None })
+    first_gap_with(start, end, || {
+        Ok(walker.next().transpose()?.map(|(key, _)| key))
+    })
 }
 
 pub fn get_full_data_path<T: DbTx>(
