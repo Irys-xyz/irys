@@ -18,7 +18,6 @@ use crate::{
 };
 use eyre::{OptionExt as _, eyre};
 use irys_config::StorageSubmodulesConfig;
-use irys_database::submodule::{get_path_hashes_by_offset, tables::ChunkPathHashes};
 use irys_domain::{
     BlockBoundsError, BlockIndexReadGuard, BlockTreeReadGuard, PACKING_PARAMS_FILE_NAME,
     PackingParams, StorageModule, StorageModuleInfo,
@@ -321,11 +320,10 @@ impl StorageModuleServiceInner {
             let max_partition_offset = self.get_max_partition_offset(assigned_sm.clone());
             let partition_range = PartitionChunkOffset::from(0)..max_partition_offset;
 
-            // Use a binary search to find the first chunk in that range without a tx_path_hash
-            // We have to do this because we don't know if we're resuming this indexing from a crash
-            // or restart of the node.
+            // First offset without path hashes (resume after crash / restart).
+            // Cursor gap-scan: correct for non-prefix holes, O(indexed keys).
             let first_unindexed_chunk_offset =
-                Self::find_first_unindexed_chunk(assigned_sm.clone(), partition_range);
+                Self::find_first_unindexed_chunk(assigned_sm.clone(), partition_range)?;
 
             // If we found some unindexed chunks that should be present, let's build a list of blocks to migrate
             if let Some(chunk_offset) = first_unindexed_chunk_offset {
@@ -375,7 +373,10 @@ impl StorageModuleServiceInner {
 
                 let start_block = block_bounds.height;
 
-                // Calculate end offset
+                // Inclusive last ledger offset: max_partition_offset is exclusive.
+                if *max_partition_offset == 0 {
+                    continue;
+                }
                 let end_ledger_offset =
                     ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1);
 
@@ -535,9 +536,13 @@ impl StorageModuleServiceInner {
         }
     }
 
-    /// Gets the maximum offset in the partition that has been assigned data chunks
-    /// by data transactions. Used for retrieving the  the maximum possible ledger offset
-    /// within a partition relative to the start of the partition.
+    /// Exclusive end of the partition-relative offset range that may hold migrated
+    /// data (`0..excl` covers partition offsets `0..=excl-1` when `excl > 0`).
+    ///
+    /// `get_storage_module_ledger_offsets` builds an `ie` interval, which nodit
+    /// stores as **inclusive** start/end. `total_chunks` is an **exclusive**
+    /// ledger frontier. Mixing those without +1 on the full-SM arm drops the
+    /// last chunk from the scan / backfill window.
     fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
         let ledger_id = storage_module
             .partition_assignment()
@@ -555,47 +560,24 @@ impl StorageModuleServiceInner {
         let range = storage_module
             .get_storage_module_ledger_offsets()
             .expect("storage module should be assigned to a ledger");
+        // Inclusive bounds after nodit `ie` → stored inclusive end.
         let start: u64 = *range.start();
-        let end: u64 = *range.end();
+        let end_incl: u64 = *range.end();
+        let max_excl = max_ledger_offset.map(|m| *m);
 
-        // Make the max offset partition relative
-        let part_end = match max_ledger_offset {
-            Some(max) if end >= *max => max.saturating_sub(start),
-            Some(_) => end - start,
-            None => 0,
-        };
-
-        PartitionChunkOffset::from(part_end)
+        PartitionChunkOffset::from(exclusive_partition_end(start, end_incl, max_excl))
     }
 
+    /// First partition-relative offset in `range` with no path-hash index entry.
+    ///
+    /// Delegates to [`StorageModule::first_missing_path_hash_offset`] (MDBX cursor
+    /// gap walk). Binary search is wrong for non-prefix holes; dense linear
+    /// point-gets are O(range) and unsafe at production partition sizes.
     fn find_first_unindexed_chunk(
         storage_module: Arc<StorageModule>,
         range: Range<PartitionChunkOffset>,
-    ) -> Option<PartitionChunkOffset> {
-        let mut lo = range.start;
-        let mut hi = range.end;
-
-        let mut path_hashes: Option<ChunkPathHashes> = None;
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-
-            path_hashes = storage_module
-                .query_submodule_db_by_offset(mid, |tx| get_path_hashes_by_offset(tx, mid))
-                .expect("to be able to query submodule db");
-
-            if path_hashes.is_some() {
-                lo = mid + 1; // skip initialized
-            } else {
-                hi = mid; // candidate for first uninitialized
-            }
-        }
-
-        if lo < range.end && path_hashes.is_none() {
-            Some(lo)
-        } else {
-            None
-        }
+    ) -> eyre::Result<Option<PartitionChunkOffset>> {
+        storage_module.first_missing_path_hash_offset(range.start, range.end)
     }
 
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
@@ -677,6 +659,25 @@ impl StorageModuleServiceInner {
             index,
             mismatches.join(", ")
         ))
+    }
+}
+
+/// Exclusive partition-relative end for index scan / backfill.
+///
+/// - `start` / `end_incl`: SM ledger span as **inclusive** bounds (nodit `ie` storage)
+/// - `max_ledger_excl`: ledger `total_chunks` frontier (**exclusive**), if known
+///
+/// Returns `N` such that partition offsets `0..N` should be considered for indexing.
+fn exclusive_partition_end(start: u64, end_incl: u64, max_ledger_excl: Option<u64>) -> u64 {
+    let sm_len_excl = end_incl.saturating_sub(start).saturating_add(1);
+    match max_ledger_excl {
+        // Exclusive frontier still inside the SM (including exactly past last inclusive).
+        Some(max) if max > start && max <= end_incl.saturating_add(1) => max.saturating_sub(start),
+        // Frontier at/before SM start → nothing to index.
+        Some(max) if max <= start => 0,
+        // Frontier past the SM → full module span.
+        Some(_) => sm_len_excl,
+        None => 0,
     }
 }
 
@@ -773,5 +774,43 @@ impl StorageModuleService {
 
         tracing::info!("shutting down StorageModule Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod exclusive_partition_end_tests {
+    use super::exclusive_partition_end;
+
+    #[test]
+    fn full_sm_includes_last_chunk_when_frontier_past_sm() {
+        // SM ledger [0, 99] inclusive (nodit ie of [0, 100)).
+        // Old arm used end - start = 99 as exclusive end → dropped offset 99.
+        assert_eq!(exclusive_partition_end(0, 99, Some(1_000)), 100);
+        assert_eq!(exclusive_partition_end(0, 99, Some(100)), 100);
+    }
+
+    #[test]
+    fn partial_frontier_inside_sm_is_exclusive_relative() {
+        // total_chunks exclusive 50 → offsets 0..49.
+        assert_eq!(exclusive_partition_end(0, 99, Some(50)), 50);
+    }
+
+    #[test]
+    fn frontier_before_sm_is_empty() {
+        assert_eq!(exclusive_partition_end(100, 199, Some(50)), 0);
+        assert_eq!(exclusive_partition_end(100, 199, Some(100)), 0);
+    }
+
+    #[test]
+    fn frontier_none_is_empty() {
+        assert_eq!(exclusive_partition_end(0, 99, None), 0);
+    }
+
+    #[test]
+    fn non_zero_sm_start() {
+        // SM [100, 199] incl, frontier 150 excl → relative exclusive end 50.
+        assert_eq!(exclusive_partition_end(100, 199, Some(150)), 50);
+        // Frontier past SM → full length 100.
+        assert_eq!(exclusive_partition_end(100, 199, Some(500)), 100);
     }
 }
