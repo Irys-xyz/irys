@@ -108,7 +108,8 @@ pub fn first_gap_in_sorted_keys(
 
 /// First offset in half-open `[start, end)` with no `ChunkPathHashesByOffset` key.
 ///
-/// Cursor walk over the sorted keyspace (one RO tx): O(#indexed keys in range),
+/// Healthy full indexes take an O(1) density check (`first` + `last` + `entries`).
+/// Otherwise walks the sorted keyspace (one RO tx): O(#indexed keys in range),
 /// correct for non-prefix holes. Dense linear point-gets are not used.
 pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
     tx: &T,
@@ -117,6 +118,25 @@ pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
 ) -> eyre::Result<Option<PartitionChunkOffset>> {
     if start >= end {
         return Ok(None);
+    }
+
+    // Density fast path: prove the *entire table* is exactly the dense range
+    // [start, end). Anchors on `cursor.first()` (table minimum), not `seek(start)`:
+    // keys below `start` must not be allowed to pad `entries()` while holes sit
+    // inside the range (e.g. keys {0,5,6,7,9} over [5,10) must not report dense).
+    let expected_len = (*end as u64).saturating_sub(*start as u64);
+    if expected_len > 0 {
+        let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
+        let first = cursor.first()?;
+        let last = cursor.last()?;
+        let count = tx.entries::<ChunkPathHashesByOffset>()? as u64;
+        if let (Some((first_key, _)), Some((last_key, _))) = (first, last) {
+            // Compare last == end-1 without wrapping u32::MAX + 1.
+            let last_is_range_end = *end > 0 && last_key == PartitionChunkOffset(*end - 1);
+            if first_key == start && last_is_range_end && count == expected_len {
+                return Ok(None);
+            }
+        }
     }
 
     let mut cursor = tx.cursor_read::<ChunkPathHashesByOffset>()?;
@@ -415,6 +435,94 @@ mod tests {
 
         let head = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(5)))?;
         assert_eq!(head, Some(o(2)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn first_missing_path_hash_offset_density_fast_path_no_gap() -> eyre::Result<()> {
+        use super::{
+            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
+        };
+        use crate::submodule::tables::SubmoduleTables;
+        use crate::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::H256;
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let temp_dir = TempDirBuilder::new()
+            .prefix("path_hash_dense")
+            .with_tracing()
+            .build();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let path_hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        };
+        {
+            let tx = db.tx_mut()?;
+            for off in 0_u32..10 {
+                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
+            }
+            tx.commit()?;
+        }
+
+        // Dense [0, 10) — first/last/entries prove completeness without relying on a hole.
+        let none = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
+        assert_eq!(none, None);
+
+        // Partial dense range with extra keys outside still falls through correctly.
+        let none_mid = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(3), o(7)))?;
+        assert_eq!(none_mid, None);
+
+        Ok(())
+    }
+
+    /// Keys below `start` must not pad `entries()` while a hole sits in-range.
+    /// With `seek(start)` + whole-table count, {0,5,6,7,9} over [5,10) looked dense.
+    #[test]
+    fn first_missing_path_hash_offset_density_not_fooled_by_keys_below_start() -> eyre::Result<()> {
+        use super::{
+            ChunkPathHashes, first_missing_path_hash_offset_in_tx, set_path_hashes_by_offset,
+        };
+        use crate::submodule::tables::SubmoduleTables;
+        use crate::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::H256;
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let temp_dir = TempDirBuilder::new()
+            .prefix("path_hash_pad")
+            .with_tracing()
+            .build();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let path_hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        };
+        {
+            let tx = db.tx_mut()?;
+            // 5 keys total; expected_len([5,10))=5. Hole at 8 inside the range.
+            for off in [0_u32, 5, 6, 7, 9] {
+                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
+            }
+            tx.commit()?;
+        }
+
+        let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(5), o(10)))?;
+        assert_eq!(gap, Some(o(8)), "must not treat padded entries() as dense");
 
         Ok(())
     }

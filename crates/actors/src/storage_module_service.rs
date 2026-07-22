@@ -29,7 +29,6 @@ use irys_types::{
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::{BTreeMap, HashMap},
-    ops::Range,
     path::Path,
     sync::{Arc, RwLock},
     time::Duration,
@@ -138,7 +137,6 @@ impl StorageModuleServiceInner {
                 .map(|module| (module.id, module.clone()))
                 .collect()
         };
-        let mut assigned_modules = Vec::new();
         let mut packing_modules = Vec::new();
 
         debug!("StorageModuleInfos:\n{:#?}", storage_module_info_update);
@@ -261,10 +259,11 @@ impl StorageModuleServiceInner {
                     if ledger_before.is_some() && info_pa.ledger_id.is_none() {
                         // This storage module is expiring from LedgerSlot->Capacity
                         packing_modules.push(existing.clone());
-                    } else if ledger_before.is_none() && info_pa.ledger_id.is_some() {
-                        // This storage module is assigned Capacity->LedgerSlot
-                        assigned_modules.push(existing.clone());
                     }
+                    // Capacity→LedgerSlot and long-lived ledger assigns: index
+                    // repair runs below for *all* ledger-assigned SMs (path-hash
+                    // gap scan). Direct ledger A→B reassignment relies on the
+                    // mining-bus reset path, not this presence scan.
                 }
             }
         }
@@ -301,173 +300,112 @@ impl StorageModuleServiceInner {
             }
         }
 
-        // For each storage module assigned to a data ledger, we need to update the data_root indexes
-        // that may overlap the assigned slot so that it can index chunks
+        // After assignments settle: gap-scan + index backfill for every local SM
+        // currently on a data ledger (not only Capacity→LedgerSlot transitions).
+        self.heal_ledger_data_indexes().await?;
+
+        Ok(())
+    }
+
+    /// Scan ledger-assigned SMs for path-hash index gaps, backfill via
+    /// `UpdateStorageModuleIndexes`, then `SyncPartitions` (membership always;
+    /// unblock only if plan + migrate reported no issues).
+    ///
+    /// Startup and every partition-assignment update. Dense indexes → density
+    /// fast path / no migrate. Soft-skips bounds/index inconsistency and per-block
+    /// migration errors; hard-fails only if the migration channel is closed.
+    ///
+    /// Marker is path-hash completeness; `UpdateStorageModuleIndexes` also writes
+    /// DataRootInfos when it runs. Residual: dense path-hashes with empty
+    /// DataRootInfos will not schedule a migrate.
+    #[tracing::instrument(level = "debug", skip_all, err)]
+    async fn heal_ledger_data_indexes(&self) -> eyre::Result<()> {
+        let ledger_modules: Vec<Arc<StorageModule>> = {
+            let guard = self.storage_modules.read().unwrap();
+            guard
+                .iter()
+                .filter(|sm| {
+                    sm.partition_assignment()
+                        .and_then(|a| a.ledger_id)
+                        .is_some()
+                })
+                .cloned()
+                .collect()
+        };
+
+        debug!(
+            storage_module.ledger_assigned_count = ledger_modules.len(),
+            "healing data indexes for ledger-assigned storage modules"
+        );
+
         let mut blocks_to_migrate: BTreeMap<u64, BlockHash> = BTreeMap::new();
-        for assigned_sm in assigned_modules {
-            // Rebuild indexes
-            let ledger_id = assigned_sm
-                .partition_assignment()
-                .and_then(|a| a.ledger_id)
-                .expect("storage module must be assigned to a data ledger slot");
-
-            let ledger_range = assigned_sm
-                .get_storage_module_ledger_offsets()
-                .expect("storage module should be assigned to a ledger");
-
-            // Get the chunk range in PartitionRelative offsets for the min and max
-            // relative offset of data stored in this partition.
-            let max_partition_offset = self.get_max_partition_offset(assigned_sm.clone());
-            let partition_range = PartitionChunkOffset::from(0)..max_partition_offset;
-
-            // First offset without path hashes (resume after crash / restart).
-            // Cursor gap-scan: correct for non-prefix holes, O(indexed keys).
-            let first_unindexed_chunk_offset =
-                Self::find_first_unindexed_chunk(assigned_sm.clone(), partition_range)?;
-
-            // If we found some unindexed chunks that should be present, let's build a list of blocks to migrate
-            if let Some(chunk_offset) = first_unindexed_chunk_offset {
-                let ledger_chunk_offset =
-                    ledger_range.start() + LedgerChunkOffset::from(*chunk_offset);
-
-                // check max_chunk_offset first
-                let block_index_guard = self.block_index.read();
-                let latest_item = match block_index_guard.get_latest_item() {
-                    Some(item) => item,
-                    None => continue, // No blocks yet, skip
-                };
-
-                let data_ledger = DataLedger::try_from(ledger_id).unwrap();
-                // Frontier for this ledger; an absent entry (e.g. a term
-                // ledger before Cascade activation) means no data yet. Still
-                // read here (not just via the bounds error) because the end
-                // offset is clamped against it below.
-                let max_chunk_offset = latest_item
-                    .ledgers
-                    .iter()
-                    .find(|l| l.ledger == data_ledger)
-                    .map(|l| l.total_chunks)
-                    .unwrap_or(0);
-
-                // Check if start offset is within bounds
-                if *ledger_chunk_offset >= max_chunk_offset {
-                    // This offset is beyond the actual data in the ledger, skip this storage module
-                    continue;
+        let mut heal_issues = 0_usize;
+        for sm in &ledger_modules {
+            match self.plan_index_repair(sm) {
+                IndexRepairPlan::Complete => {}
+                IndexRepairPlan::SoftSkipped => {
+                    heal_issues += 1;
                 }
-
-                let block_bounds =
-                    match block_index_guard.get_block_bounds(data_ledger, ledger_chunk_offset) {
-                        Ok(bounds) => bounds,
-                        // The index shrank between the frontier read and the
-                        // search (reorg truncation) — skip; the next update
-                        // re-evaluates against the new index.
-                        Err(
-                            BlockBoundsError::IndexEmpty
-                            | BlockBoundsError::LedgerInactive { .. }
-                            | BlockBoundsError::OffsetBeyondFrontier { .. },
-                        ) => continue,
-                        Err(BlockBoundsError::Internal(e)) => {
-                            return Err(e.wrap_err("Failed to get start block bounds"));
-                        }
-                    };
-
-                let start_block = block_bounds.height;
-
-                // Inclusive last ledger offset: max_partition_offset is exclusive.
-                if *max_partition_offset == 0 {
-                    continue;
-                }
-                let end_ledger_offset =
-                    ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1);
-
-                // Clamp end offset to actual data bounds
-                let clamped_end_offset = if *end_ledger_offset >= max_chunk_offset {
-                    if max_chunk_offset > 0 {
-                        LedgerChunkOffset::from(max_chunk_offset - 1)
-                    } else {
-                        continue; // No data at all
-                    }
-                } else {
-                    end_ledger_offset
-                };
-
-                // Ensure we have a valid range after clamping
-                if clamped_end_offset < ledger_chunk_offset {
-                    continue; // Skip if the range is invalid
-                }
-
-                // Now get block bounds for the end
-                let end_block_bounds =
-                    match block_index_guard.get_block_bounds(data_ledger, clamped_end_offset) {
-                        Ok(bounds) => bounds,
-                        Err(
-                            BlockBoundsError::IndexEmpty
-                            | BlockBoundsError::LedgerInactive { .. }
-                            | BlockBoundsError::OffsetBeyondFrontier { .. },
-                        ) => continue,
-                        Err(BlockBoundsError::Internal(e)) => {
-                            return Err(e.wrap_err("Failed to get end block bounds"));
-                        }
-                    };
-
-                let end_block = end_block_bounds.height;
-
-                // Drop the guard before the next read
-                let _ = block_index_guard;
-
-                {
+                IndexRepairPlan::NeedsRepair {
+                    start_height,
+                    end_height,
+                } => {
                     let bi = self.block_index.read();
-                    for height in start_block..=end_block {
-                        let block_hash = bi
-                            .get_item(height)
-                            .expect("block item to be present in index")
-                            .block_hash;
-                        blocks_to_migrate.insert(height, block_hash);
+                    let mut planned_any = false;
+                    let mut missing_height = false;
+                    for height in start_height..=end_height {
+                        let Some(item) = bi.get_item(height) else {
+                            // Index shrank / truncated between plan and read (e.g. reorg).
+                            warn!(
+                                storage_module.id = sm.id,
+                                block.height = height,
+                                plan.start_height = start_height,
+                                plan.end_height = end_height,
+                                "block missing from index during heal; counting as heal issue"
+                            );
+                            missing_height = true;
+                            break;
+                        };
+                        blocks_to_migrate.insert(height, item.block_hash);
+                        planned_any = true;
+                    }
+                    // Incomplete materialization (empty span or mid-range gap) —
+                    // count once, not on both the miss and the empty check.
+                    if missing_height || !planned_any {
+                        heal_issues += 1;
                     }
                 }
             }
         }
 
         if !blocks_to_migrate.is_empty() {
-            // If we have blocks to migrate, lets do so. The BTreeSet ensures in-order traversal
-            let migration_service = &self.service_senders.chunk_migration;
-            for (block_height, block_hash) in blocks_to_migrate {
-                // Send migration request
-                let (tx, rx) = tokio::sync::oneshot::channel();
-
-                // Handle send error
-                if let Err(e) = migration_service.send_traced(
-                    ChunkMigrationServiceMessage::UpdateStorageModuleIndexes {
-                        block_hash,
-                        receiver: tx,
-                    },
-                ) {
-                    error!(
-                        "Failed to send migration request for block {} (height {}): {}",
-                        block_hash, block_height, e
-                    );
-                    return Err(eyre!(
-                        "Unable to index storage module chunks do to mpsc send failure: {}",
-                        e
-                    ));
-                }
-
-                // We await responses so we only perform one migration at a time
-                if let Err(e) = rx.await {
-                    error!(
-                        "Failed to receive migration response for block {} (height {}): {}",
-                        block_hash, block_height, e
-                    );
-                }
-            }
+            debug!(
+                index_heal.blocks = blocks_to_migrate.len(),
+                "migrating blocks to repair storage-module data indexes"
+            );
+            heal_issues += self
+                .migrate_storage_module_indexes(blocks_to_migrate)
+                .await?;
         }
 
-        // Only once the storage module partition assignments are updated we can a
-        // safely update the data_sync_service for any necessary data synchronization
-        if let Err(e) = self
-            .service_senders
-            .data_sync
-            .send_traced(DataSyncServiceMessage::SyncPartitions)
+        // Always refresh orchestrator membership. Unblock only when every SM plan
+        // was Complete or fully migrated — plan soft-skips and migrate failures
+        // both suppress unblock to avoid epoch refetch/re-block thrash.
+        let unblock = heal_issues == 0;
+        if !unblock {
+            warn!(
+                index_heal.issues = heal_issues,
+                "index heal incomplete; SyncPartitions without unblock \
+                 to avoid refetch/re-block thrash"
+            );
+        }
+
+        if let Err(e) =
+            self.service_senders
+                .data_sync
+                .send_traced(DataSyncServiceMessage::SyncPartitions {
+                    unblock_missing_data_root_index: unblock,
+                })
         {
             error!(
                 "Failed to send SyncPartitions message to data_sync service: {}",
@@ -476,6 +414,202 @@ impl StorageModuleServiceInner {
         }
 
         Ok(())
+    }
+
+    /// Path-hash gap → inclusive block-height range to re-index, or a soft outcome.
+    ///
+    /// Distinguishes "indexes look complete" from "could not plan / uncertain" so
+    /// heal does not claim success and mass-unblock after a soft-skip.
+    fn plan_index_repair(&self, sm: &Arc<StorageModule>) -> IndexRepairPlan {
+        let ledger_id = sm
+            .partition_assignment()
+            .and_then(|a| a.ledger_id)
+            .expect("storage module must be assigned to a data ledger slot");
+
+        let Ok(ledger_range) = sm.get_storage_module_ledger_offsets() else {
+            warn!(
+                storage_module.id = sm.id,
+                "storage module not assigned to a ledger during index plan; soft-skip"
+            );
+            return IndexRepairPlan::SoftSkipped;
+        };
+
+        let max_partition_offset = self.get_max_partition_offset(sm.clone());
+        if *max_partition_offset == 0 {
+            // No migrated data in range yet — nothing to repair.
+            return IndexRepairPlan::Complete;
+        }
+
+        // First offset without path hashes (density fast path or cursor walk).
+        let chunk_offset = match sm
+            .first_missing_path_hash_offset(PartitionChunkOffset::from(0), max_partition_offset)
+        {
+            Ok(Some(offset)) => offset,
+            Ok(None) => return IndexRepairPlan::Complete,
+            Err(e) => {
+                warn!(
+                    storage_module.id = sm.id,
+                    error = %e,
+                    "path-hash gap scan failed; soft-skipping index repair for this module"
+                );
+                return IndexRepairPlan::SoftSkipped;
+            }
+        };
+
+        debug!(
+            storage_module.id = sm.id,
+            index_heal.first_gap = %chunk_offset,
+            index_heal.max_partition_offset = %max_partition_offset,
+            "path-hash index gap detected; scheduling index repair"
+        );
+
+        let ledger_chunk_offset = ledger_range.start() + LedgerChunkOffset::from(*chunk_offset);
+        let block_index_guard = self.block_index.read();
+        let Some(latest_item) = block_index_guard.get_latest_item() else {
+            // Gap exists but chain index is empty — cannot repair yet.
+            return IndexRepairPlan::SoftSkipped;
+        };
+
+        let Ok(data_ledger) = DataLedger::try_from(ledger_id) else {
+            warn!(
+                storage_module.id = sm.id,
+                ledger_id, "invalid ledger id during index plan; soft-skip"
+            );
+            return IndexRepairPlan::SoftSkipped;
+        };
+        // Frontier for this ledger; absent entry (e.g. term ledger pre-Cascade)
+        // means no data yet — still needed to clamp the end offset below.
+        let max_chunk_offset = latest_item
+            .ledgers
+            .iter()
+            .find(|l| l.ledger == data_ledger)
+            .map(|l| l.total_chunks)
+            .unwrap_or(0);
+
+        if *ledger_chunk_offset >= max_chunk_offset {
+            // Gap is past the ledger frontier — not repairable as missing index.
+            return IndexRepairPlan::Complete;
+        }
+
+        let Some(start_block) = Self::block_height_for_ledger_offset(
+            block_index_guard,
+            data_ledger,
+            ledger_chunk_offset,
+            sm.id,
+            "start",
+        ) else {
+            return IndexRepairPlan::SoftSkipped;
+        };
+
+        // Inclusive last ledger offset: max_partition_offset is exclusive.
+        let end_ledger_offset =
+            ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1);
+        let clamped_end_offset = if *end_ledger_offset >= max_chunk_offset {
+            if max_chunk_offset == 0 {
+                return IndexRepairPlan::Complete;
+            }
+            LedgerChunkOffset::from(max_chunk_offset - 1)
+        } else {
+            end_ledger_offset
+        };
+
+        if clamped_end_offset < ledger_chunk_offset {
+            return IndexRepairPlan::SoftSkipped;
+        }
+
+        let Some(end_block) = Self::block_height_for_ledger_offset(
+            block_index_guard,
+            data_ledger,
+            clamped_end_offset,
+            sm.id,
+            "end",
+        ) else {
+            return IndexRepairPlan::SoftSkipped;
+        };
+
+        IndexRepairPlan::NeedsRepair {
+            start_height: start_block,
+            end_height: end_block,
+        }
+    }
+
+    /// Map a ledger chunk offset to a block height, or soft-skip on bounds errors.
+    fn block_height_for_ledger_offset(
+        block_index: &irys_domain::BlockIndex,
+        data_ledger: DataLedger,
+        offset: LedgerChunkOffset,
+        storage_module_id: usize,
+        bound_label: &'static str,
+    ) -> Option<u64> {
+        match block_index.get_block_bounds(data_ledger, offset) {
+            Ok(bounds) => Some(bounds.height),
+            Err(
+                BlockBoundsError::IndexEmpty
+                | BlockBoundsError::LedgerInactive { .. }
+                | BlockBoundsError::OffsetBeyondFrontier { .. },
+            ) => None,
+            Err(BlockBoundsError::Internal(e)) => {
+                warn!(
+                    storage_module.id = storage_module_id,
+                    error = %e,
+                    bound = bound_label,
+                    "block bounds internal error; soft-skipping index repair"
+                );
+                None
+            }
+        }
+    }
+
+    /// Sequential `UpdateStorageModuleIndexes` for each block (BTreeMap order).
+    ///
+    /// Returns the number of per-block failures (missing data / index write /
+    /// oneshot drop). Hard-fails only if the migration mpsc is closed.
+    async fn migrate_storage_module_indexes(
+        &self,
+        blocks_to_migrate: BTreeMap<u64, BlockHash>,
+    ) -> eyre::Result<usize> {
+        let migration_service = &self.service_senders.chunk_migration;
+        let mut failures = 0_usize;
+        for (block_height, block_hash) in blocks_to_migrate {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            if let Err(e) = migration_service.send_traced(
+                ChunkMigrationServiceMessage::UpdateStorageModuleIndexes {
+                    block_hash,
+                    receiver: tx,
+                },
+            ) {
+                error!(
+                    "Failed to send migration request for block {} (height {}): {}",
+                    block_hash, block_height, e
+                );
+                return Err(eyre!(
+                    "Unable to index storage module chunks due to mpsc send failure: {}",
+                    e
+                ));
+            }
+
+            match rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(
+                        block.hash = %block_hash,
+                        block.height = block_height,
+                        error = %e,
+                        "UpdateStorageModuleIndexes failed; soft-skipping block"
+                    );
+                    failures += 1;
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to receive migration response for block {} (height {}): {}",
+                        block_hash, block_height, e
+                    );
+                    failures += 1;
+                }
+            }
+        }
+        Ok(failures)
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -568,18 +702,6 @@ impl StorageModuleServiceInner {
         PartitionChunkOffset::from(exclusive_partition_end(start, end_incl, max_excl))
     }
 
-    /// First partition-relative offset in `range` with no path-hash index entry.
-    ///
-    /// Delegates to [`StorageModule::first_missing_path_hash_offset`] (MDBX cursor
-    /// gap walk). Binary search is wrong for non-prefix holes; dense linear
-    /// point-gets are O(range) and unsafe at production partition sizes.
-    fn find_first_unindexed_chunk(
-        storage_module: Arc<StorageModule>,
-        range: Range<PartitionChunkOffset>,
-    ) -> eyre::Result<Option<PartitionChunkOffset>> {
-        storage_module.first_missing_path_hash_offset(range.start, range.end)
-    }
-
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
     /// Reports an error if there's a mismatch.
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -662,6 +784,16 @@ impl StorageModuleServiceInner {
     }
 }
 
+/// Outcome of planning path-hash index repair for one ledger-assigned SM.
+enum IndexRepairPlan {
+    /// Path-hash scan found no gap (or no data in range).
+    Complete,
+    /// Inclusive block heights that should be re-indexed.
+    NeedsRepair { start_height: u64, end_height: u64 },
+    /// Gap or bounds uncertainty; heal must not claim success / unblock.
+    SoftSkipped,
+}
+
 /// Exclusive partition-relative end for index scan / backfill.
 ///
 /// - `start` / `end_incl`: SM ledger span as **inclusive** bounds (nodit `ie` storage)
@@ -731,6 +863,13 @@ impl StorageModuleService {
     #[tracing::instrument(name = "storage_module_service_start", level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
+
+        // Crash-resume / long-lived ledger assigns never see Capacity→LedgerSlot
+        // again. Soft-skips per-SM index issues; only migration channel failure is fatal.
+        if let Err(e) = self.inner.heal_ledger_data_indexes().await {
+            error!("startup data-index heal failed: {e:?}");
+            return Err(e);
+        }
 
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.tick().await; // Skip first immediate tick
