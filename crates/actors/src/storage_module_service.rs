@@ -358,31 +358,33 @@ impl StorageModuleServiceInner {
                     heal_issues += 1;
                 }
                 IndexRepairPlan::NeedsRepair {
-                    start_height,
-                    end_height,
+                    height_spans,
+                    partial,
                 } => {
                     let bi = self.block_index.read();
                     let mut planned_any = false;
                     let mut missing_height = false;
-                    for height in start_height..=end_height {
-                        let Some(item) = bi.get_item(height) else {
-                            // Index shrank / truncated between plan and read (e.g. reorg).
-                            warn!(
-                                storage_module.id = sm.id,
-                                block.height = height,
-                                plan.start_height = start_height,
-                                plan.end_height = end_height,
-                                "block missing from index during heal; counting as heal issue"
-                            );
-                            missing_height = true;
-                            break;
-                        };
-                        blocks_to_migrate.insert(height, item.block_hash);
-                        planned_any = true;
+                    'spans: for (start_height, end_height) in height_spans {
+                        for height in start_height..=end_height {
+                            let Some(item) = bi.get_item(height) else {
+                                // Index shrank / truncated between plan and read (e.g. reorg).
+                                warn!(
+                                    storage_module.id = sm.id,
+                                    block.height = height,
+                                    plan.start_height = start_height,
+                                    plan.end_height = end_height,
+                                    "block missing from index during heal; counting as heal issue"
+                                );
+                                missing_height = true;
+                                break 'spans;
+                            };
+                            blocks_to_migrate.insert(height, item.block_hash);
+                            planned_any = true;
+                        }
                     }
-                    // Incomplete materialization (empty span or mid-range gap) —
-                    // count once, not on both the miss and the empty check.
-                    if missing_height || !planned_any {
+                    // Incomplete plan (some holes unplannable) or incomplete materialization
+                    // → count as heal issue (suppresses unblock) but still migrate what we can.
+                    if partial || missing_height || !planned_any {
                         heal_issues += 1;
                     }
                 }
@@ -427,10 +429,12 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
-    /// Path-hash gap → inclusive block-height range to re-index, or a soft outcome.
+    /// Path-hash holes → inclusive block-height spans to re-index (one span per
+    /// hole), or a soft outcome.
     ///
-    /// Distinguishes "indexes look complete" from "could not plan / uncertain" so
-    /// heal does not claim success and mass-unblock after a soft-skip.
+    /// Each hole maps to the minimal block-height range that covers it — not the
+    /// full SM/frontier tail after the first gap (avoids redundant re-migration of
+    /// already-dense segments between disjoint holes).
     fn plan_index_repair(&self, sm: &Arc<StorageModule>) -> IndexRepairPlan {
         let ledger_id = sm
             .partition_assignment()
@@ -451,12 +455,12 @@ impl StorageModuleServiceInner {
             return IndexRepairPlan::Complete;
         }
 
-        // First offset without path hashes (density fast path or cursor walk).
-        let chunk_offset = match sm
-            .first_missing_path_hash_offset(PartitionChunkOffset::from(0), max_partition_offset)
+        // All path-hash holes in the SM scan window (density fast path or walk).
+        let gaps = match sm
+            .missing_path_hash_ranges(PartitionChunkOffset::from(0), max_partition_offset)
         {
-            Ok(Some(offset)) => offset,
-            Ok(None) => return IndexRepairPlan::Complete,
+            Ok(gaps) if gaps.is_empty() => return IndexRepairPlan::Complete,
+            Ok(gaps) => gaps,
             Err(e) => {
                 warn!(
                     storage_module.id = sm.id,
@@ -469,15 +473,15 @@ impl StorageModuleServiceInner {
 
         debug!(
             storage_module.id = sm.id,
-            index_heal.first_gap = %chunk_offset,
+            index_heal.gap_count = gaps.len(),
+            index_heal.first_gap = %gaps[0].0,
             index_heal.max_partition_offset = %max_partition_offset,
-            "path-hash index gap detected; scheduling index repair"
+            "path-hash index gaps detected; scheduling per-hole index repair"
         );
 
-        let ledger_chunk_offset = ledger_range.start() + LedgerChunkOffset::from(*chunk_offset);
         let block_index_guard = self.block_index.read();
         let Some(latest_item) = block_index_guard.get_latest_item() else {
-            // Gap exists but chain index is empty — cannot repair yet.
+            // Gaps exist but chain index is empty — cannot repair yet.
             return IndexRepairPlan::SoftSkipped;
         };
 
@@ -489,7 +493,7 @@ impl StorageModuleServiceInner {
             return IndexRepairPlan::SoftSkipped;
         };
         // Frontier for this ledger; absent entry (e.g. term ledger pre-Cascade)
-        // means no data yet — still needed to clamp the end offset below.
+        // means no data yet — still needed to clamp hole ends below.
         let max_chunk_offset = latest_item
             .ledgers
             .iter()
@@ -497,50 +501,74 @@ impl StorageModuleServiceInner {
             .map(|l| l.total_chunks)
             .unwrap_or(0);
 
-        if *ledger_chunk_offset >= max_chunk_offset {
-            // Gap is past the ledger frontier — not repairable as missing index.
+        if max_chunk_offset == 0 {
             return IndexRepairPlan::Complete;
         }
 
-        let Some(start_block) = Self::block_height_for_ledger_offset(
-            block_index_guard,
-            data_ledger,
-            ledger_chunk_offset,
-            sm.id,
-            "start",
-        ) else {
-            return IndexRepairPlan::SoftSkipped;
-        };
-
-        // Inclusive last ledger offset: max_partition_offset is exclusive.
-        let end_ledger_offset =
-            ledger_range.start() + LedgerChunkOffset::from(*max_partition_offset - 1);
-        let clamped_end_offset = if *end_ledger_offset >= max_chunk_offset {
-            if max_chunk_offset == 0 {
-                return IndexRepairPlan::Complete;
+        let mut height_spans = Vec::new();
+        let mut any_soft_skip = false;
+        for (gap_start, gap_end) in gaps {
+            // Half-open [gap_start, gap_end) → inclusive last missing offset.
+            if gap_start >= gap_end {
+                continue;
             }
-            LedgerChunkOffset::from(max_chunk_offset - 1)
-        } else {
-            end_ledger_offset
-        };
+            let gap_last = PartitionChunkOffset(*gap_end - 1);
 
-        if clamped_end_offset < ledger_chunk_offset {
-            return IndexRepairPlan::SoftSkipped;
+            let start_ledger = ledger_range.start() + LedgerChunkOffset::from(*gap_start);
+            if *start_ledger >= max_chunk_offset {
+                // Entire hole is past the ledger frontier.
+                continue;
+            }
+
+            let end_ledger = ledger_range.start() + LedgerChunkOffset::from(*gap_last);
+            let clamped_end = if *end_ledger >= max_chunk_offset {
+                LedgerChunkOffset::from(max_chunk_offset - 1)
+            } else {
+                end_ledger
+            };
+            if clamped_end < start_ledger {
+                continue;
+            }
+
+            let Some(start_block) = Self::block_height_for_ledger_offset(
+                block_index_guard,
+                data_ledger,
+                start_ledger,
+                sm.id,
+                "gap_start",
+            ) else {
+                any_soft_skip = true;
+                continue;
+            };
+            let Some(end_block) = Self::block_height_for_ledger_offset(
+                block_index_guard,
+                data_ledger,
+                clamped_end,
+                sm.id,
+                "gap_end",
+            ) else {
+                any_soft_skip = true;
+                continue;
+            };
+
+            height_spans.push((start_block, end_block));
         }
 
-        let Some(end_block) = Self::block_height_for_ledger_offset(
-            block_index_guard,
-            data_ledger,
-            clamped_end_offset,
-            sm.id,
-            "end",
-        ) else {
-            return IndexRepairPlan::SoftSkipped;
-        };
+        if height_spans.is_empty() {
+            // All holes past frontier → complete; only unplannable holes → soft-skip.
+            return if any_soft_skip {
+                IndexRepairPlan::SoftSkipped
+            } else {
+                IndexRepairPlan::Complete
+            };
+        }
 
+        // Migrate plannable spans even if some holes failed bounds resolution.
+        // `partial` counts as a heal issue so we do not mass-unblock until every
+        // hole is addressable — without forfeiting progress on the rest.
         IndexRepairPlan::NeedsRepair {
-            start_height: start_block,
-            end_height: end_block,
+            height_spans,
+            partial: any_soft_skip,
         }
     }
 
@@ -833,9 +861,17 @@ impl StorageModuleServiceInner {
 enum IndexRepairPlan {
     /// Path-hash scan found no gap (or no data in range).
     Complete,
-    /// Inclusive block heights that should be re-indexed.
-    NeedsRepair { start_height: u64, end_height: u64 },
-    /// Gap or bounds uncertainty; heal must not claim success / unblock.
+    /// Inclusive block-height spans covering path-hash holes only (not full tail).
+    ///
+    /// `partial` is true when some holes could not be planned (bounds errors).
+    /// Callers should still migrate `height_spans` but count a heal issue so
+    /// unblock stays suppressed until planning is complete.
+    NeedsRepair {
+        height_spans: Vec<(u64, u64)>,
+        partial: bool,
+    },
+    /// No plannable spans and at least one unresolvable hole; heal must not claim
+    /// success / unblock.
     SoftSkipped,
 }
 

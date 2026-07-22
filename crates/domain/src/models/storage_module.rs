@@ -44,11 +44,10 @@ use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
         add_full_tx_path, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
-        clear_submodule_database, create_or_open_submodule_db,
-        first_missing_path_hash_offset_in_tx, get_data_path_by_offset,
+        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
         get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
         get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
-        set_data_root_infos_for_data_root,
+        missing_path_hash_ranges_in_tx, set_data_root_infos_for_data_root,
         tables::{DataRootInfo, DataRootInfos, TxLeafBinding},
     },
 };
@@ -1596,18 +1595,23 @@ impl StorageModule {
         submodule.db.view(fetch_from_db)?
     }
 
-    /// First partition-relative offset in half-open `[start, end)` with no path-hash
-    /// index entry. Walks each submodule's MDBX keyspace with a cursor (one RO
-    /// view per submodule), not per-offset point gets.
-    pub fn first_missing_path_hash_offset(
+    /// All half-open path-hash holes `[gap_start, gap_end)` in `[start, end)`.
+    ///
+    /// Walks each submodule once. Used by index heal to re-migrate only blocks
+    /// that overlap holes (not the full SM tail after the first gap).
+    ///
+    /// For a single first-hole lookup at the DB layer, see
+    /// [`irys_database::submodule::first_missing_path_hash_offset_in_tx`].
+    pub fn missing_path_hash_ranges(
         &self,
         start: PartitionChunkOffset,
         end: PartitionChunkOffset,
-    ) -> eyre::Result<Option<PartitionChunkOffset>> {
+    ) -> eyre::Result<Vec<(PartitionChunkOffset, PartitionChunkOffset)>> {
         if start >= end {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
+        let mut ranges = Vec::new();
         let mut offset = start;
         while offset < end {
             let (interval, submodule) = self.get_submodule_for_offset(offset)?;
@@ -1616,16 +1620,13 @@ impl StorageModule {
             let submodule_end_excl = PartitionChunkOffset(*interval.end() + 1);
             let sub_end = std::cmp::min(end, submodule_end_excl);
 
-            let gap = submodule
+            let mut sub_gaps = submodule
                 .db
-                .view(|tx| first_missing_path_hash_offset_in_tx(tx, offset, sub_end))??;
-
-            if gap.is_some() {
-                return Ok(gap);
-            }
+                .view(|tx| missing_path_hash_ranges_in_tx(tx, offset, sub_end))??;
+            ranges.append(&mut sub_gaps);
             offset = sub_end;
         }
-        Ok(None)
+        Ok(ranges)
     }
 
     pub fn intervals(&self) -> &Arc<RwLock<StorageIntervals>> {
