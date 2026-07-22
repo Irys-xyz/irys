@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784675407833,
+  "lastUpdate": 1784690365340,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -11815,6 +11815,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "55071d1111ab7f961da32fee3e2e7ae7144a884d",
+          "message": "fix(storage): find first unindexed chunk without binary-search holes (#1530)\n\n* fix(storage): find first unindexed chunk without binary-search holes\n\nReplace prefix-assuming binary search with a linear scan so non-suffix\npath-hash holes (indexed after an unindexed gap) are detected on assign\nand resume indexing from the first missing offset.\n\n* fix(storage): cursor gap-scan for first missing path-hash offset\n\nReplace dense O(range) point-gets with an MDBX cursor walk over\nChunkPathHashesByOffset (one RO view per submodule). Correct for\nnon-prefix holes without scanning every offset in large partitions.\n\n* style: satisfy clippy unseparated_literal_suffix in gap-scan test\n\n* fix(storage): include last partition chunk in index scan window\n\nNodit ie intervals store an inclusive end while total_chunks is exclusive;\nthe full-SM arm used end-start as an exclusive end and dropped the last\noffset. Unify exclusive_partition_end and share gap logic via first_gap_with.\n\n* fix(config): correct mainnet consensus-config frozen hash pin\n\ntest_mainnet_genesis_constants_are_frozen failed because the #1517\ngolden pin did not match ConsensusConfig::mainnet().keccak256_hash().\nRe-pin to the computed value; genesis field pins were already correct.",
+          "timestamp": "2026-07-21T20:00:18-07:00",
+          "tree_id": "4e18d98aa173e3163d0ad98804bf9188944285c8",
+          "url": "https://github.com/Irys-xyz/irys/commit/55071d1111ab7f961da32fee3e2e7ae7144a884d"
+        },
+        "date": 1784690363001,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.0126,
+            "range": "± 0.000433",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121083,
+            "range": "± 0.001686",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.219044,
+            "range": "± 0.037165",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.992171,
+            "range": "± 0.224454",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.079865,
+            "range": "± 0.002085",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 766.520879,
+            "range": "± 18.012237",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 985.491455,
+            "range": "± 45.663017",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117458,
+            "range": "± 0.00036",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1194.540132,
+            "range": "± 13.405124",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1547.137641,
+            "range": "± 16.65147",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033935,
+            "range": "± 0.003496",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.093356,
+            "range": "± 1.203568",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.903756,
+            "range": "± 0.943463",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
