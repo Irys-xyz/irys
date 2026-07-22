@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784749301888,
+  "lastUpdate": 1784760913831,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12463,6 +12463,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a054eaffedf7e9c2c6c894e1826281317ce7965c",
+          "message": "feat: consensus-enforced maximum data-tx size (5 TiB mainnet) (#1533)\n\n* feat(config): add consensus max_data_tx_chunks (5 TiB mainnet)\n\n* feat: enforce max data-tx size at ingress and consensus prevalidation\n\n* test: mempool ingress rejects oversize data tx\n\n* test: prevalidation rejects oversize data tx\n\n* feat: cap data-tx size during block production selection\n\n* fix: add max_data_tx_chunks to consensus config TOML templates and fixtures\n\n* refactor: use shared structural-defect predicate in tx selection\n\nReplace the inline max-size check in data-tx block-production selection with\ndata_tx_structural_defect, so block production enforces the same structural\nrules (zero data_size, prefix_size > data_size, foreign chain_id, oversize)\nas ingress and consensus prevalidation and can't drift from them.\n\n* test: re-pin frozen consensus-config hashes for max_data_tx_chunks\n\nAdding the max_data_tx_chunks consensus field changes the hashed wire\nencoding, so ConsensusConfig::keccak256_hash() moves for mainnet and testnet.\nRe-pin both golden hashes. Genesis identity (expected_genesis_hash, chain_id,\ngenesis inputs) is unaffected.",
+          "timestamp": "2026-07-22T23:36:17+01:00",
+          "tree_id": "1dd519937f32278c737220f26eca84460e363953",
+          "url": "https://github.com/Irys-xyz/irys/commit/a054eaffedf7e9c2c6c894e1826281317ce7965c"
+        },
+        "date": 1784760912619,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011916,
+            "range": "± 0.000411",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119723,
+            "range": "± 0.001985",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.216091,
+            "range": "± 0.042374",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.936722,
+            "range": "± 0.08358",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075395,
+            "range": "± 0.001614",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 752.390098,
+            "range": "± 8.699544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1015.745445,
+            "range": "± 39.536249",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120308,
+            "range": "± 0.000818",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1208.923124,
+            "range": "± 13.083786",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1598.053888,
+            "range": "± 25.055563",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033756,
+            "range": "± 0.00068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.58843,
+            "range": "± 0.215683",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.362988,
+            "range": "± 0.229865",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
