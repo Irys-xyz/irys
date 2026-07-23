@@ -16,6 +16,12 @@ use std::{
 };
 use tracing::{Instrument as _, debug, warn};
 
+/// `data_sync_probe` diagnostics only fire for chunk offsets below this
+/// threshold. Residual sync stalls manifest as low-offset Entropy holes left
+/// behind while the packing tail (high offsets) is still legitimately Entropy —
+/// gating on low offsets keeps the probes quiet on healthy modules.
+const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
+
 /// Why a chunk offset is blocked from the hot re-fetch loop.
 ///
 /// These are local progress blockers (not peer-delivery failures). Peers may
@@ -59,10 +65,11 @@ pub enum ChunkRequestState {
 }
 
 type ExcludedPeerAddresses = HashSet<IrysAddress>;
+/// Per-offset sync request. Ledger context lives on the parent
+/// [`ChunkOrchestrator`] (`self.ledger_id`); one orchestrator is one SM
+/// assignment, so it is not duplicated per request.
 #[derive(Debug)]
 pub struct ChunkRequest {
-    pub ledger_id: usize,
-    pub slot_index: usize,
     pub chunk_offset: PartitionChunkOffset,
     pub excluded: Option<ExcludedPeerAddresses>,
     pub request_state: ChunkRequestState,
@@ -85,7 +92,6 @@ pub struct ChunkOrchestrator {
     // Shared reference to peer bandwidth managers maintained by DataSyncService
     active_sync_peers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
-    slot_index: usize,
     ledger_id: u32,
     chunk_fetcher: Arc<dyn ChunkFetcher>,
     config: NodeConfig,
@@ -101,17 +107,11 @@ impl ChunkOrchestrator {
         config: NodeConfig,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
-        let slot_index = storage_module
-            .partition_assignment()
-            .expect("storage_module should have a partition assignment")
-            .slot_index
-            .expect("storage_module should be assigned to a ledger slot");
-
         let ledger_id = storage_module
             .partition_assignment()
-            .unwrap()
+            .expect("storage_module should have a partition assignment")
             .ledger_id
-            .unwrap();
+            .expect("storage_module should be assigned to a data ledger");
 
         Self {
             storage_module,
@@ -122,7 +122,6 @@ impl ChunkOrchestrator {
             active_sync_peers: sync_peers,
             service_senders: service_senders.clone(),
             ledger_id,
-            slot_index,
             chunk_fetcher, // Store the chunk fetcher
             config,
             runtime_handle,
@@ -191,11 +190,41 @@ impl ChunkOrchestrator {
         let max_requests = self.config.data_sync.max_pending_chunk_requests as usize;
         let mut requests_to_add = max_requests.saturating_sub(pending_count);
 
+        let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
+
+        // data_sync_probe: make empty-peer / residual-hole stalls diagnosable
+        // from DEBUG logs. Only fires when there is low-offset entropy (a hole
+        // below the packing tail) or pending/in-flight work, so healthy modules
+        // whose entropy is all packing tail stay silent on the 250ms tick.
+        let requested = self
+            .chunk_requests
+            .values()
+            .filter(|r| matches!(r.request_state, ChunkRequestState::Requested(..)))
+            .count();
+        let low_entropy: Vec<String> = entropy_intervals
+            .iter()
+            .filter(|iv| *iv.start() < LOW_OFFSET_PROBE_THRESHOLD)
+            .take(4)
+            .map(|iv| format!("{}-{}", *iv.start(), *iv.end()))
+            .collect();
+        if !low_entropy.is_empty() || pending_count > 0 || requested > 0 {
+            debug!(
+                "data_sync_probe ledger={:?} slot={:?} max={} pending={} requested={} peers={} to_add={} low_entropy={:?} map_size={}",
+                pa.ledger_id,
+                pa.slot_index,
+                *max_chunk_offset,
+                pending_count,
+                requested,
+                self.current_peers.len(),
+                requests_to_add,
+                low_entropy,
+                self.chunk_requests.len()
+            );
+        }
+
         if requests_to_add == 0 {
             return;
         }
-
-        let entropy_intervals = self.storage_module.get_intervals(ChunkType::Entropy);
 
         for interval in entropy_intervals {
             for interval_step in *interval.start()..=*interval.end() {
@@ -209,12 +238,17 @@ impl ChunkOrchestrator {
                 if let hash_map::Entry::Vacant(entry) = self.chunk_requests.entry(chunk_offset) {
                     // Only executes when the entry in the hashmap is vacant
                     entry.insert(ChunkRequest {
-                        ledger_id: self.storage_module.id,
-                        slot_index: self.slot_index,
                         chunk_offset,
                         excluded: None, // First time chunk requests don't have past failed peer addresses
                         request_state: ChunkRequestState::Pending,
                     });
+
+                    if *chunk_offset < LOW_OFFSET_PROBE_THRESHOLD {
+                        debug!(
+                            "data_sync_probe enqueued offset={} ledger={:?} slot={:?}",
+                            *chunk_offset, pa.ledger_id, pa.slot_index
+                        );
+                    }
 
                     requests_to_add -= 1;
                     if requests_to_add == 0 {
@@ -256,6 +290,14 @@ impl ChunkOrchestrator {
             };
             let Some(peer_address) = self.find_best_peer(chunk_request.excluded.as_ref()) else {
                 // No available peers to request from? skip this offset (can happen)
+                if *chunk_offset < LOW_OFFSET_PROBE_THRESHOLD {
+                    debug!(
+                        "data_sync_probe no_peer offset={} peers={} excluded={:?}",
+                        *chunk_offset,
+                        self.current_peers.len(),
+                        chunk_request.excluded.as_ref().map(HashSet::len)
+                    );
+                }
                 continue;
             };
 

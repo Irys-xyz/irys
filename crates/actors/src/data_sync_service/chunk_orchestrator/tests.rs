@@ -66,8 +66,6 @@ fn insert_requested(orch: &mut ChunkOrchestrator, offset: PartitionChunkOffset, 
     orch.chunk_requests.insert(
         offset,
         ChunkRequest {
-            ledger_id: 0,
-            slot_index: 0,
             chunk_offset: offset,
             excluded: None,
             request_state: ChunkRequestState::Requested(peer, Instant::now()),
@@ -97,8 +95,6 @@ async fn mark_helpers_require_requested_state() {
     orch.chunk_requests.insert(
         offset,
         ChunkRequest {
-            ledger_id: 0,
-            slot_index: 0,
             chunk_offset: offset,
             excluded: None,
             request_state: ChunkRequestState::Pending,
@@ -237,8 +233,6 @@ async fn blocked_excluded_from_pending_budget_and_dispatch_selection() {
     orch.chunk_requests.insert(
         offset3,
         ChunkRequest {
-            ledger_id: 0,
-            slot_index: 0,
             chunk_offset: offset3,
             excluded: None,
             request_state: ChunkRequestState::Pending,
@@ -278,8 +272,6 @@ async fn unblock_missing_data_root_index_requeues_only_that_reason() {
     orch.chunk_requests.insert(
         pending,
         ChunkRequest {
-            ledger_id: 0,
-            slot_index: 0,
             chunk_offset: pending,
             excluded: None,
             request_state: ChunkRequestState::Pending,

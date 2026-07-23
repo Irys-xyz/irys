@@ -92,6 +92,20 @@ pub struct DataSyncService {
 
 type StorageModuleId = usize;
 
+/// Resolve a storage module by its stable `id` field.
+///
+/// The `storage_modules` vec is **not** ordered by id — modules are inserted in
+/// ledger-assignment processing order (Publish → Submit → OneYear → ThirtyDay →
+/// Capacity). Using `vec.get(id)` therefore returns the wrong module whenever
+/// `id != vec_index` (common for term-ledger SMs whose directory indices are
+/// higher than their insertion rank). Always look up by `StorageModule::id`.
+fn storage_module_by_id(
+    storage_modules: &[Arc<StorageModule>],
+    id: StorageModuleId,
+) -> Option<Arc<StorageModule>> {
+    storage_modules.iter().find(|sm| sm.id == id).cloned()
+}
+
 pub struct DataSyncServiceInner {
     pub block_tree: BlockTreeReadGuard,
     pub storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
@@ -361,13 +375,8 @@ impl DataSyncServiceInner {
             consensus.chain_id,
         );
 
-        let sm = self
-            .storage_modules
-            .read()
-            .unwrap()
-            .get(storage_module_id)
-            .ok_or_else(|| eyre::eyre!("storage_module_id {storage_module_id} not found"))?
-            .clone();
+        let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
+            .ok_or_else(|| eyre::eyre!("storage_module_id {storage_module_id} not found"))?;
 
         let pa = sm.partition_assignment();
         let ledger_id = pa.and_then(|p| p.ledger_id);
@@ -633,8 +642,7 @@ impl DataSyncServiceInner {
 
         // Drop orchestrators for modules that no longer hold a data ledger assignment
         self.chunk_orchestrators.retain(|sm_id, _| {
-            storage_modules
-                .get(*sm_id)
+            storage_module_by_id(&storage_modules, *sm_id)
                 .and_then(|sm| sm.partition_assignment())
                 .and_then(|pa| pa.ledger_id)
                 .is_some()
@@ -686,11 +694,47 @@ impl DataSyncServiceInner {
         let mut peer_updates: Vec<(StorageModuleId, Vec<IrysAddress>)> = Vec::new();
 
         for sm_id in sm_ids {
-            let Some(storage_module) = storage_modules.get(sm_id) else {
+            let Some(storage_module) = storage_module_by_id(&storage_modules, sm_id) else {
                 continue;
             };
 
-            let best_peers = self.get_best_available_peers(storage_module, 4);
+            let best_peers = self.get_best_available_peers(&storage_module, 4);
+
+            // data_sync_probe: a data-assigned SM with entropy still to sync but
+            // zero selectable peers. `matching_assignments` distinguishes "no
+            // peer advertises this ledger/slot" (=0, peer-side gap) from "peers
+            // advertise it but selection failed" (>0, local lookup/selection bug).
+            if best_peers.is_empty()
+                && let Some(pa) = storage_module.partition_assignment()
+                && let Some(ledger_id) = pa.ledger_id
+                && let Some((max_offset, _)) = self
+                    .chunk_orchestrators
+                    .get(&sm_id)
+                    .and_then(ChunkOrchestrator::get_max_chunk_offset)
+                && storage_module
+                    .get_intervals(ChunkType::Entropy)
+                    .iter()
+                    .any(|iv| *iv.start() <= *max_offset)
+            {
+                let managers = self.active_peer_bandwidth_managers.read().unwrap();
+                let matching = managers
+                    .values()
+                    .filter(|m| {
+                        m.partition_assignments.iter().any(|a| {
+                            a.ledger_id == Some(ledger_id) && a.slot_index == pa.slot_index
+                        })
+                    })
+                    .count();
+                debug!(
+                    "data_sync_probe empty_peers sm_id={} ledger={:?} slot={:?} managers={} matching_assignments={}",
+                    sm_id,
+                    pa.ledger_id,
+                    pa.slot_index,
+                    managers.len(),
+                    matching
+                );
+            }
+
             peer_updates.push((sm_id, best_peers));
         }
 
@@ -887,6 +931,79 @@ impl DataSyncService {
 
         tracing::info!("shutting down DataSync Service gracefully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod storage_module_lookup_tests {
+    use super::storage_module_by_id;
+    use irys_domain::{StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, H256, IrysAddress, NodeConfig, PartitionChunkOffset,
+        partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use std::sync::Arc;
+
+    fn test_sm(id: usize, ledger: Option<u32>, base: &std::path::Path) -> Arc<StorageModule> {
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 4,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: base.join(format!("sm-{id}")),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let pa = ledger.map(|ledger_id| PartitionAssignment {
+            ledger_id: Some(ledger_id),
+            slot_index: Some(0),
+            miner_address: IrysAddress::from([1_u8; 20]),
+            partition_hash: H256::random(),
+        });
+        let info = StorageModuleInfo {
+            id,
+            partition_assignment: pa,
+            submodules: vec![(partition_chunk_offset_ie!(0, 4), "chunks".into())],
+        };
+        Arc::new(StorageModule::new(&info, &config).expect("storage module"))
+    }
+
+    /// Regression: module vec is ledger-order, not id-order. Lookup must use
+    /// `StorageModule::id`, not the vec index — otherwise term-ledger SMs
+    /// (high directory ids, mid insertion rank) get empty data-sync peers.
+    #[test]
+    fn storage_module_by_id_ignores_vec_index() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        // Mimic map_storage_modules_to_partition_assignments order:
+        // Publish(id=0), Submit(id=1), OneYear(id=7), ThirtyDay(id=6).
+        let modules = vec![
+            test_sm(0, Some(DataLedger::Publish.into()), tmp.path()),
+            test_sm(1, Some(DataLedger::Submit.into()), tmp.path()),
+            test_sm(7, Some(DataLedger::OneYear.into()), tmp.path()),
+            test_sm(6, Some(DataLedger::ThirtyDay.into()), tmp.path()),
+        ];
+
+        assert_eq!(storage_module_by_id(&modules, 0).unwrap().id, 0);
+        assert_eq!(storage_module_by_id(&modules, 1).unwrap().id, 1);
+        assert_eq!(storage_module_by_id(&modules, 7).unwrap().id, 7);
+        assert_eq!(storage_module_by_id(&modules, 6).unwrap().id, 6);
+        // Vec-index 2 is OneYear (id=7) — must NOT be returned for id=2.
+        assert!(storage_module_by_id(&modules, 2).is_none());
+        // Old bug: modules.get(7) would be None (len=4); by-id finds id=7 at index 2.
+        assert_eq!(
+            storage_module_by_id(&modules, 7)
+                .unwrap()
+                .partition_assignment()
+                .unwrap()
+                .ledger_id,
+            Some(DataLedger::OneYear.into())
+        );
     }
 }
 
