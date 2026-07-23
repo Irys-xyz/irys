@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784760913831,
+  "lastUpdate": 1784841735787,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12571,6 +12571,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "87ec126582894de43be9043aa598c6fb783d1857",
+          "message": "fix(data-sync): look up storage modules by id, drop redundant request fields (#1536)\n\nResolve storage modules by StorageModule::id rather than vec index so\nterm-ledger SMs are not mis-mapped when insertion order != directory id.\nRemove unused ChunkRequest ledger_id/slot_index copies (context lives on the\norchestrator) and add DEBUG probes for empty-peer / residual-hole stalls.",
+          "timestamp": "2026-07-23T14:06:24-07:00",
+          "tree_id": "d0bdd27c6170cb1f67d299c2461b9e03ebb27a50",
+          "url": "https://github.com/Irys-xyz/irys/commit/87ec126582894de43be9043aa598c6fb783d1857"
+        },
+        "date": 1784841734466,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015264,
+            "range": "± 0.001383",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.15418,
+            "range": "± 0.00498",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.557841,
+            "range": "± 0.015002",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.401475,
+            "range": "± 0.245014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078969,
+            "range": "± 0.001264",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 772.565274,
+            "range": "± 24.711601",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.447734,
+            "range": "± 6.931336",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.12406,
+            "range": "± 0.003218",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1215.127211,
+            "range": "± 78.782994",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1534.242689,
+            "range": "± 19.378643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034377,
+            "range": "± 0.00176",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.59555,
+            "range": "± 1.091365",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.087472,
+            "range": "± 0.97584",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000117,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
