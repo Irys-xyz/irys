@@ -133,11 +133,7 @@ impl ChunkIngressServiceInner {
     /// Direct re-entry into `process_pending_chunks_for_root` would recurse
     /// through this async ingress stack (`E0733`), so we always go via the
     /// control-plane channel.
-    async fn maybe_rescue_after_park(
-        &self,
-        data_root: DataRoot,
-        required_min_data_size: Option<u64>,
-    ) {
+    fn maybe_rescue_after_park(&self, data_root: DataRoot, required_min_data_size: Option<u64>) {
         let cdr_lookup = self
             .irys_db
             .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
@@ -359,7 +355,7 @@ impl ChunkIngressServiceInner {
 
                 // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
                 // Any CDR is enough: the header that commits it owns this root.
-                self.maybe_rescue_after_park(data_root, None).await;
+                self.maybe_rescue_after_park(data_root, None);
                 return Ok(());
             }
         };
@@ -394,8 +390,7 @@ impl ChunkIngressServiceInner {
                     .put(Arc::unwrap_or_clone(chunk));
                 // Only re-drain if CDR grew enough to accept this claim;
                 // otherwise leave parked for the larger TX's ProcessPendingChunks.
-                self.maybe_rescue_after_park(data_root, Some(claimed_size))
-                    .await;
+                self.maybe_rescue_after_park(data_root, Some(claimed_size));
                 return Ok(());
             }
         }
