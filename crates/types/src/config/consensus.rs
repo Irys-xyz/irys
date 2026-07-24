@@ -1034,7 +1034,7 @@ impl ConsensusConfig {
                 max_commitment_txs_per_block: 100,
                 tx_anchor_expiry_depth: 50,
                 ingress_proof_anchor_expiry_depth: 200,
-                commitment_anchor_expiry_depth: 7200,
+                commitment_anchor_expiry_depth: 8640,
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
