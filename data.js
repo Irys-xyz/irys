@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784841735787,
+  "lastUpdate": 1784860304947,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12678,6 +12678,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000117,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "627a7b7af906deb9c5952766f9e7d26e75e3a297",
+          "message": "fix(api): serve data_root chunks from node cache when SM missing (#1537)\n\nNon-assignee upload/proof nodes often hold chunk bodies only in\nCachedChunks and cannot answer ledger-offset GETs. Fall back to the\ncache on GET /chunk/data-root so residual-hole peers can fetch by\ndata_root + tx_offset. Wire main irys_db into ChunkProvider.",
+          "timestamp": "2026-07-23T19:16:35-07:00",
+          "tree_id": "f8510b8471b01444ddd5d7c0ca8da5a11fea363e",
+          "url": "https://github.com/Irys-xyz/irys/commit/627a7b7af906deb9c5952766f9e7d26e75e3a297"
+        },
+        "date": 1784860303584,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015344,
+            "range": "± 0.000804",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153626,
+            "range": "± 0.008405",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.568219,
+            "range": "± 0.068805",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.816459,
+            "range": "± 0.832511",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.084239,
+            "range": "± 0.001932",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 833.447258,
+            "range": "± 16.240109",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1016.371226,
+            "range": "± 26.220306",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120921,
+            "range": "± 0.003355",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1272.441029,
+            "range": "± 98.83967",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1787.843366,
+            "range": "± 153.761544",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035203,
+            "range": "± 0.001311",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.673644,
+            "range": "± 3.237643",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.616733,
+            "range": "± 1.881323",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000119,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
