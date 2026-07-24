@@ -1,3 +1,4 @@
+use super::ChunkIngressMessage;
 use super::ChunkIngressServiceInner;
 use super::ingress_proofs::generate_and_store_ingress_proof;
 use super::metrics::{
@@ -259,23 +260,65 @@ impl ChunkIngressServiceInner {
                 // Acquire a single write lock so the count check and the insert are
                 // atomic with respect to concurrent ingress calls, eliminating the
                 // TOCTOU race that could allow the per-item cap to be exceeded.
-                let mut pending_chunks_guard = self.pending_chunks.write().await;
-                let current_chunk_count = pending_chunks_guard
-                    .get(&chunk.data_root)
-                    .map(lru::LruCache::len)
-                    .unwrap_or(0);
-                if current_chunk_count >= preheader_chunks_per_item {
-                    warn!(
-                        "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
-                        &chunk.data_root,
-                        &chunk.tx_offset,
-                        current_chunk_count,
-                        preheader_chunks_per_item
-                    );
-                    return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
+                let data_root = chunk.data_root;
+                let tx_offset = chunk.tx_offset;
+                {
+                    let mut pending_chunks_guard = self.pending_chunks.write().await;
+                    let current_chunk_count = pending_chunks_guard
+                        .get(&data_root)
+                        .map(lru::LruCache::len)
+                        .unwrap_or(0);
+                    if current_chunk_count >= preheader_chunks_per_item {
+                        warn!(
+                            "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
+                            &data_root,
+                            &tx_offset,
+                            current_chunk_count,
+                            preheader_chunks_per_item
+                        );
+                        return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
+                    }
+
+                    pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
                 }
 
-                pending_chunks_guard.put(Arc::unwrap_or_clone(chunk));
+                // Visible park signal: previous builds returned Ok silently,
+                // which made holder-side cache misses look like "gossip worked".
+                info!(
+                    chunk.data_root = %data_root,
+                    chunk.tx_offset = %tx_offset,
+                    "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
+                );
+
+                // Close the TX/chunk gossip TOCTOU:
+                //   1. chunk looks up CachedDataRoot → miss
+                //   2. concurrent TX commits CDR + ProcessPendingChunks (pending empty)
+                //   3. chunk parks into pending → stranded forever, never CachedChunks
+                // Re-check CDR after the put. If the header committed in the window,
+                // schedule ProcessPendingChunks again (cannot call it directly —
+                // that recurses through this async fn and fails to compile).
+                let cdr_now = self
+                    .irys_db
+                    .view_eyre(|read_tx| {
+                        irys_database::cached_data_root_by_data_root(read_tx, data_root)
+                    })
+                    .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+                if cdr_now.is_some() {
+                    debug!(
+                        chunk.data_root = %data_root,
+                        "CachedDataRoot appeared after park; scheduling ProcessPendingChunks"
+                    );
+                    if let Err(e) = self.service_senders.chunk_ingress.send_traced(
+                        ChunkIngressMessage::ProcessPendingChunks(data_root),
+                    ) {
+                        warn!(
+                            chunk.data_root = %data_root,
+                            error = ?e,
+                            "Failed to schedule ProcessPendingChunks after post-park CDR recheck"
+                        );
+                    }
+                }
+
                 return Ok(());
             }
         };

@@ -177,4 +177,40 @@ mod tests {
         // Only 3 chunks should be kept (max_chunks_per_entry = 3)
         assert_eq!(cache.entries.get(&DataRoot::from(root)).unwrap().len(), 3);
     }
+
+    /// Regression fixture for the TX/chunk gossip TOCTOU that left holders
+    /// with no CachedChunks for a data_root (devnet H3xg / 3X98):
+    ///
+    /// 1. ProcessPendingChunks drains pending while empty (TX committed CDR)
+    /// 2. Concurrent chunk parks into pending after the drain
+    /// 3. Without a post-park re-drain, the chunk is stranded forever
+    ///
+    /// The product fix re-checks CachedDataRoot after park and schedules
+    /// another ProcessPendingChunks; this test pins the stranded state the
+    /// re-drain is required to clear.
+    #[test]
+    fn process_pending_before_park_strands_chunk_without_redrain() {
+        let mut cache = PriorityPendingChunks::new(10, 10);
+        let root_bytes = [0x3e_u8; 32];
+        let root = DataRoot::from(root_bytes);
+
+        // TX-side ProcessPendingChunks runs first — nothing parked yet.
+        assert!(
+            cache.pop(&root).is_none(),
+            "early ProcessPendingChunks sees an empty pending map"
+        );
+
+        // Chunk-side park completes after the drain.
+        cache.put(make_chunk(root_bytes, 0, 12));
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache.entries.contains_key(&root),
+            "parked chunk is stranded until a second drain"
+        );
+
+        // Post-park re-drain (what the fix schedules) recovers it.
+        let recovered = cache.pop(&root).expect("re-drain must recover parked chunk");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(cache.len(), 0);
+    }
 }
