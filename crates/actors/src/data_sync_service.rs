@@ -5,21 +5,29 @@ pub mod peer_stats;
 
 use crate::{chunk_fetcher::ChunkFetcherFactory, metrics, services::ServiceSenders};
 use chunk_orchestrator::{ChunkBlockReason, ChunkOrchestrator, ChunkRequestState};
+use irys_database::db::IrysDatabaseExt as _;
+use irys_database::ingress_proofs_by_data_root;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule, WriteDataChunkError};
 use irys_packing::unpack;
 use irys_types::{
-    Config, IrysAddress, PackedChunk, PartitionChunkOffset, SendTraced as _, TokioServiceHandle,
-    Traced, UnpackedChunk,
+    ChunkFormat, Config, DataRoot, IrysAddress, PartitionChunkOffset, SendTraced as _,
+    TokioServiceHandle, Traced, UnpackedChunk, app_state::DatabaseProvider,
 };
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{Instrument as _, debug, error, warn};
+
+/// Cap online ingress-proof signers appended to `current_peers` per SM refresh.
+/// Prefer assignees; these are residual-hole recovery hints only.
+const MAX_INGRESS_PROOF_SIGNER_PEERS: usize = 2;
+/// Max residual entropy offsets sampled when collecting data_roots for proof lookup.
+const MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN: usize = 16;
 
 /// Local write outcome after a successful peer fetch.
 #[derive(Debug, PartialEq, Eq)]
@@ -112,6 +120,9 @@ pub struct DataSyncServiceInner {
     pub active_peer_bandwidth_managers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
     pub chunk_orchestrators: HashMap<StorageModuleId, ChunkOrchestrator>,
     pub peer_list: PeerList,
+    /// Main node DB — used to look up accepted ingress proofs for residual-hole
+    /// peer expansion. Proof gossip is not chunk replication; signers are fetch hints.
+    pub db: DatabaseProvider,
     pub chunk_fetcher_factory: ChunkFetcherFactory,
     pub service_senders: ServiceSenders,
     pub config: Config,
@@ -134,7 +145,9 @@ pub enum DataSyncServiceMessage {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
         peer_address: IrysAddress,
-        chunk: PackedChunk,
+        /// Packed from assignee ledger-offset fetch, or Unpacked from cache-backed
+        /// data_root fetch (ingress-proof signers).
+        chunk: ChunkFormat,
     },
     ChunkFailed {
         storage_module_id: usize,
@@ -158,6 +171,7 @@ impl DataSyncServiceInner {
         block_tree: BlockTreeReadGuard,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         peer_list: PeerList,
+        db: DatabaseProvider,
         chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: ServiceSenders,
         config: Config,
@@ -167,6 +181,7 @@ impl DataSyncServiceInner {
             block_tree,
             storage_modules,
             peer_list,
+            db,
             active_peer_bandwidth_managers: Default::default(),
             chunk_fetcher_factory,
             chunk_orchestrators: Default::default(),
@@ -352,15 +367,13 @@ impl DataSyncServiceInner {
         chunk.storage_module_id = storage_module_id,
         chunk.offset = %chunk_offset,
         peer.address = %peer_addr,
-        chunk.data_root = %chunk.data_root,
-        chunk.partition_hash = %chunk.partition_hash,
     ))]
     fn on_chunk_completed(
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
-        chunk: PackedChunk,
+        chunk: ChunkFormat,
     ) -> eyre::Result<()> {
         // Peer delivery success: credit bandwidth stats, leave Requested until write outcome.
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
@@ -368,12 +381,15 @@ impl DataSyncServiceInner {
         }
 
         let consensus = &self.config.consensus;
-        let unpacked_chunk = unpack(
-            &chunk,
-            consensus.entropy_packing_iterations,
-            consensus.chunk_size as usize,
-            consensus.chain_id,
-        );
+        let unpacked_chunk = match chunk {
+            ChunkFormat::Unpacked(u) => u,
+            ChunkFormat::Packed(packed) => unpack(
+                &packed,
+                consensus.entropy_packing_iterations,
+                consensus.chunk_size as usize,
+                consensus.chain_id,
+            ),
+        };
 
         let sm = storage_module_by_id(&self.storage_modules.read().unwrap(), storage_module_id)
             .ok_or_else(|| eyre::eyre!("storage_module_id {storage_module_id} not found"))?;
@@ -628,6 +644,113 @@ impl DataSyncServiceInner {
         }
     }
 
+    /// Ensure a PeerBandwidthManager exists for an online peer that is only a
+    /// residual-hole fetch hint (ingress-proof signer), with no new partition
+    /// assignment attached. Such peers are fetched via data_root + tx_offset.
+    fn ensure_bandwidth_manager_for_peer(&mut self, miner_address: IrysAddress) -> bool {
+        let Some(peer) = self.peer_list.peer_by_mining_address(&miner_address) else {
+            return false;
+        };
+        if !peer.is_online {
+            return false;
+        }
+        let mut active_peers = self.active_peer_bandwidth_managers.write().unwrap();
+        active_peers
+            .entry(miner_address)
+            .or_insert_with(|| PeerBandwidthManager::new(&miner_address, &peer, &self.config));
+        true
+    }
+
+    /// Sample residual Entropy offsets that already have tx migration
+    /// (`data_root_and_tx_offset_at` succeeds) and collect unique data_roots.
+    fn residual_data_roots_for_proof_lookup(storage_module: &StorageModule) -> Vec<DataRoot> {
+        let entropy_intervals = storage_module.get_intervals(ChunkType::Entropy);
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        let mut sampled = 0_usize;
+
+        for interval in entropy_intervals {
+            for offset_u32 in *interval.start()..=*interval.end() {
+                if sampled >= MAX_RESIDUAL_OFFSETS_FOR_PROOF_SCAN {
+                    return roots;
+                }
+                // Prefer low offsets (residual holes under the frontier / packing tail).
+                if offset_u32 >= chunk_orchestrator::LOW_OFFSET_PROBE_THRESHOLD {
+                    // Still allow a few high-offset samples if we have no roots yet,
+                    // but skip bulk packing-tail entropy once we already have candidates.
+                    if !roots.is_empty() {
+                        continue;
+                    }
+                }
+                sampled += 1;
+                let part_off = PartitionChunkOffset::from(offset_u32);
+                if let Ok(Some((data_root, _))) =
+                    storage_module.data_root_and_tx_offset_at(part_off)
+                    && seen.insert(data_root)
+                {
+                    roots.push(data_root);
+                }
+            }
+        }
+        roots
+    }
+
+    /// Online peers that signed accepted local ingress proofs for residual data_roots.
+    ///
+    /// Ingress-proof gossip is **not** chunk replication — these addresses are
+    /// hints for data_sync dual-fetch (data_root path). Cap at
+    /// [`MAX_INGRESS_PROOF_SIGNER_PEERS`].
+    fn collect_ingress_proof_signer_peers(
+        &mut self,
+        storage_module: &StorageModule,
+    ) -> Vec<IrysAddress> {
+        let data_roots = Self::residual_data_roots_for_proof_lookup(storage_module);
+        if data_roots.is_empty() {
+            return Vec::new();
+        }
+
+        let local_miner = self.config.node_config.miner_address();
+        let mut signers = Vec::new();
+        let mut seen = HashSet::new();
+
+        for data_root in data_roots {
+            let proofs = match self
+                .db
+                .view_eyre(|tx| ingress_proofs_by_data_root(tx, data_root))
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        data_root = %data_root,
+                        error = %e,
+                        "failed to load ingress proofs for residual-hole peer expansion"
+                    );
+                    continue;
+                }
+            };
+
+            for (_root, compact) in proofs {
+                let address = compact.0.address;
+                if address == local_miner || !seen.insert(address) {
+                    continue;
+                }
+                if !self.ensure_bandwidth_manager_for_peer(address) {
+                    continue;
+                }
+                debug!(
+                    data_root = %data_root,
+                    peer.address = %address,
+                    "data_sync adding ingress-proof signer as residual-hole fetch peer"
+                );
+                signers.push(address);
+                if signers.len() >= MAX_INGRESS_PROOF_SIGNER_PEERS {
+                    return signers;
+                }
+            }
+        }
+        signers
+    }
+
     fn create_chunk_orchestrators(&mut self) {
         // Clone the storage modules list to avoid holding the read lock during iteration
         // This is lightweight since we're cloning Arc references, not the actual modules
@@ -754,7 +877,7 @@ impl DataSyncServiceInner {
     }
 
     pub fn get_best_available_peers(
-        &self,
+        &mut self,
         storage_module: &StorageModule,
         desired_count: usize,
     ) -> Vec<IrysAddress> {
@@ -775,34 +898,44 @@ impl DataSyncServiceInner {
         }
 
         let ledger_id = pa.ledger_id.unwrap();
+        let slot_index = pa.slot_index;
 
         // Find all peers that are assigned to store data for the same ledger slot
-        let active_peers = self.active_peer_bandwidth_managers.read().unwrap();
-        let mut candidates: Vec<&PeerBandwidthManager> = active_peers
-            .values()
-            .filter(|peer_manager| {
-                peer_manager.partition_assignments.iter().any(|assignment| {
-                    assignment.ledger_id == Some(ledger_id)
-                        && assignment.slot_index == pa.slot_index
-                })
-            })
-            .collect();
+        let assigned: Vec<IrysAddress> = {
+            let active_peers = self.active_peer_bandwidth_managers.read().unwrap();
+            let mut candidates: Vec<&PeerBandwidthManager> = active_peers
+                .values()
+                .filter(|peer_manager| peer_manager.is_assigned_to(ledger_id, slot_index))
+                .collect();
 
-        // Prioritize healthy peers with available bandwidth capacity
-        // Primary sort: health score (reliability, recent performance)
-        // Secondary sort: available concurrency (current capacity to handle more requests)
-        candidates.sort_by(|a, b| {
-            (b.health_score(), b.available_concurrency())
-                .partial_cmp(&(a.health_score(), a.available_concurrency()))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+            // Prioritize healthy peers with available bandwidth capacity
+            candidates.sort_by(|a, b| {
+                (b.health_score(), b.available_concurrency())
+                    .partial_cmp(&(a.health_score(), a.available_concurrency()))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
-        // Return the top performers up to the desired count
-        candidates
-            .into_iter()
-            .take(desired_count)
-            .map(|peer_manager| peer_manager.miner_address)
-            .collect()
+            candidates
+                .into_iter()
+                .take(desired_count)
+                .map(|peer_manager| peer_manager.miner_address)
+                .collect()
+        };
+
+        // Expand with online ingress-proof signers for residual holes that already
+        // have a data_root indexed. Assignees stay first (preferred path);
+        // orchestrator `find_best_peer` also prefers assignees until excluded.
+        //
+        // Without this, empty×empty assignee loops never consult the upload/proof
+        // node that still holds the body in cache (proof gossip ≠ chunk replication).
+        let mut peers = assigned;
+        let proof_signers = self.collect_ingress_proof_signer_peers(storage_module);
+        for addr in proof_signers {
+            if !peers.contains(&addr) {
+                peers.push(addr);
+            }
+        }
+        peers
     }
 }
 
@@ -812,6 +945,7 @@ impl DataSyncService {
         block_tree: BlockTreeReadGuard,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
         peer_list: PeerList,
+        db: DatabaseProvider,
         chunk_fetcher_factory: ChunkFetcherFactory,
         service_senders: &ServiceSenders,
         config: &Config,
@@ -831,6 +965,7 @@ impl DataSyncService {
                         block_tree,
                         storage_modules,
                         peer_list,
+                        db,
                         chunk_fetcher_factory,
                         service_senders,
                         config,
@@ -1004,6 +1139,220 @@ mod storage_module_lookup_tests {
                 .ledger_id,
             Some(DataLedger::OneYear.into())
         );
+    }
+}
+
+#[cfg(test)]
+mod ingress_proof_peer_tests {
+    use super::DataSyncServiceInner;
+    use crate::chunk_fetcher::MockChunkFetcher;
+    use crate::services::ServiceSenders;
+    use irys_database::db::IrysDatabaseExt as _;
+    use irys_database::{
+        IrysDatabaseArgs as _, cache_data_root, open_or_create_db,
+        store_external_ingress_proof_checked, tables::IrysTables,
+    };
+    use irys_domain::{BlockTree, PeerList, StorageModule, StorageModuleInfo};
+    use irys_testing_utils::TempDirBuilder;
+    use irys_types::{
+        Config, ConsensusConfig, DataLedger, DataTransactionLedger, H256, IrysAddress,
+        IrysBlockHeader, IrysPeerId, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+        PartitionChunkOffset, PeerAddress, PeerListItem, PeerScore, ProtocolVersion,
+        app_state::DatabaseProvider, ingress::IngressProof, irys::IrysSigner,
+        ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
+    };
+    use nodit::interval::ii;
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{Arc, RwLock},
+    };
+
+    /// Residual Entropy hole with an online ingress-proof signer must expand
+    /// `get_best_available_peers` beyond assignees-only — otherwise empty×empty
+    /// assignee loops never try the proof generator that holds the body in cache.
+    #[tokio::test]
+    async fn get_best_available_peers_includes_online_proof_signer() {
+        let tmp = TempDirBuilder::new().with_tracing().build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 20,
+                num_chunks_in_recall_range: 2,
+                num_partitions_per_slot: 1,
+                entropy_packing_iterations: 1,
+                chain_id: 1,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // Assignee SM with residual hole: tx indexed, no body written.
+        let assignee = IrysAddress::from([0xAA; 20]);
+        let prover = IrysAddress::from([0xBB; 20]);
+        let pa = PartitionAssignment {
+            ledger_id: Some(DataLedger::Submit.into()),
+            slot_index: Some(0),
+            miner_address: assignee,
+            partition_hash: H256::random(),
+        };
+        let sm = Arc::new(
+            StorageModule::new(
+                &StorageModuleInfo {
+                    id: 0,
+                    partition_assignment: Some(pa),
+                    submodules: vec![(partition_chunk_offset_ie!(0, 20), "hdd0".into())],
+                },
+                &config,
+            )
+            .expect("sm"),
+        );
+        sm.pack_with_zeros();
+
+        let data_size = chunk_size as usize; // 1 chunk
+        let data_bytes = vec![7_u8; data_size];
+        let irys = IrysSigner::random_signer(&config.consensus);
+        let tx = irys.create_transaction(data_bytes, H256::zero()).unwrap();
+        let tx = irys.sign_transaction(tx).unwrap();
+        let data_root = tx.header.data_root;
+        let (_tx_root, proofs) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
+        )
+        .expect("index");
+
+        // Main DB: CDR + ingress proof from prover (non-assignee).
+        let db = {
+            let env = open_or_create_db(
+                tmp.path().join("irys_db"),
+                IrysTables::ALL,
+                reth_db::mdbx::DatabaseArguments::irys_testing().unwrap(),
+            )
+            .unwrap();
+            DatabaseProvider(Arc::new(env))
+        };
+        db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            let proof = IngressProof::V1(irys_types::ingress::IngressProofV1 {
+                signature: Default::default(),
+                data_root,
+                proof: H256::random(),
+                chain_id: config.consensus.chain_id,
+                anchor: H256::zero(),
+            });
+            store_external_ingress_proof_checked(wtx, &proof, prover)?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Peer list: assignee + online prover (no Submit assignment for prover).
+        let (service_senders, _rx) = ServiceSenders::new();
+        let peer_api = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999);
+        let peers = vec![
+            PeerListItem {
+                peer_id: IrysPeerId::from(assignee),
+                mining_address: assignee,
+                address: PeerAddress {
+                    gossip: peer_api,
+                    api: peer_api,
+                    ..Default::default()
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            },
+            PeerListItem {
+                peer_id: IrysPeerId::from(prover),
+                mining_address: prover,
+                address: PeerAddress {
+                    gossip: peer_api,
+                    api: peer_api,
+                    ..Default::default()
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            },
+        ];
+        let peer_list = PeerList::from_peers(
+            peers,
+            service_senders.peer_network.clone(),
+            &config,
+            tokio::sync::broadcast::channel(8).0,
+        )
+        .expect("peer list");
+
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        {
+            use irys_testing_utils::IrysBlockHeaderTestExt as _;
+            genesis.test_sign();
+        }
+        let block_tree = BlockTree::new(&genesis, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
+        let storage_modules = Arc::new(RwLock::new(vec![sm.clone()]));
+        let factory: crate::chunk_fetcher::ChunkFetcherFactory =
+            Box::new(|ledger_id| Arc::new(MockChunkFetcher::new(ledger_id as usize)));
+
+        let mut inner = DataSyncServiceInner::new(
+            block_tree_guard,
+            storage_modules,
+            peer_list,
+            db,
+            factory,
+            service_senders,
+            config,
+            tokio::runtime::Handle::current(),
+        );
+
+        // Manually ensure assignee bandwidth manager with matching PA (epoch snapshot
+        // is empty in this unit fixture; production path fills this from epoch).
+        {
+            let peer = inner
+                .peer_list
+                .peer_by_mining_address(&assignee)
+                .expect("assignee peer");
+            let mut managers = inner.active_peer_bandwidth_managers.write().unwrap();
+            let entry = managers.entry(assignee).or_insert_with(|| {
+                crate::data_sync_service::peer_bandwidth_manager::PeerBandwidthManager::new(
+                    &assignee,
+                    &peer,
+                    &inner.config,
+                )
+            });
+            if !entry.partition_assignments.contains(&pa) {
+                entry.partition_assignments.push(pa);
+            }
+        }
+
+        // DataSyncServiceInner::new already creates orchestrators for data-assigned SMs.
+        assert!(
+            inner.chunk_orchestrators.contains_key(&sm.id),
+            "orchestrator must exist for residual-hole peer selection"
+        );
+
+        let peers = inner.get_best_available_peers(&sm, 4);
+        assert!(
+            peers.contains(&prover),
+            "online ingress-proof signer must be in peer set for residual hole; got {peers:?}"
+        );
+        // Assignees preferred first when present.
+        if peers.contains(&assignee) {
+            assert_eq!(
+                peers[0], assignee,
+                "assigned peers should be ordered before proof signers"
+            );
+        }
     }
 }
 

@@ -2,6 +2,7 @@ use crate::{
     DataSyncServiceMessage,
     chunk_fetcher::{ChunkFetchError, ChunkFetcher},
     data_sync_service::peer_bandwidth_manager::PeerBandwidthManager,
+    metrics,
     services::ServiceSenders,
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
@@ -20,7 +21,19 @@ use tracing::{Instrument as _, debug, warn};
 /// threshold. Residual sync stalls manifest as low-offset Entropy holes left
 /// behind while the packing tail (high offsets) is still legitimately Entropy —
 /// gating on low offsets keeps the probes quiet on healthy modules.
-const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
+pub(crate) const LOW_OFFSET_PROBE_THRESHOLD: u32 = 20_000;
+
+/// How to request a missing body from a selected peer.
+///
+/// Assignees use ledger-offset; ingress-proof signers (often no SM) use data_root.
+#[derive(Debug, Clone, Copy)]
+enum FetchMode {
+    LedgerOffset(LedgerChunkOffset),
+    DataRoot {
+        data_root: irys_types::DataRoot,
+        tx_offset: irys_types::TxChunkOffset,
+    },
+}
 
 /// Why a chunk offset is blocked from the hot re-fetch loop.
 ///
@@ -407,6 +420,10 @@ impl ChunkOrchestrator {
 
     fn find_best_peer(&self, excluding: Option<&ExcludedPeerAddresses>) -> Option<IrysAddress> {
         let peers = self.active_sync_peers.read().ok()?;
+        let slot_index = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
 
         let mut candidates: Vec<&PeerBandwidthManager> = self
             .current_peers
@@ -425,16 +442,18 @@ impl ChunkOrchestrator {
             return None;
         }
 
-        // Use the same sorting logic as the service
-        // Primary sort: health score (reliability, recent performance)
-        // Secondary sort: available concurrency (current capacity to handle more requests)
+        // Prefer assigned replicas for the common path; promote ingress-proof
+        // signers (no matching ledger/slot assignment) only after assignees are
+        // exhausted or excluded (e.g. residual empty×empty 404 loop).
+        // Then: health score, then available concurrency.
         candidates.sort_by(|a, b| {
-            (b.health_score(), b.available_concurrency())
-                .partial_cmp(&(a.health_score(), a.available_concurrency()))
+            let a_assigned = a.is_assigned_to(self.ledger_id, slot_index);
+            let b_assigned = b.is_assigned_to(self.ledger_id, slot_index);
+            (b_assigned, b.health_score(), b.available_concurrency())
+                .partial_cmp(&(a_assigned, a.health_score(), a.available_concurrency()))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Return the best peer
         candidates
             .first()
             .map(|peer_manager| peer_manager.miner_address)
@@ -446,71 +465,145 @@ impl ChunkOrchestrator {
         chunk_offset: PartitionChunkOffset,
         peer_addr: IrysAddress,
     ) {
-        let request = match self.chunk_requests.get_mut(&chunk_offset) {
-            Some(req) => req,
-            None => return,
+        let Some(request) = self.chunk_requests.get_mut(&chunk_offset) else {
+            return;
         };
 
-        let api_addr = {
-            let mut peers = match self.active_sync_peers.write() {
+        let slot_index = self
+            .storage_module
+            .partition_assignment()
+            .and_then(|pa| pa.slot_index);
+
+        let (api_addr, use_ledger_offset) = {
+            let peers = match self.active_sync_peers.read() {
                 Ok(p) => p,
                 Err(_) => return,
             };
-
-            let peer_manager = match peers.get_mut(&peer_addr) {
-                Some(pm) => pm,
-                None => return,
+            let Some(peer_manager) = peers.get(&peer_addr) else {
+                return;
             };
-
-            peer_manager.on_chunk_request_started();
-            peer_manager.peer_address.api
+            (
+                peer_manager.peer_address.api,
+                peer_manager.is_assigned_to(self.ledger_id, slot_index),
+            )
         };
 
-        // Get a ledger chunk offset
-        let start_ledger_offset = u64::from(
-            self.storage_module
-                .get_storage_module_ledger_offsets()
-                .unwrap()
-                .start(),
-        );
-        let ledger_chunk_offset =
-            LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
+        // Dual addressing:
+        // - Assignees → ledger-offset (existing)
+        // - Ingress-proof signers (may lack SM) → data_root + tx_offset
+        // Resolve mode *before* accounting a started request so we do not
+        // penalize proof signers when we cannot map the residual hole.
+        let fetch_mode = if use_ledger_offset {
+            let start_ledger_offset = u64::from(
+                self.storage_module
+                    .get_storage_module_ledger_offsets()
+                    .unwrap()
+                    .start(),
+            );
+            let ledger_chunk_offset =
+                LedgerChunkOffset::from(start_ledger_offset + u64::from(chunk_offset));
+            FetchMode::LedgerOffset(ledger_chunk_offset)
+        } else {
+            match self.storage_module.data_root_and_tx_offset_at(chunk_offset) {
+                Ok(Some((data_root, tx_offset))) => FetchMode::DataRoot {
+                    data_root,
+                    tx_offset,
+                },
+                Ok(None) => {
+                    debug!(
+                        "data_sync_probe no_data_root_for_proof_peer offset={} peer={}",
+                        chunk_offset, peer_addr
+                    );
+                    request
+                        .excluded
+                        .get_or_insert_with(HashSet::new)
+                        .insert(peer_addr);
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        chunk.offset = %chunk_offset,
+                        peer.address = %peer_addr,
+                        error = %e,
+                        "failed to resolve data_root for proof-signer fetch; excluding peer"
+                    );
+                    request
+                        .excluded
+                        .get_or_insert_with(HashSet::new)
+                        .insert(peer_addr);
+                    return;
+                }
+            }
+        };
 
-        // Change the request_state from Pending -> Requested
+        // Accounting + state transition only once we know we will dispatch.
+        if let Ok(mut peers) = self.active_sync_peers.write()
+            && let Some(pm) = peers.get_mut(&peer_addr)
+        {
+            pm.on_chunk_request_started();
+        }
+
         let start_instant = Instant::now();
         request.request_state = ChunkRequestState::Requested(peer_addr, start_instant);
 
-        // Get the chunk fetcher
         let chunk_fetcher = self.chunk_fetcher.clone();
         let tx = self.service_senders.data_sync.clone();
         let storage_module_id = self.storage_module.id;
         let timeout = self.config.data_sync.chunk_request_timeout;
+        let source_label: &'static str = if use_ledger_offset {
+            "assigned"
+        } else {
+            "ingress_proof"
+        };
 
         self.runtime_handle.spawn(
             async move {
-                debug!("Fetching chunk {chunk_offset} from {api_addr}");
+                debug!(
+                    "Fetching chunk {chunk_offset} from {api_addr} via {source_label} ({fetch_mode:?})"
+                );
 
-                let result = chunk_fetcher
-                    .fetch_chunk(ledger_chunk_offset, api_addr, timeout)
-                    .await;
+                let result = match fetch_mode {
+                    FetchMode::LedgerOffset(ledger_chunk_offset) => {
+                        chunk_fetcher
+                            .fetch_chunk_by_ledger_offset(ledger_chunk_offset, api_addr, timeout)
+                            .await
+                    }
+                    FetchMode::DataRoot {
+                        data_root,
+                        tx_offset,
+                    } => {
+                        chunk_fetcher
+                            .fetch_chunk_by_data_root(data_root, tx_offset, api_addr, timeout)
+                            .await
+                    }
+                };
 
                 let message = match result {
-                    Ok(chunk) => DataSyncServiceMessage::ChunkCompleted {
-                        storage_module_id,
-                        chunk_offset,
-                        peer_address: peer_addr,
-                        chunk,
-                    },
-                    Err(ChunkFetchError::Timeout) => DataSyncServiceMessage::ChunkTimedOut {
-                        storage_module_id,
-                        chunk_offset,
-                        peer_address: peer_addr,
-                    },
-                    Err(_) => DataSyncServiceMessage::ChunkFailed {
-                        storage_module_id,
-                        chunk_offset,
-                        peer_addr,
-                    },
+                    Ok(chunk) => {
+                        metrics::record_data_sync_fetch_by_source(source_label, "success");
+                        DataSyncServiceMessage::ChunkCompleted {
+                            storage_module_id,
+                            chunk_offset,
+                            peer_address: peer_addr,
+                            chunk,
+                        }
+                    }
+                    Err(ChunkFetchError::Timeout) => {
+                        metrics::record_data_sync_fetch_by_source(source_label, "fail");
+                        DataSyncServiceMessage::ChunkTimedOut {
+                            storage_module_id,
+                            chunk_offset,
+                            peer_address: peer_addr,
+                        }
+                    }
+                    Err(_) => {
+                        metrics::record_data_sync_fetch_by_source(source_label, "fail");
+                        DataSyncServiceMessage::ChunkFailed {
+                            storage_module_id,
+                            chunk_offset,
+                            peer_addr,
+                        }
+                    }
                 };
 
                 // Service handles fetch credit + local write outcome (store / block / requeue).

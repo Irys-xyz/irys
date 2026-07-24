@@ -2090,6 +2090,7 @@ impl IrysNode {
             block_tree_guard.clone(),
             storage_modules.clone(),
             peer_list_guard.clone(),
+            irys_db.clone(),
             http_factory,
             &service_senders,
             &config,
