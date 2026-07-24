@@ -159,10 +159,28 @@ impl DataSyncServiceTestHarness {
         rx: UnboundedReceiver<irys_types::Traced<DataSyncServiceMessage>>,
         config: Config,
     ) -> Self {
+        // Tests only exercise assigned-replica fetch; empty main DB is fine
+        // (no residual-hole proof-signer expansion).
+        let db_path = config.node_config.base_directory.join("data_sync_test_db");
+        let db = {
+            use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+            use irys_types::app_state::DatabaseProvider;
+            use reth_db::mdbx::DatabaseArguments;
+            use std::sync::Arc;
+            let env = open_or_create_db(
+                db_path,
+                IrysTables::ALL,
+                DatabaseArguments::irys_testing().unwrap(),
+            )
+            .expect("test db");
+            DatabaseProvider(Arc::new(env))
+        };
+
         let inner = DataSyncServiceInner::new(
             block_tree,
             storage_modules,
             peer_list,
+            db,
             chunk_fetcher_factory,
             service_senders,
             config,
@@ -861,12 +879,12 @@ struct PeerAwareChunkFetcher {
 
 #[async_trait::async_trait]
 impl ChunkFetcher for PeerAwareChunkFetcher {
-    async fn fetch_chunk(
+    async fn fetch_chunk_by_ledger_offset(
         &self,
         ledger_chunk_offset: LedgerChunkOffset,
         api_addr: SocketAddr,
         timeout: Duration,
-    ) -> Result<PackedChunk, ChunkFetchError> {
+    ) -> Result<irys_types::ChunkFormat, ChunkFetchError> {
         let chunk_fetcher_for_peer =
             self.mock_fetchers
                 .get(&api_addr)
@@ -886,7 +904,7 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
 
         // Delegate to the appropriate peers mock chunk fetcher
         let result = chunk_fetcher_for_peer
-            .fetch_chunk(ledger_chunk_offset, api_addr, timeout)
+            .fetch_chunk_by_ledger_offset(ledger_chunk_offset, api_addr, timeout)
             .await;
 
         // Simulate a timeout when there is one
@@ -898,6 +916,24 @@ impl ChunkFetcher for PeerAwareChunkFetcher {
         }
 
         result
+    }
+
+    async fn fetch_chunk_by_data_root(
+        &self,
+        data_root: irys_types::DataRoot,
+        tx_offset: irys_types::TxChunkOffset,
+        api_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Result<irys_types::ChunkFormat, ChunkFetchError> {
+        let chunk_fetcher_for_peer =
+            self.mock_fetchers
+                .get(&api_addr)
+                .ok_or_else(|| ChunkFetchError::NetworkError {
+                    message: format!("No mock fetcher for peer: {}", api_addr),
+                })?;
+        chunk_fetcher_for_peer
+            .fetch_chunk_by_data_root(data_root, tx_offset, api_addr, timeout)
+            .await
     }
 }
 
