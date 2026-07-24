@@ -65,6 +65,30 @@ pub struct DataSizeInfo {
     pub is_from_publish_ledger: bool,
 }
 
+/// Pure post-park rescue decision for the TX/chunk gossip TOCTOU.
+///
+/// After a chunk is parked, we re-read `CachedDataRoot`. This function decides
+/// whether to schedule another `ProcessPendingChunks` drain:
+/// - `cdr_lookup = Err(_)` → leave parked (do **not** fail the already-accepted park)
+/// - `cdr_lookup = Ok(None)` → leave parked (still waiting for the header)
+/// - `cdr_lookup = Ok(Some(size))` → drain if `required_min_data_size` is `None`
+///   (any CDR is enough) or `size >= required_min_data_size` (oversized-claim park)
+///
+/// Extracted so deleting the rescue path without updating tests fails CI.
+#[must_use]
+pub(crate) fn should_schedule_pending_drain_after_park(
+    cdr_lookup: Result<Option<u64>, ()>,
+    required_min_data_size: Option<u64>,
+) -> bool {
+    match cdr_lookup {
+        Err(()) | Ok(None) => false,
+        Ok(Some(data_size)) => match required_min_data_size {
+            None => true,
+            Some(min) => data_size >= min,
+        },
+    }
+}
+
 /// Selects the authoritative data_size from multiple storage modules.
 #[must_use]
 pub fn select_data_size_from_storage_modules(
@@ -102,6 +126,52 @@ pub fn select_data_size_from_storage_modules(
 }
 
 impl ChunkIngressServiceInner {
+    /// After parking a chunk, re-check `CachedDataRoot` and schedule
+    /// `ProcessPendingChunks` if the concurrent TX committed in the park window.
+    ///
+    /// Never fails the already-accepted park: DB and channel errors warn only.
+    /// Direct re-entry into `process_pending_chunks_for_root` would recurse
+    /// through this async ingress stack (`E0733`), so we always go via the
+    /// control-plane channel.
+    async fn maybe_rescue_after_park(
+        &self,
+        data_root: DataRoot,
+        required_min_data_size: Option<u64>,
+    ) {
+        let cdr_lookup = self
+            .irys_db
+            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, data_root))
+            .map(|opt| opt.map(|cdr| cdr.data_size))
+            .map_err(|e| {
+                warn!(
+                    chunk.data_root = %data_root,
+                    error = ?e,
+                    "post-park CDR recheck failed; chunk remains parked"
+                );
+            });
+
+        if !should_schedule_pending_drain_after_park(cdr_lookup, required_min_data_size) {
+            return;
+        }
+
+        debug!(
+            chunk.data_root = %data_root,
+            ?required_min_data_size,
+            "CachedDataRoot usable after park; scheduling ProcessPendingChunks"
+        );
+        if let Err(e) = self
+            .service_senders
+            .chunk_ingress
+            .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
+        {
+            warn!(
+                chunk.data_root = %data_root,
+                error = ?e,
+                "Failed to schedule ProcessPendingChunks after post-park CDR recheck"
+            );
+        }
+    }
+
     #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub(crate) async fn handle_chunk_ingress_message(
         &self,
@@ -287,37 +357,9 @@ impl ChunkIngressServiceInner {
                     "Parked chunk: no CachedDataRoot yet (awaiting tx header / CDR commit)"
                 );
 
-                // Close the TX/chunk gossip TOCTOU:
-                //   1. chunk looks up CachedDataRoot → miss
-                //   2. concurrent TX commits CDR + ProcessPendingChunks (pending empty)
-                //   3. chunk parks into pending → stranded forever, never CachedChunks
-                // Re-check CDR after the put. If the header committed in the window,
-                // schedule ProcessPendingChunks again (cannot call it directly —
-                // that recurses through this async fn and fails to compile).
-                let cdr_now = self
-                    .irys_db
-                    .view_eyre(|read_tx| {
-                        irys_database::cached_data_root_by_data_root(read_tx, data_root)
-                    })
-                    .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
-                if cdr_now.is_some() {
-                    debug!(
-                        chunk.data_root = %data_root,
-                        "CachedDataRoot appeared after park; scheduling ProcessPendingChunks"
-                    );
-                    if let Err(e) = self
-                        .service_senders
-                        .chunk_ingress
-                        .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
-                    {
-                        warn!(
-                            chunk.data_root = %data_root,
-                            error = ?e,
-                            "Failed to schedule ProcessPendingChunks after post-park CDR recheck"
-                        );
-                    }
-                }
-
+                // Close the TX/chunk gossip TOCTOU (see maybe_rescue_after_park).
+                // Any CDR is enough: the header that commits it owns this root.
+                self.maybe_rescue_after_park(data_root, None).await;
                 return Ok(());
             }
         };
@@ -335,15 +377,25 @@ impl ChunkIngressServiceInner {
             } else {
                 // Unconfirmed: chunk claims larger size than cached.
                 // This may be legitimate (tx with larger size not yet processed).
-                // Park the chunk for the time being.
-                debug!(
-                    "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
-                    chunk.data_size, data_size, chunk.data_root
+                // Park the chunk for the time being — same TOCTOU as the
+                // pre-header path if ProcessPendingChunks runs before this put.
+                let data_root = chunk.data_root;
+                let claimed_size = chunk.data_size;
+                info!(
+                    chunk.data_root = %data_root,
+                    chunk.tx_offset = %chunk.tx_offset,
+                    claimed_data_size = claimed_size,
+                    cached_data_size = data_size,
+                    "Parked chunk: claims larger data_size than unconfirmed CachedDataRoot"
                 );
                 self.pending_chunks
                     .write()
                     .await
                     .put(Arc::unwrap_or_clone(chunk));
+                // Only re-drain if CDR grew enough to accept this claim;
+                // otherwise leave parked for the larger TX's ProcessPendingChunks.
+                self.maybe_rescue_after_park(data_root, Some(claimed_size))
+                    .await;
                 return Ok(());
             }
         }
@@ -972,6 +1024,42 @@ mod tests {
     fn ingress_gate_proceeds_when_size_confirmed_and_block_set_populated() {
         let cdr = cdr_gate_fixture(true, vec![H256::random()], vec![H256::random()], None);
         assert!(!should_skip_ingress_proof_generation(&cdr));
+    }
+
+    /// Pre-header park (no CDR at first look): any post-park CDR should drain.
+    #[test]
+    fn post_park_rescue_schedules_when_any_cdr_appears() {
+        assert!(should_schedule_pending_drain_after_park(Ok(Some(12)), None));
+        assert!(!should_schedule_pending_drain_after_park(Ok(None), None));
+    }
+
+    /// DB error after park must leave the chunk parked — not fail the ingest
+    /// and not skip rescue via `?` (which would reintroduce the strand).
+    #[test]
+    fn post_park_rescue_leaves_parked_on_db_error() {
+        assert!(!should_schedule_pending_drain_after_park(Err(()), None));
+        assert!(!should_schedule_pending_drain_after_park(Err(()), Some(12)));
+    }
+
+    /// Oversized-claim park: only drain once CDR has grown to the claim.
+    #[test]
+    fn post_park_rescue_oversized_requires_sufficient_cdr_size() {
+        assert!(!should_schedule_pending_drain_after_park(
+            Ok(Some(10)),
+            Some(12)
+        ));
+        assert!(should_schedule_pending_drain_after_park(
+            Ok(Some(12)),
+            Some(12)
+        ));
+        assert!(should_schedule_pending_drain_after_park(
+            Ok(Some(20)),
+            Some(12)
+        ));
+        assert!(!should_schedule_pending_drain_after_park(
+            Ok(None),
+            Some(12)
+        ));
     }
 
     /// Confirmed-but-not-block-set state: pending tx with chunks staged but

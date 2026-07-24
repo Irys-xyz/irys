@@ -178,41 +178,21 @@ mod tests {
         assert_eq!(cache.entries.get(&DataRoot::from(root)).unwrap().len(), 3);
     }
 
-    /// Regression fixture for the TX/chunk gossip TOCTOU that left holders
-    /// with no CachedChunks for a data_root (devnet H3xg / 3X98):
-    ///
-    /// 1. ProcessPendingChunks drains pending while empty (TX committed CDR)
-    /// 2. Concurrent chunk parks into pending after the drain
-    /// 3. Without a post-park re-drain, the chunk is stranded forever
-    ///
-    /// The product fix re-checks CachedDataRoot after park and schedules
-    /// another ProcessPendingChunks; this test pins the stranded state the
-    /// re-drain is required to clear.
+    /// Map-level illustration of the TX/chunk TOCTOU order (drain-empty then
+    /// park). The product decision that *triggers* the second drain is covered
+    /// by `should_schedule_pending_drain_after_park` tests in `chunks.rs`.
     #[test]
-    fn process_pending_before_park_strands_chunk_without_redrain() {
+    fn early_drain_then_park_leaves_entry_until_second_pop() {
         let mut cache = PriorityPendingChunks::new(10, 10);
         let root_bytes = [0x3e_u8; 32];
         let root = DataRoot::from(root_bytes);
 
-        // TX-side ProcessPendingChunks runs first — nothing parked yet.
-        assert!(
-            cache.pop(&root).is_none(),
-            "early ProcessPendingChunks sees an empty pending map"
-        );
-
-        // Chunk-side park completes after the drain.
+        assert!(cache.pop(&root).is_none());
         cache.put(make_chunk(root_bytes, 0, 12));
-        assert_eq!(cache.len(), 1);
-        assert!(
-            cache.entries.contains_key(&root),
-            "parked chunk is stranded until a second drain"
-        );
-
-        // Post-park re-drain (what the fix schedules) recovers it.
+        assert!(cache.entries.contains_key(&root));
         let recovered = cache
             .pop(&root)
-            .expect("re-drain must recover parked chunk");
+            .expect("second drain recovers parked chunk");
         assert_eq!(recovered.len(), 1);
-        assert_eq!(cache.len(), 0);
     }
 }

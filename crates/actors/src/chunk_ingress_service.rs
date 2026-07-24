@@ -180,11 +180,9 @@ impl ChunkIngressServiceInner {
 
     /// Pop and re-ingress any chunks parked for `data_root`.
     ///
-    /// Called when a data TX header lands (`ProcessPendingChunks`) and also
-    /// from the pre-header park path after a post-park `CachedDataRoot`
-    /// re-check closes the race where this drain ran against an empty map
-    /// before the concurrent chunk finished parking.
-    pub(crate) async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
+    /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
+    /// postprocess, and from post-park CDR re-check rescue).
+    async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
         let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
