@@ -271,10 +271,7 @@ impl ChunkIngressServiceInner {
                     if current_chunk_count >= preheader_chunks_per_item {
                         warn!(
                             "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
-                            &data_root,
-                            &tx_offset,
-                            current_chunk_count,
-                            preheader_chunks_per_item
+                            &data_root, &tx_offset, current_chunk_count, preheader_chunks_per_item
                         );
                         return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                     }
@@ -308,9 +305,11 @@ impl ChunkIngressServiceInner {
                         chunk.data_root = %data_root,
                         "CachedDataRoot appeared after park; scheduling ProcessPendingChunks"
                     );
-                    if let Err(e) = self.service_senders.chunk_ingress.send_traced(
-                        ChunkIngressMessage::ProcessPendingChunks(data_root),
-                    ) {
+                    if let Err(e) = self
+                        .service_senders
+                        .chunk_ingress
+                        .send_traced(ChunkIngressMessage::ProcessPendingChunks(data_root))
+                    {
                         warn!(
                             chunk.data_root = %data_root,
                             error = ?e,

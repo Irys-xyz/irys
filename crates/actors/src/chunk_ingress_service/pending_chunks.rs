@@ -209,7 +209,9 @@ mod tests {
         );
 
         // Post-park re-drain (what the fix schedules) recovers it.
-        let recovered = cache.pop(&root).expect("re-drain must recover parked chunk");
+        let recovered = cache
+            .pop(&root)
+            .expect("re-drain must recover parked chunk");
         assert_eq!(recovered.len(), 1);
         assert_eq!(cache.len(), 0);
     }
