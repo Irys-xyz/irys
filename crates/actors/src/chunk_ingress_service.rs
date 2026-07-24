@@ -178,6 +178,10 @@ impl ChunkIngressServiceInner {
         }
     }
 
+    /// Pop and re-ingress any chunks parked for `data_root`.
+    ///
+    /// Invoked by the `ProcessPendingChunks` control-plane message (from TX
+    /// postprocess, and from post-park CDR re-check rescue).
     async fn process_pending_chunks_for_root(&self, data_root: DataRoot) {
         let option_chunks_map = self.pending_chunks.write().await.pop(&data_root);
         if let Some(chunks_map) = option_chunks_map {

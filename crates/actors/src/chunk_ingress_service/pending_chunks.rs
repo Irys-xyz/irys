@@ -177,4 +177,22 @@ mod tests {
         // Only 3 chunks should be kept (max_chunks_per_entry = 3)
         assert_eq!(cache.entries.get(&DataRoot::from(root)).unwrap().len(), 3);
     }
+
+    /// Map-level illustration of the TX/chunk TOCTOU order (drain-empty then
+    /// park). The product decision that *triggers* the second drain is covered
+    /// by `should_schedule_pending_drain_after_park` tests in `chunks.rs`.
+    #[test]
+    fn early_drain_then_park_leaves_entry_until_second_pop() {
+        let mut cache = PriorityPendingChunks::new(10, 10);
+        let root_bytes = [0x3e_u8; 32];
+        let root = DataRoot::from(root_bytes);
+
+        assert!(cache.pop(&root).is_none());
+        cache.put(make_chunk(root_bytes, 0, 12));
+        assert!(cache.entries.contains_key(&root));
+        let recovered = cache
+            .pop(&root)
+            .expect("second drain recovers parked chunk");
+        assert_eq!(recovered.len(), 1);
+    }
 }
