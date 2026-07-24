@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784860304947,
+  "lastUpdate": 1784861114151,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12786,6 +12786,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000119,
+            "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1dd796591d119bdf1c39e56bbce6489ecae197a2",
+          "message": "feat(storage): resolve data_root + tx_offset for residual Entropy holes (#1538)\n\n* fix(api): serve data_root chunks from node cache when SM missing\n\nNon-assignee upload/proof nodes often hold chunk bodies only in\nCachedChunks and cannot answer ledger-offset GETs. Fall back to the\ncache on GET /chunk/data-root so residual-hole peers can fetch by\ndata_root + tx_offset. Wire main irys_db into ChunkProvider.\n\n* feat(storage): resolve data_root + tx_offset for residual Entropy holes\n\nAdd StorageModule::data_root_and_tx_offset_at so data_sync can address\nproof-signer peers via data_root fetch when assignees have tx migration\nbut no chunk body (data_path_hash missing). Does not require a written\nbody; derives tx_offset from DataRootInfo.start_offset.",
+          "timestamp": "2026-07-23T19:17:22-07:00",
+          "tree_id": "ea5f3f5ae95bbc70625dcc851e76a18561794e39",
+          "url": "https://github.com/Irys-xyz/irys/commit/1dd796591d119bdf1c39e56bbce6489ecae197a2"
+        },
+        "date": 1784861111680,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012446,
+            "range": "± 0.000478",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.11962,
+            "range": "± 0.003987",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.227134,
+            "range": "± 0.071014",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.06428,
+            "range": "± 0.185732",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.077842,
+            "range": "± 0.001563",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 754.790324,
+            "range": "± 6.625421",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 994.551497,
+            "range": "± 16.951974",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.11766,
+            "range": "± 0.002465",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1185.580339,
+            "range": "± 22.943253",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1904.263945,
+            "range": "± 183.094841",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.033554,
+            "range": "± 0.000982",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.512268,
+            "range": "± 2.354139",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.148071,
+            "range": "± 1.66859",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
             "range": "± 0.000003",
             "unit": "ms/iter"
           }
