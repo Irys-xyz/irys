@@ -1972,8 +1972,9 @@ impl IrysNode {
             shutdown_token.clone(),
         );
 
-        // set up chunk provider
-        let chunk_provider = Self::init_chunk_provider(&config, storage_modules_guard.clone());
+        // set up chunk provider (main irys_db powers cache-backed data_root GETs)
+        let chunk_provider =
+            Self::init_chunk_provider(&config, storage_modules_guard.clone(), irys_db.clone());
 
         // set up sync service
         let (sync_service_facade, sync_service_handle) = Self::init_sync_service(
@@ -2187,8 +2188,9 @@ impl IrysNode {
     fn init_chunk_provider(
         config: &Config,
         storage_modules_guard: StorageModulesReadGuard,
+        irys_db: DatabaseProvider,
     ) -> Arc<ChunkProvider> {
-        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard);
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard, irys_db);
 
         Arc::new(chunk_provider)
     }

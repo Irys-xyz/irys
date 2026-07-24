@@ -1,7 +1,9 @@
 use eyre::OptionExt as _;
+use irys_database::db::IrysDatabaseExt as _;
+use irys_database::{cached_chunk_by_chunk_offset, cached_data_root_by_data_root};
 use irys_types::{
     ChunkFormat, Config, DataLedger, DataRoot, LedgerChunkOffset, PackedChunk, TxChunkOffset,
-    UnpackedChunk,
+    UnpackedChunk, app_state::DatabaseProvider,
 };
 use tracing::debug;
 
@@ -12,14 +14,23 @@ use crate::{StorageModulesReadGuard, checked_add_i32_u64, get_storage_module_at_
 pub struct ChunkProvider {
     /// Collection of storage modules for distributing chunk data
     pub storage_modules_guard: StorageModulesReadGuard,
+    /// Main node DB — used for cache-backed data_root fetches when no local SM
+    /// has the body (upload/API / proof-generator nodes often lack a ledger
+    /// assignment but still hold `CachedChunks` long enough to serve peers).
+    pub db: DatabaseProvider,
     pub config: Config,
 }
 
 impl ChunkProvider {
-    pub fn new(config: Config, storage_modules_guard: StorageModulesReadGuard) -> Self {
+    pub fn new(
+        config: Config,
+        storage_modules_guard: StorageModulesReadGuard,
+        db: DatabaseProvider,
+    ) -> Self {
         Self {
             config,
             storage_modules_guard,
+            db,
         }
     }
 
@@ -56,15 +67,25 @@ impl ChunkProvider {
         )))
     }
 
-    /// Retrieves a chunk by [`DataRoot`]
+    /// Retrieves a chunk by [`DataRoot`] + tx-relative offset.
+    ///
+    /// Lookup order:
+    /// 1. Local storage modules assigned to `ledger` (returns packed when present).
+    /// 2. Node chunk cache (`CachedChunks`) — allows non-assignees (upload targets /
+    ///    ingress-proof generators) to serve bodies that never landed in an SM.
+    ///
+    /// Cache hits are returned as [`ChunkFormat::Unpacked`]. Callers that need
+    /// packed form (or that accept either) should handle both variants — e.g.
+    /// block validation already does.
+    ///
+    /// Note: ingress-proof gossip is not chunk replication. Cache-backed serve is
+    /// best-effort; pruned cache entries yield `Ok(None)` the same as a missing SM.
     pub fn get_chunk_by_data_root(
         &self,
         ledger: DataLedger,
         data_root: DataRoot,
         data_tx_offset: TxChunkOffset,
     ) -> eyre::Result<Option<ChunkFormat>> {
-        // TODO: read from the cache
-
         debug!(
             "getting ledger: {:?}, data_root: {}, offset: {}",
             &ledger, &data_root, &data_tx_offset
@@ -100,8 +121,50 @@ impl ChunkProvider {
                 }
             }
         }
+        drop(binding);
 
-        Ok(None)
+        // Fall back to the node chunk cache. Non-assignees often never have an SM
+        // for this ledger/slot, but may still hold the body after POST /chunk
+        // (long enough to generate an ingress proof and to serve residual holes).
+        self.get_chunk_from_cache(data_root, data_tx_offset)
+    }
+
+    /// Reads an unpacked chunk body from `CachedChunks` / `CachedDataRoots`.
+    ///
+    /// Returns `Ok(None)` when the data_root metadata is missing, the offset is
+    /// not indexed, or the body was pruned (`chunk: None`).
+    fn get_chunk_from_cache(
+        &self,
+        data_root: DataRoot,
+        data_tx_offset: TxChunkOffset,
+    ) -> eyre::Result<Option<ChunkFormat>> {
+        self.db.view_eyre(|tx| {
+            let Some(cdr) = cached_data_root_by_data_root(tx, data_root)? else {
+                return Ok(None);
+            };
+            let Some((_meta, cached)) =
+                cached_chunk_by_chunk_offset(tx, data_root, data_tx_offset)?
+            else {
+                return Ok(None);
+            };
+            // Index-only rows (body pruned / stored only in a partition) cannot be served.
+            let Some(bytes) = cached.chunk else {
+                debug!(
+                    data_root = %data_root,
+                    tx_offset = %data_tx_offset,
+                    "cache index hit but chunk body missing; cannot serve data_root fetch"
+                );
+                return Ok(None);
+            };
+
+            Ok(Some(ChunkFormat::Unpacked(UnpackedChunk {
+                data_root,
+                data_size: cdr.data_size,
+                data_path: cached.data_path,
+                bytes,
+                tx_offset: data_tx_offset,
+            })))
+        })
     }
 
     pub fn get_ledger_offsets_for_data_root(
@@ -154,6 +217,7 @@ mod tests {
     use crate::{StorageModule, StorageModuleInfo};
 
     use super::*;
+    use irys_database::{cache_chunk, cache_data_root};
     use irys_packing::unpack_with_entropy;
     use irys_testing_utils::utils::TempDirBuilder;
     use irys_types::{
@@ -249,7 +313,10 @@ mod tests {
         let storage_modules_guard =
             StorageModulesReadGuard::new(Arc::new(RwLock::new(vec![Arc::new(storage_module)])));
 
-        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard);
+        // Empty main DB is fine: SM path still serves packed chunks.
+        let db_path = tmp_dir.path().join("irys_db");
+        let db = create_test_db(&db_path);
+        let chunk_provider = ChunkProvider::new(config.clone(), storage_modules_guard, db);
 
         for original_chunk in unpacked_chunks {
             let chunk = chunk_provider
@@ -273,5 +340,108 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Non-assignee / no-SM case: body only in the node chunk cache must still
+    /// be served via data_root + tx_offset (enables residual-hole heal from
+    /// ingress-proof generators that never held a ledger assignment).
+    #[test]
+    fn get_by_data_root_serves_from_chunk_cache_without_sm() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("get_by_data_root_cache_test")
+            .with_tracing()
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 100,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+
+        let data_size = (config.consensus.chunk_size as f64 * 2.5).round() as usize;
+        let mut data_bytes = vec![0_u8; data_size];
+        rand::thread_rng().fill(&mut data_bytes[..]);
+
+        let irys = IrysSigner::random_signer(&config.consensus);
+        let tx = irys
+            .create_transaction(data_bytes.clone(), H256::zero())
+            .unwrap();
+        let tx = irys.sign_transaction(tx).unwrap();
+        let data_root = tx.header.data_root;
+
+        let db = create_test_db(&tmp_dir.path().join("irys_db"));
+        db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+                let min = chunk_node.min_byte_range;
+                let max = chunk_node.max_byte_range;
+                let chunk = UnpackedChunk {
+                    data_root,
+                    data_size: data_size as u64,
+                    data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+                    bytes: Base64(data_bytes[min..max].to_vec()),
+                    tx_offset: TxChunkOffset::from(
+                        TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+                    ),
+                };
+                cache_chunk(wtx, &chunk)?;
+            }
+            Ok(())
+        })?;
+
+        // No storage modules: simulates an upload/API node that is not assigned
+        // to the Submit slot but still holds cache after POST /chunk.
+        let storage_modules_guard = StorageModulesReadGuard::new(Arc::new(RwLock::new(Vec::new())));
+        let chunk_provider = ChunkProvider::new(config, storage_modules_guard, db);
+
+        for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
+            let offset = TxChunkOffset::from(
+                TryInto::<u32>::try_into(tx_chunk_offset).expect("Value exceeds u32::MAX"),
+            );
+            let min = chunk_node.min_byte_range;
+            let max = chunk_node.max_byte_range;
+            let expected = UnpackedChunk {
+                data_root,
+                data_size: data_size as u64,
+                data_path: Base64(tx.proofs[tx_chunk_offset].proof.clone()),
+                bytes: Base64(data_bytes[min..max].to_vec()),
+                tx_offset: offset,
+            };
+
+            let served = chunk_provider
+                .get_chunk_by_data_root(DataLedger::Submit, data_root, offset)?
+                .expect("cache-backed data_root fetch should find body");
+            let unpacked = served
+                .as_unpacked()
+                .expect("cache path returns ChunkFormat::Unpacked");
+            assert_eq!(unpacked, expected);
+        }
+
+        // Missing offset → None (not an error)
+        let missing = TxChunkOffset::from(99_u32);
+        assert!(
+            chunk_provider
+                .get_chunk_by_data_root(DataLedger::Submit, data_root, missing)?
+                .is_none()
+        );
+
+        Ok(())
+    }
+
+    fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
+        use irys_database::{IrysDatabaseArgs as _, open_or_create_db, tables::IrysTables};
+        use reth_db::mdbx::DatabaseArguments;
+
+        let db = open_or_create_db(
+            path,
+            IrysTables::ALL,
+            DatabaseArguments::irys_testing().unwrap(),
+        )
+        .unwrap();
+        DatabaseProvider(Arc::new(db))
     }
 }
