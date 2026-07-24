@@ -30,6 +30,17 @@ impl PeerBandwidthManager {
         }
     }
 
+    /// True when this peer advertises a partition assignment for the given ledger/slot.
+    ///
+    /// Assignees can serve `GET /chunk/ledger/{ledger}/{offset}`. Peers that only
+    /// appear as ingress-proof signers (empty matching assignments) must be
+    /// fetched via data_root + tx_offset instead.
+    pub fn is_assigned_to(&self, ledger_id: u32, slot_index: Option<usize>) -> bool {
+        self.partition_assignments.iter().any(|assignment| {
+            assignment.ledger_id == Some(ledger_id) && assignment.slot_index == slot_index
+        })
+    }
+
     pub fn active_requests(&self) -> usize {
         self.peer_stats.active_requests
     }

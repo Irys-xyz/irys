@@ -1569,6 +1569,74 @@ impl StorageModule {
         })
     }
 
+    /// Resolves `(data_root, tx_offset)` for a partition offset from the SM index alone.
+    ///
+    /// Unlike [`Self::get_chunk_metadata`] / [`Self::generate_full_chunk`], this does **not**
+    /// require a written chunk body (`data_path_hash` may be missing). That is the residual
+    /// Entropy-hole case after tx migration: `tx_path` + `DataRootInfos` present, body never
+    /// written. data_sync uses this to address proof-signer peers with
+    /// `GET /chunk/data-root/{ledger}/{data_root}/{tx_offset}` instead of ledger-offset.
+    ///
+    /// `tx_offset` is derived as `partition_offset - DataRootInfo.start_offset` for the
+    /// placement that covers this offset (validated against `data_size`).
+    ///
+    /// Returns `Ok(None)` when no tx_path is indexed, no covering `DataRootInfo` exists, or
+    /// the offset falls outside the funded extent.
+    pub fn data_root_and_tx_offset_at(
+        &self,
+        partition_offset: PartitionChunkOffset,
+    ) -> eyre::Result<Option<(DataRoot, TxChunkOffset)>> {
+        let chunk_size = self.config.consensus.chunk_size;
+        self.query_submodule_db_by_offset(partition_offset, |tx| {
+            // data_path_hash may be None — that is the residual-hole case we support.
+            let Some((data_root, _data_path_hash)) =
+                recover_tx_path_data_root(tx, partition_offset)?
+            else {
+                return Ok(None);
+            };
+
+            let Some(mut data_root_infos) = get_data_root_infos_for_data_root(tx, data_root)?
+            else {
+                return Ok(None);
+            };
+            if data_root_infos.0.is_empty() {
+                return Ok(None);
+            }
+
+            // Same placement selection as generate_full_chunk: last start_offset that is
+            // still ≤ partition_offset (handles multi-placement of the same data_root).
+            data_root_infos.0.sort_unstable();
+            let partition_rel = RelativeChunkOffset::from(partition_offset);
+            let index = data_root_infos
+                .0
+                .partition_point(|info| info.start_offset <= partition_rel)
+                .saturating_sub(1);
+            if index >= data_root_infos.0.len() {
+                return Ok(None);
+            }
+            let info = &data_root_infos.0[index];
+            if info.start_offset > partition_rel {
+                return Ok(None);
+            }
+
+            // partition_offset = start_offset + tx_offset (write path); invert it.
+            // start_offset can be negative when a multi-partition tx straddles modules.
+            let tx_offset_i32 = *partition_rel - *info.start_offset;
+            if tx_offset_i32 < 0 {
+                return Ok(None);
+            }
+            let tx_offset_u32 = tx_offset_i32 as u32;
+
+            // Funded extent: last valid byte is data_size - 1; reject offsets past it.
+            let chunk_byte_offset = u64::from(tx_offset_u32).saturating_mul(chunk_size);
+            if chunk_byte_offset >= info.data_size {
+                return Ok(None);
+            }
+
+            Ok(Some((data_root, TxChunkOffset::from(tx_offset_u32))))
+        })
+    }
+
     /// Gets the tx_path and data_path for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
@@ -2553,6 +2621,114 @@ mod tests {
             "only the canonical placement whose extent lies entirely outside [3, 5] \
              survives; the placement starting at offset 2 but extending into the \
              range is dropped by extent overlap"
+        );
+
+        Ok(())
+    }
+
+    /// Residual Entropy hole: tx migration wrote `tx_path` + `DataRootInfos` but
+    /// no chunk body / `data_path_hash`. `data_root_and_tx_offset_at` must still
+    /// resolve addressing for data_root-based fetch (proof-signer path).
+    #[test]
+    fn data_root_and_tx_offset_at_works_without_chunk_body() -> eyre::Result<()> {
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("data_root_tx_offset_residual")
+            .with_tracing()
+            .build();
+        let chunk_size = 32_u64;
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size,
+                num_chunks_in_partition: 100,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let sm = StorageModule::new(
+            &StorageModuleInfo {
+                id: 0,
+                partition_assignment: Some(PartitionAssignment::default()),
+                submodules: vec![(partition_chunk_offset_ii!(0, 99), "hdd0".into())],
+            },
+            &config,
+        )?;
+        sm.pack_with_zeros();
+
+        // 3 chunks (2.5 * chunk_size rounded up)
+        let data_size = (chunk_size as f64 * 2.5).round() as usize;
+        let mut data_bytes = vec![0_u8; data_size];
+        for (i, b) in data_bytes.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let irys = IrysSigner::random_signer(&config.consensus);
+        let tx = irys
+            .create_transaction(data_bytes.clone(), H256::zero())
+            .unwrap();
+        let tx = irys.sign_transaction(tx).unwrap();
+        let data_root = tx.header.data_root;
+
+        // Place the tx at partition-relative start 10 → offsets 10, 11, 12.
+        let start = 10_u32;
+        let num_chunks = data_size.div_ceil(chunk_size as usize) as u32;
+        assert_eq!(num_chunks, 3);
+        let end = start + num_chunks - 1;
+        let (_tx_root, proofs) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
+        sm.index_transaction_data(
+            &tx.header,
+            &proofs[0].proof,
+            LedgerChunkRange(ledger_chunk_offset_ii!(start, end)),
+        )?;
+
+        // No write_data_chunk: every offset is a residual hole (Entropy, no data_path).
+        for tx_off in 0..num_chunks {
+            let part_off = PartitionChunkOffset::from(start + tx_off);
+            assert_eq!(
+                sm.get_chunk_type(&part_off),
+                Some(ChunkType::Entropy),
+                "offset {part_off} should still be Entropy (no body written)"
+            );
+            // get_chunk_metadata requires data_path — residual holes must return None.
+            assert!(
+                sm.get_chunk_metadata(part_off)?.is_none(),
+                "get_chunk_metadata needs data_path_hash; residual holes have none"
+            );
+
+            let resolved = sm
+                .data_root_and_tx_offset_at(part_off)?
+                .expect("residual hole must still resolve data_root + tx_offset");
+            assert_eq!(resolved.0, data_root);
+            assert_eq!(*resolved.1, tx_off);
+        }
+
+        // Write only the middle chunk body; outer residual holes still resolve.
+        let mid = 1_u32;
+        let min = tx.chunks[mid as usize].min_byte_range;
+        let max = tx.chunks[mid as usize].max_byte_range;
+        sm.write_data_chunk(&UnpackedChunk {
+            data_root,
+            data_size: data_size as u64,
+            data_path: Base64(tx.proofs[mid as usize].proof.clone()),
+            bytes: Base64(data_bytes[min..max].to_vec()),
+            tx_offset: TxChunkOffset::from(mid),
+        })?;
+        sm.sync_pending_chunks()?;
+
+        for tx_off in 0..num_chunks {
+            let part_off = PartitionChunkOffset::from(start + tx_off);
+            let resolved = sm
+                .data_root_and_tx_offset_at(part_off)?
+                .expect("resolution works with or without body");
+            assert_eq!(resolved.0, data_root);
+            assert_eq!(*resolved.1, tx_off);
+        }
+
+        // Unindexed offset → None
+        assert!(
+            sm.data_root_and_tx_offset_at(PartitionChunkOffset::from(50))?
+                .is_none()
         );
 
         Ok(())

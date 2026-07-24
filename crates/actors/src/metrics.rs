@@ -30,6 +30,7 @@ irys_utils::define_metrics! {
     counter DATA_SYNC_CHUNK_WRITE_FAILED("irys.data_sync.chunk_write_failed_total", "Data sync local write failures after a successful fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_BLOCKED("irys.data_sync.chunk_blocked_total", "Data sync offsets blocked from hot re-fetch (labelled by reason)");
     counter DATA_SYNC_CHUNK_UNBLOCKED("irys.data_sync.chunk_unblocked_total", "Data sync offsets re-queued on SyncPartitions when unblock_missing_data_root_index is true (MissingDataRootIndex → Pending)");
+    counter DATA_SYNC_FETCH_BY_SOURCE("irys.data_sync.fetch_by_source_total", "Data sync peer fetches by peer source and outcome (source=assigned|ingress_proof, outcome=success|fail)");
     gauge DATA_SYNC_ACTIVE_PEERS("irys.data_sync.active_peers", "Number of active data sync peers");
     counter MINING_SOLUTIONS_FOUND("irys.mining.solutions_found_total", "Mining solutions found");
     gauge PACKING_ACTIVE_WORKERS("irys.packing.active_workers", "Number of active packing workers");
@@ -294,6 +295,17 @@ pub(crate) fn record_data_sync_chunk_unblocked(count: u64) {
 
 pub(crate) fn record_data_sync_active_peers(count: u64) {
     DATA_SYNC_ACTIVE_PEERS.record(count, &[]);
+}
+
+/// `source`: `assigned` | `ingress_proof`. `outcome`: `success` | `fail`.
+pub(crate) fn record_data_sync_fetch_by_source(source: &'static str, outcome: &'static str) {
+    DATA_SYNC_FETCH_BY_SOURCE.add(
+        1,
+        &[
+            KeyValue::new("source", source),
+            KeyValue::new("outcome", outcome),
+        ],
+    );
 }
 
 pub(crate) fn record_mining_solution_found() {
