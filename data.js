@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784862092727,
+  "lastUpdate": 1784864257332,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13003,6 +13003,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000153,
             "range": "± 0.00001",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5ad580be114100adec701fc64aea7cdccd63afc6",
+          "message": "fix(chunk-ingress): recover chunks parked during TX/CDR race (#1540)\n\n* fix(chunk-ingress): recover chunks parked during TX/CDR race\n\nWhen a gossiped chunk arrives before CachedDataRoot is committed, it is\nparked pending the header. Concurrent ProcessPendingChunks can drain an\nempty map first, leaving the parked body stranded with no CachedChunks\nwrite and silent migration miss on assignees.\n\nAfter parking, re-check CDR and reschedule ProcessPendingChunks if the\nheader has landed; also log the park so holder-side misses are visible.\n\n* style: cargo fmt for chunk-park TOCTOU fix\n\n* fix(chunk-ingress): cover second park path and harden post-park rescue\n\nAddress review: apply the same CDR recheck to the oversized unconfirmed\nsize park, never fail an already-accepted park on recheck DB errors, and\nunit-test the pure rescue decision so deleting the re-check fails CI.\n\n* fix(clippy): drop unused async on maybe_rescue_after_park",
+          "timestamp": "2026-07-23T20:21:38-07:00",
+          "tree_id": "55a227a57ffc60e5c27ed659191959c503e8a6db",
+          "url": "https://github.com/Irys-xyz/irys/commit/5ad580be114100adec701fc64aea7cdccd63afc6"
+        },
+        "date": 1784864256128,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015214,
+            "range": "± 0.000144",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153575,
+            "range": "± 0.001543",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.55617,
+            "range": "± 0.023788",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 9.808782,
+            "range": "± 1.414526",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078855,
+            "range": "± 0.00069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 781.711426,
+            "range": "± 18.993952",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 977.050835,
+            "range": "± 7.821212",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120138,
+            "range": "± 0.002069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1245.414758,
+            "range": "± 86.776844",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1570.589865,
+            "range": "± 18.454984",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034688,
+            "range": "± 0.001415",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.438022,
+            "range": "± 1.389727",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.827411,
+            "range": "± 1.006799",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000114,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
