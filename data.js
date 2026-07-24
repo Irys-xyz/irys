@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784861114151,
+  "lastUpdate": 1784862092727,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -12895,6 +12895,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000112,
             "range": "± 0.000003",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a14fef3ca10de927d4c3c21c8b3f327ac9365261",
+          "message": "fix(data-sync): expand residual-hole peers with ingress-proof signers (#1539)\n\n* fix(api): serve data_root chunks from node cache when SM missing\n\nNon-assignee upload/proof nodes often hold chunk bodies only in\nCachedChunks and cannot answer ledger-offset GETs. Fall back to the\ncache on GET /chunk/data-root so residual-hole peers can fetch by\ndata_root + tx_offset. Wire main irys_db into ChunkProvider.\n\n* feat(storage): resolve data_root + tx_offset for residual Entropy holes\n\nAdd StorageModule::data_root_and_tx_offset_at so data_sync can address\nproof-signer peers via data_root fetch when assignees have tx migration\nbut no chunk body (data_path_hash missing). Does not require a written\nbody; derives tx_offset from DataRootInfo.start_offset.\n\n* fix(data-sync): expand residual-hole peers with ingress-proof signers\n\nWhen assignees all miss a chunk body, data_sync only asked other assignees\nand spun on mutual 404s. Expand current_peers with online signers of\naccepted local ingress proofs for residual Entropy data_roots, and dual-\naddress fetches: ledger-offset for assignees, data_root+tx_offset for\nproof signers (cache-backed after PR1). Prefer assignees; cap proof\nsigners; metrics by source. Docs: proof gossip ≠ chunk replication.",
+          "timestamp": "2026-07-23T19:45:31-07:00",
+          "tree_id": "7a797bb941a66a24c9284ddbba4f4a26f821fee0",
+          "url": "https://github.com/Irys-xyz/irys/commit/a14fef3ca10de927d4c3c21c8b3f327ac9365261"
+        },
+        "date": 1784862090406,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015537,
+            "range": "± 0.000657",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.152117,
+            "range": "± 0.015474",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.571324,
+            "range": "± 0.07161",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.852757,
+            "range": "± 1.396534",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.079983,
+            "range": "± 0.004501",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 823.726984,
+            "range": "± 23.808766",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1003.080102,
+            "range": "± 10.998416",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120349,
+            "range": "± 0.002571",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1215.940199,
+            "range": "± 20.471353",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1569.436287,
+            "range": "± 19.128153",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034892,
+            "range": "± 0.002687",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.265892,
+            "range": "± 1.257302",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 275.109829,
+            "range": "± 12.51862",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000153,
+            "range": "± 0.00001",
             "unit": "ms/iter"
           }
         ]
