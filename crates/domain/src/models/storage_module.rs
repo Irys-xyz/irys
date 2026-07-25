@@ -44,9 +44,9 @@ use irys_database::{
     submodule::{
         add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
         add_full_tx_path, add_tx_leaf_binding, add_tx_path_hash_to_offset_index,
-        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-        get_data_root_infos_for_data_root, get_full_data_path, get_full_tx_path,
-        get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
+        clear_submodule_database, create_or_open_submodule_db, del_path_hashes_by_offset,
+        get_data_path_by_offset, get_data_root_infos_for_data_root, get_full_data_path,
+        get_full_tx_path, get_path_hashes_by_offset, get_tx_leaf_binding, get_tx_path_by_offset,
         missing_path_hash_ranges_in_tx, set_data_root_infos_for_data_root,
         tables::{DataRootInfo, DataRootInfos, TxLeafBinding},
     },
@@ -1084,8 +1084,10 @@ impl StorageModule {
             submodule.db.update_eyre(|tx| {
                 for offset in cursor..=slice_end {
                     let part_offset = PartitionChunkOffset::from(offset);
-                    add_tx_path_hash_to_offset_index(tx, part_offset, None)?;
-                    add_data_path_hash_to_offset_index(tx, part_offset, None)?;
+                    // Delete the key entirely so gap scans see a real hole.
+                    // Writing `{None,None}` placeholders left "present" keys that
+                    // the density check treated as indexed, hiding the gap from heal.
+                    del_path_hashes_by_offset(tx, part_offset)?;
                 }
                 Ok(())
             })?;
@@ -2729,6 +2731,78 @@ mod tests {
         assert!(
             sm.data_root_and_tx_offset_at(PartitionChunkOffset::from(50))?
                 .is_none()
+        );
+
+        Ok(())
+    }
+
+    /// Clearing path-hash indexes must leave real key absences so the gap scan
+    /// (and thus index heal) can see the range — not present-with-None tombstones.
+    #[test]
+    fn clear_offset_index_in_range_leaves_the_range_as_a_gap() -> eyre::Result<()> {
+        use irys_database::submodule::{set_path_hashes_by_offset, tables::ChunkPathHashes};
+
+        let infos = [StorageModuleInfo {
+            id: 0,
+            partition_assignment: Some(PartitionAssignment::default()),
+            submodules: vec![(partition_chunk_offset_ii!(0, 9), "hdd0-test".into())],
+        }];
+        let tmp_dir = TempDirBuilder::new()
+            .prefix("clear_offset_index_test")
+            .build();
+        let node_config = NodeConfig {
+            consensus: irys_types::ConsensusOptions::Custom(ConsensusConfig {
+                chunk_size: 32,
+                num_chunks_in_partition: 10,
+                ..ConsensusConfig::testing()
+            }),
+            base_directory: tmp_dir.path().to_path_buf(),
+            ..NodeConfig::testing()
+        };
+        let config = Config::new_with_random_peer_id(node_config);
+        let storage_module = StorageModule::new(&infos[0], &config)?;
+
+        // Index a dense range [0, 9].
+        let path_hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        };
+        let (_, submodule) =
+            storage_module.get_submodule_for_offset(PartitionChunkOffset::from(0))?;
+        submodule.db.update_eyre(|tx| {
+            for offset in 0..10_u32 {
+                set_path_hashes_by_offset(
+                    tx,
+                    PartitionChunkOffset::from(offset),
+                    path_hashes.clone(),
+                )?;
+            }
+            Ok(())
+        })?;
+
+        assert!(
+            storage_module
+                .missing_path_hash_ranges(
+                    PartitionChunkOffset::from(0),
+                    PartitionChunkOffset::from(10)
+                )?
+                .is_empty(),
+            "dense range must report no gaps before clear"
+        );
+
+        storage_module.clear_offset_index_in_range(
+            PartitionChunkOffset::from(3),
+            PartitionChunkOffset::from(5),
+        )?;
+
+        let gaps = storage_module.missing_path_hash_ranges(
+            PartitionChunkOffset::from(0),
+            PartitionChunkOffset::from(10),
+        )?;
+        assert_eq!(
+            gaps,
+            vec![(PartitionChunkOffset::from(3), PartitionChunkOffset::from(6))],
+            "cleared [3,5] inclusive must be a half-open [3,6) gap"
         );
 
         Ok(())
