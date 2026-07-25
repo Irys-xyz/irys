@@ -79,6 +79,8 @@ pub(super) async fn heal_ledger_data_indexes(
     );
 
     let mut needs_retry = false;
+    // Unique placement blocks (height → hash) across all SMs. Only blocks that
+    // actually introduced a missing path-hash offset — not every height in a span.
     let mut blocks_to_migrate: BTreeMap<u64, BlockHash> = BTreeMap::new();
     // SMs that needed repair this pass — re-check gaps after migrate.
     let mut recheck_after_migrate: Vec<(Arc<StorageModule>, PartitionChunkOffset)> = Vec::new();
@@ -91,28 +93,12 @@ pub(super) async fn heal_ledger_data_indexes(
                 needs_retry = true;
             }
             IndexRepairPlan::NeedsRepair {
-                height_spans,
+                placement_blocks,
                 partial,
                 recheck_max,
             } => {
-                let bi = ctx.block_index.read();
-                for (start_height, end_height) in height_spans {
-                    for height in start_height..=end_height {
-                        let Some(item) = bi.get_item(height) else {
-                            // Skip missing height; continue other heights in the span
-                            // so a single reorg hole does not drop the rest of the plan.
-                            warn!(
-                                storage_module.id = sm.id,
-                                block.height = height,
-                                plan.start_height = start_height,
-                                plan.end_height = end_height,
-                                "block missing from index during heal; continuing remaining heights"
-                            );
-                            needs_retry = true;
-                            continue;
-                        };
-                        blocks_to_migrate.insert(height, item.block_hash);
-                    }
+                for (height, hash) in placement_blocks {
+                    blocks_to_migrate.insert(height, hash);
                 }
                 if partial {
                     crate::metrics::record_index_heal_unrepaired("partial_plan");
@@ -181,10 +167,12 @@ pub(super) async fn heal_ledger_data_indexes(
 enum IndexRepairPlan {
     /// No repairable path-hash gap in the scan window.
     Complete,
-    /// Inclusive block-height spans covering holes; `recheck_max` is the plan-time
-    /// exclusive partition bound used after migrate to decide `needs_retry`.
+    /// Unique blocks that introduced at least one missing path-hash offset in
+    /// this SM (via [`BlockIndex::get_block_bounds`]), not every height between
+    /// the first and last hole. `recheck_max` is the plan-time exclusive
+    /// partition bound used after migrate to decide `needs_retry`.
     NeedsRepair {
-        height_spans: Vec<(u64, u64)>,
+        placement_blocks: BTreeMap<u64, BlockHash>,
         partial: bool,
         recheck_max: PartitionChunkOffset,
     },
@@ -234,7 +222,7 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
         index_heal.gap_count = gaps.len(),
         index_heal.first_gap = %gaps[0].0,
         index_heal.max_partition_offset = %max_partition_offset,
-        "path-hash index gaps detected; scheduling per-hole index repair"
+        "path-hash index gaps detected; collecting placement blocks per missing offset"
     );
 
     let block_index_guard = ctx.block_index.read();
@@ -260,63 +248,72 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
         return IndexRepairPlan::Complete;
     }
 
-    let mut height_spans = Vec::new();
+    let sm_ledger_start = *ledger_range.start();
+    let mut placement_blocks: BTreeMap<u64, BlockHash> = BTreeMap::new();
     let mut any_soft_skip = false;
     let mut recheck_max = PartitionChunkOffset::from(0);
+    let mut bounds_lookups = 0_u64;
+
     for (gap_start, gap_end) in gaps {
         if gap_start >= gap_end {
             continue;
         }
+
+        // Exclusive end of this hole, clamped to the on-ledger frontier.
         let gap_last = PartitionChunkOffset(*gap_end - 1);
-
-        let start_ledger = ledger_range.start() + LedgerChunkOffset::from(*gap_start);
-        if *start_ledger >= max_chunk_offset {
-            continue;
-        }
-
-        let end_ledger = ledger_range.start() + LedgerChunkOffset::from(*gap_last);
-        let clamped_end = if *end_ledger >= max_chunk_offset {
-            LedgerChunkOffset::from(max_chunk_offset - 1)
+        let end_ledger = sm_ledger_start + u64::from(*gap_last);
+        let clamped_end_abs = if end_ledger >= max_chunk_offset {
+            max_chunk_offset.saturating_sub(1)
         } else {
             end_ledger
         };
-        if clamped_end < start_ledger {
+        let start_ledger_abs = sm_ledger_start + u64::from(*gap_start);
+        if start_ledger_abs >= max_chunk_offset || clamped_end_abs < start_ledger_abs {
+            // Entire hole past frontier.
             continue;
         }
 
-        let Some(start_block) = block_height_for_ledger_offset(
-            block_index_guard,
-            data_ledger,
-            start_ledger,
-            sm.id,
-            "gap_start",
-        ) else {
-            any_soft_skip = true;
-            continue;
-        };
-        let Some(end_block) = block_height_for_ledger_offset(
-            block_index_guard,
-            data_ledger,
-            clamped_end,
-            sm.id,
-            "gap_end",
-        ) else {
-            any_soft_skip = true;
-            continue;
-        };
-
         let hole_recheck = PartitionChunkOffset::from(
-            u32::try_from(*clamped_end - *ledger_range.start() + 1)
-                .unwrap_or(*max_partition_offset),
+            u32::try_from(clamped_end_abs - sm_ledger_start + 1).unwrap_or(*max_partition_offset),
         );
         if hole_recheck > recheck_max {
             recheck_max = hole_recheck;
         }
 
-        height_spans.push((start_block, end_block));
+        // Walk missing partition offsets; for each, resolve the unique block that
+        // introduced that ledger offset, then jump past that block's full ledger
+        // span so we do not re-query every chunk in the same block.
+        let mut part_off = *gap_start;
+        let gap_end_excl = *gap_end;
+        while part_off < gap_end_excl {
+            let ledger_abs = sm_ledger_start + u64::from(part_off);
+            if ledger_abs >= max_chunk_offset {
+                break;
+            }
+            let ledger_off = LedgerChunkOffset::from(ledger_abs);
+            bounds_lookups += 1;
+            let Some(bounds) =
+                block_bounds_for_ledger_offset(block_index_guard, data_ledger, ledger_off, sm.id)
+            else {
+                any_soft_skip = true;
+                // Skip one offset and continue — other offsets in the hole may resolve.
+                part_off = part_off.saturating_add(1);
+                continue;
+            };
+
+            placement_blocks.insert(bounds.height, bounds.block_hash);
+
+            // Block covers absolute [start_chunk_offset, end_chunk_offset). Jump to
+            // the first partition offset at or after end_chunk_offset (always advance
+            // at least one to avoid a stuck loop on degenerate bounds).
+            let next_abs = bounds.end_chunk_offset.max(ledger_abs.saturating_add(1));
+            let next_rel = next_abs.saturating_sub(sm_ledger_start);
+            let next_part = u32::try_from(next_rel).unwrap_or(u32::MAX);
+            part_off = next_part.max(part_off.saturating_add(1));
+        }
     }
 
-    if height_spans.is_empty() {
+    if placement_blocks.is_empty() {
         return if any_soft_skip {
             IndexRepairPlan::SoftSkipped
         } else {
@@ -325,22 +322,30 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
         };
     }
 
+    debug!(
+        storage_module.id = sm.id,
+        index_heal.placement_blocks = placement_blocks.len(),
+        index_heal.bounds_lookups = bounds_lookups,
+        index_heal.recheck_max = %recheck_max,
+        "collected unique placement blocks for path-hash holes"
+    );
+
     IndexRepairPlan::NeedsRepair {
-        height_spans,
+        placement_blocks,
         partial: any_soft_skip,
         recheck_max,
     }
 }
 
-fn block_height_for_ledger_offset(
+/// Block that introduced `offset` on `data_ledger`, if resolvable.
+fn block_bounds_for_ledger_offset(
     block_index: &irys_domain::BlockIndex,
     data_ledger: DataLedger,
     offset: LedgerChunkOffset,
     storage_module_id: usize,
-    bound_label: &'static str,
-) -> Option<u64> {
+) -> Option<irys_domain::BlockBounds> {
     match block_index.get_block_bounds(data_ledger, offset) {
-        Ok(bounds) => Some(bounds.height),
+        Ok(bounds) => Some(bounds),
         Err(
             BlockBoundsError::IndexEmpty
             | BlockBoundsError::LedgerInactive { .. }
@@ -350,8 +355,7 @@ fn block_height_for_ledger_offset(
             warn!(
                 storage_module.id = storage_module_id,
                 error = %e,
-                bound = bound_label,
-                "block bounds internal error; soft-skipping index repair"
+                "block bounds internal error; soft-skipping offset during index repair"
             );
             None
         }
