@@ -1639,6 +1639,18 @@ impl StorageModule {
         })
     }
 
+    /// Whether the local index can resolve `data_root` + placement for `partition_offset`.
+    ///
+    /// **Canonical readiness predicate** for data_sync re-arm and index-heal
+    /// completion: path-hash density alone is not enough (DataRootInfos residual).
+    #[inline]
+    pub fn is_data_root_index_ready_at(&self, partition_offset: PartitionChunkOffset) -> bool {
+        matches!(
+            self.data_root_and_tx_offset_at(partition_offset),
+            Ok(Some(_))
+        )
+    }
+
     /// Gets the tx_path and data_path for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,

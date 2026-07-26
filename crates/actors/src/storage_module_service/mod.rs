@@ -325,9 +325,13 @@ impl StorageModuleServiceInner {
             }
         }
 
-        // After assignments settle: gap-scan + index backfill for every local SM
-        // currently on a data ledger (not only Capacity→LedgerSlot transitions).
-        self.run_index_heal().await?;
+        // After assignments settle: best-effort gap-scan + index backfill for every
+        // local SM on a data ledger. Do not fail membership updates if heal hard-
+        // errors (channel closed); periodic retry picks up via needs_retry.
+        if let Err(e) = self.run_index_heal().await {
+            error!("index heal after partition assignment failed: {e:?}");
+            self.index_heal_needs_retry = true;
+        }
 
         Ok(())
     }

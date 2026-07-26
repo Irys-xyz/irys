@@ -274,8 +274,9 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
-    /// Re-queue `Blocked(MissingDataRootIndex)` offsets whose **local** SM index
-    /// can now resolve `data_root` + placement (capped by free pending budget).
+    /// Re-queue `Blocked(MissingDataRootIndex)` offsets whose local SM index is
+    /// ready ([`StorageModule::is_data_root_index_ready_at`] — same completion
+    /// predicate as index heal), capped by free pending budget.
     ///
     /// Anti-thrash is local: still-unindexed offsets stay Blocked. Probe work is
     /// also capped (`free_slots × REARM_PROBE_MULTIPLIER`) so a large unready
@@ -304,7 +305,7 @@ impl DataSyncServiceInner {
             let max_probes = free_slots.saturating_mul(REARM_PROBE_MULTIPLIER);
             let unblocked =
                 orchestrator.unblock_missing_data_root_index_where(free_slots, max_probes, |off| {
-                    matches!(sm.data_root_and_tx_offset_at(off), Ok(Some(_)))
+                    sm.is_data_root_index_ready_at(off)
                 });
             if unblocked > 0 {
                 debug!(

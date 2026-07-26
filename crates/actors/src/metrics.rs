@@ -288,8 +288,12 @@ pub(crate) fn record_data_sync_chunk_blocked(reason: &'static str) {
     DATA_SYNC_CHUNK_BLOCKED.add(1, &[KeyValue::new("reason", reason)]);
 }
 
-/// `reason` values: `soft_skip` (plan uncertain), `gap_after_heal` (re-verify
-/// still found a gap), `partial_plan` (some holes unplannable).
+/// `reason` values:
+/// - `soft_skip` — plan/bounds uncertain
+/// - `gap_after_heal` — path-hash still gapped after migrate
+/// - `partial_plan` — some hole offsets unresolvable
+/// - `not_ready` — path-hash dense but `is_data_root_index_ready_at` fails
+///   (same predicate as data_sync re-arm; will retry)
 pub(crate) fn record_index_heal_unrepaired(reason: &'static str) {
     DATA_INDEX_HEAL_UNREPAIRED.add(1, &[KeyValue::new("reason", reason)]);
 }
