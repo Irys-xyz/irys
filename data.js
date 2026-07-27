@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784921126125,
+  "lastUpdate": 1785119878464,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13218,6 +13218,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000113,
+            "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "samuraidan@gmail.com",
+            "name": "DMac",
+            "username": "DanMacDonald"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c395cb54700ef6393b8d0314faf201cdfafab623",
+          "message": "fix(storage): heal path-hash indexes and re-arm data_sync on index readiness (#1541)\n\n* fix(storage): heal path-hash indexes and re-arm data_sync on index readiness\n\nDecouple index repair from data_sync liveness so residual Entropy holes\nrecover without waiting for a clean global heal or an epoch boundary.\n\nIndex heal (startup, assignment, and periodic while needs_retry):\n- Scan path-hash gaps, re-migrate covering blocks in 128-block passes\n- Soft-skip missing history/timeouts; emit unrepaired metrics\n- Bail mid-migrate on shutdown via Shutdown clone on the service\n- Delete path-hash keys on clear so reorg clears are real, healable gaps\n\nData sync:\n- Drop heal-gated SyncPartitions unblock flag\n- Re-queue Blocked(MissingDataRootIndex) when local data_root_and_tx_offset_at\n  succeeds, capped by free pending slots and a probe budget\n\nAlso extract storage_module_service into mod + index_heal for maintainability.\n\n* fix(storage): heal indexes via placement blocks, not height spans\n\nPath-hash hole repair no longer re-migrates every block height between the\nfirst and last gap. For each missing partition offset, resolve the unique\nblock that introduced that ledger offset via BlockIndex::get_block_bounds,\ndedupe those blocks, and jump past each block's ledger span so the same\nblock is not queried for every chunk it covers.\n\nThis avoids migrating empty / unrelated heights inside a large H0..=H1\nrange when only a small set of placement blocks touch the hole.\n\n* refactor(storage): unify index-heal completion with data_sync readiness\n\nUse StorageModule::is_data_root_index_ready_at as the single completion\npredicate for heal and re-arm (path-hash remains the migrate driver only).\nDense DataRootInfos residual sets needs_retry and re-plans placement\nblocks; extract placement unit tests; bound migrate passes to 60s; make\nassignment-time heal best-effort so membership updates never fail.\n\n* fix(testnet): re-pin consensus keccak hash after expiry depth change\n\ncommitment_anchor_expiry_depth 7200 → 8640 changed ConsensusConfig::testnet()\nwire hash without updating the frozen pin. Align the pin and the sample\ntestnet TOML template so CI can pass.\n\n* fix(storage): cap index-heal placement bounds lookups per plan\n\nFailed get_block_bounds lookups advanced one offset at a time with no\nupper bound, so a soft-skip storm could walk an entire multi-chunk hole.\nCap lookups (success + fail) at INDEX_HEAL_MAX_BLOCKS_PER_PASS, mark\npartial, and rely on needs_retry for the rest.\n\n* fix(data-sync): back off re-arm probes after zero-yield passes\n\nWhen Blocked(MissingDataRootIndex) readiness probes unblock nothing, skip\nsubsequent re-arm ticks with exponential growth (1..16). Reset on successful\nunblock or SyncPartitions so post-heal membership still probes promptly.\n\n* fix(storage): warn on placement lookup cap only when work deferred\n\nDistinguish finishing a hole on the last permitted (failed) bounds lookup\nfrom aborting mid-hole at the cap. Emit the cap warning only when\nlookup_cap_hit is set and remaining offsets are deferred to the next pass.",
+          "timestamp": "2026-07-26T19:18:58-07:00",
+          "tree_id": "404fc4c8d017d908d187a9b47bbd84c78a124e03",
+          "url": "https://github.com/Irys-xyz/irys/commit/c395cb54700ef6393b8d0314faf201cdfafab623"
+        },
+        "date": 1785119876141,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011988,
+            "range": "± 0.000342",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.121899,
+            "range": "± 0.002467",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.212243,
+            "range": "± 0.038129",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.959865,
+            "range": "± 0.153907",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078815,
+            "range": "± 0.001371",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 756.961549,
+            "range": "± 16.586941",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.797251,
+            "range": "± 44.578853",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117399,
+            "range": "± 0.000192",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1183.457822,
+            "range": "± 8.824388",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1541.793135,
+            "range": "± 11.204971",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035296,
+            "range": "± 0.003595",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.266014,
+            "range": "± 1.248649",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 274.678432,
+            "range": "± 2.024848",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0.000004",
             "unit": "ms/iter"
           }
