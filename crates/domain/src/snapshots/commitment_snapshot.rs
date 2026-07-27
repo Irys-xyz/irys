@@ -138,6 +138,9 @@ impl CommitmentSnapshot {
                         CommitmentSnapshotStatus::Accepted
                     } else if commitments.unstake.is_some() {
                         CommitmentSnapshotStatus::UnstakePending
+                    } else if commitments.update_reward_address.is_some() {
+                        // Mutual exclusion with pending UpdateRewardAddress
+                        CommitmentSnapshotStatus::UnstakePending
                     } else {
                         CommitmentSnapshotStatus::Unknown
                     }
@@ -150,14 +153,19 @@ impl CommitmentSnapshot {
                 if !self.has_stake(signer, epoch_snapshot) {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
-                // Check if this is the currently stored update
-                if let Some(commitments) = self.commitments.get(signer)
-                    && commitments
+                if let Some(commitments) = self.commitments.get(signer) {
+                    // Mutual exclusion with pending Unstake
+                    if commitments.unstake.is_some() {
+                        return CommitmentSnapshotStatus::UnstakePending;
+                    }
+                    // Check if this is the currently stored update
+                    if commitments
                         .update_reward_address
                         .as_ref()
                         .is_some_and(|u| u.id() == txid)
-                {
-                    return CommitmentSnapshotStatus::Accepted;
+                    {
+                        return CommitmentSnapshotStatus::Accepted;
+                    }
                 }
                 CommitmentSnapshotStatus::Unknown
             }
@@ -337,6 +345,13 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::UnstakePending;
                 }
 
+                // Mutual exclusion with UpdateRewardAddress: epoch apply order is
+                // unstakes then reward updates, so both in one epoch set would fail
+                // network-wide. Reject unstake while a reward-address update is pending.
+                if miner_commitments.update_reward_address.is_some() {
+                    return CommitmentSnapshotStatus::UnstakePending;
+                }
+
                 miner_commitments.unstake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
@@ -346,6 +361,11 @@ impl CommitmentSnapshot {
                 }
 
                 let miner_commitments = self.commitments.entry(*signer).or_default();
+
+                // Mutual exclusion with Unstake (same epoch-apply failure mode as above).
+                if miner_commitments.unstake.is_some() {
+                    return CommitmentSnapshotStatus::UnstakePending;
+                }
 
                 // Idempotency: if this exact tx is already stored, return Accepted
                 if miner_commitments
@@ -1012,5 +1032,145 @@ mod tests {
         for (pledge, &expected) in pledges.iter().zip(&pledge_amounts) {
             assert_eq!(pledge.value(), expected);
         }
+    }
+
+    /// Same-epoch Unstake and UpdateRewardAddress for one signer are mutually
+    /// exclusive. Epoch apply order is unstakes then reward updates; accepting
+    /// both would brick the epoch transition for every node.
+    #[test]
+    fn unstake_and_update_reward_address_are_mutually_exclusive() {
+        let signer = IrysAddress::random();
+        let new_reward = IrysAddress::random();
+
+        let mut epoch_snapshot = EpochSnapshot::default();
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer,
+            StakeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer,
+                amount: U256::from(1000),
+                reward_address: signer,
+            },
+        );
+
+        let mut mid_epoch = CommitmentSnapshot::default();
+
+        let unstake = create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000));
+        assert_eq!(
+            mid_epoch.add_commitment(&unstake, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted,
+            "Unstake with zero active pledges must be accepted mid-epoch"
+        );
+
+        let update = create_test_commitment_v2(
+            signer,
+            CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address: new_reward,
+            },
+            U256::zero(),
+        );
+        assert_eq!(
+            mid_epoch.add_commitment(&update, &epoch_snapshot),
+            CommitmentSnapshotStatus::UnstakePending,
+            "UpdateRewardAddress must be rejected while Unstake is pending"
+        );
+
+        let epoch_commitments = mid_epoch.get_epoch_commitments();
+        assert!(
+            epoch_commitments
+                .iter()
+                .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Unstake)),
+            "epoch set must include Unstake"
+        );
+        assert!(
+            !epoch_commitments.iter().any(|c| matches!(
+                c.commitment_type(),
+                CommitmentTypeV2::UpdateRewardAddress { .. }
+            )),
+            "epoch set must not include rejected UpdateRewardAddress"
+        );
+
+        assert!(
+            epoch_snapshot.apply_unstakes(&epoch_commitments).is_ok(),
+            "unstake-only set must apply cleanly"
+        );
+        assert!(
+            epoch_snapshot
+                .apply_update_reward_addresses(&epoch_commitments)
+                .is_ok(),
+            "no reward-address updates in set"
+        );
+    }
+
+    #[test]
+    fn update_reward_address_then_unstake_is_rejected() {
+        let signer = IrysAddress::random();
+        let new_reward = IrysAddress::random();
+
+        let mut epoch_snapshot = EpochSnapshot::default();
+        epoch_snapshot.commitment_state.stake_commitments.insert(
+            signer,
+            StakeEntry {
+                id: H256::random(),
+                commitment_status: CommitmentStatus::Active,
+                signer,
+                amount: U256::from(1000),
+                reward_address: signer,
+            },
+        );
+
+        let mut mid_epoch = CommitmentSnapshot::default();
+
+        let update = create_test_commitment_v2(
+            signer,
+            CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address: new_reward,
+            },
+            U256::zero(),
+        );
+        assert_eq!(
+            mid_epoch.add_commitment(&update, &epoch_snapshot),
+            CommitmentSnapshotStatus::Accepted
+        );
+
+        let unstake = create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000));
+        assert_eq!(
+            mid_epoch.add_commitment(&unstake, &epoch_snapshot),
+            CommitmentSnapshotStatus::UnstakePending,
+            "Unstake must be rejected while UpdateRewardAddress is pending"
+        );
+
+        let epoch_commitments = mid_epoch.get_epoch_commitments();
+        assert!(
+            epoch_commitments.iter().any(|c| matches!(
+                c.commitment_type(),
+                CommitmentTypeV2::UpdateRewardAddress { .. }
+            ) && c.id() == update.id()),
+            "epoch set must include the accepted UpdateRewardAddress"
+        );
+        assert!(
+            !epoch_commitments
+                .iter()
+                .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Unstake)),
+            "epoch set must not include the rejected Unstake"
+        );
+
+        assert!(
+            epoch_snapshot
+                .apply_update_reward_addresses(&epoch_commitments)
+                .is_ok(),
+            "accepted reward-address update must apply cleanly"
+        );
+        assert_eq!(
+            epoch_snapshot
+                .commitment_state
+                .stake_commitments
+                .get(&signer)
+                .expect("stake entry remains")
+                .reward_address,
+            new_reward,
+            "signer reward_address must become new_reward after apply"
+        );
     }
 }
