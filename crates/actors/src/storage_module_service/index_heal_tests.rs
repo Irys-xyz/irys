@@ -353,6 +353,7 @@ mod placement_collect_tests {
         assert_eq!(calls, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
         assert_eq!(r.bounds_lookups, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
         assert!(r.any_soft_skip);
+        assert!(r.lookup_cap_hit, "remaining offsets deferred by cap");
         assert!(r.placement_blocks.is_empty());
     }
 
@@ -383,5 +384,32 @@ mod placement_collect_tests {
         assert_eq!(r.placement_blocks.len(), INDEX_HEAL_MAX_BLOCKS_PER_PASS);
         // Cap hit mid-hole → partial so next heal continues.
         assert!(r.any_soft_skip);
+        assert!(r.lookup_cap_hit);
+    }
+
+    #[test]
+    fn hole_ending_on_final_permitted_failed_lookup_is_not_cap_hit() {
+        // Exactly max_lookups failed lookups finish the hole — no deferred offsets.
+        // Must not set lookup_cap_hit (would falsely warn about capping).
+        let n = INDEX_HEAL_MAX_BLOCKS_PER_PASS as u32;
+        let mut calls = 0_u64;
+        let r = collect_placement_blocks_for_gaps(
+            &[(PartitionChunkOffset::from(0), PartitionChunkOffset::from(n))],
+            0,
+            10_000,
+            PartitionChunkOffset::from(n),
+            |_ledger_abs| {
+                calls += 1;
+                None
+            },
+        );
+        assert_eq!(calls, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
+        assert_eq!(r.bounds_lookups, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
+        assert!(r.any_soft_skip, "failed lookups still mark partial");
+        assert!(
+            !r.lookup_cap_hit,
+            "hole finished on final permitted lookup; nothing deferred"
+        );
+        assert!(r.placement_blocks.is_empty());
     }
 }

@@ -282,6 +282,10 @@ struct PlacementCollectResult {
     sample_offsets: Vec<PartitionChunkOffset>,
     bounds_lookups: u64,
     any_soft_skip: bool,
+    /// True only when the lookup cap aborted the scan with hole offsets still
+    /// remaining (deferred to the next heal pass). Not set when the hole simply
+    /// ends on the final permitted lookup.
+    lookup_cap_hit: bool,
     recheck_max: PartitionChunkOffset,
 }
 
@@ -305,6 +309,7 @@ fn collect_placement_blocks_for_gaps(
     let mut placement_blocks: BTreeMap<u64, BlockHash> = BTreeMap::new();
     let mut sample_offsets: Vec<PartitionChunkOffset> = Vec::new();
     let mut any_soft_skip = false;
+    let mut lookup_cap_hit = false;
     let mut recheck_max = PartitionChunkOffset::from(0);
     let mut bounds_lookups = 0_u64;
     let max_lookups = INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64;
@@ -352,6 +357,9 @@ fn collect_placement_blocks_for_gaps(
             // otherwise scan an entire multi-chunk hole. Cap matches migrate
             // pass size; remainder retries next heal.
             if bounds_lookups >= max_lookups {
+                // Still have hole offsets left — defer them (not "used exactly
+                // max lookups and finished the hole").
+                lookup_cap_hit = true;
                 any_soft_skip = true;
                 break 'collect;
             }
@@ -386,6 +394,7 @@ fn collect_placement_blocks_for_gaps(
         sample_offsets,
         bounds_lookups,
         any_soft_skip,
+        lookup_cap_hit,
         recheck_max,
     }
 }
@@ -509,8 +518,7 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
         };
     }
 
-    if collected.bounds_lookups >= INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64 && collected.any_soft_skip
-    {
+    if collected.lookup_cap_hit {
         warn!(
             storage_module.id = sm.id,
             index_heal.bounds_lookups = collected.bounds_lookups,
