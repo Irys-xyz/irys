@@ -129,6 +129,10 @@ pub struct DataSyncServiceInner {
     pub runtime_handle: tokio::runtime::Handle,
     /// Dispatch-tick counter; re-arm Blocked offsets every [`REARM_EVERY_N_TICKS`].
     rearm_tick: u64,
+    /// Re-arm *passes* still to skip after a zero-yield probe (counts down to 0).
+    rearm_backoff_remaining: u64,
+    /// Skip budget applied after the next zero-yield pass (grows, capped).
+    rearm_backoff_next_skips: u64,
 }
 
 /// Re-arm `Blocked(MissingDataRootIndex)` when the local index looks ready.
@@ -140,6 +144,13 @@ const REARM_EVERY_N_TICKS: u64 = 4;
 /// every second while still searching a few candidates past free-slot budget
 /// for holes that are not at the lowest offsets.
 const REARM_PROBE_MULTIPLIER: usize = 4;
+
+/// After a zero-yield re-arm that actually probed Blocked offsets, skip this
+/// many subsequent re-arm passes (then grow up to [`REARM_BACKOFF_MAX_SKIPS`]).
+const REARM_BACKOFF_INITIAL_SKIPS: u64 = 1;
+
+/// Cap zero-yield skip budget (~16s at 1s re-arm cadence).
+const REARM_BACKOFF_MAX_SKIPS: u64 = 16;
 
 pub enum DataSyncServiceMessage {
     /// Refresh peer/orchestrator membership for current ledger-assigned SMs.
@@ -196,6 +207,8 @@ impl DataSyncServiceInner {
             config,
             runtime_handle,
             rearm_tick: 0,
+            rearm_backoff_remaining: 0,
+            rearm_backoff_next_skips: 0,
         };
         data_sync.synchronize_peers_and_orchestrators();
         data_sync
@@ -205,6 +218,8 @@ impl DataSyncServiceInner {
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
+                // New membership / post-heal: probe again promptly.
+                self.reset_rearm_backoff();
                 self.synchronize_peers_and_orchestrators();
             }
             DataSyncServiceMessage::ChunkCompleted {
@@ -269,9 +284,35 @@ impl DataSyncServiceInner {
         self.optimize_peer_concurrency();
         self.rearm_tick = self.rearm_tick.wrapping_add(1);
         if self.rearm_tick.is_multiple_of(REARM_EVERY_N_TICKS) {
-            self.rearm_index_ready_blocked();
+            if self.rearm_backoff_remaining > 0 {
+                self.rearm_backoff_remaining -= 1;
+            } else {
+                self.rearm_index_ready_blocked();
+            }
         }
         Ok(())
+    }
+
+    fn reset_rearm_backoff(&mut self) {
+        self.rearm_backoff_remaining = 0;
+        self.rearm_backoff_next_skips = 0;
+    }
+
+    /// After probing Blocked offsets with zero unblocks, skip more re-arm passes.
+    fn grow_rearm_backoff(&mut self) {
+        let next = if self.rearm_backoff_next_skips == 0 {
+            REARM_BACKOFF_INITIAL_SKIPS
+        } else {
+            self.rearm_backoff_next_skips
+                .saturating_mul(2)
+                .min(REARM_BACKOFF_MAX_SKIPS)
+        };
+        self.rearm_backoff_next_skips = next;
+        self.rearm_backoff_remaining = next;
+        debug!(
+            data_sync.rearm_backoff_skips = next,
+            "zero-yield re-arm; backing off index readiness probes"
+        );
     }
 
     /// Re-queue `Blocked(MissingDataRootIndex)` offsets whose local SM index is
@@ -281,9 +322,14 @@ impl DataSyncServiceInner {
     /// Anti-thrash is local: still-unindexed offsets stay Blocked. Probe work is
     /// also capped (`free_slots × REARM_PROBE_MULTIPLIER`) so a large unready
     /// backlog cannot force a full-map index walk every re-arm tick.
+    ///
+    /// Zero-yield passes that actually saw Blocked offsets grow a skip backoff
+    /// (reset on unblock success or [`DataSyncServiceMessage::SyncPartitions`]).
     fn rearm_index_ready_blocked(&mut self) {
         let max_pending = self.config.node_config.data_sync.max_pending_chunk_requests as usize;
         let mut total = 0_usize;
+        // True if we ran readiness probes against at least one Blocked map entry.
+        let mut probed_blocked = false;
         // Collect ids first so we can probe each SM without holding orchestrator mut.
         let sm_ids: Vec<StorageModuleId> = self.chunk_orchestrators.keys().copied().collect();
         for id in sm_ids {
@@ -302,7 +348,17 @@ impl DataSyncServiceInner {
             if free_slots == 0 {
                 continue;
             }
+            let has_blocked = orchestrator.chunk_requests.values().any(|r| {
+                matches!(
+                    r.request_state,
+                    ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+                )
+            });
+            if !has_blocked {
+                continue;
+            }
             let max_probes = free_slots.saturating_mul(REARM_PROBE_MULTIPLIER);
+            probed_blocked = true;
             let unblocked =
                 orchestrator.unblock_missing_data_root_index_where(free_slots, max_probes, |off| {
                     sm.is_data_root_index_ready_at(off)
@@ -320,6 +376,9 @@ impl DataSyncServiceInner {
         }
         if total > 0 {
             metrics::record_data_sync_chunk_unblocked(total as u64);
+            self.reset_rearm_backoff();
+        } else if probed_blocked {
+            self.grow_rearm_backoff();
         }
     }
 
