@@ -34,6 +34,9 @@ use tracing::{debug, error, warn};
 
 /// Max blocks re-indexed in one heal pass. Remaining holes retry when
 /// [`HealOutcome::needs_retry`] is true (periodic / assignment / restart).
+///
+/// Also caps `get_block_bounds` calls per SM plan (success + soft-skip) so a
+/// large hole of failed lookups cannot walk every offset in one pass.
 pub(super) const INDEX_HEAL_MAX_BLOCKS_PER_PASS: usize = 128;
 
 /// Per-block wait for `UpdateStorageModuleIndexes`.
@@ -289,6 +292,8 @@ struct PlacementCollectResult {
 /// exclusive `end_chunk_offset` so multi-chunk blocks are not re-queried.
 ///
 /// `lookup` returns [`None`] when bounds are uncertain (soft-skip that offset).
+/// At most [`INDEX_HEAL_MAX_BLOCKS_PER_PASS`] lookups (success or fail) run per
+/// call; further offsets are deferred via `any_soft_skip` / `needs_retry`.
 fn collect_placement_blocks_for_gaps(
     gaps: &[(PartitionChunkOffset, PartitionChunkOffset)],
     sm_ledger_start: u64,
@@ -302,8 +307,9 @@ fn collect_placement_blocks_for_gaps(
     let mut any_soft_skip = false;
     let mut recheck_max = PartitionChunkOffset::from(0);
     let mut bounds_lookups = 0_u64;
+    let max_lookups = INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64;
 
-    for &(gap_start, gap_end) in gaps {
+    'collect: for &(gap_start, gap_end) in gaps {
         if gap_start >= gap_end {
             continue;
         }
@@ -341,6 +347,13 @@ fn collect_placement_blocks_for_gaps(
             let ledger_abs = sm_ledger_start + u64::from(part_off);
             if ledger_abs >= max_chunk_offset {
                 break;
+            }
+            // Bound plan cost: failed lookups advance by one offset and would
+            // otherwise scan an entire multi-chunk hole. Cap matches migrate
+            // pass size; remainder retries next heal.
+            if bounds_lookups >= max_lookups {
+                any_soft_skip = true;
+                break 'collect;
             }
             bounds_lookups += 1;
             let Some(span) = lookup(ledger_abs) else {
@@ -494,6 +507,16 @@ fn plan_index_repair(ctx: &IndexHealCtx<'_>, sm: &Arc<StorageModule>) -> IndexRe
             // All holes past frontier — nothing to repair in the on-ledger range.
             IndexRepairPlan::Complete
         };
+    }
+
+    if collected.bounds_lookups >= INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64 && collected.any_soft_skip
+    {
+        warn!(
+            storage_module.id = sm.id,
+            index_heal.bounds_lookups = collected.bounds_lookups,
+            index_heal.lookup_cap = INDEX_HEAL_MAX_BLOCKS_PER_PASS,
+            "capping placement bounds lookups this pass; remaining hole offsets retry on next heal"
+        );
     }
 
     debug!(

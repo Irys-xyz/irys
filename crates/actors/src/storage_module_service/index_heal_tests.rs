@@ -2,8 +2,8 @@
 //! Included as `mod tests` from `index_heal.rs` under `#[cfg(test)]`.
 
 use super::{
-    PlacementSpan, collect_placement_blocks_for_gaps, exclusive_partition_end,
-    readiness_sample_offsets,
+    INDEX_HEAL_MAX_BLOCKS_PER_PASS, PlacementSpan, collect_placement_blocks_for_gaps,
+    exclusive_partition_end, readiness_sample_offsets,
 };
 use irys_types::{BlockHash, PartitionChunkOffset};
 use std::collections::BTreeMap;
@@ -71,7 +71,8 @@ mod exclusive_partition_end_tests {
 
 mod placement_collect_tests {
     use super::{
-        BTreeMap, BlockHash, PartitionChunkOffset, PlacementSpan, collect_placement_blocks_for_gaps,
+        BTreeMap, BlockHash, INDEX_HEAL_MAX_BLOCKS_PER_PASS, PartitionChunkOffset, PlacementSpan,
+        collect_placement_blocks_for_gaps,
     };
 
     fn hash(n: u8) -> BlockHash {
@@ -332,5 +333,55 @@ mod placement_collect_tests {
         assert_eq!(calls, 3);
         assert_eq!(r.placement_blocks.len(), 3);
         assert_eq!(r.bounds_lookups, 3);
+    }
+
+    #[test]
+    fn bounds_lookup_cap_stops_failed_lookup_storm() {
+        // Large hole of all soft-skips would otherwise scan every offset.
+        let gap_end = PartitionChunkOffset::from(10_000_u32);
+        let mut calls = 0_u64;
+        let r = collect_placement_blocks_for_gaps(
+            &[(PartitionChunkOffset::from(0), gap_end)],
+            0,
+            100_000,
+            gap_end,
+            |_ledger_abs| {
+                calls += 1;
+                None
+            },
+        );
+        assert_eq!(calls, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
+        assert_eq!(r.bounds_lookups, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
+        assert!(r.any_soft_skip);
+        assert!(r.placement_blocks.is_empty());
+    }
+
+    #[test]
+    fn bounds_lookup_cap_preserves_jump_and_marks_partial() {
+        // Each success jumps by 1 chunk (end == ledger+1). Cap still applies to
+        // the total lookup count; leftover work is soft-skipped for needs_retry.
+        let mut calls = 0_u64;
+        let r = collect_placement_blocks_for_gaps(
+            &[(
+                PartitionChunkOffset::from(0),
+                PartitionChunkOffset::from(500),
+            )],
+            0,
+            10_000,
+            PartitionChunkOffset::from(500),
+            |ledger_abs| {
+                calls += 1;
+                Some(PlacementSpan {
+                    height: ledger_abs,
+                    block_hash: hash((ledger_abs % 256) as u8),
+                    start_chunk_offset: ledger_abs,
+                    end_chunk_offset: ledger_abs.saturating_add(1),
+                })
+            },
+        );
+        assert_eq!(calls, INDEX_HEAL_MAX_BLOCKS_PER_PASS as u64);
+        assert_eq!(r.placement_blocks.len(), INDEX_HEAL_MAX_BLOCKS_PER_PASS);
+        // Cap hit mid-hole → partial so next heal continues.
+        assert!(r.any_soft_skip);
     }
 }
