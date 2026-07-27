@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785155666591,
+  "lastUpdate": 1785162669715,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13542,6 +13542,114 @@ window.BENCHMARK_DATA = {
           {
             "name": "apply_reset_seed",
             "value": 0.000112,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3a87f3bfbc8defbb975e87a4f1d272bf9c9db6fe",
+          "message": "fix(pricing): reject zero oracle and token prices (#1544)\n\nZero oracle prices are sticky once accepted and break fee division by price.\nReject non-positive oracle prices in prevalidation and fail closed in base_network_fee.",
+          "timestamp": "2026-07-27T15:14:44+01:00",
+          "tree_id": "e22b2ebdf8280f4c980750d2abd440ac23b6c506",
+          "url": "https://github.com/Irys-xyz/irys/commit/3a87f3bfbc8defbb975e87a4f1d272bf9c9db6fe"
+        },
+        "date": 1785162667346,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015488,
+            "range": "± 0.000493",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.153617,
+            "range": "± 0.004492",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.561,
+            "range": "± 0.111069",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.436329,
+            "range": "± 0.179775",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078957,
+            "range": "± 0.000658",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 785.746342,
+            "range": "± 16.892119",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1019.761335,
+            "range": "± 14.374545",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.120023,
+            "range": "± 0.003122",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1267.436628,
+            "range": "± 81.789238",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1544.023947,
+            "range": "± 17.08082",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034854,
+            "range": "± 0.001414",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.309734,
+            "range": "± 2.550009",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.238892,
+            "range": "± 1.389173",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000111,
             "range": "± 0.000002",
             "unit": "ms/iter"
           }
