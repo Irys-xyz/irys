@@ -1140,5 +1140,37 @@ mod tests {
             CommitmentSnapshotStatus::UnstakePending,
             "Unstake must be rejected while UpdateRewardAddress is pending"
         );
+
+        let epoch_commitments = mid_epoch.get_epoch_commitments();
+        assert!(
+            epoch_commitments.iter().any(|c| matches!(
+                c.commitment_type(),
+                CommitmentTypeV2::UpdateRewardAddress { .. }
+            ) && c.id() == update.id()),
+            "epoch set must include the accepted UpdateRewardAddress"
+        );
+        assert!(
+            !epoch_commitments
+                .iter()
+                .any(|c| matches!(c.commitment_type(), CommitmentTypeV2::Unstake)),
+            "epoch set must not include the rejected Unstake"
+        );
+
+        assert!(
+            epoch_snapshot
+                .apply_update_reward_addresses(&epoch_commitments)
+                .is_ok(),
+            "accepted reward-address update must apply cleanly"
+        );
+        assert_eq!(
+            epoch_snapshot
+                .commitment_state
+                .stake_commitments
+                .get(&signer)
+                .expect("stake entry remains")
+                .reward_address,
+            new_reward,
+            "signer reward_address must become new_reward after apply"
+        );
     }
 }
