@@ -1175,8 +1175,8 @@ mod tests {
     /// EVM beneficiary (coinbase) instead. Changing the address must not change
     /// the emitted header shadow tx.
     ///
-    /// Paired with chain-tests validation test that shows CL accepts a header
-    /// whose `reward_address` differs from the payload coinbase.
+    /// Paired with chain-tests validation test that rejects a header whose
+    /// `reward_address` differs from the payload coinbase.
     #[test]
     fn block_reward_packet_ignores_reward_address() {
         let config = ConsensusConfig::testing();
