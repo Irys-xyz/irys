@@ -246,15 +246,22 @@ impl EmaSnapshot {
         }
     }
 
-    /// Validate that an oracle price is within the safe range.
+    /// Validate that an oracle price is positive and within the safe range.
     ///
-    /// This prevents sudden price spikes or drops that could be used for manipulation.
-    /// The safe range is typically ±n% from the previous oracle price, where n is configurable.
+    /// Zero (or non-positive) prices are always rejected: fee math divides by the
+    /// token price, and a zero parent makes the relative safe-range band collapse
+    /// to `{0}` so the chain cannot recover via normal oracle updates.
+    ///
+    /// The safe range then limits sudden spikes or drops vs the previous oracle
+    /// price (typically ±n%, configurable).
     pub fn oracle_price_is_valid(
         oracle_price: IrysTokenPrice,
         previous_oracle_price: IrysTokenPrice,
         safe_range: Amount<Percentage>,
     ) -> bool {
+        if oracle_price.amount.is_zero() {
+            return false;
+        }
         let capped = bound_in_min_max_range(oracle_price, safe_range, previous_oracle_price);
         oracle_price == capped
     }
@@ -868,6 +875,42 @@ mod test {
                     prop_assert_eq!(result, desired_price, "in-range value should pass through unchanged");
                 }
             }
+        }
+    }
+
+    mod oracle_price_is_valid_tests {
+        use super::*;
+        use rust_decimal_macros::dec;
+
+        #[test]
+        fn zero_oracle_price_is_always_invalid() {
+            let parent = IrysTokenPrice::token(dec!(1.0)).unwrap();
+            // Full ±100% range would otherwise treat 0 as the min bound of parent.
+            let full_range = Amount::percentage(dec!(1.0)).unwrap();
+            let zero = IrysTokenPrice::token(dec!(0.0)).unwrap();
+
+            assert!(
+                !EmaSnapshot::oracle_price_is_valid(zero, parent, full_range),
+                "zero oracle price must be rejected even when the relative safe range includes 0"
+            );
+        }
+
+        #[test]
+        fn positive_price_within_range_is_valid() {
+            let parent = IrysTokenPrice::token(dec!(1.0)).unwrap();
+            let range = Amount::percentage(dec!(0.1)).unwrap();
+            let price = IrysTokenPrice::token(dec!(1.05)).unwrap();
+
+            assert!(EmaSnapshot::oracle_price_is_valid(price, parent, range));
+        }
+
+        #[test]
+        fn positive_price_outside_range_is_invalid() {
+            let parent = IrysTokenPrice::token(dec!(1.0)).unwrap();
+            let range = Amount::percentage(dec!(0.1)).unwrap();
+            let price = IrysTokenPrice::token(dec!(1.20)).unwrap();
+
+            assert!(!EmaSnapshot::oracle_price_is_valid(price, parent, range));
         }
     }
 }

@@ -24,6 +24,7 @@ mod same_block_promotion;
 mod slow_path_submit_expiry;
 mod unpledge_partition;
 mod unstake_edge_cases;
+mod zero_oracle_price;
 
 use std::sync::Arc;
 
