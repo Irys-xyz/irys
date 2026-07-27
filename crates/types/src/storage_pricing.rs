@@ -335,13 +335,19 @@ impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
     ///
     /// # Errors
     ///
-    /// Whenever any of the math operations fail due to bounds checks.
+    /// - Token price is zero (non-positive prices are not valid fee denominators)
+    /// - Whenever any of the math operations fail due to bounds checks.
     pub fn base_network_fee(
         self,
         bytes_to_store: U256,
         chunk_size: u64,
         irys_token_price: Amount<(IrysPrice, Usd)>,
     ) -> Result<Amount<(NetworkFee, Irys)>> {
+        ensure!(
+            !irys_token_price.amount.is_zero(),
+            "token price must be positive"
+        );
+
         // Calculate number of chunks (rounded up)
         let chunk_size_u256 = U256::from(chunk_size);
         let num_chunks = safe_div(
@@ -987,6 +993,30 @@ mod tests {
     mod user_fee {
         use super::*;
         use rust_decimal_macros::dec;
+
+        #[test]
+        fn test_zero_token_price_is_rejected() {
+            let cost_per_chunk_adjusted = Amount::token(dec!(0.001)).unwrap();
+            let zero_price = Amount::token(dec!(0.0)).unwrap();
+            let bytes_to_store = 256_u64 * 1024_u64;
+            let chunk_size = 256_u64 * 1024_u64;
+
+            let result = cost_per_chunk_adjusted.base_network_fee(
+                U256::from(bytes_to_store),
+                chunk_size,
+                zero_price,
+            );
+
+            assert!(
+                result.is_err(),
+                "base_network_fee must fail closed on non-positive token price"
+            );
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("token price must be positive"),
+                "expected explicit price-floor error, got: {err}"
+            );
+        }
 
         #[test]
         fn test_normal_case() -> Result<()> {
