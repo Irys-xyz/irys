@@ -19,6 +19,7 @@ mod promote_after_activation_straddle;
 mod promote_after_submit_expiry;
 mod publish_after_submit_expiry_filtered;
 mod reorg_submit_expiry;
+mod reward_address_coinbase;
 mod same_block_promotion;
 mod slow_path_submit_expiry;
 mod unpledge_partition;

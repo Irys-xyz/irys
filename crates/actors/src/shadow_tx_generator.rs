@@ -1170,6 +1170,78 @@ mod tests {
             });
     }
 
+    /// H2 (partial): BlockReward packet is amount-only. The generator stores
+    /// `reward_address` but never binds it into the reward packet — EL pays the
+    /// EVM beneficiary (coinbase) instead. Changing the address must not change
+    /// the emitted header shadow tx.
+    ///
+    /// Paired with chain-tests validation test that shows CL accepts a header
+    /// whose `reward_address` differs from the payload coinbase.
+    #[test]
+    fn block_reward_packet_ignores_reward_address() {
+        let config = ConsensusConfig::testing();
+        let parent_block = IrysBlockHeader::new_mock_header();
+        let block_height = 101_u64;
+        let reward_amount = U256::from(5000);
+        let initial_treasury = U256::from(2_000_000);
+        let publish_ledger = PublishLedgerWithTxs {
+            txs: vec![],
+            proofs: None,
+        };
+        let solution_hash = H256::zero();
+        let empty_fees = LedgerExpiryBalanceDelta {
+            reward_balance_increment: BTreeMap::new(),
+            user_perm_fee_refunds: Vec::new(),
+        };
+        let epoch_snapshot = test_epoch_snapshot();
+
+        let addr_a = IrysAddress::from([0xAA; 20]);
+        let addr_b = IrysAddress::from([0xBB; 20]);
+        assert_ne!(addr_a, addr_b);
+
+        let first_shadow = |reward_address: &IrysAddress| {
+            ShadowTxGenerator::new(
+                &block_height,
+                reward_address,
+                &reward_amount,
+                &parent_block,
+                &solution_hash,
+                &config,
+                &[],
+                &[],
+                &[],
+                &[],
+                &publish_ledger,
+                initial_treasury,
+                &empty_fees,
+                &[],
+                &[],
+                &epoch_snapshot,
+            )
+            .expect("generator")
+            .next()
+            .expect("header phase")
+            .expect("ok")
+        };
+
+        let a = first_shadow(&addr_a);
+        let b = first_shadow(&addr_b);
+        assert_eq!(
+            a, b,
+            "BlockReward shadow must be identical for different reward_address values"
+        );
+        let expected = ShadowMetadata {
+            shadow_tx: ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement {
+                    amount: reward_amount.into(),
+                }),
+                solution_hash.into(),
+            ),
+            transaction_fee: 0,
+        };
+        assert_eq!(a, expected);
+    }
+
     #[test]
     fn test_three_commitments() {
         let config = ConsensusConfig::testing();

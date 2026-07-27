@@ -224,6 +224,16 @@ pub enum PreValidationError {
     RewardCurveError(String),
     #[error("Reward mismatch: got {got}, expected {expected}")]
     RewardMismatch { got: U256, expected: U256 },
+    /// Header `reward_address` must equal the registered payout for `miner_address`
+    /// (stake entry via parent epoch snapshot, else the miner address itself).
+    #[error(
+        "Reward address mismatch: header {got} does not match registered payout {expected} for miner {miner}"
+    )]
+    RewardAddressMismatch {
+        got: IrysAddress,
+        expected: IrysAddress,
+        miner: IrysAddress,
+    },
     #[error("Invalid solution_hash - expected difficulty >={expected} got {got}")]
     SolutionHashBelowDifficulty { expected: U256, got: U256 },
     #[error("Invalid solution_hash link - expected {expected} got {got}")]
@@ -629,6 +639,7 @@ impl PreValidationError {
             | Self::PublishTxMissingPriorSubmit { .. }
             | Self::PublishTxProofLengthMismatch
             | Self::RewardMismatch { .. }
+            | Self::RewardAddressMismatch { .. }
             | Self::SolutionHashBelowDifficulty { .. }
             | Self::SolutionHashLinkInvalid { .. }
             | Self::SubmitTxAlreadyIncluded { .. }
@@ -708,6 +719,7 @@ impl PreValidationError {
             Self::PreviousSolutionHashMismatch { .. } => "prev_solution_hash_mismatch",
             Self::RewardCurveError(_) => "reward_curve_error",
             Self::RewardMismatch { .. } => "reward_mismatch",
+            Self::RewardAddressMismatch { .. } => "reward_address_mismatch",
             Self::SolutionHashBelowDifficulty { .. } => "solution_hash_below_difficulty",
             Self::SolutionHashLinkInvalid { .. } => "solution_hash_link_invalid",
             Self::SystemTimeError(_) => "system_time_error",
@@ -1844,6 +1856,17 @@ pub async fn prevalidate_block(
         return Err(PreValidationError::RewardMismatch {
             got: block.reward_amount,
             expected: reward.amount,
+        });
+    }
+
+    // Declared payout (header) must match the registered payout for the miner
+    // (stake entry reward_address on the parent epoch snapshot, or miner if unstaked).
+    let registered_reward = parent_epoch_snapshot.resolve_reward_address(block.miner_address);
+    if block.reward_address != registered_reward {
+        return Err(PreValidationError::RewardAddressMismatch {
+            got: block.reward_address,
+            expected: registered_reward,
+            miner: block.miner_address,
         });
     }
 
@@ -4817,6 +4840,18 @@ pub async fn shadow_transactions_are_valid(
     let evm_block: Block = payload_v3
         .try_into_block()
         .map_err(|e| reject(format!("payload conversion failed: {e}")))?;
+
+    // Paid payout (EVM coinbase / beneficiary) must match the declared header
+    // reward_address. Prevalidation already requires header == registered
+    // stake payout, so this completes the three-way bind:
+    // registered == header.reward_address == evm.beneficiary.
+    let coinbase = IrysAddress::from(evm_block.header.beneficiary);
+    if coinbase != block.reward_address {
+        return Err(reject(format!(
+            "EVM coinbase {coinbase} does not match block reward_address {}",
+            block.reward_address
+        )));
+    }
 
     // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
     if evm_block.header.requests_hash.is_some() {
