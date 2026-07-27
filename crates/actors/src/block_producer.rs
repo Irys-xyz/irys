@@ -612,6 +612,21 @@ pub trait BlockProdStrategy {
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
+        // Registered payout for this miner on the parent epoch snapshot must be
+        // what we declare on the Irys header and pay via EVM coinbase.
+        let reward_address = {
+            let tree = self.inner().block_tree_guard.read();
+            let epoch_snapshot = tree
+                .get_epoch_snapshot(&prev_block_header.block_hash)
+                .ok_or_else(|| {
+                    eyre!(
+                        "parent epoch snapshot missing for {}",
+                        prev_block_header.block_hash
+                    )
+                })?;
+            epoch_snapshot.resolve_reward_address(solution.mining_address)
+        };
+
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
@@ -620,6 +635,7 @@ pub trait BlockProdStrategy {
                 block_reward,
                 current_timestamp,
                 solution.solution_hash,
+                reward_address,
             )
             .await?;
         let evm_block = eth_built_payload.block();
@@ -634,6 +650,7 @@ pub trait BlockProdStrategy {
                 evm_block,
                 &prev_block_ema_snapshot,
                 final_treasury,
+                reward_address,
             )
             .await?;
 
@@ -924,6 +941,8 @@ pub trait BlockProdStrategy {
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
+        // Registered / declared payout (must match stake entry and EVM coinbase).
+        reward_address: IrysAddress,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -934,7 +953,7 @@ pub trait BlockProdStrategy {
         // Generate expected shadow transactions using shared logic
         let mut shadow_tx_generator = ShadowTxGenerator::new(
             &block_height,
-            &self.inner().config.node_config.reward_address,
+            &reward_address,
             &reward_amount.amount,
             prev_block_header,
             &solution_hash,
@@ -981,6 +1000,7 @@ pub trait BlockProdStrategy {
                 timestamp_ms,
                 shadow_txs,
                 perv_evm_block.header.mix_hash,
+                reward_address,
             )
             .await?;
 
@@ -998,6 +1018,7 @@ pub trait BlockProdStrategy {
         timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
+        reward_address: IrysAddress,
     ) -> Result<EthBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
@@ -1006,7 +1027,8 @@ pub trait BlockProdStrategy {
             inner: PayloadAttributes {
                 timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
                 prev_randao: parent_mix_hash,
-                suggested_fee_recipient: self.inner().config.node_config.reward_address.into(),
+                // Coinbase must match registered + Irys header reward_address.
+                suggested_fee_recipient: reward_address.into(),
                 withdrawals: None, // these should ALWAYS be none
                 parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             },
@@ -1105,6 +1127,7 @@ pub trait BlockProdStrategy {
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
         final_treasury: U256,
+        reward_address: IrysAddress,
     ) -> eyre::Result<Option<(Arc<IrysSealedBlock>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
@@ -1229,7 +1252,7 @@ pub trait BlockProdStrategy {
             previous_block_hash: prev_block_hash,
             previous_cumulative_diff: prev_block_header.cumulative_diff,
             poa,
-            reward_address: self.inner().config.node_config.reward_address,
+            reward_address,
             reward_amount: block_reward.amount,
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer

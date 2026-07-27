@@ -58,6 +58,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
@@ -70,6 +71,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
                     invalid_reward_amount,
                     timestamp_ms,
                     solution_hash,
+                    reward_address,
                 )
                 .await
         }
@@ -234,6 +236,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let mut tampered_mempool = mempool.clone();
@@ -246,6 +249,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
+                    reward_address,
                 )
                 .await
         }
@@ -338,6 +342,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             // NOTE: We reverse the order of txs, this means
@@ -354,6 +359,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
+                    reward_address,
                 )
                 .await
         }

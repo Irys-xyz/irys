@@ -1072,6 +1072,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
@@ -1090,6 +1091,7 @@ async fn block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()> {
                     reward_amount,
                     timestamp_ms,
                     solution_hash,
+                    reward_address,
                 )
                 .await
         }
@@ -1496,6 +1498,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
@@ -1511,6 +1514,7 @@ async fn test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                     reward_amount,
                     timestamp_ms,
                     invalid_solution_hash,
+                    reward_address,
                 )
                 .await
         }

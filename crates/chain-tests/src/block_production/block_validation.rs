@@ -159,6 +159,7 @@ async fn test_future_block_rejection() -> Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            reward_address: irys_types::IrysAddress,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             self.prod
@@ -169,6 +170,7 @@ async fn test_future_block_rejection() -> Result<()> {
                     reward_amount,
                     self.invalid_timestamp,
                     solution_hash,
+                    reward_address,
                 )
                 .await
         }
@@ -183,6 +185,7 @@ async fn test_future_block_rejection() -> Result<()> {
             eth_built_payload: &RethSealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
+            reward_address: irys_types::IrysAddress,
         ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
             self.prod
                 .produce_block_without_broadcasting(
@@ -194,6 +197,7 @@ async fn test_future_block_rejection() -> Result<()> {
                     eth_built_payload,
                     prev_block_ema_snapshot,
                     treasury,
+                    reward_address,
                 )
                 .await
         }
