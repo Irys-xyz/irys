@@ -349,3 +349,152 @@ async fn unblock_missing_data_root_index_respects_cap() {
     assert_eq!(pending, 2);
     assert_eq!(still_blocked, 1);
 }
+
+/// With Blocked offsets {5, 1, 3} and `max = 2`, the lowest two offsets
+/// (1, 3) must be unblocked — not an arbitrary HashMap-order pair.
+#[test_log::test(tokio::test)]
+async fn unblock_missing_data_root_index_picks_lowest_offsets_first() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 8;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([7_u8; 20]);
+
+    for i in [5_u32, 1_u32, 3_u32] {
+        let offset = PartitionChunkOffset::from(i);
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .unwrap();
+    }
+
+    let n = orch.unblock_missing_data_root_index(2);
+    assert_eq!(n, 2);
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(1_u32)].request_state,
+        ChunkRequestState::Pending,
+        "lowest offset must be unblocked"
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(3_u32)].request_state,
+        ChunkRequestState::Pending,
+        "second-lowest offset must be unblocked"
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(5_u32)].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
+        "highest offset must remain Blocked when capped below the full backlog"
+    );
+}
+
+/// `is_ready` must gate which Blocked offsets re-enter Pending — unready
+/// offsets stay Blocked even when free-slot budget remains.
+#[test_log::test(tokio::test)]
+async fn unblock_where_skips_offsets_that_are_not_ready() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 8;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([7_u8; 20]);
+
+    for i in 0..4_u32 {
+        let offset = PartitionChunkOffset::from(i);
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .unwrap();
+    }
+
+    // Only even offsets are "index ready". Probe budget covers the full map.
+    let n = orch.unblock_missing_data_root_index_where(10, 10, |off| *off % 2 == 0);
+    assert_eq!(n, 2);
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(0_u32)].request_state,
+        ChunkRequestState::Pending
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(1_u32)].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(2_u32)].request_state,
+        ChunkRequestState::Pending
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(3_u32)].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+    );
+}
+
+/// Cap applies only to ready offsets: with max=1 and ready={0,2}, only the
+/// lowest ready offset unblocks.
+#[test_log::test(tokio::test)]
+async fn unblock_where_respects_cap_among_ready_offsets() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 8;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([7_u8; 20]);
+
+    for i in [0_u32, 1, 2] {
+        let offset = PartitionChunkOffset::from(i);
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .unwrap();
+    }
+
+    let n = orch.unblock_missing_data_root_index_where(1, 10, |off| *off != 1);
+    assert_eq!(n, 1);
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(0_u32)].request_state,
+        ChunkRequestState::Pending
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(1_u32)].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+    );
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(2_u32)].request_state,
+        ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex),
+        "second ready offset must wait for a later re-arm pass"
+    );
+}
+
+/// Probe budget stops after `max_probes` readiness checks even when free-slot
+/// budget remains — a large unready prefix cannot force a full-map walk.
+#[test_log::test(tokio::test)]
+async fn unblock_where_respects_max_probes() {
+    let tmp = TempDirBuilder::new().with_tracing().build();
+    let num_chunks = 16;
+    let config = test_config(tmp.path().to_path_buf(), num_chunks);
+    let sm = packed_sm(&config, num_chunks);
+    let mut orch = make_orchestrator(sm, &config);
+    let peer = IrysAddress::from([7_u8; 20]);
+
+    // Blocked 0..9; only offset 5 is ready. With max=3 free slots but max_probes=3
+    // we only look at 0,1,2 — all unready — so nothing unblocks (would need probe 6).
+    for i in 0..10_u32 {
+        let offset = PartitionChunkOffset::from(i);
+        insert_requested(&mut orch, offset, peer);
+        orch.mark_chunk_blocked(offset, ChunkBlockReason::MissingDataRootIndex)
+            .unwrap();
+    }
+
+    let n = orch.unblock_missing_data_root_index_where(3, 3, |off| *off == 5);
+    assert_eq!(n, 0, "probe budget exhausted before the ready offset");
+    assert!(orch.chunk_requests.values().all(|r| {
+        matches!(
+            r.request_state,
+            ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+        )
+    }));
+
+    // Wider probe budget reaches offset 5.
+    let n = orch.unblock_missing_data_root_index_where(3, 6, |off| *off == 5);
+    assert_eq!(n, 1);
+    assert_eq!(
+        orch.chunk_requests[&PartitionChunkOffset::from(5_u32)].request_state,
+        ChunkRequestState::Pending
+    );
+}

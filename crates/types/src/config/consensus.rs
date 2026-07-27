@@ -1216,7 +1216,8 @@ mod tests {
         );
         assert_eq!(
             config.keccak256_hash(),
-            H256::from_base58("ErtksqJHbWMXGLdw2NYyNa1RiiHEagYwpKuvbm6VWusK"),
+            // Re-pinned after commitment_anchor_expiry_depth 7200 → 8640 (7f100d7a9).
+            H256::from_base58("4tYzvwZudjEbdWmSNENciFzWeZdhYfst6dWvp23JuzoW"),
             "testnet consensus-config hash is consensus-frozen"
         );
     }

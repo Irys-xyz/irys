@@ -190,6 +190,12 @@ fn path_hash_table_is_dense_range<T: DbTx>(
 /// Healthy full indexes take an O(1) density check (`first` + `last` + `entries`).
 /// Otherwise walks the sorted keyspace until the first hole (one RO tx), not a
 /// full multi-hole collect — use [`missing_path_hash_ranges_in_tx`] for that.
+///
+/// Key-presence only. Legacy `{tx_path_hash: None, data_path_hash: None}`
+/// tombstones written by pre-fix clears (before clears switched to deleting the
+/// key) read as present → dense → invisible to heal, while their `DataRootInfos`
+/// are gone. A one-shot upgrade scrub deleting all entries whose both hashes are
+/// `None` converts them to real, healable gaps.
 pub fn first_missing_path_hash_offset_in_tx<T: DbTx>(
     tx: &T,
     start: PartitionChunkOffset,
@@ -314,6 +320,16 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
     path_hashes: ChunkPathHashes,
 ) -> eyre::Result<()> {
     Ok(tx.put::<ChunkPathHashesByOffset>(offset, path_hashes)?)
+}
+
+/// Delete the entire `ChunkPathHashesByOffset` entry for `offset` (un-index it),
+/// so a gap scan sees the offset as missing rather than present-with-None.
+pub fn del_path_hashes_by_offset<T: DbTxMut>(
+    tx: &T,
+    offset: PartitionChunkOffset,
+) -> eyre::Result<()> {
+    tx.delete::<ChunkPathHashesByOffset>(offset, None)?;
+    Ok(())
 }
 
 /// get DataRootInfos for the `data_root`
@@ -652,6 +668,54 @@ mod tests {
 
         let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(5), o(10)))?;
         assert_eq!(gap, Some(o(8)), "must not treat padded entries() as dense");
+
+        Ok(())
+    }
+
+    /// Deleting a path-hash entry must make the offset look missing to both
+    /// a direct lookup and the gap scan — not present-with-`None` fields.
+    #[test]
+    fn del_path_hashes_by_offset_makes_offset_a_gap() -> eyre::Result<()> {
+        use super::{
+            ChunkPathHashes, del_path_hashes_by_offset, first_missing_path_hash_offset_in_tx,
+            get_path_hashes_by_offset, set_path_hashes_by_offset,
+        };
+        use crate::submodule::tables::SubmoduleTables;
+        use crate::{IrysDatabaseArgs as _, open_or_create_db};
+        use irys_testing_utils::utils::TempDirBuilder;
+        use irys_types::H256;
+        use reth_db::Database as _;
+        use reth_db::mdbx::DatabaseArguments;
+
+        let temp_dir = TempDirBuilder::new()
+            .prefix("path_hash_delete")
+            .with_tracing()
+            .build();
+        let db = open_or_create_db(
+            temp_dir,
+            SubmoduleTables::ALL,
+            DatabaseArguments::irys_testing()?,
+        )?;
+
+        let path_hashes = ChunkPathHashes {
+            data_path_hash: Some(H256::random()),
+            tx_path_hash: Some(H256::random()),
+        };
+        {
+            let tx = db.tx_mut()?;
+            for off in 0_u32..10 {
+                set_path_hashes_by_offset(&tx, o(off), path_hashes.clone())?;
+            }
+            tx.commit()?;
+        }
+
+        db.update_eyre(|tx| del_path_hashes_by_offset(tx, o(3)))?;
+
+        let entry = db.view_eyre(|tx| get_path_hashes_by_offset(tx, o(3)))?;
+        assert_eq!(entry, None);
+
+        let gap = db.view_eyre(|tx| first_missing_path_hash_offset_in_tx(tx, o(0), o(10)))?;
+        assert_eq!(gap, Some(o(3)));
 
         Ok(())
     }

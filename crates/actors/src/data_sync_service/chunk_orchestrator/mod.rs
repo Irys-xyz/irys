@@ -72,8 +72,9 @@ pub enum ChunkRequestState {
 
     /// Locally blocked from hot re-fetch (index gap, etc.). Still retained while
     /// the offset is Entropy so we do not thrash peers. Cleared when the offset
-    /// becomes Data, when `SyncPartitions { unblock_missing_data_root_index: true }`
-    /// re-queues [`ChunkBlockReason::MissingDataRootIndex`], or on process restart.
+    /// becomes Data, when a re-arm tick finds the local index ready for this
+    /// offset ([`ChunkOrchestrator::unblock_missing_data_root_index_where`]), or
+    /// on process restart.
     Blocked(ChunkBlockReason),
 }
 
@@ -706,32 +707,61 @@ impl ChunkOrchestrator {
         Ok(())
     }
 
-    /// After a successful index heal, re-queue offsets blocked solely on
-    /// [`ChunkBlockReason::MissingDataRootIndex`], up to `max` offsets.
+    /// Re-queue offsets blocked solely on [`ChunkBlockReason::MissingDataRootIndex`]
+    /// for which `is_ready` returns true, up to `max` successes, lowest first.
     ///
-    /// Cap prevents one `SyncPartitions` from flipping an unbounded Blocked
-    /// backlog into Pending and storming the 250ms dispatch tick. Remaining
-    /// Blocked offsets stay until a later successful heal/SyncPartitions.
+    /// `max_probes` bounds how many times `is_ready` is called so a large still-
+    /// unindexed Blocked backlog cannot force a full-map index walk every re-arm
+    /// tick. Remaining Blocked offsets wait for a later pass (heal progress or
+    /// lower offsets clearing).
     ///
     /// Returns the number of requests moved to [`ChunkRequestState::Pending`].
-    pub fn unblock_missing_data_root_index(&mut self, max: usize) -> usize {
-        if max == 0 {
+    pub fn unblock_missing_data_root_index_where(
+        &mut self,
+        max: usize,
+        max_probes: usize,
+        mut is_ready: impl FnMut(PartitionChunkOffset) -> bool,
+    ) -> usize {
+        if max == 0 || max_probes == 0 {
             return 0;
         }
+        let mut offsets: Vec<PartitionChunkOffset> = self
+            .chunk_requests
+            .iter()
+            .filter_map(|(&offset, request)| {
+                matches!(
+                    request.request_state,
+                    ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
+                )
+                .then_some(offset)
+            })
+            .collect();
+        if offsets.is_empty() {
+            return 0;
+        }
+        offsets.sort_unstable();
         let mut count = 0_usize;
-        for request in self.chunk_requests.values_mut() {
-            if count >= max {
+        for (probe_idx, offset) in offsets.into_iter().enumerate() {
+            if count >= max || probe_idx >= max_probes {
                 break;
             }
-            if matches!(
-                request.request_state,
-                ChunkRequestState::Blocked(ChunkBlockReason::MissingDataRootIndex)
-            ) {
+            if !is_ready(offset) {
+                continue;
+            }
+            if let Some(request) = self.chunk_requests.get_mut(&offset) {
                 request.request_state = ChunkRequestState::Pending;
                 count += 1;
             }
         }
         count
+    }
+
+    /// Unconditionally re-queue up to `max` `MissingDataRootIndex` Blocked offsets
+    /// (lowest first). Prefer [`Self::unblock_missing_data_root_index_where`] when
+    /// a local readiness probe is available.
+    pub fn unblock_missing_data_root_index(&mut self, max: usize) -> usize {
+        // Unconditional path: every probe succeeds, so max_probes == max.
+        self.unblock_missing_data_root_index_where(max, max, |_| true)
     }
 
     /// Local write failed for a non-blocking reason; re-queue without blaming the peer

@@ -266,9 +266,7 @@ impl DataSyncServiceTestHarness {
 
     /// Convenience method to start syncing
     fn start_sync(&mut self) -> eyre::Result<()> {
-        self.handle_message(DataSyncServiceMessage::SyncPartitions {
-            unblock_missing_data_root_index: true,
-        })
+        self.handle_message(DataSyncServiceMessage::SyncPartitions)
     }
 
     /// Get peers list
