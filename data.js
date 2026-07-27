@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785154318002,
+  "lastUpdate": 1785155666591,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13429,6 +13429,114 @@ window.BENCHMARK_DATA = {
             "name": "parallel_verification/mainnet",
             "value": 285.331171,
             "range": "± 3.872702",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "059734e1aa838d86e56019728aabcaba51751ca0",
+          "message": "fix(consensus): bind registered, header, and EVM coinbase reward addresses (#1542)\n\n* fix(consensus): bind registered, header, and EVM coinbase reward addresses\n\nRequire parent-epoch resolve_reward_address(miner) to match the Irys header\nreward_address, and the EVM beneficiary to match the header. Producers now\nresolve the registered payout for header and suggested_fee_recipient so honest\nblocks stay valid after UpdateRewardAddress. Regression test rejects a spoofed\nheader with a mismatched coinbase.\n\n* docs(actors): fix stale H2 test comment for reward_address bind\n\nThe paired chain-tests validation case rejects a header whose reward_address\ndiffers from the payload coinbase; the unit-test doc no longer says it accepts.",
+          "timestamp": "2026-07-27T13:18:24+01:00",
+          "tree_id": "9112aad9aaa32cc7e411428cc502244fbc77e0c9",
+          "url": "https://github.com/Irys-xyz/irys/commit/059734e1aa838d86e56019728aabcaba51751ca0"
+        },
+        "date": 1785155665358,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.015532,
+            "range": "± 0.000937",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.154256,
+            "range": "± 0.002285",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.58425,
+            "range": "± 0.038733",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 10.492407,
+            "range": "± 0.137464",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.07861,
+            "range": "± 0.000966",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 789.102459,
+            "range": "± 13.396578",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1022.972682,
+            "range": "± 23.762753",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.122314,
+            "range": "± 0.002685",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1241.701998,
+            "range": "± 81.621235",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1564.111695,
+            "range": "± 16.723363",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034382,
+            "range": "± 0.001141",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.948987,
+            "range": "± 0.731054",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 272.874558,
+            "range": "± 1.514912",
             "unit": "ms/iter"
           },
           {
