@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785119878464,
+  "lastUpdate": 1785154318002,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13327,6 +13327,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000111,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8061b98aeb3499056bd6ddd57baaeb1baf660fd6",
+          "message": "fix(domain): mutually exclude Unstake and UpdateRewardAddress mid-epoch (#1543)\n\n* fix(domain): mutually exclude Unstake and UpdateRewardAddress mid-epoch\n\nAccepting both for one signer put them in the shared epoch commitment set;\napply order unstakes then reward updates and fails network-wide. Reject the\nsecond commitment as UnstakePending so only one can enter the epoch set.\n\n* test(domain): assert epoch set and apply for update-then-unstake path\n\nAfter rejecting Unstake, verify get_epoch_commitments keeps only the\nUpdateRewardAddress, apply_update_reward_addresses succeeds, and the stake\nentry reward_address becomes the new address.",
+          "timestamp": "2026-07-27T12:55:57+01:00",
+          "tree_id": "b4babfb7f0477d7c4db05763b2550a37212b03a2",
+          "url": "https://github.com/Irys-xyz/irys/commit/8061b98aeb3499056bd6ddd57baaeb1baf660fd6"
+        },
+        "date": 1785154316727,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012015,
+            "range": "± 0.000605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.155071,
+            "range": "± 0.001555",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.273114,
+            "range": "± 0.059937",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 7.990343,
+            "range": "± 0.203422",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.074983,
+            "range": "± 0.000843",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 751.284996,
+            "range": "± 8.001408",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 991.432442,
+            "range": "± 11.804173",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.146153,
+            "range": "± 0.0026",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1183.3528,
+            "range": "± 134.988952",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1537.229993,
+            "range": "± 21.23547",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.035183,
+            "range": "± 0.000842",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 209.971433,
+            "range": "± 3.745064",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 285.331171,
+            "range": "± 3.872702",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000002",
             "unit": "ms/iter"
           }
         ]
