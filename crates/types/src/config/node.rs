@@ -289,15 +289,26 @@ impl NodeMode {
     /// startup VDF throughput check, and default submodule creation —
     /// submodules exist to hold packed partitions, which only a mining node
     /// is assigned.
+    ///
+    /// Written as an exhaustive `match`, not `matches!`: a new variant must be
+    /// a compile error here rather than a silent `false`.
     pub const fn mines(self) -> bool {
-        matches!(self, Self::Genesis | Self::Miner)
+        match self {
+            Self::Genesis | Self::Miner => true,
+            Self::Observer => false,
+        }
     }
 
     /// Whether this mode joins a network that already exists. Rules that
     /// govern joining — a pinned genesis hash, a working periodic sync
     /// check — must cover every such mode, not just `Miner`.
+    ///
+    /// Exhaustive for the same reason as [`Self::mines`].
     pub const fn joins_existing_network(self) -> bool {
-        matches!(self, Self::Miner | Self::Observer)
+        match self {
+            Self::Miner | Self::Observer => true,
+            Self::Genesis => false,
+        }
     }
 }
 
