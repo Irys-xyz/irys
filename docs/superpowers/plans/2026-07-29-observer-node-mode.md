@@ -806,6 +806,177 @@ git commit -m "feat(chain): skip VDF throughput check and partition mining for O
 
 ---
 
+### Task 6: Surface config parse errors without a panic
+
+Task 3 added a carefully worded migration error for the retired `node_mode = "Peer"`. An operator never sees it in readable form, because a config parse failure currently goes through the panic machinery, which flattens it.
+
+The chain: `crates/chain/src/utils.rs:15` calls `.expect("invalid config file")` on `toml::from_str`, so a malformed config panics. The panic hook at `crates/utils/testing-utils/src/utils.rs:156` does `panic_message.replace('\n', " | ")` for its structured log field. toml's diagnostic is multi-line — `toml_edit-0.22.27/src/error.rs:86-130` emits line/column, a gutter, the source line, and a `^^^^` caret, falling back to `in \`key.path\`` when it has no span — so flattening destroys exactly the part that makes it readable. The operator gets that one mangled line plus a color_eyre report, a backtrace, `Aborting process`, a SIGINT, and the shutdown watchdog, for what is a typo in a config file.
+
+The `Err(err)` arm at `utils.rs:18-35` already has the right message, including the `SETUP.md` pointer — but it only ever sees `read_to_string` failures, so it never fires for a parse error.
+
+No new dependency is needed. toml 0.8 already renders what `miette` and `serde_path_to_error` would provide. Note also that `{:?}` and `{}` are interchangeable for `toml::de::Error` — `toml-0.8.23/src/de.rs:84-94` gives `Debug` and `Display` identical bodies — so the formatting specifier is not the problem and changing it fixes nothing.
+
+**Files:**
+- Modify: `crates/chain/src/utils.rs` (`load_config`, plus a new `parse_config` helper and a test module)
+
+**Interfaces:**
+- Consumes: `NodeMode`'s hand-written `Deserialize` from Task 3, whose message this task makes visible.
+- Produces: `fn parse_config(contents: &str, path: &Path) -> eyre::Result<NodeConfig>` — a pure parse-and-annotate seam, so the error text is testable without env vars or the filesystem. `load_config` calls it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `crates/chain/src/utils.rs`. Build the fixture from a real template so the document is complete and the test exercises the same shape an operator has:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The testnet template with `node_mode` forced back to the retired spelling.
+    fn template_with_retired_node_mode() -> String {
+        let template = include_str!("../../config/templates/testnet_config.toml");
+        template
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("node_mode") {
+                    "node_mode = \"Peer\""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn parse_config_surfaces_the_node_mode_migration_error() {
+        let err = parse_config(
+            &template_with_retired_node_mode(),
+            Path::new("/etc/irys/config.toml"),
+        )
+        .expect_err("a retired node_mode must not parse")
+        .to_string();
+
+        // The migration guidance from the hand-written Deserialize survives.
+        assert!(err.contains("no longer exists"), "{err}");
+        assert!(err.contains("Miner"), "{err}");
+        assert!(err.contains("Observer"), "{err}");
+        // toml's positional context survives, so the operator can find the line.
+        assert!(err.contains("line 1") || err.contains("node_mode"), "{err}");
+        // The operator is pointed at the setup docs.
+        assert!(err.contains("SETUP.md"), "{err}");
+        // The offending path is named.
+        assert!(err.contains("/etc/irys/config.toml"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_reports_a_syntax_error_with_position() {
+        let err = parse_config("this is not = = valid toml", Path::new("bad.toml"))
+            .expect_err("malformed TOML must not parse")
+            .to_string();
+
+        assert!(err.contains("line 1"), "{err}");
+        assert!(err.contains("SETUP.md"), "{err}");
+    }
+
+    #[test]
+    fn parse_config_accepts_the_testnet_template() {
+        let template = include_str!("../../config/templates/testnet_config.toml");
+        parse_config(template, Path::new("testnet_config.toml"))
+            .expect("the shipped testnet template must parse");
+    }
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+```bash
+cargo nextest run -p irys-chain utils::tests
+```
+
+Expected: compilation FAILS with `cannot find function \`parse_config\``.
+
+- [ ] **Step 3: Add the `parse_config` helper**
+
+In `crates/chain/src/utils.rs`, add above `load_config`. Use `{err}` (Display) so toml's multi-line rendering is preserved verbatim; do not collapse or re-wrap it:
+
+```rust
+/// Parse a node config, annotating failures so an operator can act on them.
+///
+/// toml already reports the line, column, and offending source line. Keep its
+/// rendering intact and add only the file path and a pointer to the setup docs.
+/// This is a separate function so the error text is testable without touching
+/// the environment or the filesystem.
+pub fn parse_config(contents: &str, path: &Path) -> eyre::Result<NodeConfig> {
+    toml::from_str::<NodeConfig>(contents).map_err(|err| {
+        eyre::eyre!(
+            "Invalid config file at {}:\n{err}\nHave you followed the setup steps in SETUP.md?",
+            path.display(),
+        )
+    })
+}
+```
+
+Add `use std::path::Path;` to the imports alongside the existing `PathBuf`.
+
+- [ ] **Step 4: Route `load_config` through it**
+
+Restructure the head of `load_config` so reading and parsing are separate fallible steps. The `GENERATE_CONFIG` behavior must be preserved exactly: it triggers only when the file cannot be READ, never when it parses badly — writing a fresh config over a file that merely has a typo would destroy an operator's work.
+
+```rust
+    debug!("Loading config from {:?}", &config_path);
+    let contents = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            let generate_config =
+                std::env::var("GENERATE_CONFIG").unwrap_or_else(|_| "false".to_owned()) == "true";
+            if generate_config {
+                let mut config = NodeConfig::testnet();
+                let signer = config.new_random_signer();
+                config.reward_address = signer.address();
+                config.mining_key = signer.signer;
+                let mut file = std::fs::File::create(&config_path)?;
+                std::io::Write::write_all(&mut file, toml::to_string(&config)?.as_bytes())?;
+                eyre::bail!("Config file created - please edit it before restarting (see SETUP.md)")
+            }
+            eyre::bail!(
+                "Unable to read config file at {:?} - {err}\nHave you followed the setup steps in SETUP.md?",
+                &config_path,
+            );
+        }
+    };
+
+    let mut config = parse_config(&contents, &config_path)?;
+```
+
+The rest of `load_config` (the `GENESIS` env override and the `Ok(config)` return) is unchanged.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+```bash
+cargo nextest run -p irys-chain utils::tests
+cargo xtask check
+```
+
+Expected: all three tests PASS.
+
+- [ ] **Step 6: Confirm the panic path is gone**
+
+```bash
+grep -n "expect(\"invalid config file\")" crates/chain/src/utils.rs
+```
+
+Expected: no output.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A
+git commit -m "fix(config): report config parse errors instead of panicking"
+```
+
+---
+
 ## Verification Summary
 
 After Task 5, the following must all hold:
