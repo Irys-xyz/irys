@@ -11,8 +11,8 @@ node has no partition assignments, so three startup behaviors are wrong for it:
 
 - **Startup VDF throughput check** (`crates/chain/src/chain.rs:849-922`) aborts
   the node when the CPU cannot produce one VDF step per second. A node that
-  never mines does not need to hold that rate, so the check turns a usable
-  node into a refusing one.
+  never mines does not need to hold that rate, so aborting turns a usable node
+  into a refusing one.
 - **Partition mining** (`crates/chain/src/main.rs:93`) starts unconditionally.
 - **Default submodule creation** (`crates/config/src/submodules.rs:138-160`)
   writes `.irys_submodules.toml` with three submodule paths and creates the
@@ -46,9 +46,32 @@ pub enum NodeMode {
 `Observer` joins and syncs exactly as `Miner` does. It differs only in that it
 does not mine.
 
-`Observer` keeps running the local VDF. A local step count that tracks the
-chain reduces the parallel VDF work that block validation must do, so the
-saving from stopping it is smaller than the validation cost it adds.
+`Observer` keeps running the local VDF where the hardware allows. A local step
+count that tracks the chain reduces the parallel VDF work that block validation
+must do, so the saving from stopping it is smaller than the validation cost it
+adds.
+
+### The throughput check measures every mode; only the consequence differs
+
+The check still runs for `Observer`. What changes is what failing it means: a
+mining node aborts startup, because it cannot mine without holding chain rate;
+an `Observer` starts anyway, because its local VDF is only validation's fast
+path and it can follow the chain from validated fast-forward steps without one.
+
+Skipping the check outright would have been wrong. `vdf.progress_timeout_secs`
+is spent on VDF step *advancement*, not wall clock
+(`design/docs/vdf-validation-stall-detection.md`), and its budget was safe only
+because the check guaranteed every node ≥1 step/s. A free-running VDF drains
+fast-forward steps once per step, so a step longer than that budget freezes the
+step counter and trips the never-mislabel panic — the node would sync, reach the
+tip, and then crash-loop.
+
+So the measurement decides whether free-running pays off. Up to
+`MAX_FREE_RUN_STEP_MULTIPLE` (10) times the one-second target, the `Observer`
+free-runs and logs a warning. Past it, free-run is disabled and the node follows
+the chain from fast-forward steps, which the paused VDF loop drains every 200ms.
+The 10× cutoff leaves headroom under the 15s default budget; a unit test pins
+that relationship so raising the multiple past the budget cannot pass silently.
 
 ### Retiring `Peer`
 
@@ -67,17 +90,20 @@ are all unit variants.
 
 | | Genesis | Miner | Observer |
 |---|---|---|---|
-| Startup VDF throughput check | yes | yes | skipped |
+| Startup VDF throughput check | yes | yes | yes |
+| Failing that check | abort | abort | start without free-run |
 | Partition mining | yes | yes | no |
-| Local VDF | yes | yes | yes |
+| Local VDF free-run | yes | yes | if fast enough |
+| Follows via fast-forward steps | yes | yes | yes |
 | Default submodule creation | yes | yes | no |
 | Minimum 3 submodules | required | — | — |
 
 `Observer` skips only the *creation* of default submodules. An existing
 `.irys_submodules.toml` is honored, so an operator can still list paths.
 
-`main.rs` splits the current `start_mining()` call: it always starts the VDF
-and enables partition mining only outside `Observer`.
+`main.rs` splits the current `start_mining()` call: it starts the VDF when the
+benchmark says free-running pays off, and enables partition mining only outside
+`Observer`.
 
 ### Config validation
 
@@ -134,3 +160,7 @@ a `NodeMode::joins_existing_network()` helper that covers `Miner` and
 - Deserializing `node_mode = "Peer"` fails and the error names both `Miner`
   and `Observer`.
 - `NodeMode` serde round-trip over all three variants.
+- The free-run cutoff: allowed at and under chain rate, inclusive at the
+  multiple, and below the default stall budget. Tested against a supplied
+  duration rather than a measured one, so the result does not depend on the
+  speed of the machine running the test.
