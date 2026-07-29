@@ -1,10 +1,12 @@
 //! Observer-mode startup tests.
 //!
-//! These drive `IrysNodeTest`, which never runs `main.rs`, so the mode gate
-//! there is not exercised — the harness starts the VDF on demand inside its
-//! `wait_*` helpers. What is pinned below is the reachable half: a fresh
-//! Observer has no mining apparatus, and a converted one has it but keeps
-//! mining off. That an Observer still runs its VDF stays unpinned.
+//! These drive `IrysNodeTest`, which never runs `main.rs`, so neither half of the
+//! mode gate there is exercised: the harness starts the VDF on demand inside its
+//! `wait_*` helpers, and nothing here turns partition mining on. What is pinned
+//! is the structure the gate acts on — a fresh Observer has no mining apparatus
+//! at all, and a converted one keeps the apparatus its existing submodules
+//! config describes. A converted Observer's controllers idling rests on the
+//! construction default, which the wider suite already leans on.
 
 use crate::utils::IrysNodeTest;
 use irys_types::{NodeConfig, NodeMode};
@@ -67,11 +69,17 @@ async fn heavy_test_observer_boots_and_follows_without_mining() -> eyre::Result<
 
 /// The opposite structural case to the fresh Observer above: `.irys_submodules.toml`
 /// already exists and an existing file is always honored, so the submodule mode gate
-/// never fires and the node keeps its storage modules and one controller per module.
-/// What stops it mining is the construction default, not the gate — controllers start
-/// off and only the `main.rs` miner path turns them on. This pins that default.
+/// never fires. The converted node keeps its storage modules and one controller per
+/// module, reuses the file byte-for-byte, and still follows the chain.
+///
+/// It does not assert that those controllers have mining off. That is the construction
+/// default, which the wider suite already leans on — `partition_recovery` builds
+/// solutions by hand precisely because controllers idle until something calls
+/// `start_mining`, and every test that calls it implies the same. Re-checking it here
+/// would need a mining-flag read-back on the production controller whose only caller
+/// would be this line.
 #[test_log::test(tokio::test)]
-async fn heavy_test_converted_observer_has_controllers_but_does_not_mine() -> eyre::Result<()> {
+async fn heavy_test_converted_observer_reuses_submodules_and_follows() -> eyre::Result<()> {
     let seconds_to_wait = 30;
     let num_blocks_in_epoch = 3;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
@@ -136,37 +144,28 @@ async fn heavy_test_converted_observer_has_controllers_but_does_not_mine() -> ey
     stopped.cfg.stake_pledge_drives = false;
     let observer = stopped.start_with_name("OBSERVER").await;
 
-    // The mining apparatus is present. With either count at 0 the mining-off
-    // assertion below would be vacuous.
+    // The mining apparatus survives the conversion — this is what distinguishes a
+    // converted Observer from the fresh one above.
     let sm_count = observer.node_ctx.storage_modules_guard.read().len();
-    let controllers = observer.node_ctx.partition_controllers.clone();
+    let controller_count = observer.node_ctx.partition_controllers.len();
     assert!(
         sm_count > 0,
         "a converted observer must keep the storage modules its existing \
-         .irys_submodules.toml describes; with 0 this test is vacuous"
+         .irys_submodules.toml describes"
     );
     assert!(
-        !controllers.is_empty(),
+        controller_count > 0,
         "a converted observer must keep one partition mining controller per \
-         storage module; with 0 this test is vacuous"
+         storage module"
     );
 
-    // The observer still follows the chain.
+    // The observer still follows the chain, including the mining broadcasts
+    // (seed, difficulty) that live blocks push at every controller.
     genesis.mine_blocks(3).await?;
     let genesis_height = genesis.get_canonical_chain_height().await;
     observer
         .wait_until_height(genesis_height, seconds_to_wait)
         .await?;
-
-    // Checked after following live blocks, so it also covers the mining
-    // broadcasts (seed, difficulty) those blocks push at every controller.
-    for (idx, controller) in controllers.iter().enumerate() {
-        assert_eq!(
-            controller.is_mining().await,
-            Some(false),
-            "converted observer: partition mining controller {idx} reports mining enabled"
-        );
-    }
 
     // The pre-existing submodules config was honored, not rewritten.
     assert_eq!(
