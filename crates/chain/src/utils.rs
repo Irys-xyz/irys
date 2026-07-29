@@ -94,8 +94,13 @@ mod tests {
         assert!(err.contains("no longer exists"), "{err}");
         assert!(err.contains("Miner"), "{err}");
         assert!(err.contains("Observer"), "{err}");
-        // toml's positional context survives, so the operator can find the line.
-        assert!(err.contains("line 1") || err.contains("node_mode"), "{err}");
+        // toml's positional rendering survives, so the operator can find the
+        // offending line: the header, the echoed source line, and the caret.
+        // Asserted structurally rather than against a fixed line number, which
+        // shifts whenever the template's leading comments change.
+        assert!(err.contains("TOML parse error at line "), "{err}");
+        assert!(err.contains("node_mode = \"Peer\""), "{err}");
+        assert!(err.contains('^'), "{err}");
         // The operator is pointed at the setup docs.
         assert!(err.contains("SETUP.md"), "{err}");
         // The offending path is named.
