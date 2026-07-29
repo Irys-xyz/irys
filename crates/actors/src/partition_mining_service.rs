@@ -22,6 +22,7 @@ use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::oneshot;
 use tracing::{Instrument as _, debug, error, info, warn};
 
 /// Commands that control the partition mining service
@@ -29,6 +30,8 @@ use tracing::{Instrument as _, debug, error, info, warn};
 pub enum PartitionMiningCommand {
     /// Enable/disable mining for this partition
     SetMining(bool),
+    /// Read back the current mining flag
+    GetMining(oneshot::Sender<bool>),
 }
 
 /// Controller for a running PartitionMiningService
@@ -42,6 +45,20 @@ impl PartitionMiningController {
     pub fn set_mining(&self, enabled: bool) {
         // Best-effort. If the service is gone, ignore the error.
         let _ = self.cmd_tx.send(PartitionMiningCommand::SetMining(enabled));
+    }
+
+    /// Read back whether this partition is mining.
+    ///
+    /// The query travels the same command channel as `set_mining`, so the
+    /// service answers it only after every command sent before it has been
+    /// applied. `None` means the service is gone — the same best-effort
+    /// contract as `set_mining`.
+    pub async fn is_mining(&self) -> Option<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(PartitionMiningCommand::GetMining(reply_tx))
+            .ok()?;
+        reply_rx.await.ok()
     }
 }
 
@@ -472,6 +489,10 @@ impl PartitionMiningService {
                     match cmd {
                         Some(PartitionMiningCommand::SetMining(enabled)) => {
                             self.state.set_mining(enabled);
+                        }
+                        Some(PartitionMiningCommand::GetMining(reply)) => {
+                            // Best-effort: a dropped receiver just means the caller gave up.
+                            let _ = reply.send(self.state.should_mine);
                         }
                         None => {
                             warn!("PartitionMiningService controller channel closed; stopping service");
