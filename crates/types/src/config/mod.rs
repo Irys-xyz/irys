@@ -283,9 +283,9 @@ impl Config {
             "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
         );
 
-        // For peer-mode nodes the chain_sync `count == 0` skip path is only
-        // recovered via the periodic sync check. If the operator disables the
-        // periodic check (or sets the interval to 0), a peer that boots
+        // For nodes joining an existing network the chain_sync `count == 0`
+        // skip path is only recovered via the periodic sync check. If the
+        // operator disables the periodic check (or sets the interval to 0), a node that boots
         // before its trusted peers are reachable will stay unsynced
         // indefinitely. Reject that combination at config validation rather
         // than letting the node silently sit cold.

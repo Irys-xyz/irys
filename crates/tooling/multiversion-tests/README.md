@@ -109,9 +109,12 @@ For peer nodes, the template's `[consensus.Custom]` block (if any) is overlaid o
 
 When omitted, both kinds fall back to `fixtures/base-config.toml`. Sample templates for the d071fc03 ↔ HEAD span live in `examples/base-config-old.toml` and `examples/base-config-new.toml`.
 
-`node_mode` was renamed from `Peer` to `Miner`. A span whose OLD ref predates that
-rename must pass `--base-config-old`, because the bundled `fixtures/base-config.toml`
-tracks the current schema and the old binary rejects `Miner`.
+Each template owns its own `node_mode` spelling — the generator only forces
+`Genesis` for the genesis node and leaves a joining node's value alone. So a
+template must spell `node_mode` the way the binary that reads it expects.
+`node_mode` was renamed from `Peer` to `Miner`, so a span whose OLD ref predates
+that rename must pass `--base-config-old` with `"Peer"`; the bundled
+`fixtures/base-config.toml` tracks the current schema and says `"Miner"`.
 
 ### Run Config (`--run-config`)
 

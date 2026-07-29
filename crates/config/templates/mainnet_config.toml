@@ -1,4 +1,6 @@
 consensus = "Mainnet"
+# Genesis: start a new network. Miner: join and mine. Observer: join and follow
+# the chain without mining.
 node_mode = "Miner"
 sync_mode = "Full"
 base_directory = ".irys"

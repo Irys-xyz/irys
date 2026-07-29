@@ -849,9 +849,13 @@ impl IrysNode {
         // Skipped when sha_1s_difficulty is low (test configs use ~1000), and
         // for modes that do not mine: they never need to hold the one-step-per-
         // second rate, so failing them here would refuse a usable node.
-        if self.config.node_config.node_mode.mines()
-            && self.config.vdf.sha_1s_difficulty >= 1_000_000
-        {
+        if !self.config.node_config.node_mode.mines() {
+            info!(
+                "Skipping the VDF throughput check: node_mode {:?} does not mine. \
+                 On undersized hardware the local VDF may permanently trail the chain.",
+                self.config.node_config.node_mode
+            );
+        } else if self.config.vdf.sha_1s_difficulty >= 1_000_000 {
             let vdf_config = &self.config.vdf;
             let hashes_per_step = vdf_config.sha_1s_difficulty;
             let num_checkpoints = vdf_config.num_checkpoints_in_vdf_step;

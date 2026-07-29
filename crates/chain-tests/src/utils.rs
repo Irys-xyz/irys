@@ -837,7 +837,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let node_config = &self.node_ctx.config.node_config;
 
-        if matches!(node_config.node_mode, NodeMode::Miner) {
+        if !matches!(node_config.node_mode, NodeMode::Genesis) {
             panic!("Can only create a peer from a genesis config");
         }
 

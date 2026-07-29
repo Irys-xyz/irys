@@ -40,7 +40,7 @@ impl StorageSubmodulesConfig {
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path.
     ///
     /// Genesis nodes require at least 3 submodules to ensure minimum network
-    /// capacity. Peer nodes have no minimum.
+    /// capacity. Nodes joining an existing network have no minimum.
     pub fn from_toml(path: impl AsRef<Path>, node_mode: NodeMode) -> eyre::Result<Self> {
         let contents = fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;

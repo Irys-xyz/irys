@@ -108,11 +108,13 @@ a `NodeMode::joins_existing_network()` helper that covers `Miner` and
   `crates/config/templates/testnet_config.toml`, and 5 configs under `docker/`.
 - Multiversion tests: `fixtures/base-config.toml` and
   `examples/base-config-new.toml` move to `"Miner"`;
-  `examples/base-config-old.toml` stays `"Peer"` because the old binary only
-  accepts that spelling. A span crossing this change must pass
-  `--base-config-old`, because the one bundled default can no longer satisfy
-  both parsers. This is the drift case the harness already documents
-  (`crates/tooling/multiversion-tests/README.md:101`).
+  `examples/base-config-old.toml` stays `"Peer"`, the spelling a pre-rename
+  binary expects. The generator only forces `Genesis` for a genesis node and
+  otherwise keeps the template's `node_mode`, so each side's template must
+  spell it the way its own binary expects. A span crossing this change must
+  therefore pass `--base-config-old`; the one bundled default can no longer
+  satisfy both parsers. This is the drift case the harness already documents
+  (`crates/tooling/multiversion-tests/README.md`).
 - `NodeConfig::testing()` constructors keep `Genesis` and `Miner`, so no
   existing test changes behavior.
 
