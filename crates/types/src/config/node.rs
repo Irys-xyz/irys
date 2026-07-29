@@ -240,8 +240,7 @@ pub struct NodeConfig {
 ///
 /// Defines how the node participates in the network - either as a genesis node
 /// that starts a new network or as a node that joins an existing one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
@@ -256,6 +255,33 @@ pub enum NodeMode {
     /// reduces the parallel VDF work block validation has to do.
     /// Requires `consensus.expected_genesis_hash` to be set.
     Observer,
+}
+
+/// Hand-written so the retired `Peer` spelling produces a migration error.
+///
+/// `Peer` used to mean "join the network and mine". The name was removed rather
+/// than reused for the non-mining mode: a reused name would leave every
+/// deployed config parsing without error while meaning the opposite, and every
+/// miner would stop mining on its next restart with nothing to signal it.
+impl<'de> Deserialize<'de> for NodeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const VARIANTS: &[&str] = &["Genesis", "Miner", "Observer"];
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "Genesis" => Ok(Self::Genesis),
+            "Miner" => Ok(Self::Miner),
+            "Observer" => Ok(Self::Observer),
+            "Peer" => Err(serde::de::Error::custom(
+                "node_mode = \"Peer\" no longer exists: use \"Miner\" to keep the previous \
+                 behavior (join the network and mine), or \"Observer\" to join and follow the \
+                 chain without mining",
+            )),
+            other => Err(serde::de::Error::unknown_variant(other, VARIANTS)),
+        }
+    }
 }
 
 impl NodeMode {
@@ -1657,6 +1683,7 @@ mod run_mode_tests {
 #[cfg(test)]
 mod node_mode_tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn mines_is_true_for_genesis_and_miner_only() {
@@ -1670,5 +1697,44 @@ mod node_mode_tests {
         assert!(!NodeMode::Genesis.joins_existing_network());
         assert!(NodeMode::Miner.joins_existing_network());
         assert!(NodeMode::Observer.joins_existing_network());
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct ModeDoc {
+        node_mode: NodeMode,
+    }
+
+    #[test]
+    fn deserialize_peer_reports_the_rename() {
+        let err = toml::from_str::<ModeDoc>("node_mode = \"Peer\"")
+            .expect_err("\"Peer\" must not deserialize")
+            .to_string();
+        assert!(
+            err.contains("no longer exists"),
+            "error must explain that Peer was retired, not just list variants: {err}"
+        );
+        assert!(err.contains("Miner"), "error must name Miner: {err}");
+        assert!(err.contains("Observer"), "error must name Observer: {err}");
+    }
+
+    #[test]
+    fn deserialize_unknown_mode_lists_the_variants() {
+        let err = toml::from_str::<ModeDoc>("node_mode = \"Nonsense\"")
+            .expect_err("unknown variants must not deserialize")
+            .to_string();
+        assert!(err.contains("Genesis"), "error must list Genesis: {err}");
+        assert!(err.contains("Miner"), "error must list Miner: {err}");
+        assert!(err.contains("Observer"), "error must list Observer: {err}");
+    }
+
+    #[rstest]
+    #[case(NodeMode::Genesis)]
+    #[case(NodeMode::Miner)]
+    #[case(NodeMode::Observer)]
+    fn serde_round_trip(#[case] mode: NodeMode) {
+        let doc = ModeDoc { node_mode: mode };
+        let encoded = toml::to_string(&doc).expect("serializes");
+        let decoded: ModeDoc = toml::from_str(&encoded).expect("deserializes");
+        assert_eq!(doc, decoded);
     }
 }
