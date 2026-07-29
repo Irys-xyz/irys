@@ -96,6 +96,19 @@ impl StorageSubmodulesConfig {
     pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
 
+        // A non-mining node is assigned no partitions, so the three default
+        // submodules would only ever be empty directories. Return before any
+        // filesystem write, so nothing is left behind. This runs only when no
+        // config file exists; an existing one is always honored below, and the
+        // symlink sweep it skips has nothing to sweep without one.
+        if !config_path_local.exists() && !node_mode.mines() {
+            tracing::info!(
+                "node_mode does not mine — not creating a default submodule config at {:?}",
+                config_path_local
+            );
+            return Ok(Self::default());
+        }
+
         let base_path = instance_dir.join("storage_modules");
         fs::create_dir_all(&base_path).expect("to create storage_modules directory");
 
@@ -137,15 +150,6 @@ impl StorageSubmodulesConfig {
             }
 
             Ok(config)
-        } else if !node_mode.mines() {
-            // A non-mining node is assigned no partitions, so the three
-            // default submodules would only ever be empty directories.
-            // Leave the filesystem untouched and run with no storage modules.
-            tracing::info!(
-                "node_mode does not mine — not creating a default submodule config at {:?}",
-                config_path_local
-            );
-            Ok(Self::default())
         } else {
             tracing::info!("Creating default config at {:?}", config_path_local);
             let config = Self {
@@ -296,8 +300,8 @@ mod tests {
             "observer must not write a submodules config file"
         );
         assert!(
-            !dir.path().join("storage_modules/submodule_0").exists(),
-            "observer must not create default submodule directories"
+            !dir.path().join("storage_modules").exists(),
+            "observer must not touch the filesystem at all"
         );
         Ok(())
     }
