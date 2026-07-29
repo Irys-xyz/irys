@@ -53,7 +53,7 @@ Note that the “consensus” values that are in some of the other template conf
 
 ```toml
  consensus = "Mainnet"
- node_mode = "Peer"
+ node_mode = "Miner"
  sync_mode = "Full"
  base_directory = ".irys"
  mining_key = "0000000000000000000000000000000000000000000000000000000000000001"

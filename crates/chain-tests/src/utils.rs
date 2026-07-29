@@ -837,7 +837,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let node_config = &self.node_ctx.config.node_config;
 
-        if matches!(node_config.node_mode, NodeMode::Peer) {
+        if matches!(node_config.node_mode, NodeMode::Miner) {
             panic!("Can only create a peer from a genesis config");
         }
 
@@ -846,7 +846,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer_config.reward_address = peer_signer.address();
 
         // Set peer mode and expected genesis hash via consensus config
-        peer_config.node_mode = NodeMode::Peer;
+        peer_config.node_mode = NodeMode::Miner;
         peer_config.consensus.get_mut().expected_genesis_hash = Some(self.node_ctx.genesis_hash);
 
         // Make sure this peer does port randomization instead of copying the genesis ports

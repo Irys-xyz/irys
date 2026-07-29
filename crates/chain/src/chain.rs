@@ -555,12 +555,12 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block().await
             }
-            NodeMode::Peer => {
+            NodeMode::Miner => {
                 let expected_genesis_hash = self
                     .config
                     .consensus
                     .expected_genesis_hash
-                    .expect("expected_genesis_hash must be configured for peer nodes");
+                    .expect("expected_genesis_hash must be configured for Miner nodes");
                 // Fetch genesis data from trusted peer when joining network
                 let (block, commitments) = self
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)

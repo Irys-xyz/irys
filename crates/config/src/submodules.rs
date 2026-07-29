@@ -87,8 +87,8 @@ impl StorageSubmodulesConfig {
             fs::create_dir_all(path).expect("to create submodule dir");
         }
 
-        // Tests don't enforce genesis minimum — pass Peer to skip the check.
-        Self::from_toml(config_path_local, NodeMode::Peer)
+        // Tests don't enforce genesis minimum — pass Miner to skip the check.
+        Self::from_toml(config_path_local, NodeMode::Miner)
     }
 
     pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
@@ -242,13 +242,13 @@ mod tests {
     #[case(2, false)]
     #[case(3, false)]
     #[case(10, false)]
-    fn from_toml_submodule_count_boundary_peer(
+    fn from_toml_submodule_count_boundary_miner(
         #[case] count: usize,
         #[case] should_err: bool,
     ) -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();
         let path = write_config_toml(dir.path(), count)?;
-        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Peer);
+        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Miner);
         assert_eq!(result.is_err(), should_err);
         Ok(())
     }

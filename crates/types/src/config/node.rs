@@ -239,16 +239,16 @@ pub struct NodeConfig {
 /// # Node Operation Mode
 ///
 /// Defines how the node participates in the network - either as a genesis node
-/// that starts a new network or as a peer that syncs with existing nodes.
+/// that starts a new network or as a node that joins an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
 
-    /// Join an existing network by connecting to trusted peers.
+    /// Join an existing network by connecting to trusted peers, and mine.
     /// Requires `consensus.expected_genesis_hash` to be set.
-    Peer,
+    Miner,
 }
 
 /// # Node Synchronization Mode
@@ -1281,7 +1281,7 @@ impl NodeConfig {
         consensus.genesis.reward_address = reward_address;
         consensus.expected_genesis_hash = Some(H256::zero());
         Self {
-            node_mode: NodeMode::Peer,
+            node_mode: NodeMode::Miner,
             sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),

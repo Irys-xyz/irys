@@ -109,6 +109,10 @@ For peer nodes, the template's `[consensus.Custom]` block (if any) is overlaid o
 
 When omitted, both kinds fall back to `fixtures/base-config.toml`. Sample templates for the d071fc03 ↔ HEAD span live in `examples/base-config-old.toml` and `examples/base-config-new.toml`.
 
+`node_mode` was renamed from `Peer` to `Miner`. A span whose OLD ref predates that
+rename must pass `--base-config-old`, because the bundled `fixtures/base-config.toml`
+tracks the current schema and the old binary rejects `Miner`.
+
 ### Run Config (`--run-config`)
 
 A small TOML file with knobs for **what to compare** and **how to construct test transactions**. Pointed to by `--run-config <path>`; surfaced to the test harness via the `IRYS_TEST_RUN_CONFIG` env var. Default (no flag) is the empty config: no aliases, no skips, every applicable header field gets exercised non-default. That's the right default for adjacent-release tests where renames are rare.

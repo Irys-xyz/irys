@@ -109,10 +109,10 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
-        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+        if matches!(self.node_config.node_mode, NodeMode::Miner) {
             ensure!(
                 self.consensus.expected_genesis_hash.is_some(),
-                "expected_genesis_hash must be set in consensus config for peer nodes"
+                "expected_genesis_hash must be set in consensus config for Miner nodes"
             );
         }
 
@@ -279,14 +279,14 @@ impl Config {
         // before its trusted peers are reachable will stay unsynced
         // indefinitely. Reject that combination at config validation rather
         // than letting the node silently sit cold.
-        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+        if matches!(self.node_config.node_mode, NodeMode::Miner) {
             let periodic_disabled = !self.node_config.sync.enable_periodic_sync_check
                 || self.node_config.sync.periodic_sync_check_interval_secs == 0;
             ensure!(
                 !periodic_disabled,
-                "peer-mode nodes require sync.enable_periodic_sync_check = true \
+                "Miner nodes require sync.enable_periodic_sync_check = true \
                  and sync.periodic_sync_check_interval_secs > 0; without periodic re-engagement \
-                 a peer that boots before any peers are reachable would stay unsynced indefinitely"
+                 a node that boots before any peers are reachable would stay unsynced indefinitely"
             );
         }
 
@@ -1363,7 +1363,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert!(matches!(config.node_mode, NodeMode::Peer));
+        assert!(matches!(config.node_mode, NodeMode::Miner));
 
         // Check consensus config fields
         let consensus = config.consensus_config();
@@ -1388,13 +1388,13 @@ mod tests {
             .expect("Failed to parse mainnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert!(matches!(config.node_mode, NodeMode::Peer));
+        assert!(matches!(config.node_mode, NodeMode::Miner));
 
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
 
-        // Peer mode requires this pin (Config::validate).
+        // Miner mode requires this pin (Config::validate).
         assert_eq!(
             consensus.expected_genesis_hash,
             Some(H256::from_base58(
@@ -1886,9 +1886,9 @@ mod validate_tests {
     }
 
     #[test]
-    fn validate_rejects_peer_mode_without_genesis_hash() {
+    fn validate_rejects_miner_mode_without_genesis_hash() {
         let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Peer;
+            nc.node_mode = NodeMode::Miner;
             nc.consensus.get_mut().expected_genesis_hash = None;
         });
         let err = cfg.validate().unwrap_err();
@@ -2251,21 +2251,21 @@ mod validate_tests {
         );
     }
 
-    /// Peer-mode nodes that disable the periodic sync check (or set its
+    /// Miner-mode nodes that disable the periodic sync check (or set its
     /// interval to 0) have no recovery path from the chain_sync zero-peer
     /// fast-exit — `initialize_sync_mode` returns `Ok(false)` and the
     /// service idles. Validation must reject this combination so a misconfigured
-    /// peer doesn't silently sit cold.
+    /// node doesn't silently sit cold.
     #[rstest]
     #[case::disabled(false, 30)]
     #[case::zero_interval(true, 0)]
-    fn validate_rejects_peer_mode_without_periodic_sync(
+    fn validate_rejects_miner_mode_without_periodic_sync(
         #[case] enable_periodic: bool,
         #[case] interval_secs: u64,
     ) {
         let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Peer;
-            // Peer-mode also requires expected_genesis_hash; set it so the
+            nc.node_mode = NodeMode::Miner;
+            // Miner mode also requires expected_genesis_hash; set it so the
             // earlier-firing genesis-hash check passes and the later
             // periodic-sync check is the one that surfaces.
             nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
@@ -2274,11 +2274,11 @@ mod validate_tests {
         });
         let err = cfg
             .validate()
-            .expect_err("peer-mode without periodic sync must fail validation");
+            .expect_err("miner-mode without periodic sync must fail validation");
         let msg = err.to_string();
         assert!(
-            msg.contains("peer-mode") && msg.contains("periodic"),
-            "expected error referencing peer-mode/periodic-sync requirement; got: {msg}"
+            msg.contains("Miner nodes") && msg.contains("periodic"),
+            "expected error referencing Miner-node/periodic-sync requirement; got: {msg}"
         );
     }
 

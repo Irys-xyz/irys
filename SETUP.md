@@ -72,7 +72,7 @@ This will run a small, low-capacity localnet node that you can interact with:
 Note: the trusted peers section template is:
 
 ```toml
-node_mode = "Peer"
+node_mode = "Miner"
 
 [[trusted_peers]]
 gossip = "<public IP>:<public port>"
