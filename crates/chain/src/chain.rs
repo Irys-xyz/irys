@@ -137,8 +137,11 @@ pub struct IrysNodeCtx {
     /// measured by the startup throughput benchmark. Always true for a mining
     /// node — one too slow to free-run fails startup outright. False only for a
     /// non-mining node on hardware past [`MAX_FREE_RUN_STEP_MULTIPLE`], which
-    /// follows the chain from fast-forward steps instead. Set by
-    /// [`IrysNode::start`] after the benchmark.
+    /// follows the chain from fast-forward steps instead.
+    ///
+    /// A plain `bool`, not shared state: [`IrysNode::start`] writes it on the
+    /// value it returns, after the benchmark. Clones taken before that keep the
+    /// permissive default, so read it from the handle `start` handed back.
     pub vdf_free_run: bool,
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
@@ -443,6 +446,10 @@ const ACTIX_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const GOSSIP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the VDF thread to finish during graceful shutdown.
 const VDF_THREAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for the lifecycle task to complete its full shutdown sequence.
+/// Budget: API(5s) + gossip(5s) + VDF(10s) + service_set(~10 services × 10s) + reth tasks(10s).
+/// Using 60s to cover typical case with margin; worst-case depends on service count.
+const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A non-mining node may free-run its VDF at up to this multiple of the
 /// one-step-per-second target.
@@ -462,10 +469,6 @@ const MAX_FREE_RUN_STEP_MULTIPLE: u32 = 10;
 const fn vdf_free_run_allowed(measured_step: Duration, target_step: Duration) -> bool {
     measured_step.as_millis() <= target_step.as_millis() * MAX_FREE_RUN_STEP_MULTIPLE as u128
 }
-/// Timeout for the lifecycle task to complete its full shutdown sequence.
-/// Budget: API(5s) + gossip(5s) + VDF(10s) + service_set(~10 services × 10s) + reth tasks(10s).
-/// Using 60s to cover typical case with margin; worst-case depends on service count.
-const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl IrysNode {
     /// Binds HTTP and gossip TCP listeners, updates config with assigned ports.
