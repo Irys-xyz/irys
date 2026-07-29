@@ -249,6 +249,30 @@ pub enum NodeMode {
     /// Join an existing network by connecting to trusted peers, and mine.
     /// Requires `consensus.expected_genesis_hash` to be set.
     Miner,
+
+    /// Join an existing network and follow it without mining. Skips partition
+    /// mining, the startup VDF throughput check, and default submodule
+    /// creation. The local VDF still runs: a step count that tracks the chain
+    /// reduces the parallel VDF work block validation has to do.
+    /// Requires `consensus.expected_genesis_hash` to be set.
+    Observer,
+}
+
+impl NodeMode {
+    /// Whether this mode participates in mining. Gates partition mining, the
+    /// startup VDF throughput check, and default submodule creation —
+    /// submodules exist to hold packed partitions, which only a mining node
+    /// is assigned.
+    pub const fn mines(self) -> bool {
+        matches!(self, Self::Genesis | Self::Miner)
+    }
+
+    /// Whether this mode joins a network that already exists. Rules that
+    /// govern joining — a pinned genesis hash, a working periodic sync
+    /// check — must cover every such mode, not just `Miner`.
+    pub const fn joins_existing_network(self) -> bool {
+        matches!(self, Self::Miner | Self::Observer)
+    }
 }
 
 /// # Node Synchronization Mode
@@ -1627,5 +1651,24 @@ mod run_mode_tests {
             cfg.sync.execution_payload_wait_timeout_millis, 5_000,
             "test config must use the short 5s payload wait so integration tests don't hang 60s on the prod default"
         );
+    }
+}
+
+#[cfg(test)]
+mod node_mode_tests {
+    use super::*;
+
+    #[test]
+    fn mines_is_true_for_genesis_and_miner_only() {
+        assert!(NodeMode::Genesis.mines());
+        assert!(NodeMode::Miner.mines());
+        assert!(!NodeMode::Observer.mines());
+    }
+
+    #[test]
+    fn joins_existing_network_excludes_genesis() {
+        assert!(!NodeMode::Genesis.joins_existing_network());
+        assert!(NodeMode::Miner.joins_existing_network());
+        assert!(NodeMode::Observer.joins_existing_network());
     }
 }

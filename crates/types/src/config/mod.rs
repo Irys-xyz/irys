@@ -109,12 +109,22 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
-        if matches!(self.node_config.node_mode, NodeMode::Miner) {
+        if self.node_config.node_mode.joins_existing_network() {
             ensure!(
                 self.consensus.expected_genesis_hash.is_some(),
-                "expected_genesis_hash must be set in consensus config for Miner nodes"
+                "expected_genesis_hash must be set in consensus config for Miner and Observer nodes"
             );
         }
+
+        // Pledging drives creates the partition assignments an Observer node
+        // is defined as not having. Reject the pair rather than silently
+        // letting one win.
+        ensure!(
+            !(matches!(self.node_config.node_mode, NodeMode::Observer)
+                && self.node_config.stake_pledge_drives),
+            "node_mode = \"Observer\" cannot be combined with stake_pledge_drives = true: \
+             pledging drives assigns partitions to mine, which an Observer node never does"
+        );
 
         // Chunk/partition/recall sizing must be non-zero. Zero breaks every
         // chunk-offset and slot computation: e.g. ledger-expiry `compute_chunk_range`
@@ -279,12 +289,12 @@ impl Config {
         // before its trusted peers are reachable will stay unsynced
         // indefinitely. Reject that combination at config validation rather
         // than letting the node silently sit cold.
-        if matches!(self.node_config.node_mode, NodeMode::Miner) {
+        if self.node_config.node_mode.joins_existing_network() {
             let periodic_disabled = !self.node_config.sync.enable_periodic_sync_check
                 || self.node_config.sync.periodic_sync_check_interval_secs == 0;
             ensure!(
                 !periodic_disabled,
-                "Miner nodes require sync.enable_periodic_sync_check = true \
+                "Miner and Observer nodes require sync.enable_periodic_sync_check = true \
                  and sync.periodic_sync_check_interval_secs > 0; without periodic re-engagement \
                  a node that boots before any peers are reachable would stay unsynced indefinitely"
             );
@@ -2277,7 +2287,7 @@ mod validate_tests {
             .expect_err("miner-mode without periodic sync must fail validation");
         let msg = err.to_string();
         assert!(
-            msg.contains("Miner nodes") && msg.contains("periodic"),
+            msg.contains("Miner and Observer nodes") && msg.contains("periodic"),
             "expected error referencing Miner-node/periodic-sync requirement; got: {msg}"
         );
     }
@@ -2293,5 +2303,62 @@ mod validate_tests {
         });
         cfg.validate()
             .expect("genesis-mode may disable the periodic sync check");
+    }
+
+    #[test]
+    fn validate_accepts_observer_mode() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Observer;
+            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+        });
+        cfg.validate()
+            .expect("observer config with a genesis hash should validate");
+    }
+
+    #[test]
+    fn validate_rejects_observer_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Observer;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("expected_genesis_hash"),
+            "expected the genesis-hash rule to fire, got: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case::disabled(false, 30)]
+    #[case::zero_interval(true, 0)]
+    fn validate_rejects_observer_mode_without_periodic_sync(
+        #[case] enable_periodic: bool,
+        #[case] interval_secs: u64,
+    ) {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Observer;
+            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+            nc.sync.enable_periodic_sync_check = enable_periodic;
+            nc.sync.periodic_sync_check_interval_secs = interval_secs;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("periodic_sync_check"),
+            "expected the periodic-sync rule to fire, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_observer_with_stake_pledge_drives() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Observer;
+            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+            nc.stake_pledge_drives = true;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("stake_pledge_drives"),
+            "expected the stake_pledge_drives rule to fire, got: {err}"
+        );
     }
 }
