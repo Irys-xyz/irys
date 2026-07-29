@@ -17,6 +17,12 @@ pub enum ConfigError {
     MissingSection(String),
     #[error("consensus config is not a JSON object")]
     InvalidConsensusJson,
+    #[error(
+        "base-config template has no `node_mode`; a joining node needs it \
+         spelled the way its binary expects (`Miner` on current, `Peer` on \
+         pre-rename builds)"
+    )]
+    MissingNodeMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,11 +55,26 @@ pub fn generate_config(params: &ConfigParams<'_>) -> Result<(), ConfigError> {
     let mut config: Value = params.base_template.parse()?;
     let table = config.as_table_mut().ok_or(ConfigError::InvalidTemplate)?;
 
-    let node_mode = match params.role {
-        NodeRole::Genesis => "Genesis",
-        NodeRole::Peer => "Peer",
-    };
-    table.insert("node_mode".into(), Value::String(node_mode.into()));
+    // Topology the template cannot know: a genesis node must be `Genesis`
+    // whatever the template says, so force it. The `GENESIS` env override the
+    // harness sets cannot rescue a wrong template value — the node parses the
+    // config first, and a joining-mode spelling the binary does not know fails
+    // to parse before the override is applied.
+    //
+    // For a joining node the correct spelling depends on which binary reads
+    // the file — it was renamed `Peer` -> `Miner`. The cluster already selects
+    // the template by binary kind, so the template is the authority; leave its
+    // value alone rather than hardcoding one release's spelling here.
+    match params.role {
+        NodeRole::Genesis => {
+            table.insert("node_mode".into(), Value::String("Genesis".into()));
+        }
+        NodeRole::Peer => {
+            if !table.contains_key("node_mode") {
+                return Err(ConfigError::MissingNodeMode);
+            }
+        }
+    }
     table.insert("mining_key".into(), Value::String(params.mining_key.into()));
     table.insert(
         "reward_address".into(),
@@ -367,8 +388,24 @@ mod tests {
             prop_assert_eq!(reth_net["bind_port"].as_integer().unwrap(), i64::from(reth_port));
             prop_assert_eq!(reth_net["public_port"].as_integer().unwrap(), i64::from(reth_port));
 
-            let expected_mode = if is_genesis { "Genesis" } else { "Peer" };
+            let expected_mode = if is_genesis {
+                "Genesis"
+            } else {
+                // Template wins for joining nodes — assert the generator did
+                // not rewrite it.
+                "Miner"
+            };
             prop_assert_eq!(table["node_mode"].as_str().unwrap(), expected_mode);
+
+            // The generator's output must be loadable by the binary that will
+            // read it. Without this, a schema drift in the generated config is
+            // invisible until a cluster fails to boot.
+            let content = std::fs::read_to_string(&output_path).unwrap();
+            prop_assert!(
+                toml::from_str::<irys_types::NodeConfig>(&content).is_ok(),
+                "generated config does not parse as NodeConfig: {:?}",
+                toml::from_str::<irys_types::NodeConfig>(&content).err()
+            );
             prop_assert_eq!(
                 table["mining_key"].as_str().unwrap(),
                 "aaaa000000000000000000000000000000000000000000000000000000000001"
