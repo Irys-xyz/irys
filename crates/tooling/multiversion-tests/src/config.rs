@@ -388,13 +388,15 @@ mod tests {
             prop_assert_eq!(reth_net["bind_port"].as_integer().unwrap(), i64::from(reth_port));
             prop_assert_eq!(reth_net["public_port"].as_integer().unwrap(), i64::from(reth_port));
 
-            let expected_mode = if is_genesis {
-                "Genesis"
-            } else {
-                // Template wins for joining nodes — assert the generator did
-                // not rewrite it.
-                "Miner"
-            };
+            // Genesis is forced; a joining node keeps whatever the template
+            // said, so compare against the template rather than a literal.
+            let template_mode = BASE_TEMPLATE
+                .parse::<Value>()
+                .unwrap()["node_mode"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let expected_mode = if is_genesis { "Genesis" } else { &template_mode };
             prop_assert_eq!(table["node_mode"].as_str().unwrap(), expected_mode);
 
             // The generator's output must be loadable by the binary that will
