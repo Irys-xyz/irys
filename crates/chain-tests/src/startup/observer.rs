@@ -1,3 +1,11 @@
+//! Observer-mode startup tests.
+//!
+//! These drive `IrysNodeTest`, which never runs `main.rs`, so the mode gate
+//! there is not exercised — the harness starts the VDF on demand inside its
+//! `wait_*` helpers. What is pinned below is the reachable half: a fresh
+//! Observer has no mining apparatus, and a converted one has it but keeps
+//! mining off. That an Observer still runs its VDF stays unpinned.
+
 use crate::utils::IrysNodeTest;
 use irys_types::{NodeConfig, NodeMode};
 use std::sync::Arc;
@@ -57,14 +65,11 @@ async fn heavy_test_observer_boots_and_follows_without_mining() -> eyre::Result<
     Ok(())
 }
 
-/// An `Observer` converted from a `Miner` is the opposite structural case to the
-/// fresh Observer above: its `.irys_submodules.toml` already exists, and an
-/// existing file is always honored, so the mode gate on default submodule
-/// creation never fires. Storage modules are built and one partition mining
-/// controller is spawned per module. What keeps such a node from mining is not
-/// the mode gate but the construction default — controllers start with mining
-/// off, and only the `main.rs` miner path ever turns it on. This test pins that
-/// default, so removing it cannot pass silently.
+/// The opposite structural case to the fresh Observer above: `.irys_submodules.toml`
+/// already exists and an existing file is always honored, so the submodule mode gate
+/// never fires and the node keeps its storage modules and one controller per module.
+/// What stops it mining is the construction default, not the gate — controllers start
+/// off and only the `main.rs` miner path turns them on. This pins that default.
 #[test_log::test(tokio::test)]
 async fn heavy_test_converted_observer_has_controllers_but_does_not_mine() -> eyre::Result<()> {
     let seconds_to_wait = 30;
@@ -131,9 +136,8 @@ async fn heavy_test_converted_observer_has_controllers_but_does_not_mine() -> ey
     stopped.cfg.stake_pledge_drives = false;
     let observer = stopped.start_with_name("OBSERVER").await;
 
-    // The structural difference from a fresh Observer: the mining apparatus is
-    // present. If either count were 0 the mining-off assertion below would be
-    // vacuous.
+    // The mining apparatus is present. With either count at 0 the mining-off
+    // assertion below would be vacuous.
     let sm_count = observer.node_ctx.storage_modules_guard.read().len();
     let controllers = observer.node_ctx.partition_controllers.clone();
     assert!(
@@ -154,9 +158,8 @@ async fn heavy_test_converted_observer_has_controllers_but_does_not_mine() -> ey
         .wait_until_height(genesis_height, seconds_to_wait)
         .await?;
 
-    // The assertion this test exists for. Checked after the observer has
-    // followed live blocks, so it also covers the mining broadcasts (seed,
-    // difficulty) those blocks push at every controller.
+    // Checked after following live blocks, so it also covers the mining
+    // broadcasts (seed, difficulty) those blocks push at every controller.
     for (idx, controller) in controllers.iter().enumerate() {
         assert_eq!(
             controller.is_mining().await,

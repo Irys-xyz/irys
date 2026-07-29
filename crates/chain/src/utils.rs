@@ -1,6 +1,5 @@
 use irys_types::{NodeConfig, NodeMode};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::debug;
 
 /// Parse a node config, annotating failures so an operator can act on them.

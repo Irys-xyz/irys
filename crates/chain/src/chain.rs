@@ -281,6 +281,9 @@ impl IrysNodeCtx {
         self.set_partition_mining(false)
     }
     /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
+    ///
+    /// Does not consult `node_mode`: on a node whose mode does not mine, this
+    /// enables mining anyway. `main` gates the call instead.
     pub fn start_mining(&self) -> eyre::Result<()> {
         // start the VDF thread
         self.start_vdf();
@@ -852,7 +855,8 @@ impl IrysNode {
         if !self.config.node_config.node_mode.mines() {
             info!(
                 "Skipping the VDF throughput check: node_mode {:?} does not mine. \
-                 On undersized hardware the local VDF may permanently trail the chain.",
+                 On undersized hardware the local VDF cannot free-run at chain rate \
+                 and instead tracks the chain via fast-forward steps.",
                 self.config.node_config.node_mode
             );
         } else if self.config.vdf.sha_1s_difficulty >= 1_000_000 {
