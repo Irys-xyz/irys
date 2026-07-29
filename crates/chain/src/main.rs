@@ -90,7 +90,13 @@ async fn main() -> eyre::Result<()> {
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
         .start()
         .await?;
-    handle.start_mining()?;
+    // An Observer keeps running the VDF: a local step count that tracks the
+    // chain reduces the parallel VDF work block validation has to do. It just
+    // never mines partitions.
+    handle.start_vdf();
+    if handle.config.node_config.node_mode.mines() {
+        handle.set_partition_mining(true)?;
+    }
 
     // Await lifecycle task completion asynchronously
     // Brief non-contended lock to extract the JoinHandle.
