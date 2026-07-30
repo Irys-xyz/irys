@@ -73,6 +73,31 @@ the chain from fast-forward steps, which the paused VDF loop drains every 200ms.
 The 10× cutoff leaves headroom under the 15s default budget; a unit test pins
 that relationship so raising the multiple past the budget cannot pass silently.
 
+### `vdf.free_run` overrides the measurement
+
+The benchmark samples one step at startup, on an idle machine. An operator who
+knows their hardware should not be bound to that, so `vdf.free_run` takes
+`Auto` (default, defer to the benchmark), `Enabled`, or `Disabled`. It follows
+`core_pinning`'s shape, which already handles the same measure-or-override job in
+`VdfNodeConfig`.
+
+The name is deliberate: this does not turn the VDF off. The thread and its step
+buffer are always needed, because validation uses the buffer as a fast path and
+falls back to recomputing from a block's own seeds when it misses. Only the
+free-run — computing fresh steps — is optional.
+
+`Disabled` is the safe direction, and the reason the setting exists: it removes
+the crash risk entirely rather than trusting a single idle-time sample. `Enabled`
+is an escape hatch that bypasses the cutoff, so on a machine that measures fast
+but slows under validation load it restores exactly the failure the cutoff
+prevents; startup warns when it contradicts the benchmark.
+
+`Disabled` is rejected for a mining `node_mode`. `run_vdf` broadcasts mining
+seeds only from the free-run path, so such a node emits none, its partition
+mining services never receive a seed, and it could never mine. This also gives a
+non-mining node with `Disabled` a second, independent reason it cannot mine,
+alongside the `main.rs` gate.
+
 ### Retiring `Peer`
 
 `node_mode = "Peer"` currently means "mine". Reusing the freed name for the
@@ -92,6 +117,7 @@ are all unit variants.
 |---|---|---|---|
 | Startup VDF throughput check | yes | yes | yes |
 | Failing that check | abort | abort | start without free-run |
+| `vdf.free_run = "Disabled"` | rejected | rejected | allowed |
 | Partition mining | yes | yes | no |
 | Local VDF free-run | yes | yes | if fast enough |
 | Follows via fast-forward steps | yes | yes | yes |

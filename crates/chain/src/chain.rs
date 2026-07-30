@@ -60,7 +60,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun, app_state::DatabaseProvider,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
@@ -887,7 +887,10 @@ impl IrysNode {
         // starts, and gives up only the free-run, and only once it is slow
         // enough for the free-run to cost more than it earns — see
         // [`vdf_free_run_allowed`].
-        let mut vdf_free_run = true;
+        //
+        // This is the `Auto` verdict. `vdf.free_run` overrides it below, so the
+        // benchmark still runs and reports even when the operator has decided.
+        let mut benchmark_allows_free_run = true;
         if self.config.vdf.sha_1s_difficulty >= 1_000_000 {
             let vdf_config = &self.config.vdf;
             let hashes_per_step = vdf_config.sha_1s_difficulty;
@@ -951,9 +954,9 @@ impl IrysNode {
                     ));
                 }
 
-                vdf_free_run =
+                benchmark_allows_free_run =
                     vdf_free_run_allowed(elapsed, Duration::from_millis(target_step_ms as u64));
-                if vdf_free_run {
+                if benchmark_allows_free_run {
                     warn!(
                         "VDF step takes {step_duration_ms}ms against a {target_step_ms}ms target \
                          ({ratio:.1}x slower than chain rate). node_mode {node_mode:?} does not \
@@ -982,6 +985,33 @@ impl IrysNode {
                 info!("VDF throughput OK: mining at full efficiency");
             }
         }
+
+        // Resolve the operator's choice against what the benchmark measured. An
+        // explicit setting wins, and says so when it disagrees — an override that
+        // silently contradicts the measurement is the one thing an operator
+        // debugging VDF behaviour must not have to guess at.
+        let vdf_free_run = match self.config.vdf.free_run {
+            VdfFreeRun::Auto => benchmark_allows_free_run,
+            VdfFreeRun::Enabled => {
+                if !benchmark_allows_free_run {
+                    warn!(
+                        "vdf.free_run = \"Enabled\" overrides a benchmark that measured this \
+                         machine too slow to free-run safely. A step outlasting \
+                         vdf.progress_timeout_secs freezes the step counter and panics the \
+                         process. Set \"Auto\" to defer to the benchmark, or \"Disabled\" to \
+                         follow the chain from fast-forward steps."
+                    );
+                }
+                true
+            }
+            VdfFreeRun::Disabled => {
+                info!(
+                    "vdf.free_run = \"Disabled\": the local VDF will not compute steps and will \
+                     follow the chain from validated fast-forward steps."
+                );
+                false
+            }
+        };
 
         let runtime_handle = self.runtime_handle.unwrap_or_else(Handle::current);
 

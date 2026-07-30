@@ -125,6 +125,17 @@ impl Config {
             );
         }
 
+        // `run_vdf` broadcasts mining seeds only from its free-run path, so a
+        // node that never free-runs emits none and its partition mining services
+        // never receive a seed to mine against.
+        ensure!(
+            !(self.node_config.node_mode.mines()
+                && matches!(self.node_config.vdf.free_run, VdfFreeRun::Disabled)),
+            "vdf.free_run = \"Disabled\" cannot be combined with a mining node_mode: \
+             mining seeds are broadcast only by the local VDF free-run, so the node \
+             would never mine"
+        );
+
         // Pledging drives creates the partition assignments an Observer node
         // is defined as not having. Reject the pair rather than silently
         // letting one win.
@@ -601,6 +612,7 @@ impl From<&NodeConfig> for VdfConfig {
         let VdfNodeConfig {
             parallel_verification_thread_limit,
             core_pinning,
+            free_run,
             throttle,
             progress_timeout_secs,
             validation_batch_size,
@@ -615,6 +627,7 @@ impl From<&NodeConfig> for VdfConfig {
             progress_timeout_secs: *progress_timeout_secs,
             validation_batch_size: *validation_batch_size,
             core_pinning: *core_pinning,
+            free_run: *free_run,
         }
     }
 }
@@ -684,6 +697,9 @@ pub struct VdfConfig {
 
     /// See `VdfNodeConfig::core_pinning`. Controls VDF-thread CPU pinning.
     pub core_pinning: CorePinning,
+
+    /// See `VdfNodeConfig::free_run`. Whether the thread computes its own steps.
+    pub free_run: VdfFreeRun,
 }
 
 impl VdfConfig {
@@ -2390,6 +2406,52 @@ mod validate_tests {
             err.contains("periodic_sync_check"),
             "expected the periodic-sync rule to fire, got: {err}"
         );
+    }
+
+    /// Mining seeds are broadcast only from the VDF free-run path, so a mining
+    /// node with the free-run off would never mine. Reject rather than let it
+    /// idle and look healthy.
+    #[rstest]
+    #[case::genesis(NodeMode::Genesis)]
+    #[case::miner(NodeMode::Miner)]
+    fn validate_rejects_free_run_disabled_for_a_mining_mode(#[case] mode: NodeMode) {
+        // Genesis is not a joining mode, so build it through the plain helper.
+        let cfg = if mode.joins_existing_network() {
+            joining_config(mode, |nc| nc.vdf.free_run = VdfFreeRun::Disabled)
+        } else {
+            config_with_node(|nc| {
+                nc.node_mode = mode;
+                nc.vdf.free_run = VdfFreeRun::Disabled;
+            })
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("free_run"),
+            "expected the free_run rule to fire, got: {err}"
+        );
+    }
+
+    /// The whole point of the setting: a non-mining node may turn the free-run
+    /// off, and may also force it on.
+    #[rstest]
+    #[case::disabled(VdfFreeRun::Disabled)]
+    #[case::enabled(VdfFreeRun::Enabled)]
+    #[case::auto(VdfFreeRun::Auto)]
+    fn validate_accepts_any_free_run_for_an_observer(#[case] free_run: VdfFreeRun) {
+        joining_config(NodeMode::Observer, |nc| nc.vdf.free_run = free_run)
+            .validate()
+            .expect("an observer may choose any free-run setting");
+    }
+
+    /// `Enabled` is only an override of the benchmark, never of the mining
+    /// requirement, so it stays legal everywhere.
+    #[test]
+    fn validate_accepts_free_run_enabled_for_a_miner() {
+        joining_config(NodeMode::Miner, |nc| {
+            nc.vdf.free_run = VdfFreeRun::Enabled;
+        })
+        .validate()
+        .expect("a miner may force the free-run on");
     }
 
     #[test]

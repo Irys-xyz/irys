@@ -36,6 +36,7 @@ These are the configuration options you *should* change when configuring a new n
     - `Miner`: join an existing network and mine.
     - `Observer`: join an existing network and follow it without mining.
     - If you are running a local network, use `Genesis` - otherwise, use `Miner` or `Observer`.
+    - An `Observer` runs the local VDF where the hardware allows, since a step count that tracks the chain speeds up block validation. On a slow machine set `[vdf] free_run = "Disabled"` to follow the chain from validated fast-forward steps instead; `"Auto"` (the default) decides from a startup benchmark.
     - to join a network you must also specify the genesis block hash. This will be used for validating the genesis block that you will receive from a trusted peer.
 - `base_directory`: The fully qualified path to where the Irys node should store all it's data. 
     - Note: Changing this will require you to manually move your existing data directory.

@@ -93,6 +93,33 @@ impl Default for DatabaseConfig {
     }
 }
 
+/// Controls whether the local VDF thread computes its own steps.
+///
+/// Not a switch for the VDF itself: the thread and its step buffer are always
+/// needed, because block validation uses the local buffer as a fast path and
+/// falls back to recomputing from a block's own seeds when it misses. What this
+/// selects is whether the thread *free-runs* — produces fresh steps — or only
+/// drains the validated fast-forward steps validation hands it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VdfFreeRun {
+    /// Free-run only if the startup throughput benchmark says it pays off.
+    #[default]
+    Auto,
+    /// Always free-run, whatever the benchmark measured.
+    ///
+    /// This bypasses the benchmark's safety cutoff. On a machine that measures
+    /// fast when idle but slows under validation load, a step can outlast
+    /// `progress_timeout_secs`, which freezes the step counter and panics the
+    /// process by the never-mislabel rule. An escape hatch, not a tuning knob.
+    Enabled,
+    /// Never free-run; follow the chain from validated fast-forward steps only.
+    ///
+    /// Always safe: the paused loop drains fast-forward every 200ms, well inside
+    /// the stall budget. Rejected for a mining `node_mode` — mining seeds are
+    /// broadcast only from the free-run path, so such a node could never mine.
+    Disabled,
+}
+
 /// Controls whether and how the VDF thread is pinned to a CPU core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CorePinning {
@@ -910,6 +937,12 @@ pub struct VdfNodeConfig {
     #[serde(default)]
     pub core_pinning: CorePinning,
 
+    /// Whether the local VDF thread computes its own steps, or only follows the
+    /// chain from validated fast-forward steps. `Auto` defers to the startup
+    /// throughput benchmark.
+    #[serde(default)]
+    pub free_run: VdfFreeRun,
+
     /// When true, enforce a minimum step duration to prevent VDF from
     /// outrunning block production when sha_1s_difficulty is low.
     #[serde(default)]
@@ -960,6 +993,7 @@ impl Default for VdfNodeConfig {
             // TODO: default to something like numcpus - 4
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
+            free_run: VdfFreeRun::default(),
             throttle: false,
             progress_timeout_secs: default_vdf_progress_timeout_secs(),
             validation_batch_size: default_vdf_validation_batch_size(),
@@ -1257,6 +1291,9 @@ impl NodeConfig {
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
+                // Test configs skip the throughput benchmark (low
+                // sha_1s_difficulty), so `Auto` resolves to free-running.
+                free_run: VdfFreeRun::Auto,
                 throttle: true,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
                 validation_batch_size: default_vdf_validation_batch_size(),
@@ -1445,6 +1482,7 @@ impl NodeConfig {
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
                 core_pinning: CorePinning::Auto,
+                free_run: VdfFreeRun::Auto,
                 throttle: false,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
                 validation_batch_size: default_vdf_validation_batch_size(),
