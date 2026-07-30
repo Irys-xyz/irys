@@ -61,13 +61,22 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
     subscriber.init();
 
     let db = {
-        let config = std::env::var("CONFIG")
+        let config_path = std::env::var("CONFIG")
             .unwrap_or_else(|_| "./config.toml".to_owned())
             .parse::<PathBuf>()
             .expect("file path to be valid");
-        let config = std::fs::read_to_string(config)
+        let config = std::fs::read_to_string(&config_path)
             .map(|config_file| {
-                toml::from_str::<NodeConfig>(&config_file).expect("invalid config file")
+                // Render toml's own error: it carries the line, the offending
+                // source line, and any guidance a hand-written Deserialize adds
+                // (`node_mode` migration, for one). `expect` formats the error
+                // with Debug and loses all of that.
+                toml::from_str::<NodeConfig>(&config_file).unwrap_or_else(|err| {
+                    panic!(
+                        "Invalid config file at {}:\n{err}\nHave you followed the setup steps in SETUP.md?",
+                        config_path.display()
+                    )
+                })
             })
             .unwrap_or_else(|err| {
                 tracing::warn!(
