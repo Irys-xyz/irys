@@ -277,9 +277,10 @@ pub enum NodeMode {
     Miner,
 
     /// Join an existing network and follow it without mining. Skips partition
-    /// mining, the startup VDF throughput check, and default submodule
-    /// creation. The local VDF still runs: a step count that tracks the chain
-    /// reduces the parallel VDF work block validation has to do.
+    /// mining and default submodule creation. The startup VDF throughput check
+    /// still runs, but failing it disables the local free-run instead of
+    /// aborting startup. The local VDF otherwise still runs: a step count that
+    /// tracks the chain reduces the parallel VDF work block validation has to do.
     /// Requires `consensus.expected_genesis_hash` to be set.
     Observer,
 }
@@ -312,10 +313,10 @@ impl<'de> Deserialize<'de> for NodeMode {
 }
 
 impl NodeMode {
-    /// Whether this mode participates in mining. Gates partition mining, the
-    /// startup VDF throughput check, and default submodule creation —
-    /// submodules exist to hold packed partitions, which only a mining node
-    /// is assigned.
+    /// Whether this mode participates in mining. Gates partition mining, default
+    /// submodule creation, and whether failing the startup VDF throughput check
+    /// aborts startup — submodules exist to hold packed partitions, which only a
+    /// mining node is assigned.
     ///
     /// Written as an exhaustive `match`, not `matches!`: a new variant must be
     /// a compile error here rather than a silent `false`.
