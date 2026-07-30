@@ -65,26 +65,26 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
             .unwrap_or_else(|_| "./config.toml".to_owned())
             .parse::<PathBuf>()
             .expect("file path to be valid");
-        let config = std::fs::read_to_string(&config_path)
-            .map(|config_file| {
-                // Render toml's own error: it carries the line, the offending
-                // source line, and any guidance a hand-written Deserialize adds
-                // (`node_mode` migration, for one). `expect` formats the error
-                // with Debug and loses all of that.
-                toml::from_str::<NodeConfig>(&config_file).unwrap_or_else(|err| {
-                    panic!(
-                        "Invalid config file at {}:\n{err}\nHave you followed the setup steps in SETUP.md?",
-                        config_path.display()
-                    )
-                })
-            })
-            .unwrap_or_else(|err| {
+        let config = match std::fs::read_to_string(&config_path) {
+            // Render toml's own error: it carries the line, the offending source
+            // line, and any guidance a hand-written Deserialize adds (`node_mode`
+            // migration, for one). Returned rather than panicked: a config the
+            // operator supplied but got wrong is this tool's own error to report.
+            Ok(contents) => toml::from_str::<NodeConfig>(&contents).map_err(|err| {
+                eyre::eyre!(
+                    "Invalid config file at {}:\n{err}\nHave you followed the setup steps in SETUP.md?",
+                    config_path.display()
+                )
+            })?,
+            // No config at all is the expected local-debugging case, not an error.
+            Err(err) => {
                 tracing::warn!(
                     custom.error = ?err,
                     "config file not provided, defaulting to testnet config"
                 );
                 NodeConfig::testnet()
-            });
+            }
+        };
 
         // open the Irys database
         let db_path = config.irys_consensus_data_dir();
