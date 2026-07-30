@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785255959249,
+  "lastUpdate": 1785413505035,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -13867,6 +13867,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000117,
             "range": "± 0.000002",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0098712224786f1806c40dd013b61c269ea7c22e",
+          "message": "feat(config): add Observer node mode, rename Peer to Miner (#1545)\n\n* docs(design): add Observer node mode ADR\n\n* docs(plan): add Observer node mode implementation plan\n\n* refactor(config): rename NodeMode::Peer to NodeMode::Miner\n\n* feat(config): add NodeMode::Observer with mode predicates and validation\n\n* feat(config): reject retired node_mode \"Peer\" with a migration error\n\n* feat(config): skip default submodule creation for non-mining modes\n\n* feat(chain): skip VDF throughput check and partition mining for Observer\n\n* docs(plan): add task 6 — surface config parse errors without a panic\n\n* fix(config): report config parse errors instead of panicking\n\nA malformed config file went through toml::from_str(...).expect(...),\nso a parse failure panicked. The panic hook flattens newlines for its\nstructured log field, destroying toml's line/column/caret diagnostic -\nexactly the detail an operator needs, and exactly what carries the\nnode_mode migration message for the retired \"Peer\" value.\n\nSplit load_config into a read step and a parse_config step. Reading\nstill triggers GENERATE_CONFIG on failure; parsing returns an\neyre::Result that keeps toml's rendering intact and adds the file path\nand a SETUP.md pointer.\n\n* fix(multiversion-tests): let the base-config template own peer node_mode\n\n`generate_config` overwrote the template's `node_mode` with a hardcoded\nstring per `NodeRole`, so the template's spelling had no effect and every\njoining node got the retired `\"Peer\"` value. `NodeRole` carries topology,\nnot schema vintage: only the template knows which binary vintage it\ntargets, and the cluster already picks it per binary kind.\n\nForce `Genesis` for the genesis role, since the template cannot know the\ntopology and a wrong value there fails to parse before the `GENESIS` env\noverride can be applied. For a joining node, keep the template's value and\nfail generation if the key is absent, so the operator learns about it at\ngeneration time rather than at node startup.\n\nHarden the roundtrip prop-test to parse the generated document as\n`NodeConfig`; that is the assertion which would have caught this.\n\n* test(chain): assert an Observer node boots and follows without mining\n\nCovers the mode's central invariants: zero storage modules, zero partition\nmining controllers, no submodules config written, and it still syncs the\nchain from the genesis node.\n\n* docs(config): correct node_mode documentation and log the skipped VDF check\n\n- SETUP.md documented a `mode` field with `PeerSync` / `TrustedPeerSync`\n  values, conflating `node_mode` with `sync_mode`. Name the real field and\n  its three values, and describe each so `Observer` is discoverable outside\n  the migration error message.\n- Add the valid values as a comment above `node_mode` in both config\n  templates.\n- Reword the multiversion README and the ADR: the constraint is that each\n  side's template must spell `node_mode` the way its own binary expects,\n  not that one specific template is rejected.\n- The chain-tests peer-config guard tested a single variant while its\n  message states a Genesis-only invariant, so `Observer` slipped through.\n  Invert it to the allow-list the message describes.\n- Drop two references to the retired `Peer` variant name.\n- An Observer skipped the VDF throughput check with no log line, leaving an\n  operator on undersized hardware without a signal that the local VDF may\n  trail the chain. Log it at info: skipping is expected for the mode.\n\n* test(config): assert toml positional rendering structurally\n\nThe previous assertion allowed \"line 1\" OR a \"node_mode\" substring. The\nmigration message itself contains node_mode = \"Peer\", so the second clause\nwas always true and the check proved nothing about positional rendering.\nIt also masked a stale expectation: node_mode sits on line 3 of the\ntemplate, not line 1.\n\nAssert the header, the echoed source line, and the caret instead, so the\ncheck survives changes to the template's leading comments.\n\n* feat(actors): add a mining-flag read-back to PartitionMiningController\n\nThe controller could only write `should_mine`, so the invariant that a\nconverted Observer keeps its partition mining controllers switched off was\nunobservable. The query travels the same command channel as `SetMining`, so\nthe reply is ordered after every command sent before it — a guarantee a\nshared atomic could not give.\n\n* test(chain): pin that a Miner converted to Observer does not mine\n\nAn operator who flips node_mode to Observer but keeps the existing\n.irys_submodules.toml still gets storage modules and one partition mining\ncontroller each — an existing submodules file is always honored, so the mode\ngate never fires. Only the controllers' construction default keeps that node\nfrom mining. Exercise the real conversion: a Miner pledges its drives, takes\non-chain partition assignments, then restarts the same directory as an\nObserver.\n\n* fix(config): make the NodeMode mode predicates exhaustive\n\n`mines()` and `joins_existing_network()` used `matches!`, so a variant added\nlater would get `false` from both with no compiler complaint. That is the\nfailure these predicates exist to prevent, moved one level down. An exhaustive\n`match` makes a new variant a compile error at both sites.\n\n* fix(config): leave the filesystem untouched for a non-mining node\n\nThe mode gate sat after the unconditional `create_dir_all`, so a non-mining\nnode still left an empty `storage_modules/` behind — the opposite of what the\nsurrounding comment claimed. Return before any write.\n\nThe relocated guard skips the symlink sweep, which is correct: the sweep only\nmatters when a submodules config exists, and the guard already excludes that\ncase. The test now asserts the directory itself is absent, not just the\nsubmodule paths under it.\n\n* test(multiversion): assert node_mode against the template, not a literal\n\nThe generator leaves a joining node's `node_mode` alone, so that is what the\ntest should check. Comparing against a hardcoded spelling instead means editing\nthe fixture fails the test with a message blaming the generator.\n\n* docs(mining): name the current node_mode values in the genesis guide\n\nThe guide still told operators to use the retired `Peer` spelling, which now\nrefuses to start. A loud config break only works if every doc names a value\nthat parses.\n\n* docs(chain): correct the VDF skip message and the Observer test's scope\n\nThe skip log said the local VDF may permanently trail the chain. It does not:\nit fast-forwards from validated steps, so what a slow node loses is free-running\nat chain rate. Say that instead.\n\n`start_mining` gets a line noting it ignores `node_mode`, so a future caller\ndoes not wire it up for a non-mining node by accident.\n\nThe Observer tests drive the harness, which never runs `main`, so the mode gate\nthere is unexercised — the harness starts the VDF on demand inside its wait\nhelpers. State that at the module level rather than leaving the gap implied.\n\n* docs: remove the Observer implementation plan\n\nThe design record under design/docs carries the decisions. Committing the\nstep-by-step plan alongside it duplicates them and dates quickly.\n\n* feat(chain): decide the local VDF free-run from the startup benchmark\n\nA non-mining node previously skipped the VDF throughput check entirely. That\nremoved the guarantee the check exists to provide, and something else depended\non it: `vdf.progress_timeout_secs` is spent on VDF step *advancement*, not wall\nclock, and its budget was safe only because every node was known to hold at\nleast one step per second. A free-running VDF drains fast-forward steps once per\nstep, so on hardware where a step exceeds that budget the step counter freezes\nand validation's never-mislabel rule panics the process. Such a node would sync,\nreach the tip, then crash-loop — on exactly the modest hardware a non-mining\nnode is meant to serve.\n\nRun the benchmark for every mode and vary only what failing it means. A mining\nnode still aborts: it cannot mine without holding chain rate. A non-mining node\nstarts, because its local VDF is only validation's fast path and it can follow\nthe chain from validated fast-forward steps without one. Up to ten times the\none-second target it keeps free-running and warns; past that the free-run is\ndisabled, which the paused loop already handles by draining fast-forward every\n200ms.\n\nThe cutoff is a pure function of a supplied duration, so its relationship to the\nstall budget is tested without depending on the speed of the test machine.\n\n* fix(vdf): throttle the paused-loop log\n\nThe parked loop wakes every 10-200ms and logged on each wake, so 5-100 lines per\nsecond. A non-mining node whose free-run the startup benchmark disabled stays\nparked for its whole lifetime, which makes the volume permanent rather than\ntransient.\n\nRate-limit to the same interval the reset-boundary warning already uses, and\ncarry the step numbers so the surviving line says something useful about how far\nbehind the node is. Deliberately not reset when the loop resumes: a node flipping\nin and out of the pause branch would otherwise restore the volume. A genuinely\nnew pause episode still logs at once, because by then the interval has elapsed.\n\n* refactor(actors): drop the partition mining-flag read-back\n\nThe read-back existed for one assertion in one integration test, and gave the\nproduction controller an API with no production caller.\n\nThe invariant it checked — controllers idle until something enables them — is\nalready load-bearing across the suite: `partition_recovery` builds solutions by\nhand precisely because of it, and every test that calls `start_mining` implies\nthe same. A dedicated heavy integration assertion added little on top, and paid\nfor it in public surface.\n\nThe converted-Observer test keeps what only it covers: that flipping the mode on\nan existing data directory boots, reuses `.irys_submodules.toml` byte-for-byte,\nkeeps the storage modules and controllers that file describes, and follows the\nchain. Renamed to say that, rather than naming an assertion it no longer makes.\n\n* style(chain): keep the shutdown-timeout consts together\n\nThe free-run threshold was inserted mid-list, separating\nRETH_THREAD_STOP_TIMEOUT from its siblings. Move it below them, and note on\n`vdf_free_run` that it is a plain field written on the value `start` returns —\na clone taken earlier keeps the permissive default.\n\n* fix(debug-utils): render the real config parse error\n\n`expect` formats a toml error with Debug, which flattens the line number, the\nechoed source line, and any guidance a hand-written Deserialize adds — the\n`node_mode` migration message among them. Panic with the Display rendering and\nthe offending path instead.\n\nA read failure still falls back to the testnet config as before; only a present\nbut unparseable file changes behaviour, and reporting that beats guessing.\n\n* fix(config): require trusted_peers for a joining node\n\nA Miner or Observer bootstraps genesis over HTTP from the first trusted peer, so\nan empty list cannot work. `fetch_genesis_from_trusted_peer` takes the first\nentry unconditionally, so the node panicked after a full startup instead of\nfailing on its config. Reject it alongside the other joining rules.\n\nThe joining-mode validation tests get a shared constructor that satisfies every\njoining precondition, so each knocks out only the rule it exercises rather than\ntripping whichever fires first. Without it, adding this rule would silently\nchange what four of them assert.\n\nGenesis is unaffected: it starts the network and has nothing to join through, so\n`NodeConfig::testing()` keeps its empty list. The shipped testnet template keeps\none too, since it is edited before use — its comment now says the field is\nrequired outside Genesis mode.\n\n* feat(chain): warn when a non-mining node still holds partition assignments\n\nConverting a Miner to an Observer keeps whatever the existing submodules config\ndescribes, assignments included. Such a node stops producing blocks but keeps\npacking those partitions and keeps their slots pledged, and the network cannot\nreassign a pledged slot. Nothing detects it: expiry is term-based and no path\npenalizes an assigned node for producing no solutions.\n\nSo conversion is not a way to release capacity, and the only signal today is\npacking activity on a machine the operator expects to be idle. Warn once at\nstartup and point at unpledge, which is what actually frees the slots.\n\nThe design record gains a section on this, and picks up the trusted_peers rule\nfrom the preceding commit.\n\n* feat(config): add vdf.free_run to override the startup benchmark\n\nThe benchmark samples one step at startup on an idle machine, then decides for\nthe operator whether the local VDF free-runs. An operator who knows their\nhardware should not be bound to a single idle-time sample.\n\n`vdf.free_run` takes `Auto` (default, defer to the benchmark), `Enabled`, or\n`Disabled`, following `core_pinning`'s shape in the same config section since it\ndoes the same measure-or-override job. `Auto` reproduces current behaviour\nexactly, so no deployed config changes meaning.\n\nNamed for what it controls. The VDF thread and its step buffer are always\nneeded — validation uses the buffer as a fast path and recomputes from a block's\nown seeds when it misses — so only the free-run is optional. `Disabled` is the\nsafe direction and the reason the setting exists; `Enabled` bypasses the cutoff\nand restores the crash risk on a machine that slows under load, so startup warns\nwhen it contradicts the measurement.\n\n`Disabled` is rejected for a mining mode: mining seeds are broadcast only from\nthe free-run path, so such a node emits none and could never mine.\n\n* fix(chain): bound the VDF free-run by the configured stall budget\n\n`vdf_free_run_allowed` capped the measured step at a fixed multiple of the\nchain-rate target only. Validation's waiter resets its stall clock solely on\nlocal step advancement, so an operator who lowers `vdf.progress_timeout_secs`\nbelow that multiple could pass the cutoff while every step outlasts the budget —\nfreezing the step counter and tripping the never-mislabel panic at the tip.\n\nAdd a second bound: a permitted step may consume at most 2/3 of the budget. At\nthe shipped 15s default that fraction is exactly the 10x multiple, so the two\nbounds coincide and no default behaviour changes; the fraction generalises the\nheadroom the default already shipped rather than inventing one. A test pins that\ncoincidence so moving either constant reports itself.\n\n* docs(config): correct what a non-mining mode skips at startup\n\n`NodeMode::Observer` and `mines()` both claimed the startup VDF throughput check\nis skipped. It runs for every mode; only the abort is gated on `mines()`. Since\n`vdf.free_run = \"Auto\"` decides from that measurement, an operator who believes\nthe check is skipped misreads their own startup logs.\n\n* fix(debug-utils): return the config parse error instead of panicking\n\nThe function already returns `eyre::Result`, so a config the operator supplied\nbut got wrong is an error to report, not a panic. The rendered toml error and\nthe path are unchanged. A missing config file stays a warning plus the testnet\nfallback — that is the expected local-debugging case.\n\n* test(chain): pin one mining controller per storage module\n\n`init_partition_mining_services` builds exactly one controller per storage\nmodule, which is what the assertion's own message claimed. Assert the equality\nthe invariant states rather than a non-zero count that a partial build would\nalso satisfy.",
+          "timestamp": "2026-07-30T12:51:35+01:00",
+          "tree_id": "4082e786a1be15ac82574b5357ea846b61ffd6b0",
+          "url": "https://github.com/Irys-xyz/irys/commit/0098712224786f1806c40dd013b61c269ea7c22e"
+        },
+        "date": 1785413502300,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.011968,
+            "range": "± 0.000224",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.119953,
+            "range": "± 0.001436",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.214042,
+            "range": "± 0.043242",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.136331,
+            "range": "± 0.302676",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075678,
+            "range": "± 0.001216",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 759.850759,
+            "range": "± 8.247464",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 1011.161193,
+            "range": "± 35.995348",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.119995,
+            "range": "± 0.000261",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1206.976798,
+            "range": "± 13.266349",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1557.608361,
+            "range": "± 1.383637",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034134,
+            "range": "± 0.000551",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.942074,
+            "range": "± 0.153068",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.582342,
+            "range": "± 0.177133",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000113,
+            "range": "± 0",
             "unit": "ms/iter"
           }
         ]
