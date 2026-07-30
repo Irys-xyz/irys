@@ -114,6 +114,15 @@ impl Config {
                 self.consensus.expected_genesis_hash.is_some(),
                 "expected_genesis_hash must be set in consensus config for Miner and Observer nodes"
             );
+            // A joining node bootstraps genesis over HTTP from the first trusted
+            // peer, so an empty list leaves it nothing to join through. Without
+            // this rule the node panics in `fetch_genesis_from_trusted_peer`
+            // after a full startup instead of failing on its config.
+            ensure!(
+                !self.node_config.trusted_peers.is_empty(),
+                "trusted_peers must list at least one peer for Miner and Observer nodes: \
+                 a joining node fetches the genesis block from a trusted peer (see SETUP.md)"
+            );
         }
 
         // Pledging drives creates the partition assignments an Observer node
@@ -1706,6 +1715,7 @@ mod tests {
 #[cfg(test)]
 mod validate_tests {
     use super::*;
+    use crate::{PeerAddress, RethPeerInfo};
     use rstest::rstest;
     use rust_decimal_macros::dec;
 
@@ -1723,6 +1733,22 @@ mod validate_tests {
         let mut nc = NodeConfig::testing();
         f(&mut nc);
         Config::new_with_random_peer_id(nc)
+    }
+
+    /// A config in a joining mode with every joining precondition already met, so
+    /// a test can knock out exactly the one rule it means to exercise instead of
+    /// tripping whichever fires first.
+    fn joining_config(mode: NodeMode, f: impl FnOnce(&mut NodeConfig)) -> Config {
+        config_with_node(|nc| {
+            nc.node_mode = mode;
+            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+            nc.trusted_peers = vec![PeerAddress {
+                api: "127.0.0.1:8080".parse().expect("valid SocketAddr"),
+                gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr"),
+                execution: RethPeerInfo::default(),
+            }];
+            f(nc);
+        })
     }
 
     #[test]
@@ -2273,12 +2299,7 @@ mod validate_tests {
         #[case] enable_periodic: bool,
         #[case] interval_secs: u64,
     ) {
-        let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Miner;
-            // Miner mode also requires expected_genesis_hash; set it so the
-            // earlier-firing genesis-hash check passes and the later
-            // periodic-sync check is the one that surfaces.
-            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+        let cfg = joining_config(NodeMode::Miner, |nc| {
             nc.sync.enable_periodic_sync_check = enable_periodic;
             nc.sync.periodic_sync_check_interval_secs = interval_secs;
         });
@@ -2307,12 +2328,37 @@ mod validate_tests {
 
     #[test]
     fn validate_accepts_observer_mode() {
+        joining_config(NodeMode::Observer, |_| {})
+            .validate()
+            .expect("observer config meeting the joining rules should validate");
+    }
+
+    /// A joining node bootstraps genesis from the first trusted peer, so an empty
+    /// list cannot work. Before this rule it panicked deep in startup instead.
+    #[rstest]
+    #[case::miner(NodeMode::Miner)]
+    #[case::observer(NodeMode::Observer)]
+    fn validate_rejects_joining_mode_without_trusted_peers(#[case] mode: NodeMode) {
+        let err = joining_config(mode, |nc| nc.trusted_peers.clear())
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("trusted_peers"),
+            "expected the trusted_peers rule to fire, got: {err}"
+        );
+    }
+
+    /// Genesis starts the network, so it has nothing to join through and needs no
+    /// trusted peers. `NodeConfig::testing()` ships an empty list, which is why
+    /// every other test in this module can leave it alone.
+    #[test]
+    fn validate_allows_genesis_mode_without_trusted_peers() {
         let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Observer;
-            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+            nc.node_mode = NodeMode::Genesis;
+            nc.trusted_peers.clear();
         });
-        cfg.validate()
-            .expect("observer config with a genesis hash should validate");
+        cfg.validate().expect("genesis needs no trusted peers");
     }
 
     #[test]
@@ -2335,9 +2381,7 @@ mod validate_tests {
         #[case] enable_periodic: bool,
         #[case] interval_secs: u64,
     ) {
-        let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Observer;
-            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+        let cfg = joining_config(NodeMode::Observer, |nc| {
             nc.sync.enable_periodic_sync_check = enable_periodic;
             nc.sync.periodic_sync_check_interval_secs = interval_secs;
         });
@@ -2350,9 +2394,7 @@ mod validate_tests {
 
     #[test]
     fn validate_rejects_observer_with_stake_pledge_drives() {
-        let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Observer;
-            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+        let cfg = joining_config(NodeMode::Observer, |nc| {
             nc.stake_pledge_drives = true;
         });
         let err = cfg.validate().unwrap_err().to_string();

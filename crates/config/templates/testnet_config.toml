@@ -4,6 +4,9 @@ node_mode = "Miner"
 sync_mode = "Full"
 base_directory = ".irys"
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
+# Required for Miner and Observer: a joining node fetches the genesis block from
+# the first trusted peer. Startup refuses an empty list outside Genesis mode.
+# See SETUP.md for the [[trusted_peers]] block to add here.
 trusted_peers = []
 initial_stake_and_pledge_whitelist = []
 reward_address = "0x0000000000000000000000000000000000000000"
