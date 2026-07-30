@@ -1048,6 +1048,29 @@ impl IrysNode {
             &node_config.reth.network.bind_port,
         );
 
+        // A node converted from a mining mode keeps whatever its existing
+        // submodules config describes, including partition assignments. It will
+        // not mine them, and the network cannot reassign a slot that is still
+        // pledged, so the capacity is stranded. Say so once at startup rather
+        // than leaving the operator to infer it from packing activity on a node
+        // they expected to go quiet.
+        if !node_mode.mines() {
+            let assigned = ctx
+                .storage_modules_guard
+                .read()
+                .iter()
+                .filter(|sm| sm.partition_assignment().is_some())
+                .count();
+            if assigned > 0 {
+                warn!(
+                    "node_mode {node_mode:?} does not mine, but {assigned} storage module(s) \
+                     still hold partition assignments. This node keeps packing them and keeps \
+                     their slots pledged without ever mining them. Submit unpledge commitments \
+                     for those partitions if you meant to release the capacity."
+                );
+            }
+        }
+
         // Subscribe before initial_sync so the receiver captures all block
         // events produced during (and after) sync — prevents a race where
         // events fire before we start listening.

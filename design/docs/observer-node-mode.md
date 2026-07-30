@@ -101,6 +101,20 @@ are all unit variants.
 `Observer` skips only the *creation* of default submodules. An existing
 `.irys_submodules.toml` is honored, so an operator can still list paths.
 
+### Converting a Miner to an Observer strands its capacity
+
+Because an existing submodules config is honored, a node converted from `Miner`
+keeps its storage modules, its packed data, and its on-chain partition
+assignments. It stops producing blocks, but it keeps packing those partitions and
+keeps their slots pledged, and the network cannot reassign a slot that is still
+pledged. Nothing detects or penalizes this — partition expiry is term-based, and
+no code path slashes an assigned node for producing no solutions.
+
+Conversion is therefore not a way to release capacity. An operator who wants that
+must submit unpledge commitments for the partitions. Startup warns once when a
+non-mining node is holding assignments, since the alternative is inferring it from
+packing activity on a machine expected to go quiet.
+
 `main.rs` splits the current `start_mining()` call: it starts the VDF when the
 benchmark says free-running pays off, and enables partition mining only outside
 `Observer`.
@@ -108,6 +122,9 @@ benchmark says free-running pays off, and enables partition mining only outside
 ### Config validation
 
 - `expected_genesis_hash` must be set (`crates/types/src/config/mod.rs:112`).
+- `trusted_peers` must be non-empty. A joining node fetches genesis over HTTP
+  from the first entry, so an empty list previously panicked deep in startup
+  rather than failing on the config.
 - Periodic sync check must be enabled (`crates/types/src/config/mod.rs:282`).
 - `stake_pledge_drives = true` is rejected with `Observer`. Pledging drives
   creates the assignments the mode assumes absent.
