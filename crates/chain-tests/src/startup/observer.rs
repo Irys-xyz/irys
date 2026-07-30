@@ -153,8 +153,8 @@ async fn heavy_test_converted_observer_reuses_submodules_and_follows() -> eyre::
         "a converted observer must keep the storage modules its existing \
          .irys_submodules.toml describes"
     );
-    assert!(
-        controller_count > 0,
+    assert_eq!(
+        controller_count, sm_count,
         "a converted observer must keep one partition mining controller per \
          storage module"
     );
