@@ -319,8 +319,8 @@ expected_genesis_hash = "<block-hash>"
 
 1. The genesis block producer starts in `Genesis` mode with a trusted peer
    pointing to itself or with the genesis files on disk.
-2. Peer nodes start in `Peer` mode and fetch genesis from the producer (or
-   another peer that already has it).
+2. Peer nodes start in `Miner` mode (or `Observer` to follow without mining)
+   and fetch genesis from the producer (or another peer that already has it).
 
 ### Offline Bootstrap (Alternative)
 
@@ -331,8 +331,8 @@ artifacts locally:
 2. Run `irys-cli import-genesis --genesis-dir <path-to-genesis-artifacts>` to
    import the genesis block and commitments into the local database.
 3. Set `expected_genesis_hash` in the peer's `config.toml` as described above.
-4. Start the peer node in `Peer` mode — it will use the preloaded genesis
-   instead of fetching it from the network.
+4. Start the peer node in `Miner` or `Observer` mode — it will use the
+   preloaded genesis instead of fetching it from the network.
 
 ## Security Notes
 

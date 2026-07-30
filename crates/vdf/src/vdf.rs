@@ -16,6 +16,13 @@ const PAUSED_SYNC_FAST_FORWARD_SLEEP: Duration = Duration::from_millis(10);
 /// every `PAUSED_VDF_LOOP_SLEEP` (200ms), so the warning is rate-limited to avoid ~5/sec
 /// log spam during an expected multi-block park; the first occurrence still logs immediately.
 const BOUNDARY_GATE_WARN_INTERVAL: Duration = Duration::from_secs(30);
+/// Minimum gap between repeated "VDF paused" lines. The parked loop wakes every
+/// 10-200ms, so an unthrottled line is 5-100 per second — and a non-mining node
+/// whose free-run the startup benchmark disabled stays parked for its whole
+/// lifetime. Not reset when the loop resumes: a node flipping in and out of the
+/// pause branch must not restore the spam. A genuinely new pause episode still
+/// logs at once, because by then the interval has elapsed.
+const PAUSED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn run_vdf_for_genesis_block(
     genesis_block: &mut IrysBlockHeader,
@@ -108,6 +115,7 @@ pub fn run_vdf<B: BlockProvider>(
     // `BOUNDARY_GATE_WARN_INTERVAL`). Reset when the loop pauses with mining disabled, so a
     // gate appearing after mining resumes warns immediately.
     let mut last_boundary_gate_warning: Option<Instant> = None;
+    let mut last_paused_log: Option<Instant> = None;
 
     loop {
         if shutdown_token.is_cancelled() {
@@ -307,7 +315,17 @@ pub fn run_vdf<B: BlockProvider>(
             } else {
                 PAUSED_VDF_LOOP_SLEEP
             };
-            debug!("VDF mining paused, waiting {:?}", pause_duration);
+            let pause_now = Instant::now();
+            if last_paused_log
+                .is_none_or(|last| pause_now.duration_since(last) >= PAUSED_LOG_INTERVAL)
+            {
+                debug!(
+                    vdf.global_step_number = global_step_number,
+                    vdf.canonical_global_step_number = canonical_global_step_number,
+                    "VDF free-run paused; draining fast-forward steps every {pause_duration:?}"
+                );
+                last_paused_log = Some(pause_now);
+            }
             std::thread::sleep(pause_duration);
             continue;
         }

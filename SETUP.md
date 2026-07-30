@@ -31,8 +31,12 @@ e.g `RUST_LOG="debug" cargo run --bin irys --release` will enable `debug` and hi
 
 ## Notable configuration options
 These are the configuration options you *should* change when configuring a new node:
--  `mode`: either `Genesis`, `PeerSync` or `TrustedPeerSync` 
-    - If you are running a local network, use `Genesis` - otherwise, use `PeerSync`
+-  `node_mode`: either `Genesis`, `Miner` or `Observer`
+    - `Genesis`: start a new network as its first node. Use this for a local network.
+    - `Miner`: join an existing network and mine.
+    - `Observer`: join an existing network and follow it without mining.
+    - If you are running a local network, use `Genesis` - otherwise, use `Miner` or `Observer`.
+    - An `Observer` runs the local VDF where the hardware allows, since a step count that tracks the chain speeds up block validation. On a slow machine set `[vdf] free_run = "Disabled"` to follow the chain from validated fast-forward steps instead; `"Auto"` (the default) decides from a startup benchmark.
     - to join a network you must also specify the genesis block hash. This will be used for validating the genesis block that you will receive from a trusted peer.
 - `base_directory`: The fully qualified path to where the Irys node should store all it's data. 
     - Note: Changing this will require you to manually move your existing data directory.
@@ -58,7 +62,7 @@ These are the configuration options you *should* change when configuring a new n
 ### Localnet quickstart:
 - Run the node: `cargo run --bin irys --release`
 - Open the config `./config.toml`
-- Set `mode` to `Genesis`
+- Set `node_mode` to `Genesis`
 - Set `num_chunks_in_partition` to `800`
 - Run the node: `cargo run --bin irys --release`\
 This will run a small, low-capacity localnet node that you can interact with:
@@ -72,7 +76,7 @@ This will run a small, low-capacity localnet node that you can interact with:
 Note: the trusted peers section template is:
 
 ```toml
-node_mode = "Peer"
+node_mode = "Miner"
 
 [[trusted_peers]]
 gossip = "<public IP>:<public port>"
@@ -92,7 +96,7 @@ peer_id = "..."
 ```
 - Add your peer's info to the other peer's configurations as a trusted peer.
 - Make sure your `[consensus(...)]` sections are *identical*.
-- Set mode to `PeerSync`.
+- Set `node_mode` to `Miner` (or `Observer` to follow the chain without mining).
 - Perform any other required setup (port forwarding, loading in EVM genesis state snapshots, etc).
 - Start the node!
 

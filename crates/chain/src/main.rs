@@ -90,7 +90,17 @@ async fn main() -> eyre::Result<()> {
     let handle = IrysNode::new_with_listeners(config, http_listener, gossip_listener)?
         .start()
         .await?;
-    handle.start_mining()?;
+    // A non-mining node still runs the VDF where it can: a local step count
+    // that tracks the chain reduces the parallel VDF work block validation has
+    // to do. It just never mines partitions. `vdf_free_run` is false only when
+    // the startup benchmark found this machine too slow for that to pay off, in
+    // which case the node follows the chain from fast-forward steps.
+    if handle.vdf_free_run {
+        handle.start_vdf();
+    }
+    if handle.config.node_config.node_mode.mines() {
+        handle.set_partition_mining(true)?;
+    }
 
     // Await lifecycle task completion asynchronously
     // Brief non-contended lock to extract the JoinHandle.

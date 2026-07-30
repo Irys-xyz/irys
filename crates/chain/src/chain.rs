@@ -60,7 +60,7 @@ use irys_types::{
     BlockBody, CommitmentTransaction, Config, ConsensusOptions, CorePinning, H256, IrysBlockHeader,
     NodeConfig, NodeMode, OracleConfig, PartitionChunkRange, PeerNetworkSender,
     PeerNetworkServiceMessage, RethPeerInfo, SealedBlock, SendTraced as _, ServiceSet,
-    SystemLedger, TokioServiceHandle, Traced, U256, app_state::DatabaseProvider,
+    SystemLedger, TokioServiceHandle, Traced, U256, VdfFreeRun, app_state::DatabaseProvider,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_vdf::{
@@ -133,6 +133,16 @@ pub struct IrysNodeCtx {
     /// Controller over the single shared VDF mining-enable flag (same `Arc` as
     /// `VdfState.is_vdf_mining_enabled`). Start/stop route through it.
     pub vdf_controller: VdfController,
+    /// Whether this machine is fast enough for the local VDF to free-run, as
+    /// measured by the startup throughput benchmark. Always true for a mining
+    /// node — one too slow to free-run fails startup outright. False only for a
+    /// non-mining node on hardware past [`MAX_FREE_RUN_STEP_MULTIPLE`], which
+    /// follows the chain from fast-forward steps instead.
+    ///
+    /// A plain `bool`, not shared state: [`IrysNode::start`] writes it on the
+    /// value it returns, after the benchmark. Clones taken before that keep the
+    /// permissive default, so read it from the handle `start` handed back.
+    pub vdf_free_run: bool,
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     pub chunk_ingress_state: irys_actors::ChunkIngressState,
@@ -281,6 +291,9 @@ impl IrysNodeCtx {
         self.set_partition_mining(false)
     }
     /// Start VDF thread and send a message to all known partition actors to begin mining when they receive a VDF step
+    ///
+    /// Does not consult `node_mode`: on a node whose mode does not mine, this
+    /// enables mining anyway. `main` gates the call instead.
     pub fn start_mining(&self) -> eyre::Result<()> {
         // start the VDF thread
         self.start_vdf();
@@ -438,6 +451,52 @@ const VDF_THREAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// Using 60s to cover typical case with margin; worst-case depends on service count.
 const RETH_THREAD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A non-mining node may free-run its VDF at up to this multiple of the
+/// one-step-per-second target.
+///
+/// Past it the free-run stops earning its keep and starts costing. The run loop
+/// drains fast-forward steps once per step, so a long step starves that drain;
+/// and validation's stall budget (`vdf.progress_timeout_secs`) is spent on step
+/// *advancement*, not wall clock, so a step longer than the budget trips the
+/// never-mislabel panic. A node past this point follows the chain from validated
+/// fast-forward steps, which the paused VDF loop drains every 200ms.
+const MAX_FREE_RUN_STEP_MULTIPLE: u32 = 10;
+
+/// Fraction of `vdf.progress_timeout_secs` a permitted free-run step may
+/// consume, as `(numerator, denominator)`.
+///
+/// A bare "under the budget" test would leave no headroom: the benchmark is one
+/// sample taken on an idle machine, and validation's waiter trips the moment a
+/// step reaches the budget. At the shipped 15s default, 2/3 is exactly
+/// `MAX_FREE_RUN_STEP_MULTIPLE` seconds, so this generalises the headroom the
+/// default already ships rather than inventing a new one — the two bounds
+/// coincide there, and only a lowered budget makes this one bind.
+const MAX_FREE_RUN_STALL_BUDGET_FRACTION: (u128, u128) = (2, 3);
+
+/// Whether a measured VDF step duration leaves free-running worthwhile.
+///
+/// Two bounds, both of which must hold:
+///
+/// - `MAX_FREE_RUN_STEP_MULTIPLE` of the chain-rate target — past it the
+///   free-run costs more than it earns, however generous the stall budget.
+/// - `MAX_FREE_RUN_STALL_BUDGET_FRACTION` of `stall_budget`
+///   (`vdf.progress_timeout_secs`). Validation's waiter resets its stall clock
+///   only when the local step counter advances, so a step approaching the budget
+///   freezes the counter and trips the never-mislabel panic.
+///
+/// Separate from the benchmark that measures it, so the thresholds are testable
+/// without depending on the speed of the machine running the test.
+const fn vdf_free_run_allowed(
+    measured_step: Duration,
+    target_step: Duration,
+    stall_budget: Duration,
+) -> bool {
+    let measured_ms = measured_step.as_millis();
+    let (num, den) = MAX_FREE_RUN_STALL_BUDGET_FRACTION;
+    measured_ms <= target_step.as_millis() * MAX_FREE_RUN_STEP_MULTIPLE as u128
+        && measured_ms <= stall_budget.as_millis() * num / den
+}
+
 impl IrysNode {
     /// Binds HTTP and gossip TCP listeners, updates config with assigned ports.
     /// Call once, then pass results to [`new_with_listeners()`].
@@ -555,12 +614,10 @@ impl IrysNode {
                 // Create a new genesis block for network initialization
                 self.create_new_genesis_block().await
             }
-            NodeMode::Peer => {
-                let expected_genesis_hash = self
-                    .config
-                    .consensus
-                    .expected_genesis_hash
-                    .expect("expected_genesis_hash must be configured for peer nodes");
+            NodeMode::Miner | NodeMode::Observer => {
+                let expected_genesis_hash = self.config.consensus.expected_genesis_hash.expect(
+                    "expected_genesis_hash must be configured for Miner and Observer nodes",
+                );
                 // Fetch genesis data from trusted peer when joining network
                 let (block, commitments) = self
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
@@ -846,9 +903,21 @@ impl IrysNode {
             );
         }
 
-        // VDF throughput check — verify this CPU can keep up with the chain's
-        // VDF difficulty before committing to a full startup.
+        // VDF throughput check — measure this CPU against the chain's VDF
+        // difficulty before committing to a full startup.
         // Skipped when sha_1s_difficulty is low (test configs use ~1000).
+        //
+        // A mining node must hold the one-step-per-second rate, so failing the
+        // check aborts startup. A non-mining node has no such need: its local
+        // VDF only serves as validation's fast path, and it follows the chain
+        // from validated fast-forward steps without one. Such a node therefore
+        // starts, and gives up only the free-run, and only once it is slow
+        // enough for the free-run to cost more than it earns — see
+        // [`vdf_free_run_allowed`].
+        //
+        // This is the `Auto` verdict. `vdf.free_run` overrides it below, so the
+        // benchmark still runs and reports even when the operator has decided.
+        let mut benchmark_allows_free_run = true;
         if self.config.vdf.sha_1s_difficulty >= 1_000_000 {
             let vdf_config = &self.config.vdf;
             let hashes_per_step = vdf_config.sha_1s_difficulty;
@@ -896,18 +965,47 @@ impl IrysNode {
 
             if block_duration_ms > target_block_ms {
                 let ratio = block_duration_ms as f64 / target_block_ms as f64;
-                error!(
-                    "This CPU cannot keep up with the chain. \
-                     VDF requires {hashes_per_step} hashes/step ({steps_per_block} steps/block), \
-                     but this CPU only manages {hashes_per_sec} H/s. \
-                     Block would take {block_duration_ms}ms vs {target_block_ms}ms target \
-                     ({ratio:.1}x too slow). The node will fall behind and be unable to \
-                     validate blocks."
+                let node_mode = self.config.node_config.node_mode;
+                if node_mode.mines() {
+                    error!(
+                        "This CPU cannot keep up with the chain. \
+                         VDF requires {hashes_per_step} hashes/step ({steps_per_block} steps/block), \
+                         but this CPU only manages {hashes_per_sec} H/s. \
+                         Block would take {block_duration_ms}ms vs {target_block_ms}ms target \
+                         ({ratio:.1}x too slow). The node will fall behind and be unable to \
+                         validate blocks."
+                    );
+                    return Err(eyre::eyre!(
+                        "VDF throughput check failed: {hashes_per_sec} H/s, need \
+                         {hashes_per_step} hashes/step to keep up with {block_time_secs}s blocks."
+                    ));
+                }
+
+                let stall_budget = Duration::from_secs(vdf_config.progress_timeout_secs);
+                benchmark_allows_free_run = vdf_free_run_allowed(
+                    elapsed,
+                    Duration::from_millis(target_step_ms as u64),
+                    stall_budget,
                 );
-                return Err(eyre::eyre!(
-                    "VDF throughput check failed: {hashes_per_sec} H/s, need \
-                     {hashes_per_step} hashes/step to keep up with {block_time_secs}s blocks."
-                ));
+                if benchmark_allows_free_run {
+                    warn!(
+                        "VDF step takes {step_duration_ms}ms against a {target_step_ms}ms target \
+                         ({ratio:.1}x slower than chain rate). node_mode {node_mode:?} does not \
+                         mine, so this only slows validation's local fast path. The node follows \
+                         the chain normally."
+                    );
+                } else {
+                    warn!(
+                        "VDF step takes {step_duration_ms}ms, past the free-run cutoff: \
+                         {MAX_FREE_RUN_STEP_MULTIPLE}x the {target_step_ms}ms target, and it must \
+                         stay under the {stall_budget:?} vdf.progress_timeout_secs budget. Local \
+                         VDF free-run is disabled: at this rate it would starve the fast-forward \
+                         drain rather than serve as validation's fast path, and a step outlasting \
+                         the budget would freeze the step counter. node_mode {node_mode:?} does \
+                         not mine, so the node follows the chain from validated fast-forward \
+                         steps instead — a supported way to run a non-mining node, not a fault."
+                    );
+                }
             } else if efficiency_pct < 100 {
                 warn!(
                     "VDF step takes {step_duration_ms}ms (target {target_step_ms}ms). \
@@ -920,6 +1018,33 @@ impl IrysNode {
                 info!("VDF throughput OK: mining at full efficiency");
             }
         }
+
+        // Resolve the operator's choice against what the benchmark measured. An
+        // explicit setting wins, and says so when it disagrees — an override that
+        // silently contradicts the measurement is the one thing an operator
+        // debugging VDF behaviour must not have to guess at.
+        let vdf_free_run = match self.config.vdf.free_run {
+            VdfFreeRun::Auto => benchmark_allows_free_run,
+            VdfFreeRun::Enabled => {
+                if !benchmark_allows_free_run {
+                    warn!(
+                        "vdf.free_run = \"Enabled\" overrides a benchmark that measured this \
+                         machine too slow to free-run safely. A step outlasting \
+                         vdf.progress_timeout_secs freezes the step counter and panics the \
+                         process. Set \"Auto\" to defer to the benchmark, or \"Disabled\" to \
+                         follow the chain from fast-forward steps."
+                    );
+                }
+                true
+            }
+            VdfFreeRun::Disabled => {
+                info!(
+                    "vdf.free_run = \"Disabled\": the local VDF will not compute steps and will \
+                     follow the chain from validated fast-forward steps."
+                );
+                false
+            }
+        };
 
         let runtime_handle = self.runtime_handle.unwrap_or_else(Handle::current);
 
@@ -965,6 +1090,7 @@ impl IrysNode {
         ctx.lifecycle_handle = Arc::new(std::sync::Mutex::new(Some(lifecycle_handle)));
         ctx.shutdown_sender = shutdown_tx;
         ctx.shutdown_token = shutdown_token;
+        ctx.vdf_free_run = vdf_free_run;
         let node_config = &ctx.config.node_config;
 
         // Log startup information
@@ -984,6 +1110,29 @@ impl IrysNode {
                 .bind_ip(&node_config.network_defaults),
             &node_config.reth.network.bind_port,
         );
+
+        // A node converted from a mining mode keeps whatever its existing
+        // submodules config describes, including partition assignments. It will
+        // not mine them, and the network cannot reassign a slot that is still
+        // pledged, so the capacity is stranded. Say so once at startup rather
+        // than leaving the operator to infer it from packing activity on a node
+        // they expected to go quiet.
+        if !node_mode.mines() {
+            let assigned = ctx
+                .storage_modules_guard
+                .read()
+                .iter()
+                .filter(|sm| sm.partition_assignment().is_some())
+                .count();
+            if assigned > 0 {
+                warn!(
+                    "node_mode {node_mode:?} does not mine, but {assigned} storage module(s) \
+                     still hold partition assignments. This node keeps packing them and keeps \
+                     their slots pledged without ever mining them. Submit unpledge commitments \
+                     for those partitions if you meant to release the capacity."
+                );
+            }
+        }
 
         // Subscribe before initial_sync so the receiver captures all block
         // events produced during (and after) sync — prevents a race where
@@ -2057,6 +2206,10 @@ impl IrysNode {
             mempool_pledge_provider: mempool_pledge_provider.clone(),
             sync_service_facade,
             vdf_controller,
+            // `start` overwrites this from the throughput benchmark. Services
+            // built here never read it, so the permissive default only stands
+            // for the paths that skip the benchmark.
+            vdf_free_run: true,
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             chunk_ingress_state,
@@ -2872,6 +3025,126 @@ async fn stake_and_pledge(
 mod tests {
     use super::*;
     use tokio::runtime::Handle;
+
+    mod vdf_free_run {
+        use super::*;
+
+        const TARGET: Duration = Duration::from_secs(1);
+        /// The shipped default, under which the multiple is the binding bound.
+        const BUDGET: Duration = Duration::from_secs(15);
+
+        /// At or under the target the free-run is unambiguously worth keeping —
+        /// this is the mining node's own operating point.
+        #[test]
+        fn allowed_at_and_under_chain_rate() {
+            assert!(vdf_free_run_allowed(
+                Duration::from_millis(200),
+                TARGET,
+                BUDGET
+            ));
+            assert!(vdf_free_run_allowed(TARGET, TARGET, BUDGET));
+        }
+
+        /// The boundary is inclusive, so a machine measured exactly at the
+        /// multiple keeps free-running rather than flapping on rounding.
+        #[test]
+        fn boundary_is_inclusive() {
+            let boundary = TARGET * MAX_FREE_RUN_STEP_MULTIPLE;
+            assert!(vdf_free_run_allowed(boundary, TARGET, BUDGET));
+            assert!(!vdf_free_run_allowed(
+                boundary + Duration::from_millis(1),
+                TARGET,
+                BUDGET
+            ));
+        }
+
+        /// An operator who lowers `vdf.progress_timeout_secs` below the fixed
+        /// multiple gets the tighter bound. Without this the cutoff would permit
+        /// a free-run whose every step outlasts the budget, freezing the step
+        /// counter and tripping the never-mislabel panic at the tip.
+        #[test]
+        fn a_lowered_stall_budget_binds_before_the_multiple() {
+            let budget = Duration::from_secs(6);
+            // 2/3 of a 6s budget, so the boundary sits at 4s.
+            assert!(vdf_free_run_allowed(Duration::from_secs(4), TARGET, budget));
+            assert!(!vdf_free_run_allowed(
+                Duration::from_millis(4001),
+                TARGET,
+                budget
+            ));
+            // Well inside the 10x multiple, but past the budget fraction.
+            assert!(!vdf_free_run_allowed(
+                Duration::from_secs(5),
+                TARGET,
+                budget
+            ));
+        }
+
+        /// The budget bound must leave real headroom, not merely land under the
+        /// budget: the benchmark is a single idle-machine sample, and the waiter
+        /// trips the moment a step reaches the budget.
+        #[rstest::rstest]
+        #[case(3)]
+        #[case(6)]
+        #[case(15)]
+        #[case(60)]
+        fn the_budget_bound_leaves_headroom(#[case] budget_secs: u64) {
+            let budget = Duration::from_secs(budget_secs);
+            // A step lasting the whole budget is always refused...
+            assert!(!vdf_free_run_allowed(budget, TARGET, budget));
+            // ...and so is anything in the top third of it.
+            let (num, den) = MAX_FREE_RUN_STALL_BUDGET_FRACTION;
+            let boundary_ms = budget.as_millis() * num / den;
+            assert!(!vdf_free_run_allowed(
+                Duration::from_millis(boundary_ms as u64 + 1),
+                Duration::from_secs(budget_secs),
+                budget
+            ));
+        }
+
+        /// The budget only ever tightens. A generous timeout must not license a
+        /// free-run past the multiple, which bounds usefulness rather than safety.
+        #[test]
+        fn a_generous_budget_does_not_relax_the_multiple() {
+            let budget = Duration::from_secs(600);
+            let boundary = TARGET * MAX_FREE_RUN_STEP_MULTIPLE;
+            assert!(vdf_free_run_allowed(boundary, TARGET, budget));
+            assert!(!vdf_free_run_allowed(
+                boundary + Duration::from_millis(1),
+                TARGET,
+                budget
+            ));
+        }
+
+        /// At the shipped default the two bounds coincide exactly, so adding the
+        /// budget bound changed no default behaviour and the fraction is the
+        /// headroom the default already shipped. If either constant moves, this
+        /// is the test that says so.
+        #[test]
+        fn the_two_bounds_coincide_at_the_default_stall_budget() {
+            let budget = Duration::from_secs(NodeConfig::testing().vdf.progress_timeout_secs);
+            assert_eq!(budget, BUDGET, "BUDGET must track the shipped default");
+            let (num, den) = MAX_FREE_RUN_STALL_BUDGET_FRACTION;
+            assert_eq!(
+                budget.as_millis() * num / den,
+                (TARGET * MAX_FREE_RUN_STEP_MULTIPLE).as_millis(),
+                "the budget fraction must equal the fixed multiple at the default budget, \
+                 or the default's free-run behaviour has changed"
+            );
+        }
+
+        /// Scales with the target rather than assuming one second.
+        #[test]
+        fn scales_with_the_target_step() {
+            let target = Duration::from_millis(500);
+            assert!(vdf_free_run_allowed(Duration::from_secs(5), target, BUDGET));
+            assert!(!vdf_free_run_allowed(
+                Duration::from_millis(5001),
+                target,
+                BUDGET
+            ));
+        }
+    }
 
     /// Drives `await_lifecycle_init` against a synthetic lifecycle that mirrors how
     /// `node_lifecycle`'s early-return paths behave: send `Err` on the oneshot, then

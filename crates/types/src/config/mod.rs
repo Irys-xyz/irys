@@ -109,12 +109,42 @@ impl Config {
             self.consensus.block_migration_depth,
         );
 
-        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+        if self.node_config.node_mode.joins_existing_network() {
             ensure!(
                 self.consensus.expected_genesis_hash.is_some(),
-                "expected_genesis_hash must be set in consensus config for peer nodes"
+                "expected_genesis_hash must be set in consensus config for Miner and Observer nodes"
+            );
+            // A joining node bootstraps genesis over HTTP from the first trusted
+            // peer, so an empty list leaves it nothing to join through. Without
+            // this rule the node panics in `fetch_genesis_from_trusted_peer`
+            // after a full startup instead of failing on its config.
+            ensure!(
+                !self.node_config.trusted_peers.is_empty(),
+                "trusted_peers must list at least one peer for Miner and Observer nodes: \
+                 a joining node fetches the genesis block from a trusted peer (see SETUP.md)"
             );
         }
+
+        // `run_vdf` broadcasts mining seeds only from its free-run path, so a
+        // node that never free-runs emits none and its partition mining services
+        // never receive a seed to mine against.
+        ensure!(
+            !(self.node_config.node_mode.mines()
+                && matches!(self.node_config.vdf.free_run, VdfFreeRun::Disabled)),
+            "vdf.free_run = \"Disabled\" cannot be combined with a mining node_mode: \
+             mining seeds are broadcast only by the local VDF free-run, so the node \
+             would never mine"
+        );
+
+        // Pledging drives creates the partition assignments an Observer node
+        // is defined as not having. Reject the pair rather than silently
+        // letting one win.
+        ensure!(
+            !(matches!(self.node_config.node_mode, NodeMode::Observer)
+                && self.node_config.stake_pledge_drives),
+            "node_mode = \"Observer\" cannot be combined with stake_pledge_drives = true: \
+             pledging drives assigns partitions to mine, which an Observer node never does"
+        );
 
         // Chunk/partition/recall sizing must be non-zero. Zero breaks every
         // chunk-offset and slot computation: e.g. ledger-expiry `compute_chunk_range`
@@ -273,20 +303,20 @@ impl Config {
             "sync.min_active_peers must be > 0 (zero makes startup skip sync immediately on the empty snapshot)"
         );
 
-        // For peer-mode nodes the chain_sync `count == 0` skip path is only
-        // recovered via the periodic sync check. If the operator disables the
-        // periodic check (or sets the interval to 0), a peer that boots
+        // For nodes joining an existing network the chain_sync `count == 0`
+        // skip path is only recovered via the periodic sync check. If the
+        // operator disables the periodic check (or sets the interval to 0), a node that boots
         // before its trusted peers are reachable will stay unsynced
         // indefinitely. Reject that combination at config validation rather
         // than letting the node silently sit cold.
-        if matches!(self.node_config.node_mode, NodeMode::Peer) {
+        if self.node_config.node_mode.joins_existing_network() {
             let periodic_disabled = !self.node_config.sync.enable_periodic_sync_check
                 || self.node_config.sync.periodic_sync_check_interval_secs == 0;
             ensure!(
                 !periodic_disabled,
-                "peer-mode nodes require sync.enable_periodic_sync_check = true \
+                "Miner and Observer nodes require sync.enable_periodic_sync_check = true \
                  and sync.periodic_sync_check_interval_secs > 0; without periodic re-engagement \
-                 a peer that boots before any peers are reachable would stay unsynced indefinitely"
+                 a node that boots before any peers are reachable would stay unsynced indefinitely"
             );
         }
 
@@ -582,6 +612,7 @@ impl From<&NodeConfig> for VdfConfig {
         let VdfNodeConfig {
             parallel_verification_thread_limit,
             core_pinning,
+            free_run,
             throttle,
             progress_timeout_secs,
             validation_batch_size,
@@ -596,6 +627,7 @@ impl From<&NodeConfig> for VdfConfig {
             progress_timeout_secs: *progress_timeout_secs,
             validation_batch_size: *validation_batch_size,
             core_pinning: *core_pinning,
+            free_run: *free_run,
         }
     }
 }
@@ -665,6 +697,9 @@ pub struct VdfConfig {
 
     /// See `VdfNodeConfig::core_pinning`. Controls VDF-thread CPU pinning.
     pub core_pinning: CorePinning,
+
+    /// See `VdfNodeConfig::free_run`. Whether the thread computes its own steps.
+    pub free_run: VdfFreeRun,
 }
 
 impl VdfConfig {
@@ -1363,7 +1398,7 @@ mod tests {
             .expect("Failed to parse testnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert!(matches!(config.node_mode, NodeMode::Peer));
+        assert!(matches!(config.node_mode, NodeMode::Miner));
 
         // Check consensus config fields
         let consensus = config.consensus_config();
@@ -1388,13 +1423,13 @@ mod tests {
             .expect("Failed to parse mainnet_config.toml template");
 
         // Basic sanity checks - just verify it parsed successfully
-        assert!(matches!(config.node_mode, NodeMode::Peer));
+        assert!(matches!(config.node_mode, NodeMode::Miner));
 
         // Check consensus config fields
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 3282);
 
-        // Peer mode requires this pin (Config::validate).
+        // Miner mode requires this pin (Config::validate).
         assert_eq!(
             consensus.expected_genesis_hash,
             Some(H256::from_base58(
@@ -1696,6 +1731,7 @@ mod tests {
 #[cfg(test)]
 mod validate_tests {
     use super::*;
+    use crate::{PeerAddress, RethPeerInfo};
     use rstest::rstest;
     use rust_decimal_macros::dec;
 
@@ -1713,6 +1749,22 @@ mod validate_tests {
         let mut nc = NodeConfig::testing();
         f(&mut nc);
         Config::new_with_random_peer_id(nc)
+    }
+
+    /// A config in a joining mode with every joining precondition already met, so
+    /// a test can knock out exactly the one rule it means to exercise instead of
+    /// tripping whichever fires first.
+    fn joining_config(mode: NodeMode, f: impl FnOnce(&mut NodeConfig)) -> Config {
+        config_with_node(|nc| {
+            nc.node_mode = mode;
+            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+            nc.trusted_peers = vec![PeerAddress {
+                api: "127.0.0.1:8080".parse().expect("valid SocketAddr"),
+                gossip: "127.0.0.1:8081".parse().expect("valid SocketAddr"),
+                execution: RethPeerInfo::default(),
+            }];
+            f(nc);
+        })
     }
 
     #[test]
@@ -1886,9 +1938,9 @@ mod validate_tests {
     }
 
     #[test]
-    fn validate_rejects_peer_mode_without_genesis_hash() {
+    fn validate_rejects_miner_mode_without_genesis_hash() {
         let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Peer;
+            nc.node_mode = NodeMode::Miner;
             nc.consensus.get_mut().expected_genesis_hash = None;
         });
         let err = cfg.validate().unwrap_err();
@@ -2251,34 +2303,29 @@ mod validate_tests {
         );
     }
 
-    /// Peer-mode nodes that disable the periodic sync check (or set its
+    /// Miner-mode nodes that disable the periodic sync check (or set its
     /// interval to 0) have no recovery path from the chain_sync zero-peer
     /// fast-exit — `initialize_sync_mode` returns `Ok(false)` and the
     /// service idles. Validation must reject this combination so a misconfigured
-    /// peer doesn't silently sit cold.
+    /// node doesn't silently sit cold.
     #[rstest]
     #[case::disabled(false, 30)]
     #[case::zero_interval(true, 0)]
-    fn validate_rejects_peer_mode_without_periodic_sync(
+    fn validate_rejects_miner_mode_without_periodic_sync(
         #[case] enable_periodic: bool,
         #[case] interval_secs: u64,
     ) {
-        let cfg = config_with_node(|nc| {
-            nc.node_mode = NodeMode::Peer;
-            // Peer-mode also requires expected_genesis_hash; set it so the
-            // earlier-firing genesis-hash check passes and the later
-            // periodic-sync check is the one that surfaces.
-            nc.consensus.get_mut().expected_genesis_hash = Some(H256::zero());
+        let cfg = joining_config(NodeMode::Miner, |nc| {
             nc.sync.enable_periodic_sync_check = enable_periodic;
             nc.sync.periodic_sync_check_interval_secs = interval_secs;
         });
         let err = cfg
             .validate()
-            .expect_err("peer-mode without periodic sync must fail validation");
+            .expect_err("miner-mode without periodic sync must fail validation");
         let msg = err.to_string();
         assert!(
-            msg.contains("peer-mode") && msg.contains("periodic"),
-            "expected error referencing peer-mode/periodic-sync requirement; got: {msg}"
+            msg.contains("Miner and Observer nodes") && msg.contains("periodic"),
+            "expected error referencing Miner-node/periodic-sync requirement; got: {msg}"
         );
     }
 
@@ -2293,5 +2340,129 @@ mod validate_tests {
         });
         cfg.validate()
             .expect("genesis-mode may disable the periodic sync check");
+    }
+
+    #[test]
+    fn validate_accepts_observer_mode() {
+        joining_config(NodeMode::Observer, |_| {})
+            .validate()
+            .expect("observer config meeting the joining rules should validate");
+    }
+
+    /// A joining node bootstraps genesis from the first trusted peer, so an empty
+    /// list cannot work. Before this rule it panicked deep in startup instead.
+    #[rstest]
+    #[case::miner(NodeMode::Miner)]
+    #[case::observer(NodeMode::Observer)]
+    fn validate_rejects_joining_mode_without_trusted_peers(#[case] mode: NodeMode) {
+        let err = joining_config(mode, |nc| nc.trusted_peers.clear())
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("trusted_peers"),
+            "expected the trusted_peers rule to fire, got: {err}"
+        );
+    }
+
+    /// Genesis starts the network, so it has nothing to join through and needs no
+    /// trusted peers. `NodeConfig::testing()` ships an empty list, which is why
+    /// every other test in this module can leave it alone.
+    #[test]
+    fn validate_allows_genesis_mode_without_trusted_peers() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Genesis;
+            nc.trusted_peers.clear();
+        });
+        cfg.validate().expect("genesis needs no trusted peers");
+    }
+
+    #[test]
+    fn validate_rejects_observer_mode_without_genesis_hash() {
+        let cfg = config_with_node(|nc| {
+            nc.node_mode = NodeMode::Observer;
+            nc.consensus.get_mut().expected_genesis_hash = None;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("expected_genesis_hash"),
+            "expected the genesis-hash rule to fire, got: {err}"
+        );
+    }
+
+    #[rstest]
+    #[case::disabled(false, 30)]
+    #[case::zero_interval(true, 0)]
+    fn validate_rejects_observer_mode_without_periodic_sync(
+        #[case] enable_periodic: bool,
+        #[case] interval_secs: u64,
+    ) {
+        let cfg = joining_config(NodeMode::Observer, |nc| {
+            nc.sync.enable_periodic_sync_check = enable_periodic;
+            nc.sync.periodic_sync_check_interval_secs = interval_secs;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("periodic_sync_check"),
+            "expected the periodic-sync rule to fire, got: {err}"
+        );
+    }
+
+    /// Mining seeds are broadcast only from the VDF free-run path, so a mining
+    /// node with the free-run off would never mine. Reject rather than let it
+    /// idle and look healthy.
+    #[rstest]
+    #[case::genesis(NodeMode::Genesis)]
+    #[case::miner(NodeMode::Miner)]
+    fn validate_rejects_free_run_disabled_for_a_mining_mode(#[case] mode: NodeMode) {
+        // Genesis is not a joining mode, so build it through the plain helper.
+        let cfg = if mode.joins_existing_network() {
+            joining_config(mode, |nc| nc.vdf.free_run = VdfFreeRun::Disabled)
+        } else {
+            config_with_node(|nc| {
+                nc.node_mode = mode;
+                nc.vdf.free_run = VdfFreeRun::Disabled;
+            })
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("free_run"),
+            "expected the free_run rule to fire, got: {err}"
+        );
+    }
+
+    /// The whole point of the setting: a non-mining node may turn the free-run
+    /// off, and may also force it on.
+    #[rstest]
+    #[case::disabled(VdfFreeRun::Disabled)]
+    #[case::enabled(VdfFreeRun::Enabled)]
+    #[case::auto(VdfFreeRun::Auto)]
+    fn validate_accepts_any_free_run_for_an_observer(#[case] free_run: VdfFreeRun) {
+        joining_config(NodeMode::Observer, |nc| nc.vdf.free_run = free_run)
+            .validate()
+            .expect("an observer may choose any free-run setting");
+    }
+
+    /// `Enabled` is only an override of the benchmark, never of the mining
+    /// requirement, so it stays legal everywhere.
+    #[test]
+    fn validate_accepts_free_run_enabled_for_a_miner() {
+        joining_config(NodeMode::Miner, |nc| {
+            nc.vdf.free_run = VdfFreeRun::Enabled;
+        })
+        .validate()
+        .expect("a miner may force the free-run on");
+    }
+
+    #[test]
+    fn validate_rejects_observer_with_stake_pledge_drives() {
+        let cfg = joining_config(NodeMode::Observer, |nc| {
+            nc.stake_pledge_drives = true;
+        });
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("stake_pledge_drives"),
+            "expected the stake_pledge_drives rule to fire, got: {err}"
+        );
     }
 }

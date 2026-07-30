@@ -93,6 +93,33 @@ impl Default for DatabaseConfig {
     }
 }
 
+/// Controls whether the local VDF thread computes its own steps.
+///
+/// Not a switch for the VDF itself: the thread and its step buffer are always
+/// needed, because block validation uses the local buffer as a fast path and
+/// falls back to recomputing from a block's own seeds when it misses. What this
+/// selects is whether the thread *free-runs* — produces fresh steps — or only
+/// drains the validated fast-forward steps validation hands it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VdfFreeRun {
+    /// Free-run only if the startup throughput benchmark says it pays off.
+    #[default]
+    Auto,
+    /// Always free-run, whatever the benchmark measured.
+    ///
+    /// This bypasses the benchmark's safety cutoff. On a machine that measures
+    /// fast when idle but slows under validation load, a step can outlast
+    /// `progress_timeout_secs`, which freezes the step counter and panics the
+    /// process by the never-mislabel rule. An escape hatch, not a tuning knob.
+    Enabled,
+    /// Never free-run; follow the chain from validated fast-forward steps only.
+    ///
+    /// Always safe: the paused loop drains fast-forward every 200ms, well inside
+    /// the stall budget. Rejected for a mining `node_mode` — mining seeds are
+    /// broadcast only from the free-run path, so such a node could never mine.
+    Disabled,
+}
+
 /// Controls whether and how the VDF thread is pinned to a CPU core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CorePinning {
@@ -239,16 +266,78 @@ pub struct NodeConfig {
 /// # Node Operation Mode
 ///
 /// Defines how the node participates in the network - either as a genesis node
-/// that starts a new network or as a peer that syncs with existing nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// that starts a new network or as a node that joins an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NodeMode {
     /// Start a new blockchain network as the first node
     Genesis,
 
-    /// Join an existing network by connecting to trusted peers.
+    /// Join an existing network by connecting to trusted peers, and mine.
     /// Requires `consensus.expected_genesis_hash` to be set.
-    Peer,
+    Miner,
+
+    /// Join an existing network and follow it without mining. Skips partition
+    /// mining and default submodule creation. The startup VDF throughput check
+    /// still runs, but failing it disables the local free-run instead of
+    /// aborting startup. The local VDF otherwise still runs: a step count that
+    /// tracks the chain reduces the parallel VDF work block validation has to do.
+    /// Requires `consensus.expected_genesis_hash` to be set.
+    Observer,
+}
+
+/// Hand-written so the retired `Peer` spelling produces a migration error.
+///
+/// `Peer` used to mean "join the network and mine". The name was removed rather
+/// than reused for the non-mining mode: a reused name would leave every
+/// deployed config parsing without error while meaning the opposite, and every
+/// miner would stop mining on its next restart with nothing to signal it.
+impl<'de> Deserialize<'de> for NodeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const VARIANTS: &[&str] = &["Genesis", "Miner", "Observer"];
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "Genesis" => Ok(Self::Genesis),
+            "Miner" => Ok(Self::Miner),
+            "Observer" => Ok(Self::Observer),
+            "Peer" => Err(serde::de::Error::custom(
+                "node_mode = \"Peer\" no longer exists: use \"Miner\" to keep the previous \
+                 behavior (join the network and mine), or \"Observer\" to join and follow the \
+                 chain without mining",
+            )),
+            other => Err(serde::de::Error::unknown_variant(other, VARIANTS)),
+        }
+    }
+}
+
+impl NodeMode {
+    /// Whether this mode participates in mining. Gates partition mining, default
+    /// submodule creation, and whether failing the startup VDF throughput check
+    /// aborts startup — submodules exist to hold packed partitions, which only a
+    /// mining node is assigned.
+    ///
+    /// Written as an exhaustive `match`, not `matches!`: a new variant must be
+    /// a compile error here rather than a silent `false`.
+    pub const fn mines(self) -> bool {
+        match self {
+            Self::Genesis | Self::Miner => true,
+            Self::Observer => false,
+        }
+    }
+
+    /// Whether this mode joins a network that already exists. Rules that
+    /// govern joining — a pinned genesis hash, a working periodic sync
+    /// check — must cover every such mode, not just `Miner`.
+    ///
+    /// Exhaustive for the same reason as [`Self::mines`].
+    pub const fn joins_existing_network(self) -> bool {
+        match self {
+            Self::Miner | Self::Observer => true,
+            Self::Genesis => false,
+        }
+    }
 }
 
 /// # Node Synchronization Mode
@@ -849,6 +938,12 @@ pub struct VdfNodeConfig {
     #[serde(default)]
     pub core_pinning: CorePinning,
 
+    /// Whether the local VDF thread computes its own steps, or only follows the
+    /// chain from validated fast-forward steps. `Auto` defers to the startup
+    /// throughput benchmark.
+    #[serde(default)]
+    pub free_run: VdfFreeRun,
+
     /// When true, enforce a minimum step duration to prevent VDF from
     /// outrunning block production when sha_1s_difficulty is low.
     #[serde(default)]
@@ -899,6 +994,7 @@ impl Default for VdfNodeConfig {
             // TODO: default to something like numcpus - 4
             parallel_verification_thread_limit: 4,
             core_pinning: CorePinning::default(),
+            free_run: VdfFreeRun::default(),
             throttle: false,
             progress_timeout_secs: default_vdf_progress_timeout_secs(),
             validation_batch_size: default_vdf_validation_batch_size(),
@@ -1196,6 +1292,9 @@ impl NodeConfig {
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 8,
                 core_pinning: CorePinning::Disabled,
+                // Test configs skip the throughput benchmark (low
+                // sha_1s_difficulty), so `Auto` resolves to free-running.
+                free_run: VdfFreeRun::Auto,
                 throttle: true,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
                 validation_batch_size: default_vdf_validation_batch_size(),
@@ -1281,7 +1380,7 @@ impl NodeConfig {
         consensus.genesis.reward_address = reward_address;
         consensus.expected_genesis_hash = Some(H256::zero());
         Self {
-            node_mode: NodeMode::Peer,
+            node_mode: NodeMode::Miner,
             sync_mode: SyncMode::Full,
             consensus: ConsensusOptions::Custom(consensus),
             base_directory: default_irys_path(),
@@ -1384,6 +1483,7 @@ impl NodeConfig {
             vdf: VdfNodeConfig {
                 parallel_verification_thread_limit: 4,
                 core_pinning: CorePinning::Auto,
+                free_run: VdfFreeRun::Auto,
                 throttle: false,
                 progress_timeout_secs: default_vdf_progress_timeout_secs(),
                 validation_batch_size: default_vdf_validation_batch_size(),
@@ -1627,5 +1727,64 @@ mod run_mode_tests {
             cfg.sync.execution_payload_wait_timeout_millis, 5_000,
             "test config must use the short 5s payload wait so integration tests don't hang 60s on the prod default"
         );
+    }
+}
+
+#[cfg(test)]
+mod node_mode_tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[test]
+    fn mines_is_true_for_genesis_and_miner_only() {
+        assert!(NodeMode::Genesis.mines());
+        assert!(NodeMode::Miner.mines());
+        assert!(!NodeMode::Observer.mines());
+    }
+
+    #[test]
+    fn joins_existing_network_excludes_genesis() {
+        assert!(!NodeMode::Genesis.joins_existing_network());
+        assert!(NodeMode::Miner.joins_existing_network());
+        assert!(NodeMode::Observer.joins_existing_network());
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct ModeDoc {
+        node_mode: NodeMode,
+    }
+
+    #[test]
+    fn deserialize_peer_reports_the_rename() {
+        let err = toml::from_str::<ModeDoc>("node_mode = \"Peer\"")
+            .expect_err("\"Peer\" must not deserialize")
+            .to_string();
+        assert!(
+            err.contains("no longer exists"),
+            "error must explain that Peer was retired, not just list variants: {err}"
+        );
+        assert!(err.contains("Miner"), "error must name Miner: {err}");
+        assert!(err.contains("Observer"), "error must name Observer: {err}");
+    }
+
+    #[test]
+    fn deserialize_unknown_mode_lists_the_variants() {
+        let err = toml::from_str::<ModeDoc>("node_mode = \"Nonsense\"")
+            .expect_err("unknown variants must not deserialize")
+            .to_string();
+        assert!(err.contains("Genesis"), "error must list Genesis: {err}");
+        assert!(err.contains("Miner"), "error must list Miner: {err}");
+        assert!(err.contains("Observer"), "error must list Observer: {err}");
+    }
+
+    #[rstest]
+    #[case(NodeMode::Genesis)]
+    #[case(NodeMode::Miner)]
+    #[case(NodeMode::Observer)]
+    fn serde_round_trip(#[case] mode: NodeMode) {
+        let doc = ModeDoc { node_mode: mode };
+        let encoded = toml::to_string(&doc).expect("serializes");
+        let decoded: ModeDoc = toml::from_str(&encoded).expect("deserializes");
+        assert_eq!(doc, decoded);
     }
 }

@@ -14,7 +14,9 @@ use tracing::{debug, info};
 ///
 /// This file is automatically created if it does not exist when the node starts, and is
 /// populated with `submodule_paths` set to a default configuration of 3 storage modules
-/// (This should be the same as the minimum required configuration to initiate a network genesis)
+/// (This should be the same as the minimum required configuration to initiate a network genesis).
+/// Modes that do not mine are assigned no partitions, so no file is created for them and
+/// the config loads empty.
 ///
 /// The `submodule_paths` items are expected to be paths to directories that can be
 /// mounted as submodules. The number of paths in `submodule_paths` must exactly
@@ -38,7 +40,7 @@ impl StorageSubmodulesConfig {
     /// Loads the [`StorageSubmodulesConfig`] from a TOML file at the given path.
     ///
     /// Genesis nodes require at least 3 submodules to ensure minimum network
-    /// capacity. Peer nodes have no minimum.
+    /// capacity. Nodes joining an existing network have no minimum.
     pub fn from_toml(path: impl AsRef<Path>, node_mode: NodeMode) -> eyre::Result<Self> {
         let contents = fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
@@ -87,12 +89,25 @@ impl StorageSubmodulesConfig {
             fs::create_dir_all(path).expect("to create submodule dir");
         }
 
-        // Tests don't enforce genesis minimum — pass Peer to skip the check.
-        Self::from_toml(config_path_local, NodeMode::Peer)
+        // Tests don't enforce genesis minimum — pass Miner to skip the check.
+        Self::from_toml(config_path_local, NodeMode::Miner)
     }
 
     pub fn load(instance_dir: PathBuf, node_mode: NodeMode) -> eyre::Result<Self> {
         let config_path_local = Path::new(&instance_dir).join(SUBMODULES_CONFIG_FILE_NAME);
+
+        // A non-mining node is assigned no partitions, so the three default
+        // submodules would only ever be empty directories. Return before any
+        // filesystem write, so nothing is left behind. This runs only when no
+        // config file exists; an existing one is always honored below, and the
+        // symlink sweep it skips has nothing to sweep without one.
+        if !config_path_local.exists() && !node_mode.mines() {
+            tracing::info!(
+                "node_mode does not mine — not creating a default submodule config at {:?}",
+                config_path_local
+            );
+            return Ok(Self::default());
+        }
 
         let base_path = instance_dir.join("storage_modules");
         fs::create_dir_all(&base_path).expect("to create storage_modules directory");
@@ -242,13 +257,13 @@ mod tests {
     #[case(2, false)]
     #[case(3, false)]
     #[case(10, false)]
-    fn from_toml_submodule_count_boundary_peer(
+    fn from_toml_submodule_count_boundary_miner(
         #[case] count: usize,
         #[case] should_err: bool,
     ) -> eyre::Result<()> {
         let dir = TempDirBuilder::new().build();
         let path = write_config_toml(dir.path(), count)?;
-        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Peer);
+        let result = StorageSubmodulesConfig::from_toml(&path, NodeMode::Miner);
         assert_eq!(result.is_err(), should_err);
         Ok(())
     }
@@ -271,6 +286,36 @@ mod tests {
         let second = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Genesis)?;
         assert_eq!(first, second);
         assert_eq!(second.submodule_paths.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn load_skips_default_config_for_observer() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().build();
+        let config = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Observer)?;
+
+        assert!(config.submodule_paths.is_empty());
+        assert!(
+            !dir.path().join(SUBMODULES_CONFIG_FILE_NAME).exists(),
+            "observer must not write a submodules config file"
+        );
+        assert!(
+            !dir.path().join("storage_modules").exists(),
+            "observer must not touch the filesystem at all"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_honors_an_existing_config_for_observer() -> eyre::Result<()> {
+        let dir = TempDirBuilder::new().build();
+        // A Miner run creates the file; a later Observer run must read it
+        // rather than ignore it.
+        let created = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Miner)?;
+        let reloaded = StorageSubmodulesConfig::load(dir.path().to_path_buf(), NodeMode::Observer)?;
+
+        assert_eq!(created, reloaded);
+        assert_eq!(reloaded.submodule_paths.len(), 3);
         Ok(())
     }
 }

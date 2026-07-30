@@ -1,4 +1,4 @@
-node_mode = "Peer" #changeme
+node_mode = "Miner" #changeme
 sync_mode = "Trusted"
 base_directory = "/app/data"
 mining_key = "4882545ed67d1b638207334975ee839e2369d31d8b3b8ef656b94952ca4ae4f3" #changeme
