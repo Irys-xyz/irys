@@ -96,7 +96,7 @@ async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::
 
 /// Mid-chain Cascade activation must leave the term ledgers with slots and
 /// partition assignments in the epoch that activates them, and term data posted
-/// in the following epoch must reach disk.
+/// in that same epoch must reach disk.
 ///
 /// The activation epoch block's own header carries only Publish + Submit: the
 /// producer derives the header ledger set from the parent epoch snapshot, which
@@ -243,7 +243,7 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
             .get_data_ledger_tx_ids()
             .get(&DataLedger::OneYear)
             .is_some_and(|ids| ids.contains(&tx.header.id)),
-        "the term tx must be included in the block right after the activation epoch"
+        "the term tx must be included in the block right after the activation epoch block"
     );
 
     for i in 0..chunks.len() {
