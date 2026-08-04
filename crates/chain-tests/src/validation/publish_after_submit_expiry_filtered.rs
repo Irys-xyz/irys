@@ -222,7 +222,7 @@ async fn heavy_producer_drops_publish_candidate_whose_submit_storage_expired() -
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(expiry_parent_block.timestamp_secs());
+        .cascade_for_block(expiry_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &expiry_parent_snapshot,
         &expiry_parent_block,

@@ -216,7 +216,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(expiry_block.timestamp_secs());
+        .cascade_for_block(expiry_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &expiry_parent_snapshot,
         &expiry_parent_block,
@@ -359,7 +359,7 @@ async fn heavy_cascade_block_promoting_already_expired_submit_tx_gets_rejected()
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(evil_parent_block.timestamp_secs());
+        .cascade_for_block(evil_parent_block.timestamp_secs());
     let mut target: Option<&irys_types::DataTransaction> = None;
     for tx in &txs {
         let per_candidate = irys_actors::block_producer::ledger_expiry::is_submit_storage_expired(

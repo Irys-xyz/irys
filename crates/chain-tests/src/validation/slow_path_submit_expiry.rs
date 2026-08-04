@@ -69,7 +69,7 @@ async fn heavy_submit_expiry_resolves_unmigrated_inclusion_via_slow_path() -> ey
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(evil_parent_block.timestamp_secs());
+        .cascade_for_block(evil_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &tip_snapshot,
         &evil_parent_block,

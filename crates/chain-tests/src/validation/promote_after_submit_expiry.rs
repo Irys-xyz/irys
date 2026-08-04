@@ -75,7 +75,7 @@ async fn heavy_block_promoting_already_expired_submit_tx_gets_rejected() -> eyre
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(evil_parent_block.timestamp_secs());
+        .cascade_for_block(evil_parent_block.timestamp_secs());
     let expired_set = irys_actors::block_producer::ledger_expiry::expired_submit_tx_ids(
         &tip_snapshot,
         &evil_parent_block,

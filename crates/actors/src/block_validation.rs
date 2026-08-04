@@ -34,7 +34,9 @@ use irys_types::{
     DataTransactionLedger, DifficultyAdjustmentConfig, H256, IrysAddress, IrysBlockHeader, PoaData,
     SealedBlock, SendTraced as _, SystemLedger, U256, UnixTimestamp,
     app_state::DatabaseProvider,
-    calculate_difficulty, next_cumulative_diff,
+    calculate_difficulty,
+    hardfork_config::{Cascade, ForEpoch},
+    next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path,
 };
@@ -1887,19 +1889,19 @@ pub async fn prevalidate_block(
     // Data Ledger Validation
     // ========================================
     // Ensure only active data ledgers are present in the block
-    let cascade_active = config
+    let cascade_for_epoch = config
         .consensus
         .hardforks
-        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
+        .cascade_for_epoch(&parent_epoch_snapshot);
 
     // Validate 'expires' field on term ledgers
-    validate_term_ledger_expiry(block, &config.consensus, cascade_active)?;
+    validate_term_ledger_expiry(block, &config.consensus, cascade_for_epoch)?;
     for ledger in &block.data_ledgers {
         match DataLedger::try_from(ledger.ledger_id) {
             Ok(DataLedger::Publish | DataLedger::Submit) => {
                 // Always valid
             }
-            Ok(DataLedger::OneYear | DataLedger::ThirtyDay) if cascade_active => {
+            Ok(DataLedger::OneYear | DataLedger::ThirtyDay) if cascade_for_epoch.is_active() => {
                 // Valid when Cascade hardfork is active
             }
             _ => {
@@ -5226,12 +5228,12 @@ async fn generate_expected_shadow_transactions(
 
     // Use pre-fetched publish ledger transactions with proofs from block header.
     // `extract_data_ledgers` validates peer-supplied structure → consensus.
-    let cascade_active = config
+    let cascade_for_epoch = config
         .consensus
         .hardforks
-        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
+        .cascade_for_epoch(&parent_epoch_snapshot);
     let (publish_ledger, _submit_ledger) =
-        extract_data_ledgers(block, cascade_active).map_err(consensus)?;
+        extract_data_ledgers(block, cascade_for_epoch).map_err(consensus)?;
     let publish_ledger_with_txs = PublishLedgerWithTxs {
         txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
         proofs: publish_ledger.proofs.clone(),
@@ -5277,16 +5279,16 @@ async fn generate_expected_shadow_transactions(
         // the same value `perform_epoch_tasks` reads to gate the
         // `touch_active_ledger_slots` that rescues these slots. Must match the
         // producer (which uses the produced block's timestamp), and must NOT be
-        // the parent-snapshot helper (`is_cascade_active_for_epoch`), which lags
+        // the parent-snapshot helper (`cascade_for_epoch`), which lags
         // by an epoch at the activation boundary.
-        let cascade_active_for_block = config
+        let cascade_for_block = config
             .consensus
             .hardforks
-            .is_cascade_active_at(block.timestamp_secs());
-        let cascade_active_for_epoch = config
+            .cascade_for_block(block.timestamp_secs());
+        let cascade_for_epoch = config
             .consensus
             .hardforks
-            .is_cascade_active_for_epoch(&parent_epoch_snapshot);
+            .cascade_for_epoch(&parent_epoch_snapshot);
         // Each ledger's cumulative `total_chunks` is read from the prevalidated
         // header so producer and validator settle the identical expiring set.
         ledger_expiry::calculate_all_expired_ledger_fees(
@@ -5298,8 +5300,8 @@ async fn generate_expected_shadow_transactions(
             block_tree_guard,
             mempool_guard,
             db,
-            cascade_active_for_block,
-            cascade_active_for_epoch,
+            cascade_for_block,
+            cascade_for_epoch,
             |ledger| block.ledger_total_chunks(ledger),
         )
         .in_current_span()
@@ -5384,13 +5386,13 @@ async fn generate_expected_shadow_transactions(
     // (the write-window exclusion in `get_expiring_partition_info`) is. So a node
     // replaying history from genesis applies these rules to PRE-Cascade blocks too
     // (`expired_submit_range` still returns allocation-anchored expired slots when
-    // `cascade_active=false`). We accept this because no persistent (mainnet /
+    // Cascade is inactive for the block). We accept this because no persistent (mainnet /
     // non-resettable-testnet) pre-softfork data-tx history exists that could trip it
     // — the only blocks it would newly reject are exactly the buggy
     // already-expired-promotion blocks this fix exists to forbid, which must not
     // exist on any chain we replay. If that assumption is ever falsified, gate this
     // block and the refund-algorithm changes behind
-    // `is_cascade_active_at(block.timestamp_secs())` so pre-activation replay
+    // `cascade_for_block(block.timestamp_secs())` so pre-activation replay
     // reproduces old behavior bit-for-bit. Pinned by the mixed-mode test
     // `slow_heavy_cascade_midchain_submit_expiry_refunds_across_activation`.
     {
@@ -5398,16 +5400,16 @@ async fn generate_expected_shadow_transactions(
         // so resolve it once and reuse it per-candidate. Locally derived (parent
         // epoch snapshot, our block_index/mempool/DB); a failure here is a hard
         // node-local fault, not a peer statement. `None` → nothing expired.
-        let cascade_active_for_block = config
+        let cascade_for_block = config
             .consensus
             .hardforks
-            .is_cascade_active_at(block.timestamp_secs());
+            .cascade_for_block(block.timestamp_secs());
         let expired_range = ledger_expiry::expired_submit_range(
             block.height,
             &parent_epoch_snapshot,
             &prev_block,
             config,
-            cascade_active_for_block,
+            cascade_for_block,
         )
         .map_err(|e| node_fault(format!("NC-0042 expiry check: {e}")))?;
         if let Some(range) = &expired_range {
@@ -6160,7 +6162,7 @@ fn validate_term_only_price(
 fn validate_term_ledger_expiry(
     block: &IrysBlockHeader,
     consensus: &ConsensusConfig,
-    cascade_active: bool,
+    cascade_for_epoch: ForEpoch<Cascade>,
 ) -> Result<(), PreValidationError> {
     let cascade = consensus.hardforks.cascade.as_ref();
 
@@ -6180,8 +6182,10 @@ fn validate_term_ledger_expiry(
         let expected_expires = match ledger {
             DataLedger::Publish => None,
             DataLedger::Submit => Some(consensus.epoch.submit_ledger_epoch_length),
-            DataLedger::OneYear if cascade_active => Some(cascade_config()?.one_year_epoch_length),
-            DataLedger::ThirtyDay if cascade_active => {
+            DataLedger::OneYear if cascade_for_epoch.is_active() => {
+                Some(cascade_config()?.one_year_epoch_length)
+            }
+            DataLedger::ThirtyDay if cascade_for_epoch.is_active() => {
                 Some(cascade_config()?.thirty_day_epoch_length)
             }
             _ => continue, // non-active cascade ledgers handled by presence check
@@ -6275,18 +6279,18 @@ pub async fn data_txs_are_valid(
     }
 
     // Cascade activation is derived from the parent epoch snapshot the
-    // caller fetched — single source of truth. The previous `cascade_active`
+    // caller fetched — single source of truth. The previous bare-bool
     // bool parameter computed it from a separate snapshot read, which gave
     // two reads where only one was authoritative; the reads always agreed
     // (same parent hash, immutable `Arc<EpochSnapshot>`) but the bool was a
     // footgun for any future caller computing it from a stale snapshot.
-    let cascade_active = config
+    let cascade_for_epoch = config
         .consensus
         .hardforks
-        .is_cascade_active_for_epoch(&parent_epoch_snapshot);
+        .cascade_for_epoch(&parent_epoch_snapshot);
 
     // Extract publish ledger for ingress proofs validation
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_active)
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block, cascade_for_epoch)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
@@ -6906,12 +6910,12 @@ pub async fn data_txs_are_valid(
 
 fn extract_data_ledgers(
     block: &IrysBlockHeader,
-    cascade_active: bool,
+    cascade_for_epoch: ForEpoch<Cascade>,
 ) -> eyre::Result<(&DataTransactionLedger, &DataTransactionLedger)> {
     let (publish_ledger, submit_ledger) = match &block.data_ledgers[..] {
         [publish_ledger, submit_ledger] => {
             ensure!(
-                !cascade_active,
+                !cascade_for_epoch.is_active(),
                 "Post-Cascade blocks must have 4 data ledgers, got 2"
             );
             ensure!(
@@ -6931,7 +6935,7 @@ fn extract_data_ledgers(
             thirty_day_ledger,
         ] => {
             ensure!(
-                cascade_active,
+                cascade_for_epoch.is_active(),
                 "Pre-Cascade blocks must have 2 data ledgers, got 4"
             );
             ensure!(
@@ -6971,7 +6975,7 @@ fn extract_data_ledgers(
         }
         [..] => eyre::bail!(
             "Expected {} data ledgers on the block, got {}",
-            if cascade_active { 4 } else { 2 },
+            if cascade_for_epoch.is_active() { 4 } else { 2 },
             block.data_ledgers.len()
         ),
     };

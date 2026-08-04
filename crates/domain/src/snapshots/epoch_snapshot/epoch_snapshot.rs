@@ -10,7 +10,7 @@ use irys_types::{
 };
 use irys_types::{
     CommitmentTransaction, ConsensusConfig, IrysAddress, PartitionChunkOffset,
-    hardfork_config::{Activation, Delta},
+    hardfork_config::{Activation, Cascade, Delta, ForBlock},
     partition_chunk_offset_ie,
 };
 use openssl::sha;
@@ -50,7 +50,7 @@ impl Default for EpochSnapshot {
         let node_config = NodeConfig::testing();
         let config = Config::new_with_random_peer_id(node_config);
         Self {
-            ledgers: Ledgers::new(&config.consensus, false),
+            ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
@@ -119,12 +119,12 @@ impl EpochSnapshot {
         commitments: Vec<CommitmentTransaction>,
         config: &Config,
     ) -> Self {
-        let cascade_active = config
+        let cascade = config
             .consensus
             .hardforks
-            .is_cascade_active_at(genesis_block.timestamp_secs());
+            .cascade_for_block(genesis_block.timestamp_secs());
         let mut new_self = Self {
-            ledgers: Ledgers::new(&config.consensus, cascade_active),
+            ledgers: Ledgers::new(&config.consensus, cascade),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
@@ -310,14 +310,14 @@ impl EpochSnapshot {
         // "this slot has canonical data" marker is updated unconditionally so
         // post-Cascade expiry can distinguish written slots from empty preallocations
         // (pre-Cascade, allocation-aged unwritten slots still expire).
-        let cascade_active = self
+        let cascade = self
             .config
             .consensus
             .hardforks
-            .is_cascade_active_at(new_epoch_block.timestamp_secs());
+            .cascade_for_block(new_epoch_block.timestamp_secs());
 
         // Activate Cascade hardfork ledgers at the activation epoch boundary
-        if cascade_active {
+        if cascade.is_active() {
             self.ledgers.activate_cascade(&self.config.consensus);
         }
 
@@ -345,13 +345,13 @@ impl EpochSnapshot {
         // which `block_producer::ledger_expiry` derives by calling
         // `get_expiring_partition_info` on the PARENT snapshot with the same
         // window exclusion. The last-height refresh above and that exclusion are
-        // gated on this same `cascade_active` (the new epoch block's Cascade
+        // gated on this same `cascade` state (the new epoch block's Cascade
         // status); if one is gated and the other isn't they diverge — a slot
         // would recycle here yet still be settled, or vice versa. Keep the two
         // gates aligned.
-        self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block, cascade_active);
+        self.touch_active_ledger_slots(previous_epoch_block, new_epoch_block, cascade);
 
-        self.expire_ledger_slots(new_epoch_block, cascade_active);
+        self.expire_ledger_slots(new_epoch_block, cascade);
 
         self.apply_unpledges(&new_epoch_commitments)?;
 
@@ -517,13 +517,17 @@ impl EpochSnapshot {
     /// Loops through all ledgers and looks for slots that are older
     /// than their configured epoch length. Marks them expired and stores
     /// the expired partition hashes in the epoch snapshot.
-    fn expire_ledger_slots(&mut self, new_epoch_block: &IrysBlockHeader, cascade_active: bool) {
+    fn expire_ledger_slots(
+        &mut self,
+        new_epoch_block: &IrysBlockHeader,
+        cascade: ForBlock<Cascade>,
+    ) {
         let epoch_height = new_epoch_block.height;
         // Same write-frontier inputs as `touch_active_ledger_slots`: the new
         // epoch block's cumulative per-ledger totals.
         let expired_partitions: Vec<ExpiringPartitionInfo> = self.ledgers.expire_partitions(
             epoch_height,
-            cascade_active,
+            cascade,
             |ledger| new_epoch_block.ledger_total_chunks(ledger),
             self.config.consensus.num_chunks_in_partition,
         );
@@ -602,7 +606,7 @@ impl EpochSnapshot {
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
-        refresh_last_height: bool,
+        refresh_last_height: ForBlock<Cascade>,
     ) {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         for ledger in self.ledgers.active_ledgers() {
@@ -1362,8 +1366,8 @@ impl EpochSnapshot {
     /// epoch block; `prev` is read from this (parent) snapshot's epoch block,
     /// matching `touch_active_ledger_slots`.
     ///
-    /// `cascade_active` MUST be the Cascade status of the epoch block being
-    /// produced/validated (`is_cascade_active_at(new_epoch_block.timestamp)`),
+    /// `cascade` MUST be the Cascade status of the epoch block being
+    /// produced/validated (`cascade_for_block(new_epoch_block.timestamp)`),
     /// NOT of this parent snapshot — it has to mirror the
     /// `touch_active_ledger_slots` gate in `perform_epoch_tasks`, which keys off
     /// the new epoch block. When false, the window exclusion is skipped and the
@@ -1377,11 +1381,11 @@ impl EpochSnapshot {
         epoch_height: u64,
         ledger: DataLedger,
         new_total_chunks: u64,
-        cascade_active: bool,
+        cascade: ForBlock<Cascade>,
     ) -> Vec<ExpiringPartitionInfo> {
         // Flattened per-partition view of the slot-keyed set, so the two can
         // never diverge. A slot with no partitions contributes nothing here.
-        self.get_expiring_slot_partitions(epoch_height, ledger, new_total_chunks, cascade_active)
+        self.get_expiring_slot_partitions(epoch_height, ledger, new_total_chunks, cascade)
             .into_iter()
             .flat_map(|(slot_index, partition_hashes)| {
                 partition_hashes
@@ -1407,7 +1411,7 @@ impl EpochSnapshot {
         epoch_height: u64,
         ledger: DataLedger,
         new_total_chunks: u64,
-        cascade_active: bool,
+        cascade: ForBlock<Cascade>,
     ) -> Vec<(usize, Vec<PartitionHash>)> {
         let chunks_per_slot = self.config.consensus.num_chunks_in_partition;
         let prev_total_chunks = self.epoch_block.ledger_total_chunks(ledger);
@@ -1418,7 +1422,8 @@ impl EpochSnapshot {
         // when Cascade is inactive so the expiring set matches the original
         // master behavior (no window exclusion) for bit-identical replay.
         let written_this_epoch = |slot_index: usize| -> bool {
-            if !cascade_active || new_total_chunks <= prev_total_chunks || chunks_per_slot == 0 {
+            if !cascade.is_active() || new_total_chunks <= prev_total_chunks || chunks_per_slot == 0
+            {
                 return false;
             }
             let first = prev_total_chunks / chunks_per_slot;
@@ -1435,7 +1440,7 @@ impl EpochSnapshot {
         self.ledgers
             .get_expiring_slots(
                 epoch_height,
-                cascade_active,
+                cascade,
                 // LOCKSTEP with `expire_ledger_slots`: the target ledger uses the
                 // new epoch block's total. Other ledgers fall back to this
                 // (parent) snapshot's totals — their entries are discarded by the
@@ -1471,13 +1476,13 @@ impl EpochSnapshot {
         &self,
         ledger: DataLedger,
         epoch_height: u64,
-        cascade_active: bool,
+        cascade: ForBlock<Cascade>,
         total_chunks: u64,
     ) -> Vec<usize> {
         self.ledgers.get_all_expired_term_slot_indexes(
             ledger,
             epoch_height,
-            cascade_active,
+            cascade,
             total_chunks,
             self.config.consensus.num_chunks_in_partition,
         )
@@ -1667,7 +1672,7 @@ mod tests {
         });
         let config = Config::new_with_random_peer_id(node_config);
         let mut snapshot = EpochSnapshot {
-            ledgers: Ledgers::new(&config.consensus, false),
+            ledgers: Ledgers::new(&config.consensus, ForBlock::inactive()),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),

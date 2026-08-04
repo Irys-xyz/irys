@@ -288,7 +288,7 @@ async fn heavy_mid_epoch_boundary_crossing_defers_then_rescues() -> eyre::Result
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(append_block.timestamp_secs());
+        .cascade_for_block(append_block.timestamp_secs());
 
     // Oracle (anti-vacuity): T really is inside the boundary-crossed-but-unrescued
     // window as of the block we are about to produce.

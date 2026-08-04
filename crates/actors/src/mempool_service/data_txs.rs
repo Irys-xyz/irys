@@ -77,7 +77,8 @@ impl Inner {
                     .node_config
                     .consensus_config()
                     .hardforks
-                    .is_cascade_active_for_epoch(&epoch_snapshot)
+                    .cascade_for_epoch(&epoch_snapshot)
+                    .is_active()
             };
             if !cascade_active {
                 return Err(TxIngressError::InvalidLedger(tx.ledger_id));

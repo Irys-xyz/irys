@@ -659,7 +659,8 @@ pub async fn select_best_txs(
                 let consensus = ctx.config.node_config.consensus_config();
                 if !consensus
                     .hardforks
-                    .is_cascade_active_for_epoch(&parent_epoch_snapshot)
+                    .cascade_for_epoch(&parent_epoch_snapshot)
+                    .is_active()
                 {
                     debug!(
                         tx.id = ?tx.id,
@@ -1006,17 +1007,17 @@ async fn get_publish_txs_and_proofs(
         // so compute it once here and reuse it per-candidate via `submit_tx_expired`
         // (which then costs at most one canonical Submit-height read each). `None`
         // means nothing has expired as of this block → no candidate is filtered.
-        let cascade_active_for_block = ctx
+        let cascade_for_block = ctx
             .config
             .consensus
             .hardforks
-            .is_cascade_active_at(current_timestamp);
+            .cascade_for_block(current_timestamp);
         let expired_submit_range = crate::block_producer::ledger_expiry::expired_submit_range(
             next_block_height,
             epoch_snapshot,
             parent_block_header,
             ctx.config,
-            cascade_active_for_block,
+            cascade_for_block,
         )?;
 
         // Branch-correct "already promoted?" set. `DataTransactionHeader::

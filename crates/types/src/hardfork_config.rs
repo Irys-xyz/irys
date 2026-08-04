@@ -10,6 +10,7 @@ use crate::{
 };
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -204,6 +205,71 @@ impl<T> From<Option<T>> for Activation<T> {
     }
 }
 
+/// Fork `T`'s activation state resolved at **one block's own timestamp**.
+///
+/// For an epoch-aligned fork this is the value that governs the epoch a block
+/// opens, so it is what epoch processing (slot touch, expiry) and anything that
+/// must agree with epoch processing takes. It is NOT interchangeable with
+/// [`ForEpoch`]: for the whole epoch in which such a fork activates, a block's
+/// own status is already active while its governing epoch block's is not.
+/// Distinct types so the two cannot be swapped at a call site.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ForBlock<T> {
+    active: bool,
+    _fork: PhantomData<T>,
+}
+
+/// Fork `T`'s activation state resolved at the **epoch block governing a
+/// block's epoch** — the epoch-aligned status, which lags a block's own status
+/// throughout the activation epoch. See [`ForBlock`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct ForEpoch<T> {
+    active: bool,
+    _fork: PhantomData<T>,
+}
+
+macro_rules! impl_fork_scope {
+    ($scope:ident) => {
+        // Hand-written so the scope stays `Copy` regardless of whether the fork's
+        // parameter type is: the scope holds only activeness plus a phantom.
+        impl<T> Clone for $scope<T> {
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+
+        impl<T> Copy for $scope<T> {}
+
+        impl<T> $scope<T> {
+            #[must_use]
+            pub const fn new(active: bool) -> Self {
+                Self {
+                    active,
+                    _fork: PhantomData,
+                }
+            }
+
+            #[must_use]
+            pub const fn active() -> Self {
+                Self::new(true)
+            }
+
+            #[must_use]
+            pub const fn inactive() -> Self {
+                Self::new(false)
+            }
+
+            #[must_use]
+            pub const fn is_active(self) -> bool {
+                self.active
+            }
+        }
+    };
+}
+
+impl_fork_scope!(ForBlock);
+impl_fork_scope!(ForEpoch);
+
 /// Result of looking up a data ledger in a block header via
 /// [`IrysHardforkConfig::classify_data_ledger`].
 ///
@@ -276,6 +342,17 @@ impl IrysHardforkConfig {
     #[must_use]
     pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
         self.cascade_at(timestamp).is_some()
+    }
+
+    /// Cascade's activation state at a block's OWN timestamp (in seconds).
+    ///
+    /// This is the value epoch processing uses (the epoch block's own timestamp
+    /// decides the epoch it opens), and therefore the value everything that must
+    /// stay in lockstep with epoch processing must use — never the epoch-aligned
+    /// [`ForEpoch`] state, which lags for the whole activation epoch.
+    #[must_use]
+    pub fn cascade_for_block(&self, timestamp: UnixTimestamp) -> ForBlock<Cascade> {
+        ForBlock::new(self.is_cascade_active_at(timestamp))
     }
 
     /// Resolve the Delta hardfork's activation state at the given timestamp

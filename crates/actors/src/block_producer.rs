@@ -1213,13 +1213,13 @@ pub trait BlockProdStrategy {
             .total_chunks
             .saturating_add(submit_chunks_added);
 
-        let cascade_active = self
+        let cascade_for_epoch = self
             .inner()
             .config
             .consensus
             .hardforks
-            .is_cascade_active_for_epoch(&epoch_snapshot);
-        let cascade = if cascade_active {
+            .cascade_for_epoch(&epoch_snapshot);
+        let cascade = if cascade_for_epoch.is_active() {
             self.inner().config.consensus.hardforks.cascade.as_ref()
         } else {
             None
@@ -1870,20 +1870,20 @@ pub trait BlockProdStrategy {
         // Cascade status of THIS block (its own timestamp — the value
         // `perform_epoch_tasks` reads to gate the `touch_active_ledger_slots` that
         // rescues slots written this epoch). Gates the write-window exclusion, and
-        // must NOT be the parent-snapshot helper `is_cascade_active_for_epoch`
+        // must NOT be the parent-snapshot helper `cascade_for_epoch`
         // below, which lags by an epoch at the activation boundary.
-        let cascade_active_for_block = self
+        let cascade_for_block = self
             .inner()
             .config
             .consensus
             .hardforks
-            .is_cascade_active_at(block_timestamp.to_secs());
-        let cascade_active_for_epoch = self
+            .cascade_for_block(block_timestamp.to_secs());
+        let cascade_for_epoch = self
             .inner()
             .config
             .consensus
             .hardforks
-            .is_cascade_active_for_epoch(parent_epoch_snapshot);
+            .cascade_for_epoch(parent_epoch_snapshot);
 
         // The producer's per-ledger `total_chunks` at this block = parent total +
         // chunks added by this block's selected txs. This is the exact value that
@@ -1898,8 +1898,8 @@ pub trait BlockProdStrategy {
             &self.inner().block_tree_guard,
             &self.inner().mempool_guard,
             &self.inner().db,
-            cascade_active_for_block,
-            cascade_active_for_epoch,
+            cascade_for_block,
+            cascade_for_epoch,
             |ledger| {
                 let txs: &[DataTransactionHeader] = match ledger {
                     DataLedger::Submit => &mempool_txs.submit_tx,

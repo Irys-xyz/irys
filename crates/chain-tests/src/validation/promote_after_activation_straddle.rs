@@ -182,9 +182,9 @@ async fn slow_heavy_promote_after_activation_straddle_rejected() -> eyre::Result
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(evil_parent_block.timestamp_secs());
+        .cascade_for_block(evil_parent_block.timestamp_secs());
     assert!(
-        cascade_active,
+        cascade_active.is_active(),
         "evil block's parent tip must be cascade-active post-activation \
          (activation anchored at the pre-restart tip + 1s)"
     );
