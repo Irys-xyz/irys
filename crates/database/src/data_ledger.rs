@@ -794,9 +794,9 @@ impl Ledgers {
     }
 
     /// Mark every slot that received new canonical data during this epoch as
-    /// written. When `refresh_last_height` is Cascade-active, also refresh `last_height`
-    /// so the slot's expiry clock counts from the last time data was written
-    /// into it rather than from when the slot was allocated.
+    /// written. When Cascade is active for the epoch block, also refresh
+    /// `last_height` so the slot's expiry clock counts from the last time data
+    /// was written into it rather than from when the slot was allocated.
     ///
     /// `prev_total_chunks` / `new_total_chunks` are the ledger's cumulative
     /// chunk counts at the previous and current epoch blocks (read from the

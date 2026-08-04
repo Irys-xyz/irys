@@ -6276,7 +6276,7 @@ pub async fn data_txs_are_valid(
 
     // Cascade activation is derived from the parent epoch snapshot the
     // caller fetched — single source of truth. The previous bare-bool
-    // bool parameter computed it from a separate snapshot read, which gave
+    // parameter computed it from a separate snapshot read, which gave
     // two reads where only one was authoritative; the reads always agreed
     // (same parent hash, immutable `Arc<EpochSnapshot>`) but the bool was a
     // footgun for any future caller computing it from a stale snapshot.

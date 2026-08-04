@@ -570,12 +570,20 @@ impl EpochSnapshot {
                 // A ledger activated by THIS epoch block cannot appear in its
                 // own header: the producer derives the header ledger set from
                 // the parent epoch snapshot, which still predates the
-                // activation. Seed the ledger's first slots here (as genesis
-                // init does for the ledgers active at genesis) so it has
-                // partitions from the epoch it becomes active — blocks in that
-                // epoch already accept data for it, and the header only catches
-                // up an epoch later. `slot_count() == 0` never recurs once
-                // seeded: slots are marked expired, never removed.
+                // activation. Seed the ledger's first slots here so the epoch
+                // that activates it can also serve it — blocks in that epoch
+                // already accept data for it, and the header only catches up an
+                // epoch later.
+                //
+                // Slots only. The partitions come from
+                // `backfill_missing_partitions`, which draws from the
+                // already-pledged capacity pool and leaves a slot empty if that
+                // pool is exhausted — capacity minting runs after it. Unlike
+                // genesis init, which mints capacity and assigns pledges before
+                // the shared backfill, this path has no such guarantee.
+                //
+                // `slot_count() == 0` never recurs once seeded: slots are
+                // marked expired, never removed.
                 if let Activation::Active(delta) = delta
                     && self.ledgers[ledger].slot_count() == 0
                 {

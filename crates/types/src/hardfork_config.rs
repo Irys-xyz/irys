@@ -40,8 +40,8 @@ pub struct IrysHardforkConfig {
     pub cascade: Option<Cascade>,
 
     /// Delta hardfork - seeds slots for a data ledger in the epoch it activates.
-    /// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch block's
-    /// timestamp >= activation_timestamp. None means disabled.
+    /// Resolved at the epoch block's own timestamp; no per-block effect, since it
+    /// only acts during epoch processing. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
 }
@@ -143,8 +143,10 @@ impl Cascade {
 /// without this fork the ledger stays slotless — and therefore unassigned and
 /// unstorable — until the following epoch.
 ///
-/// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch
-/// block's timestamp >= activation_timestamp. None means disabled.
+/// Resolved at the epoch block's own timestamp — the first epoch block whose
+/// timestamp meets `activation_timestamp` is the one that seeds. There is no
+/// per-block effect: this fork only acts during epoch processing. None means
+/// disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Delta {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
@@ -191,12 +193,16 @@ impl<T> From<Option<T>> for Activation<T> {
 
 /// Fork `T`'s activation state resolved at **one block's own timestamp**.
 ///
-/// For an epoch-aligned fork this is the value that governs the epoch a block
+/// On an epoch block this is also the value that governs the epoch that block
 /// opens, so it is what epoch processing (slot touch, expiry) and anything that
-/// must agree with epoch processing takes. It is NOT interchangeable with
-/// [`ForEpoch`]: for the whole epoch in which such a fork activates, a block's
-/// own status is already active while its governing epoch block's is not.
-/// Distinct types so the two cannot be swapped at a call site.
+/// must agree with epoch processing takes. On an ordinary block it is just that
+/// block's own status — which is what the expiry-policy gates read, and which
+/// can flip mid-epoch, before epoch processing has applied the new rules.
+///
+/// It is NOT interchangeable with [`ForEpoch`]: for the whole epoch in which an
+/// epoch-aligned fork activates, a block's own status is already active while
+/// its governing epoch block's is not. Distinct types so the two cannot be
+/// swapped at a call site.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ForBlock<T> {
     active: bool,
@@ -366,7 +372,7 @@ impl IrysHardforkConfig {
     /// Only the Cascade term ledgers (OneYear/ThirtyDay) qualify, and only before
     /// Cascade activates. This uses the block's own `timestamp` as a proxy,
     /// whereas the authoritative ledger-set check (`extract_data_ledgers`) is
-    /// epoch-aligned (`is_cascade_active_for_epoch`). In the window between
+    /// epoch-aligned (`cascade_for_epoch`). In the window between
     /// Cascade's activation timestamp and the next epoch boundary the two can
     /// disagree, so callers treat an "unexpected" absence as a warning — the
     /// block's shape is already validated upstream — and degrade gracefully
