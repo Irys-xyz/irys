@@ -397,13 +397,15 @@ async fn unique_addresses_per_slot_test() {
 /// about the new ledgers from the header. Delta seeds them directly; before
 /// Delta the ledgers stay slotless (and therefore unassigned) for a full epoch.
 #[rstest::rstest]
-#[case::delta_active(true, 1)]
-#[case::pre_delta(false, 0)]
+#[case::delta_active(true, 1, 1)]
+#[case::pre_delta(false, 0, 2)]
 #[tokio::test]
 async fn new_ledger_activation_slots_test(
     #[case] delta_active: bool,
-    #[case] expected_slots: usize,
+    #[case] activation_epoch_slots: usize,
+    #[case] next_epoch_slots: usize,
 ) {
+    use irys_types::DataTransactionLedger;
     use irys_types::UnixTimestamp;
     use irys_types::hardfork_config::{Cascade, Delta};
 
@@ -498,7 +500,7 @@ async fn new_ledger_activation_slots_test(
         let slots = epoch_snapshot.ledgers.get_slots(ledger);
         assert_eq!(
             slots.len(),
-            expected_slots,
+            activation_epoch_slots,
             "{:?} slot count at the activation epoch (delta_active={})",
             ledger,
             delta_active
@@ -519,11 +521,42 @@ async fn new_ledger_activation_slots_test(
         }
     }
 
-    // Seeding happens once: the ledgers are still absent from later epoch
-    // headers, but their slots already exist so no further slots are added.
+    // The NEXT epoch block does carry the term ledgers: its producer reads the
+    // now-cascade-active parent snapshot, and `extract_data_ledgers` rejects a
+    // 2-ledger block from here on. So this is where the un-seeded ledger meets
+    // `calculate_additional_slots` for the first time, and the two cases diverge:
+    //
+    //   delta_active: 1 seeded slot already exists, and with no term data written
+    //     the capacity threshold is not met -> stays at 1. Seeding happens once.
+    //   pre_delta: `num_slots == 0` collapses the threshold to 0, which any
+    //     ledger size meets -> 2 slots, a full epoch after the ledger went live.
+    //
+    // That one-epoch slotless window is what Delta exists to close.
     let mut later_epoch_block = IrysBlockHeader::new_mock_header();
     later_epoch_block.height = config.consensus.epoch.num_blocks_in_epoch * 2;
-    later_epoch_block.timestamp = UnixTimestampMs::from_millis(EPOCH_BLOCK_SECS as u128 * 2000);
+    later_epoch_block.timestamp = UnixTimestampMs::from_millis(EPOCH_BLOCK_SECS as u128 * 2 * 1000);
+    let cascade = config
+        .consensus
+        .hardforks
+        .cascade
+        .as_ref()
+        .expect("cascade is configured above");
+    for (ledger, expires) in [
+        (DataLedger::OneYear, cascade.one_year_epoch_length),
+        (DataLedger::ThirtyDay, cascade.thirty_day_epoch_length),
+    ] {
+        later_epoch_block.data_ledgers.push(DataTransactionLedger {
+            ledger_id: ledger as u32,
+            tx_root: H256::zero(),
+            tx_ids: H256List::default(),
+            // No term data was written during the activation epoch, so the
+            // seeded slot is nowhere near full.
+            total_chunks: 0,
+            expires: Some(expires),
+            proofs: None,
+            required_proof_count: None,
+        });
+    }
 
     epoch_snapshot
         .perform_epoch_tasks(
@@ -536,8 +569,8 @@ async fn new_ledger_activation_slots_test(
     for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
         assert_eq!(
             epoch_snapshot.ledgers.get_slots(ledger).len(),
-            expected_slots,
-            "{:?} must not gain slots at epochs after activation (delta_active={})",
+            next_epoch_slots,
+            "{:?} slot count at the epoch after activation (delta_active={})",
             ledger,
             delta_active
         );
