@@ -518,6 +518,30 @@ async fn new_ledger_activation_slots_test(
             );
         }
     }
+
+    // Seeding happens once: the ledgers are still absent from later epoch
+    // headers, but their slots already exist so no further slots are added.
+    let mut later_epoch_block = IrysBlockHeader::new_mock_header();
+    later_epoch_block.height = config.consensus.epoch.num_blocks_in_epoch * 2;
+    later_epoch_block.timestamp = UnixTimestampMs::from_millis(EPOCH_BLOCK_SECS as u128 * 2000);
+
+    epoch_snapshot
+        .perform_epoch_tasks(
+            &Some(new_epoch_block.clone()),
+            &later_epoch_block,
+            Vec::new(),
+        )
+        .unwrap();
+
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        assert_eq!(
+            epoch_snapshot.ledgers.get_slots(ledger).len(),
+            expected_slots,
+            "{:?} must not gain slots at epochs after activation (delta_active={})",
+            ledger,
+            delta_active
+        );
+    }
 }
 
 #[tokio::test]
