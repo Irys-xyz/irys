@@ -95,7 +95,8 @@ async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::
 }
 
 /// Mid-chain Cascade activation must leave the term ledgers with slots and
-/// partition assignments in the epoch that activates them.
+/// partition assignments in the epoch that activates them, and term data posted
+/// in the following epoch must reach disk.
 ///
 /// The activation epoch block's own header carries only Publish + Submit: the
 /// producer derives the header ledger set from the parent epoch snapshot, which
@@ -111,10 +112,16 @@ async fn heavy_cascade_block_header_ledger_shape_at_activation_epoch() -> eyre::
 async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Result<()> {
     use irys_config::submodules::StorageSubmodulesConfig;
     use irys_types::hardfork_config::{Cascade, Delta};
+    use irys_types::{BoundedFee, LedgerChunkOffset};
 
-    let num_blocks_in_epoch = 2_u64;
-    let config = NodeConfig::testing().with_consensus(|c| {
+    // 4-block epochs leave room to include a term tx and migrate its block to
+    // disk without crossing the next epoch boundary — the boundary that would
+    // allocate the term slots from the header ledger set even without Delta.
+    let num_blocks_in_epoch = 4_u64;
+    let mut config = NodeConfig::testing().with_consensus(|c| {
         c.epoch.num_blocks_in_epoch = num_blocks_in_epoch;
+        c.chunk_size = 32;
+        c.block_migration_depth = 1;
         // Delta is active for the whole chain; it only has an effect in an epoch
         // that activates a ledger.
         c.hardforks.delta = Some(Delta {
@@ -123,6 +130,8 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
         });
         // Cascade intentionally NOT configured yet — activated mid-chain below.
     });
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
 
     // 5 submodules: 2 partitions for the genesis ledgers, the rest available for
     // the term ledger slots seeded at activation.
@@ -205,6 +214,61 @@ async fn heavy_cascade_midchain_activation_seeds_term_ledger_slots() -> eyre::Re
             node.node_ctx.config.consensus.num_partitions_per_slot,
             "{ledger:?} slot 0 must have its partitions assigned in the same epoch"
         );
+    }
+
+    // The window Delta exists for: from here until the next epoch block, term
+    // txs are accepted (the canonical epoch snapshot is now cascade-active) but
+    // only the seeded slots can store them. Data posted in this window must
+    // reach disk, not wait an epoch for slots.
+    node.wait_for_packing(30).await;
+
+    let chunks = vec![[10_u8; 32], [20_u8; 32], [30_u8; 32]];
+    let data: Vec<u8> = chunks.concat();
+    let data_size = data.len() as u64;
+    let price = node.get_data_price(DataLedger::OneYear, data_size).await?;
+    let tx = signer.create_transaction_with_fees(
+        data,
+        node.get_anchor().await?,
+        DataLedger::OneYear,
+        BoundedFee::new(price.term_fee),
+        None,
+    )?;
+    let tx = signer.sign_transaction(tx)?;
+    node.ingest_data_tx(tx.header.clone()).await?;
+    node.wait_for_mempool(tx.header.id, 30).await?;
+
+    let inclusion_block = node.mine_block().await?;
+    assert!(
+        inclusion_block
+            .get_data_ledger_tx_ids()
+            .get(&DataLedger::OneYear)
+            .is_some_and(|ids| ids.contains(&tx.header.id)),
+        "the term tx must be included in the block right after the activation epoch"
+    );
+
+    for i in 0..chunks.len() {
+        node.post_chunk_32b(&tx, i, &chunks).await;
+    }
+
+    // One more block migrates the inclusion block (block_migration_depth = 1),
+    // writing its chunks into the storage module behind the seeded slot. The
+    // ledger-offset read below only consults storage modules, never the chunk
+    // cache, so a hit means the bytes are on disk.
+    node.mine_block().await?;
+    assert!(
+        node.get_canonical_chain_height().await < activation_epoch + num_blocks_in_epoch,
+        "the on-disk check must land before the next epoch boundary, or a later \
+         epoch block could have allocated the slots instead of Delta"
+    );
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        node.verify_migrated_chunk_32b(
+            DataLedger::OneYear,
+            LedgerChunkOffset::from(i as u64),
+            chunk,
+            data_size,
+        )
+        .await;
     }
 
     node.stop().await;
