@@ -1181,7 +1181,7 @@ impl EpochSnapshot {
         let mut unassigned_parts: VecDeque<H256> = unassigned_partition_hashes.into();
 
         // Make a list of all the active pledges with no assigned partition hash
-        let mut unassigned_pledges: Vec<PledgeEntry> = self
+        let unassigned_pledges: Vec<PledgeEntry> = self
             .commitment_state
             .pledge_commitments
             .values()
@@ -1198,9 +1198,23 @@ impl EpochSnapshot {
             return;
         }
 
-        // Sort all the unassigned pledges by their ids, having a sorted list
-        // of pledges and unassigned hashes leads to deterministic pledge assignment
-        unassigned_pledges.sort_unstable_by_key(|a| a.id);
+        // Water-fill selection decides WHO is served when the pool cannot cover every pending
+        // pledge, spreading scarce capacity across as many distinct miner addresses as possible.
+        // It returns the winners in pledge-id order, so which hash each winner receives is
+        // unchanged, and an epoch whose supply meets demand assigns exactly as it always has.
+        let capacity_held = self
+            .partition_assignments
+            .capacity_partitions
+            .values()
+            .fold(
+                BTreeMap::new(),
+                |mut counts: BTreeMap<IrysAddress, usize>, assignment| {
+                    *counts.entry(assignment.miner_address).or_default() += 1;
+                    counts
+                },
+            );
+        let unassigned_pledges =
+            Self::water_fill_select(unassigned_pledges, &capacity_held, unassigned_parts.len());
 
         // Loop through both lists assigning capacity partitions to pledges
         for pledge in &unassigned_pledges {
@@ -2133,6 +2147,156 @@ mod tests {
             let winners = EpochSnapshot::water_fill_select(pending, &holdings, 1);
 
             assert_eq!(ids(&winners), vec![H256::from([0x02; 32])]);
+        }
+
+        fn capacity_assignment(
+            partition_hash: H256,
+            miner_address: IrysAddress,
+        ) -> PartitionAssignment {
+            PartitionAssignment {
+                partition_hash,
+                miner_address,
+                ledger_id: None,
+                slot_index: None,
+            }
+        }
+
+        fn seed_pending_pledge(snapshot: &mut EpochSnapshot, signer: IrysAddress, id: u8) {
+            snapshot
+                .commitment_state
+                .pledge_commitments
+                .entry(signer)
+                .or_default()
+                .push(PledgeEntry {
+                    id: H256::from([id; 32]),
+                    commitment_status: CommitmentStatus::Active,
+                    signer,
+                    amount: U256::zero(),
+                    partition_hash: None,
+                });
+        }
+
+        fn owner_of(snapshot: &EpochSnapshot, partition_hash: H256) -> Option<IrysAddress> {
+            snapshot
+                .partition_assignments
+                .capacity_partitions
+                .get(&partition_hash)
+                .map(|assignment| assignment.miner_address)
+        }
+
+        /// End to end through the snapshot: two unowned hashes, a deep holder and two newcomers
+        /// all with pending pledges. The newcomers must be served, the deep holder skipped.
+        #[test]
+        fn assignment_spreads_scarce_capacity_across_signers() {
+            let mut snapshot = EpochSnapshot::default();
+            let deep = IrysAddress::from([0xA0; 20]);
+            let newcomer_a = IrysAddress::from([0xB0; 20]);
+            let newcomer_b = IrysAddress::from([0xC0; 20]);
+
+            // The deep holder already owns five capacity partitions.
+            for byte in 0..5_u8 {
+                let partition_hash = H256::from([0xD0 + byte; 32]);
+                snapshot
+                    .partition_assignments
+                    .capacity_partitions
+                    .insert(partition_hash, capacity_assignment(partition_hash, deep));
+            }
+
+            let contested = [H256::from([0x01; 32]), H256::from([0x02; 32])];
+            snapshot.unassigned_partitions = contested.to_vec();
+
+            // The deep holder's pledges sort first by id, so the legacy lottery would have
+            // handed it both hashes.
+            seed_pending_pledge(&mut snapshot, deep, 0x10);
+            seed_pending_pledge(&mut snapshot, deep, 0x11);
+            seed_pending_pledge(&mut snapshot, newcomer_a, 0x12);
+            seed_pending_pledge(&mut snapshot, newcomer_b, 0x13);
+
+            snapshot.assign_partition_hashes_to_pledges();
+
+            let owners: Vec<IrysAddress> = contested
+                .iter()
+                .filter_map(|hash| owner_of(&snapshot, *hash))
+                .collect();
+            assert_eq!(owners.len(), 2, "both contested hashes should be assigned");
+            assert!(owners.contains(&newcomer_a), "newcomer A should be served");
+            assert!(owners.contains(&newcomer_b), "newcomer B should be served");
+            assert!(snapshot.unassigned_partitions.is_empty());
+        }
+
+        /// Uncontended through the snapshot: with supply for every pledge the deep holder is
+        /// served too, and the pairing is the legacy one — lowest pledge id takes the lowest hash.
+        #[test]
+        fn assignment_serves_everyone_when_supply_suffices() {
+            let mut snapshot = EpochSnapshot::default();
+            let deep = IrysAddress::from([0xA0; 20]);
+            let newcomer = IrysAddress::from([0xB0; 20]);
+
+            let existing = H256::from([0xD0; 32]);
+            snapshot
+                .partition_assignments
+                .capacity_partitions
+                .insert(existing, capacity_assignment(existing, deep));
+
+            snapshot.unassigned_partitions = vec![H256::from([0x01; 32]), H256::from([0x02; 32])];
+
+            seed_pending_pledge(&mut snapshot, deep, 0x10);
+            seed_pending_pledge(&mut snapshot, newcomer, 0x11);
+
+            snapshot.assign_partition_hashes_to_pledges();
+
+            assert_eq!(
+                snapshot.commitment_state.pledge_commitments[&deep][0].partition_hash,
+                Some(H256::from([0x01; 32]))
+            );
+            assert_eq!(
+                snapshot.commitment_state.pledge_commitments[&newcomer][0].partition_hash,
+                Some(H256::from([0x02; 32]))
+            );
+            assert!(snapshot.unassigned_partitions.is_empty());
+        }
+
+        /// Holdings count capacity partitions only. A signer whose partitions were promoted into
+        /// data slots is treated as a zero holder, because promoted partitions no longer occupy
+        /// the capacity pool.
+        #[test]
+        fn data_partitions_do_not_count_toward_holdings() {
+            let mut snapshot = EpochSnapshot::default();
+            let data_holder = IrysAddress::from([0xA0; 20]);
+            let capacity_holder = IrysAddress::from([0xB0; 20]);
+
+            // Same total footprint, different kind: one holds three data partitions, the other
+            // three capacity partitions.
+            for byte in 0..3_u8 {
+                let data_hash = H256::from([0xE0 + byte; 32]);
+                snapshot.partition_assignments.data_partitions.insert(
+                    data_hash,
+                    PartitionAssignment {
+                        partition_hash: data_hash,
+                        miner_address: data_holder,
+                        ledger_id: Some(DataLedger::Publish as u32),
+                        slot_index: Some(0),
+                    },
+                );
+
+                let capacity_hash = H256::from([0xF0 + byte; 32]);
+                snapshot.partition_assignments.capacity_partitions.insert(
+                    capacity_hash,
+                    capacity_assignment(capacity_hash, capacity_holder),
+                );
+            }
+
+            let contested = H256::from([0x01; 32]);
+            snapshot.unassigned_partitions = vec![contested];
+
+            // The capacity holder's pledge sorts first by id, so only the holdings count can
+            // make the data holder win.
+            seed_pending_pledge(&mut snapshot, capacity_holder, 0x10);
+            seed_pending_pledge(&mut snapshot, data_holder, 0x11);
+
+            snapshot.assign_partition_hashes_to_pledges();
+
+            assert_eq!(owner_of(&snapshot, contested), Some(data_holder));
         }
 
         /// Reference implementation: repeatedly serve the signer holding the fewest capacity
