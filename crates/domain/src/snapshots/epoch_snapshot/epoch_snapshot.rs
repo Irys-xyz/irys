@@ -14,7 +14,7 @@ use irys_types::{
     partition_chunk_offset_ie,
 };
 use openssl::sha;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
@@ -1110,18 +1110,65 @@ impl EpochSnapshot {
         self.unassigned_partitions.push(partition_hash);
     }
 
+    /// Selects which pending pledges receive the `available` unowned capacity partitions.
+    ///
+    /// Water-filling: signers holding the fewest capacity partitions are served first, so a
+    /// scarce pool spreads across as many distinct miner addresses as possible. Capacity pool
+    /// diversity is what bounds data replication — `process_slot_needs` admits at most one
+    /// replica per miner, so a slot can only reach as many replicas as there are distinct
+    /// capacity holders.
+    ///
+    /// Selection and hash pairing are deliberately separate concerns. Only selection bears on
+    /// diversity; which hash a winner receives does not. Winners are therefore returned in
+    /// pledge-id order, the order the protocol has always used, so when `available` covers every
+    /// pending pledge the result is exactly that order and assignment is unchanged.
+    ///
+    /// `held` counts capacity partitions only. A partition promoted into a data slot no longer
+    /// occupies the pool, so it no longer weighs against its holder.
+    fn water_fill_select(
+        pending: Vec<PledgeEntry>,
+        held: &BTreeMap<IrysAddress, usize>,
+        available: usize,
+    ) -> Vec<PledgeEntry> {
+        // Within a signer, pending pledges claim consecutive holdings levels in id order: the
+        // k-th pending pledge of a signer holding n is the one that would take it from n+k-1 to
+        // n+k. Stamping levels up front makes a single sort equivalent to repeatedly re-picking
+        // the lowest current holder.
+        let mut pending = pending;
+        pending.sort_unstable_by_key(|pledge| pledge.id);
+        let mut next_level: BTreeMap<IrysAddress, usize> = BTreeMap::new();
+        let mut keyed: Vec<(usize, PledgeEntry)> = pending
+            .into_iter()
+            .map(|pledge| {
+                let offset = next_level.entry(pledge.signer).or_default();
+                let level = held.get(&pledge.signer).copied().unwrap_or(0) + *offset;
+                *offset += 1;
+                (level, pledge)
+            })
+            .collect();
+
+        keyed.sort_unstable_by_key(|(level, pledge)| (*level, pledge.id));
+        keyed.truncate(available);
+
+        let mut winners: Vec<PledgeEntry> = keyed.into_iter().map(|(_, pledge)| pledge).collect();
+        winners.sort_unstable_by_key(|pledge| pledge.id);
+        winners
+    }
+
     /// Assigns partition hashes to unassigned pledge commitments
     ///
     /// This function pairs unassigned partition hashes with active pledge commitments
     /// that have no partition hash assigned. It:
     ///
     /// 1. Takes partition hashes from self.unassigned_partitions
-    /// 2. Assigns them to active pledges in commitment_state that need partitions
+    /// 2. Selects which active pledges are served, fewest capacity partitions held first
     /// 3. Updates PartitionAssignments to track the assignments
     /// 4. Removes assigned partitions from the unassigned_partitions list
     ///
-    /// The assignment is deterministic, using sorted lists of both pledges and
-    /// partition hashes to ensure consistent results.
+    /// The assignment is deterministic: both the partition hashes and the selected pledges are
+    /// sorted. When the pool can serve every pending pledge, selection is total and the pledge
+    /// order is the plain id order, so the outcome matches assignment before water-filling
+    /// existed. See `water_fill_select`.
     pub fn assign_partition_hashes_to_pledges(&mut self) {
         // Exit early if no partitions available
         if self.unassigned_partitions.is_empty() {
@@ -1962,6 +2009,205 @@ mod tests {
                 .filter(|h| **h == ph)
                 .count();
             assert_eq!(count, 1);
+        }
+    }
+
+    mod water_fill_selection {
+        use super::*;
+        use irys_types::{CommitmentStatus, U256};
+        use std::collections::BTreeMap;
+
+        fn pledge(signer: u8, id: u8) -> PledgeEntry {
+            PledgeEntry {
+                id: H256::from([id; 32]),
+                commitment_status: CommitmentStatus::Active,
+                signer: IrysAddress::from([signer; 20]),
+                amount: U256::zero(),
+                partition_hash: None,
+            }
+        }
+
+        fn held(entries: &[(u8, usize)]) -> BTreeMap<IrysAddress, usize> {
+            entries
+                .iter()
+                .map(|(signer, count)| (IrysAddress::from([*signer; 20]), *count))
+                .collect()
+        }
+
+        fn ids(pledges: &[PledgeEntry]) -> Vec<H256> {
+            pledges.iter().map(|pledge| pledge.id).collect()
+        }
+
+        /// Supply meeting demand must reproduce the legacy ordering exactly: sorted by pledge
+        /// id, nothing dropped. The assignment loop is unchanged and consumes this list in
+        /// order against an unchanged hash queue, so this identity is what makes an
+        /// uncontended epoch produce byte-identical state to the pre-change behavior.
+        #[test]
+        fn uncontended_reproduces_legacy_id_order() {
+            let pending = vec![pledge(1, 9), pledge(2, 3), pledge(1, 5)];
+            let holdings = held(&[(1, 42), (2, 0)]);
+
+            let winners = EpochSnapshot::water_fill_select(pending.clone(), &holdings, 3);
+
+            let mut expected = pending;
+            expected.sort_unstable_by_key(|pledge| pledge.id);
+            assert_eq!(ids(&winners), ids(&expected));
+        }
+
+        /// Exactly enough supply is still uncontended, and is the boundary most likely to
+        /// regress into reordering or dropping.
+        #[test]
+        fn uncontended_at_exact_boundary() {
+            let pending = vec![pledge(1, 9), pledge(1, 8), pledge(2, 7)];
+            let holdings = held(&[(1, 30)]);
+
+            let winners =
+                EpochSnapshot::water_fill_select(pending.clone(), &holdings, pending.len());
+
+            let mut expected = pending;
+            expected.sort_unstable_by_key(|pledge| pledge.id);
+            assert_eq!(ids(&winners), ids(&expected));
+        }
+
+        /// Contended: a deep holder is skipped entirely in favour of shallow holders.
+        /// A holds 42 with 2 pending, B holds 0 with 3 pending, C holds 1 with 1 pending,
+        /// four hashes available. B and C take all four, in id order among themselves.
+        #[test]
+        fn contended_selects_shallow_holders_first() {
+            let pending = vec![
+                pledge(0xA0, 0x21),
+                pledge(0xA0, 0x22),
+                pledge(0xB0, 0x11),
+                pledge(0xB0, 0x12),
+                pledge(0xB0, 0x13),
+                pledge(0xC0, 0x31),
+            ];
+            let holdings = held(&[(0xA0, 42), (0xC0, 1)]);
+
+            let winners = EpochSnapshot::water_fill_select(pending, &holdings, 4);
+
+            assert_eq!(
+                ids(&winners),
+                vec![
+                    H256::from([0x11; 32]),
+                    H256::from([0x12; 32]),
+                    H256::from([0x13; 32]),
+                    H256::from([0x31; 32]),
+                ]
+            );
+        }
+
+        /// A signer's own pending pledges claim consecutive levels, so one signer cannot take
+        /// the whole pool while another waits at a lower level.
+        #[test]
+        fn levels_advance_within_a_signer() {
+            let pending = vec![
+                pledge(1, 0x01),
+                pledge(1, 0x02),
+                pledge(1, 0x03),
+                pledge(2, 0x04),
+            ];
+
+            let winners = EpochSnapshot::water_fill_select(pending, &BTreeMap::new(), 2);
+
+            // Signer 1 takes level 0 with id 0x01, signer 2 takes level 0 with id 0x04.
+            // Signer 1's id 0x02 sits at level 1 and loses to it.
+            assert_eq!(
+                ids(&winners),
+                vec![H256::from([0x01; 32]), H256::from([0x04; 32])]
+            );
+        }
+
+        #[test]
+        fn no_supply_selects_nothing() {
+            let pending = vec![pledge(1, 1), pledge(2, 2)];
+            assert!(EpochSnapshot::water_fill_select(pending, &BTreeMap::new(), 0).is_empty());
+        }
+
+        /// A signer absent from the holdings map counts as zero.
+        #[test]
+        fn unknown_signer_counts_as_zero_holdings() {
+            let pending = vec![pledge(1, 0x02), pledge(2, 0x01)];
+            let holdings = held(&[(2, 5)]);
+
+            let winners = EpochSnapshot::water_fill_select(pending, &holdings, 1);
+
+            assert_eq!(ids(&winners), vec![H256::from([0x02; 32])]);
+        }
+
+        /// Reference implementation: repeatedly serve the signer holding the fewest capacity
+        /// partitions, ties by id. The single-sort form must agree with it on every input.
+        fn reference_select(
+            pending: &[PledgeEntry],
+            held: &BTreeMap<IrysAddress, usize>,
+            available: usize,
+        ) -> Vec<PledgeEntry> {
+            let mut remaining = pending.to_vec();
+            remaining.sort_unstable_by_key(|pledge| pledge.id);
+            let mut counts = held.clone();
+            let mut winners = Vec::new();
+            for _ in 0..available {
+                let Some((index, _)) = remaining.iter().enumerate().min_by_key(|(_, pledge)| {
+                    (counts.get(&pledge.signer).copied().unwrap_or(0), pledge.id)
+                }) else {
+                    break;
+                };
+                let winner = remaining.remove(index);
+                *counts.entry(winner.signer).or_default() += 1;
+                winners.push(winner);
+            }
+            winners.sort_unstable_by_key(|pledge| pledge.id);
+            winners
+        }
+
+        /// Duplicate pledge ids are rejected upstream by `commitment_dedup`, and the reference
+        /// implementation's `min_by_key` would tie on them, so generated inputs are deduped.
+        fn distinct_pledges(specs: Vec<(u8, u8)>) -> Vec<PledgeEntry> {
+            let mut seen = HashSet::new();
+            specs
+                .into_iter()
+                .filter(|(_, id)| seen.insert(*id))
+                .map(|(signer, id)| pledge(signer, id))
+                .collect()
+        }
+
+        proptest::proptest! {
+            #[test]
+            fn matches_greedy_reference(
+                specs in proptest::collection::vec((1_u8..4, 0_u8..32), 0..12),
+                holdings in proptest::collection::vec((1_u8..4, 0_usize..6), 0..4),
+                available in 0_usize..12,
+            ) {
+                let pending = distinct_pledges(specs);
+                let holdings = held(&holdings);
+
+                let actual = EpochSnapshot::water_fill_select(pending.clone(), &holdings, available);
+                let expected = reference_select(&pending, &holdings, available);
+
+                proptest::prop_assert_eq!(ids(&actual), ids(&expected));
+                proptest::prop_assert!(actual.len() <= available);
+                proptest::prop_assert!(actual.windows(2).all(|pair| pair[0].id <= pair[1].id));
+            }
+
+            /// The uncontended identity, over arbitrary holdings and pledge distributions.
+            #[test]
+            fn uncontended_is_always_legacy_order(
+                specs in proptest::collection::vec((1_u8..5, 0_u8..40), 0..12),
+                holdings in proptest::collection::vec((1_u8..5, 0_usize..50), 0..5),
+            ) {
+                let pending = distinct_pledges(specs);
+                let holdings = held(&holdings);
+
+                let actual = EpochSnapshot::water_fill_select(
+                    pending.clone(),
+                    &holdings,
+                    pending.len(),
+                );
+
+                let mut expected = pending;
+                expected.sort_unstable_by_key(|pledge| pledge.id);
+                proptest::prop_assert_eq!(ids(&actual), ids(&expected));
+            }
         }
     }
 }
