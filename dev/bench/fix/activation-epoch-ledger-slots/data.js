@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785435606748,
+  "lastUpdate": 1785842694927,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14083,6 +14083,110 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "committer": {
+            "name": "Irys-xyz",
+            "username": "Irys-xyz"
+          },
+          "id": "c67ff2bbed11be7540e82fd03fe47338e59e8e98",
+          "message": "feat(consensus): Delta hardfork — seed slots for ledgers activated mid-chain",
+          "timestamp": "2026-07-30T18:04:55Z",
+          "url": "https://github.com/Irys-xyz/irys/pull/1547/commits/c67ff2bbed11be7540e82fd03fe47338e59e8e98"
+        },
+        "date": 1785842693707,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.013001,
+            "range": "± 0.000792",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.127145,
+            "range": "± 0.0033",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.282277,
+            "range": "± 0.024402",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.395509,
+            "range": "± 0.167932",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.078972,
+            "range": "± 0.000638",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 777.667581,
+            "range": "± 8.787104",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 981.327026,
+            "range": "± 6.26453",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117598,
+            "range": "± 0.001632",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1172.829377,
+            "range": "± 10.010295",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1554.986065,
+            "range": "± 6.763486",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.034913,
+            "range": "± 0.000728",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 208.814796,
+            "range": "± 0.104218",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 271.640758,
+            "range": "± 0.403636",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000112,
+            "range": "± 0.000001",
             "unit": "ms/iter"
           }
         ]
