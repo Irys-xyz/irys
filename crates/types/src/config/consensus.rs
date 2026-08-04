@@ -842,6 +842,8 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
+                // Delta hardfork - not scheduled yet
+                delta: None,
             },
         }
     }
@@ -978,6 +980,9 @@ impl ConsensusConfig {
                 // Cascade hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 cascade: None,
+                // Delta hardfork - not active by default in testing;
+                // tests that need it should override via with_consensus()
+                delta: None,
             },
         }
     }
@@ -1113,6 +1118,8 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 10, // 10 hrs
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
+                // Delta hardfork - not scheduled yet
+                delta: None,
             },
         }
     }

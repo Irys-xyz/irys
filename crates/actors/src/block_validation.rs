@@ -7574,6 +7574,7 @@ mod tests {
                 aurora: None,
                 borealis: None,
                 cascade: None,
+                delta: None,
             };
 
             let parent_n = hardforks.number_of_ingress_proofs_total_at(parent_ts);
@@ -9235,6 +9236,7 @@ mod commitment_version_tests {
                 }),
                 borealis: None,
                 cascade: None,
+                delta: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -9251,6 +9253,7 @@ mod commitment_version_tests {
                 aurora: None,
                 borealis: None,
                 cascade: None,
+                delta: None,
             },
             ..ConsensusConfig::testing()
         }

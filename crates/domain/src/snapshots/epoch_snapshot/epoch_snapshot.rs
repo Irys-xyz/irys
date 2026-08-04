@@ -10,6 +10,7 @@ use irys_types::{
 };
 use irys_types::{
     CommitmentTransaction, ConsensusConfig, IrysAddress, PartitionChunkOffset,
+    hardfork_config::{Activation, Delta},
     partition_chunk_offset_ie,
 };
 use openssl::sha;
@@ -324,7 +325,15 @@ impl EpochSnapshot {
 
         self.try_genesis_init(new_epoch_block);
 
-        self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block);
+        // Epoch-aligned, like the Cascade gate above: the epoch block's own
+        // timestamp decides Delta for every block in this epoch.
+        let delta = self
+            .config
+            .consensus
+            .hardforks
+            .delta_at(new_epoch_block.timestamp_secs());
+
+        self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block, delta);
 
         // Update the canonical write window AFTER allocation (so this epoch's
         // new slots exist) and BEFORE expiry (so freshly-written slots aren't
@@ -545,6 +554,7 @@ impl EpochSnapshot {
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
         new_epoch_block: &IrysBlockHeader,
+        delta: Activation<Delta>,
     ) {
         for ledger in self.ledgers.active_ledgers() {
             // Skip ledgers not present in the block (e.g. pre-hardfork blocks)
@@ -553,6 +563,25 @@ impl EpochSnapshot {
                 .iter()
                 .any(|l| l.ledger_id == ledger as u32)
             {
+                // A ledger activated by THIS epoch block cannot appear in its
+                // own header: the producer derives the header ledger set from
+                // the parent epoch snapshot, which still predates the
+                // activation. Seed the ledger's first slots here (as genesis
+                // init does for the ledgers active at genesis) so it has
+                // partitions from the epoch it becomes active — blocks in that
+                // epoch already accept data for it, and the header only catches
+                // up an epoch later. `slot_count() == 0` never recurs once
+                // seeded: slots are marked expired, never removed.
+                if let Activation::Active(delta) = delta
+                    && self.ledgers[ledger].slot_count() == 0
+                {
+                    let slots = delta.initial_slots_per_new_ledger.get();
+                    debug!(
+                        "Seeding {} slots for newly activated ledger {:?}",
+                        slots, ledger
+                    );
+                    self.ledgers[ledger].allocate_slots(slots, new_epoch_block.height);
+                }
                 continue;
             }
             let part_slots =

@@ -10,6 +10,7 @@ use crate::{
 };
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,6 +37,12 @@ pub struct IrysHardforkConfig {
     /// timestamp >= activation_timestamp. None means disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cascade: Option<Cascade>,
+
+    /// Delta hardfork - seeds slots for a data ledger in the epoch it activates.
+    /// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch block's
+    /// timestamp >= activation_timestamp. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta: Option<Delta>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -125,6 +132,78 @@ impl Cascade {
     }
 }
 
+/// Delta hardfork - a data ledger that becomes active mid-chain gets its first
+/// slots in the epoch that activates it.
+///
+/// A hardfork that adds a data ledger activates it inside `perform_epoch_tasks`,
+/// but the epoch block's own header cannot list it: the producer derives the
+/// header ledger set from the parent epoch snapshot, which still predates the
+/// activation. Slot allocation skips any ledger absent from the header, so
+/// without this fork the ledger stays slotless — and therefore unassigned and
+/// unstorable — until the following epoch.
+///
+/// Activation is epoch-aligned: enabled for all blocks in an epoch if the epoch
+/// block's timestamp >= activation_timestamp. None means disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Delta {
+    /// Timestamp (seconds since epoch) at which this hardfork activates.
+    /// The actual activation happens at the first epoch boundary where the
+    /// epoch block's timestamp meets or exceeds this value.
+    #[serde(with = "unix_timestamp_string_serde")]
+    pub activation_timestamp: UnixTimestamp,
+    /// Slots allocated to a data ledger in the epoch it becomes active
+    /// (default: 1, matching the per-ledger allocation at genesis init).
+    /// Non-zero: seeding zero slots is what this fork exists to prevent.
+    #[serde(default = "Delta::default_initial_slots_per_new_ledger")]
+    pub initial_slots_per_new_ledger: NonZeroU64,
+}
+
+impl Delta {
+    pub const fn default_initial_slots_per_new_ledger() -> NonZeroU64 {
+        NonZeroU64::MIN
+    }
+}
+
+/// The resolved activation state of a hardfork, carrying that fork's parameters
+/// while it is active.
+///
+/// Consensus code takes this instead of a bare `bool`. Which timestamp a fork is
+/// resolved against decides the activation boundary — a block's own timestamp
+/// and its epoch block's timestamp disagree for a whole epoch after an
+/// epoch-aligned fork activates — so the resolution happens once, where the
+/// state is built, and the state travels to its call sites as a named type that
+/// cannot be confused with an unrelated flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation<T> {
+    Active(T),
+    Inactive,
+}
+
+impl<T> Activation<T> {
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        matches!(self, Self::Active(_))
+    }
+
+    /// The fork's parameters, or `None` while it is inactive.
+    #[must_use]
+    pub fn params(self) -> Option<T> {
+        match self {
+            Self::Active(params) => Some(params),
+            Self::Inactive => None,
+        }
+    }
+}
+
+impl<T> From<Option<T>> for Activation<T> {
+    fn from(params: Option<T>) -> Self {
+        match params {
+            Some(params) => Self::Active(params),
+            None => Self::Inactive,
+        }
+    }
+}
+
 /// Result of looking up a data ledger in a block header via
 /// [`IrysHardforkConfig::classify_data_ledger`].
 ///
@@ -197,6 +276,16 @@ impl IrysHardforkConfig {
     #[must_use]
     pub fn is_cascade_active_at(&self, timestamp: UnixTimestamp) -> bool {
         self.cascade_at(timestamp).is_some()
+    }
+
+    /// Resolve the Delta hardfork's activation state at the given timestamp
+    /// (in seconds). Raw timestamp check — epoch alignment is the caller's
+    /// concern (pass an epoch block's timestamp for epoch-aligned semantics).
+    #[must_use]
+    pub fn delta_at(&self, timestamp: UnixTimestamp) -> Activation<Delta> {
+        self.delta
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .into()
     }
 
     /// Check if the Borealis hardfork is active at the given timestamp (in seconds).
@@ -295,6 +384,7 @@ mod tests {
             aurora: None,
             borealis: None,
             cascade: None,
+            delta: None,
         };
 
         assert_eq!(
@@ -327,6 +417,7 @@ mod tests {
             }),
             borealis: None,
             cascade: None,
+            delta: None,
         };
 
         // Before activation timestamp
@@ -358,6 +449,7 @@ mod tests {
                 thirty_day_epoch_length: 30,
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
+            delta: None,
         };
 
         // Before activation timestamp
@@ -381,6 +473,7 @@ mod tests {
         // No cascade configured
         let no_cascade = IrysHardforkConfig {
             cascade: None,
+            delta: None,
             ..config
         };
         assert!(
@@ -407,6 +500,7 @@ mod tests {
                 thirty_day_epoch_length: 30,
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
+            delta: None,
         };
 
         let before = UnixTimestamp::from_secs(1499);
@@ -426,6 +520,7 @@ mod tests {
         // absence is always expected (never an invariant violation).
         let no_cascade = IrysHardforkConfig {
             cascade: None,
+            delta: None,
             ..config
         };
         assert!(no_cascade.ledger_absence_expected(DataLedger::OneYear as u32, at));
@@ -452,6 +547,7 @@ mod tests {
                 thirty_day_epoch_length: 30,
                 annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
             }),
+            delta: None,
         };
 
         // Cascade active at the block's timestamp.
@@ -488,6 +584,7 @@ mod tests {
                 activation_timestamp: UnixTimestamp::from_secs(1500),
             }),
             cascade: None,
+            delta: None,
         };
 
         assert!(!config.is_borealis_active_at(UnixTimestamp::from_secs(1499)));
@@ -516,6 +613,7 @@ mod tests {
             aurora: None,
             borealis: None,
             cascade: None,
+            delta: None,
         };
 
         // Before activation timestamp
@@ -552,6 +650,59 @@ mod tests {
     }
 
     #[test]
+    fn test_delta_at_activation_boundary() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 0,
+            },
+            next_name_tbd: None,
+            aurora: None,
+            borealis: None,
+            cascade: None,
+            delta: Some(Delta {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                initial_slots_per_new_ledger: NonZeroU64::new(2).expect("non-zero"),
+            }),
+        };
+
+        assert_eq!(
+            config.delta_at(UnixTimestamp::from_secs(1499)),
+            Activation::Inactive
+        );
+        let Activation::Active(delta) = config.delta_at(UnixTimestamp::from_secs(1500)) else {
+            panic!("delta must be active at its activation timestamp");
+        };
+        assert_eq!(delta.initial_slots_per_new_ledger.get(), 2);
+        assert!(config.delta_at(UnixTimestamp::from_secs(1501)).is_active());
+
+        // Unconfigured means never active.
+        let no_delta = IrysHardforkConfig {
+            delta: None,
+            ..config
+        };
+        assert_eq!(
+            no_delta.delta_at(UnixTimestamp::from_secs(u64::MAX)),
+            Activation::Inactive
+        );
+    }
+
+    #[test]
+    fn test_delta_toml_defaults_initial_slots() {
+        let toml_str = "
+            [frontier]
+            number_of_ingress_proofs_total = 5
+            number_of_ingress_proofs_from_assignees = 0
+
+            [delta]
+            activation_timestamp = \"2026-09-01T00:00:00+00:00\"
+        ";
+        let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
+        let delta = config.delta.expect("delta must parse");
+        assert_eq!(delta.initial_slots_per_new_ledger.get(), 1);
+    }
+
+    #[test]
     fn test_toml_serialization() {
         let config = IrysHardforkConfig {
             frontier: FrontierParams {
@@ -566,6 +717,7 @@ mod tests {
             aurora: None,
             borealis: None,
             cascade: None,
+            delta: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -612,6 +764,7 @@ mod tests {
                 }),
                 borealis: None,
                 cascade: None,
+                delta: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -638,6 +791,7 @@ mod tests {
                 }),
                 borealis: None,
                 cascade: None,
+                delta: None,
             };
 
             let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -657,6 +811,7 @@ mod tests {
                 aurora: None,
                 borealis: None,
                 cascade: None,
+                delta: None,
             };
 
             prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
@@ -689,6 +844,7 @@ mod tests {
                 }),
                 borealis: None,
                 cascade: None,
+                delta: None,
             };
 
             let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
@@ -721,6 +877,7 @@ mod tests {
                 }),
                 borealis: None,
                 cascade: None,
+                delta: None,
             }
         }
 
@@ -734,6 +891,7 @@ mod tests {
                 aurora: None,
                 borealis: None,
                 cascade: None,
+                delta: None,
             }
         }
 
@@ -825,6 +983,7 @@ mod tests {
                 aurora: None,
                 borealis: None,
                 cascade: None,
+                delta: None,
             }
         }
 
@@ -837,6 +996,7 @@ mod tests {
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
+                delta: None,
                 ..base_config()
             };
             let toml_str = toml::to_string_pretty(&config).unwrap();
