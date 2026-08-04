@@ -331,7 +331,7 @@ impl EpochSnapshot {
             .config
             .consensus
             .hardforks
-            .delta_at(new_epoch_block.timestamp_secs());
+            .delta_for_block(new_epoch_block.timestamp_secs());
 
         self.allocate_additional_ledger_slots(previous_epoch_block, new_epoch_block, delta);
 

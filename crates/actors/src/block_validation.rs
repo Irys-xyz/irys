@@ -5285,10 +5285,6 @@ async fn generate_expected_shadow_transactions(
             .consensus
             .hardforks
             .cascade_for_block(block.timestamp_secs());
-        let cascade_for_epoch = config
-            .consensus
-            .hardforks
-            .cascade_for_epoch(&parent_epoch_snapshot);
         // Each ledger's cumulative `total_chunks` is read from the prevalidated
         // header so producer and validator settle the identical expiring set.
         ledger_expiry::calculate_all_expired_ledger_fees(

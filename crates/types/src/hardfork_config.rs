@@ -180,22 +180,6 @@ pub enum Activation<T> {
     Inactive,
 }
 
-impl<T> Activation<T> {
-    #[must_use]
-    pub const fn is_active(&self) -> bool {
-        matches!(self, Self::Active(_))
-    }
-
-    /// The fork's parameters, or `None` while it is inactive.
-    #[must_use]
-    pub fn params(self) -> Option<T> {
-        match self {
-            Self::Active(params) => Some(params),
-            Self::Inactive => None,
-        }
-    }
-}
-
 impl<T> From<Option<T>> for Activation<T> {
     fn from(params: Option<T>) -> Self {
         match params {
@@ -355,11 +339,15 @@ impl IrysHardforkConfig {
         ForBlock::new(self.is_cascade_active_at(timestamp))
     }
 
-    /// Resolve the Delta hardfork's activation state at the given timestamp
-    /// (in seconds). Raw timestamp check — epoch alignment is the caller's
-    /// concern (pass an epoch block's timestamp for epoch-aligned semantics).
+    /// Delta's activation state at a block's OWN timestamp (in seconds), with
+    /// its parameters while active.
+    ///
+    /// Named like [`Self::cascade_for_block`] because the scope is the same — the
+    /// epoch block's own timestamp decides the epoch it opens. It carries the
+    /// fork's parameters rather than a [`ForBlock`] tag because its single
+    /// consumer needs them.
     #[must_use]
-    pub fn delta_at(&self, timestamp: UnixTimestamp) -> Activation<Delta> {
+    pub fn delta_for_block(&self, timestamp: UnixTimestamp) -> Activation<Delta> {
         self.delta
             .filter(|f| timestamp >= f.activation_timestamp)
             .into()
@@ -727,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_at_activation_boundary() {
+    fn test_delta_for_block_activation_boundary() {
         let config = IrysHardforkConfig {
             frontier: FrontierParams {
                 number_of_ingress_proofs_total: 5,
@@ -744,14 +732,18 @@ mod tests {
         };
 
         assert_eq!(
-            config.delta_at(UnixTimestamp::from_secs(1499)),
+            config.delta_for_block(UnixTimestamp::from_secs(1499)),
             Activation::Inactive
         );
-        let Activation::Active(delta) = config.delta_at(UnixTimestamp::from_secs(1500)) else {
+        let Activation::Active(delta) = config.delta_for_block(UnixTimestamp::from_secs(1500))
+        else {
             panic!("delta must be active at its activation timestamp");
         };
         assert_eq!(delta.initial_slots_per_new_ledger.get(), 2);
-        assert!(config.delta_at(UnixTimestamp::from_secs(1501)).is_active());
+        assert!(matches!(
+            config.delta_for_block(UnixTimestamp::from_secs(1501)),
+            Activation::Active(_)
+        ));
 
         // Unconfigured means never active.
         let no_delta = IrysHardforkConfig {
@@ -759,7 +751,7 @@ mod tests {
             ..config
         };
         assert_eq!(
-            no_delta.delta_at(UnixTimestamp::from_secs(u64::MAX)),
+            no_delta.delta_for_block(UnixTimestamp::from_secs(u64::MAX)),
             Activation::Inactive
         );
     }
