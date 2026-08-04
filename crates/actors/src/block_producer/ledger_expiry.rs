@@ -70,7 +70,10 @@ use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, H256, IrysAddress,
     IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, U256,
-    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
+    app_state::DatabaseProvider,
+    fee_distribution::TermFeeCharges,
+    hardfork_config::{Cascade, ForBlock, ForEpoch},
+    ledger_chunk_offset_ii,
 };
 use nodit::{InclusiveInterval as _, interval::ii};
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,7 +113,7 @@ pub async fn calculate_expired_ledger_fees(
     // slot-keyed minerless-slot refund (empty-`partitions` expired slots) is
     // unconditional, so for such a slot the settled set differs from pre-Cascade
     // master.
-    cascade_active: bool,
+    cascade_for_block: ForBlock<Cascade>,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Fee distribution is only implemented for Submit ledger. Publish expiry
     // simply resets partitions without fee redistribution.
@@ -126,7 +129,7 @@ pub async fn calculate_expired_ledger_fees(
         block_height,
         ledger_type,
         new_total_chunks,
-        cascade_active,
+        cascade_for_block,
     )?;
 
     tracing::info!(
@@ -250,9 +253,9 @@ pub async fn calculate_expired_ledger_fees(
 ///
 /// This is the single home for the three-call pattern so producer↔validator parity
 /// is **mechanical, not hand-maintained**: both sides pass the same
-/// `cascade_active_for_block` (the block's OWN timestamp — gates the write-window
-/// exclusion to match `touch_active_ledger_slots`, and must NOT be the
-/// epoch-lagging `is_cascade_active_for_epoch`) and `cascade_active_for_epoch`
+/// `cascade_for_block` (the block's OWN timestamp — gates the write-window
+/// exclusion to match `touch_active_ledger_slots`; a distinct type from the
+/// epoch-lagging state, so the two cannot be swapped) and `cascade_for_epoch`
 /// (gates whether the term ledgers settle at all). The ONLY legitimate difference —
 /// each ledger's cumulative `total_chunks` at this block — is supplied by
 /// `new_total_chunks`: the producer computes `parent + chunks_added`; the validator
@@ -267,8 +270,8 @@ pub async fn calculate_all_expired_ledger_fees(
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-    cascade_active_for_block: bool,
-    cascade_active_for_epoch: bool,
+    cascade_for_block: ForBlock<Cascade>,
+    cascade_for_epoch: ForEpoch<Cascade>,
     new_total_chunks: impl Fn(DataLedger) -> u64,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     let mut result = calculate_expired_ledger_fees(
@@ -283,12 +286,12 @@ pub async fn calculate_all_expired_ledger_fees(
         db,
         true, // Submit: expect promotion — refund the perm fee for unpromoted txs
         new_total_chunks(DataLedger::Submit),
-        cascade_active_for_block,
+        cascade_for_block,
     )
     .await?;
 
     // Term ledgers (no promotion) only settle once Cascade is active for the epoch.
-    if cascade_active_for_epoch {
+    if cascade_for_epoch.is_active() {
         for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
             let delta = calculate_expired_ledger_fees(
                 parent_epoch_snapshot,
@@ -302,7 +305,7 @@ pub async fn calculate_all_expired_ledger_fees(
                 db,
                 false, // term ledgers: no promotion expected
                 new_total_chunks(ledger),
-                cascade_active_for_block,
+                cascade_for_block,
             )
             .await?;
             result.merge(delta);
@@ -453,7 +456,7 @@ pub async fn expired_submit_tx_ids(
     // to `expired_submit_range`, so this differential-test oracle stays faithful
     // at the activation epoch boundary (NC-0042) — previously this derived it from
     // `parent_epoch_snapshot.epoch_block.timestamp_secs()`, which lags the block.
-    cascade_active: bool,
+    cascade_for_block: ForBlock<Cascade>,
     block_index: BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -462,7 +465,7 @@ pub async fn expired_submit_tx_ids(
     let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
         DataLedger::Submit,
         block_height,
-        cascade_active,
+        cascade_for_block,
         parent_block_header.ledger_total_chunks(DataLedger::Submit),
     );
     if slot_indexes.is_empty() {
@@ -523,7 +526,7 @@ pub async fn is_submit_storage_expired(
     parent_block_header: &IrysBlockHeader,
     config: &Config,
     // The block-under-test's own Cascade status — see `expired_submit_tx_ids`.
-    cascade_active: bool,
+    cascade_for_block: ForBlock<Cascade>,
     block_index: &BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
@@ -534,7 +537,7 @@ pub async fn is_submit_storage_expired(
         parent_epoch_snapshot,
         parent_block_header,
         config,
-        cascade_active,
+        cascade_for_block,
     )?
     else {
         return Ok(false);
@@ -576,7 +579,7 @@ pub struct ExpiredSubmitRange {
 /// a pure function of the block's own parent, identical on every node regardless
 /// of that node's migration-lagged block-index tip (NC-0042 F2). The branch-
 /// correct mapping from a candidate's inclusion to a chunk offset happens later,
-/// per candidate, in [`submit_tx_expired`]. `cascade_active` MUST be the
+/// per candidate, in [`submit_tx_expired`]. `cascade_for_block` MUST be the
 /// Cascade status of the block being produced/validated; pre-Cascade replay
 /// keeps the old allocation-anchored unwritten-slot expiry behavior.
 pub fn expired_submit_range(
@@ -584,13 +587,13 @@ pub fn expired_submit_range(
     parent_epoch_snapshot: &EpochSnapshot,
     parent_block_header: &IrysBlockHeader,
     config: &Config,
-    cascade_active: bool,
+    cascade_for_block: ForBlock<Cascade>,
 ) -> eyre::Result<Option<ExpiredSubmitRange>> {
     let parent_total = parent_block_header.ledger_total_chunks(DataLedger::Submit);
     let slot_indexes = parent_epoch_snapshot.get_all_expired_term_slot_indexes(
         DataLedger::Submit,
         block_height,
-        cascade_active,
+        cascade_for_block,
         parent_total,
     );
     let Some(&max_expired_slot) = slot_indexes.iter().max() else {
@@ -1189,13 +1192,13 @@ fn collect_expired_partitions(
     block_height: u64,
     target_ledger_type: DataLedger,
     new_total_chunks: u64,
-    cascade_active: bool,
+    cascade_for_block: ForBlock<Cascade>,
 ) -> eyre::Result<BTreeMap<SlotIndex, Vec<IrysAddress>>> {
     let partition_assignments = &parent_epoch_snapshot.partition_assignments;
     // Window-excluded (Cascade only): settle exactly the slots that actually
     // recycle, so a slot written in its expiry epoch (rescued by the last_height
     // touch) is not paid here and then again when it later recycles. Pre-Cascade
-    // the touch is gated off, so `cascade_active=false` disables the exclusion
+    // the touch is gated off, so an inactive block state disables the exclusion
     // and settlement matches the original master set.
     //
     // Slot-keyed, NOT partition-keyed: a slot whose replicas were all unpledged
@@ -1208,7 +1211,7 @@ fn collect_expired_partitions(
         block_height,
         target_ledger_type,
         new_total_chunks,
-        cascade_active,
+        cascade_for_block,
     );
     let mut expired_ledger_slot_indexes = BTreeMap::new();
 
@@ -1836,7 +1839,7 @@ mod tests {
     /// Shared fixture: an otherwise-empty `EpochSnapshot` seeded from `config`.
     fn empty_epoch_snapshot(config: &Config) -> EpochSnapshot {
         EpochSnapshot {
-            ledgers: irys_database::Ledgers::new(&config.consensus, false),
+            ledgers: irys_database::Ledgers::new(&config.consensus, ForBlock::inactive()),
             partition_assignments: PartitionAssignments::new(),
             all_active_partitions: Vec::new(),
             unassigned_partitions: Vec::new(),
@@ -3552,7 +3555,12 @@ mod tests {
         }
 
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true, 19),
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                probe_height,
+                ForBlock::active(),
+                19
+            ),
             vec![0],
             "canonical epoch processing must skip unwritten preallocated Submit slots"
         );
@@ -3633,8 +3641,14 @@ mod tests {
         let tree = BlockTree::new(&inclusion_genesis, ConsensusConfig::testing());
         let guard = BlockTreeReadGuard::new(Arc::new(RwLock::new(tree)));
 
-        let range = expired_submit_range(probe_height, &epoch, &prev_epoch, &config, true)?
-            .expect("expired Submit slots must produce a range");
+        let range = expired_submit_range(
+            probe_height,
+            &epoch,
+            &prev_epoch,
+            &config,
+            ForBlock::active(),
+        )?
+        .expect("expired Submit slots must produce a range");
         assert!(
             submit_tx_expired(
                 tx_slot_0.id,
@@ -3662,7 +3676,7 @@ mod tests {
             "slot-1 tx must stay live even though later empty slots also expired"
         );
 
-        // Walk-oracle parity + the new `cascade_active` parameter: the (now
+        // Walk-oracle parity + the block-scoped Cascade state: the (now
         // parameterized) `expired_submit_tx_ids` walk must return EXACTLY the
         // per-candidate–expired set — only the slot-0 tx — when passed the block's
         // own Cascade status. Previously the oracle derived Cascade from the parent
@@ -3674,7 +3688,7 @@ mod tests {
             &prev_epoch,
             probe_height,
             &config,
-            true, // the block-under-test's own Cascade status (activation at genesis here)
+            ForBlock::active(), // the block-under-test's own Cascade status (activation at genesis here)
             block_index.clone(),
             &guard,
             &MempoolReadGuard::stub(),
@@ -3775,7 +3789,7 @@ mod tests {
         epoch.ledgers[DataLedger::Submit].allocate_slots(4, 1);
 
         // Touch slots 0 and 2 only (chunks [0,10) and [20,30)); slot 1 stays
-        // unwritten. With cascade_active=true, unwritten slots are excluded from
+        // unwritten. With Cascade active for the block, unwritten slots are excluded from
         // expiry, so slot 1 is never returned as expired.
         let chunks_per_slot = config.consensus.num_chunks_in_partition;
         epoch.ledgers.touch_filled_slots(
@@ -3784,7 +3798,7 @@ mod tests {
             chunks_per_slot,
             chunks_per_slot,
             1,
-            true,
+            ForBlock::active(),
         );
         epoch.ledgers.touch_filled_slots(
             DataLedger::Submit,
@@ -3792,7 +3806,7 @@ mod tests {
             3 * chunks_per_slot,
             chunks_per_slot,
             1,
-            true,
+            ForBlock::active(),
         );
 
         // block_height = min_blocks + 50 → expiry_height = 50. Slots 0 and 2 have
@@ -3807,7 +3821,7 @@ mod tests {
             epoch.get_all_expired_term_slot_indexes(
                 DataLedger::Submit,
                 block_height,
-                true,
+                ForBlock::active(),
                 3 * chunks_per_slot
             ),
             vec![0, 2],
@@ -3818,7 +3832,7 @@ mod tests {
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 3 * chunks_per_slot;
 
-        let err = expired_submit_range(block_height, &epoch, &parent, &config, true)
+        let err = expired_submit_range(block_height, &epoch, &parent, &config, ForBlock::active())
             .expect_err("a non-prefix expired set must fail loud, not over-approximate");
         assert!(
             err.to_string().contains("not a contiguous prefix"),
@@ -3870,7 +3884,12 @@ mod tests {
         // expire; the frontier slot 1 must stay live.
         let probe_height = blocks_per_cycle + num_blocks_in_epoch + 1;
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, probe_height, true, 18),
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                probe_height,
+                ForBlock::active(),
+                18
+            ),
             vec![0],
             "the write frontier's slot must not expire during an ingress stall"
         );
@@ -3882,8 +3901,9 @@ mod tests {
         // append (offset 18) lies outside it and stays promotable/settleable.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 18;
-        let range = expired_submit_range(probe_height, &epoch, &parent, &config, true)?
-            .expect("slot 0 expired, so a range must exist");
+        let range =
+            expired_submit_range(probe_height, &epoch, &parent, &config, ForBlock::active())?
+                .expect("slot 0 expired, so a range must exist");
         assert_eq!(
             range.range_end, 10,
             "expired range must end at the last full slot's boundary, not the frontier"
@@ -3904,7 +3924,7 @@ mod tests {
             epoch.get_all_expired_term_slot_indexes(
                 DataLedger::Submit,
                 resume_height + 1,
-                true,
+                ForBlock::active(),
                 25
             ),
             vec![0],
@@ -3995,7 +4015,7 @@ mod tests {
             epoch.get_all_expired_term_slot_indexes(
                 DataLedger::Submit,
                 expiry_height,
-                true,
+                ForBlock::active(),
                 submit_total
             ),
             vec![0],
@@ -4005,7 +4025,12 @@ mod tests {
         // not be derived from partition infos.
         assert!(
             epoch
-                .get_expiring_partition_info(expiry_height, DataLedger::Submit, submit_total, true)
+                .get_expiring_partition_info(
+                    expiry_height,
+                    DataLedger::Submit,
+                    submit_total,
+                    ForBlock::active()
+                )
                 .is_empty(),
             "partition-keyed expiring set has no entry for a partition-less slot"
         );
@@ -4120,7 +4145,7 @@ mod tests {
             &db,
             true, // Submit: refund the perm fee for unpromoted txs
             submit_total,
-            true,
+            ForBlock::active(),
         )
         .await?;
 
@@ -4173,7 +4198,7 @@ mod tests {
         // no partitions there are no expiring-partition infos to report.
         let infos = epoch.ledgers.expire_partitions(
             expiry_epoch,
-            false,
+            ForBlock::inactive(),
             |_| 0,
             config.consensus.num_chunks_in_partition,
         );
@@ -4187,7 +4212,12 @@ mod tests {
         );
         // The inclusive (non-promotability) set still contains the slot...
         assert_eq!(
-            epoch.get_all_expired_term_slot_indexes(DataLedger::Submit, expiry_epoch + 1, false, 0),
+            epoch.get_all_expired_term_slot_indexes(
+                DataLedger::Submit,
+                expiry_epoch + 1,
+                ForBlock::inactive(),
+                0
+            ),
             vec![0],
             "the recycled slot stays in the inclusive set"
         );
@@ -4196,7 +4226,13 @@ mod tests {
         // chunk range at all.
         let mut parent = IrysBlockHeader::new_mock_header();
         parent.data_ledgers[DataLedger::Submit].total_chunks = 0;
-        let range = expired_submit_range(expiry_epoch + 1, &epoch, &parent, &config, false)?;
+        let range = expired_submit_range(
+            expiry_epoch + 1,
+            &epoch,
+            &parent,
+            &config,
+            ForBlock::inactive(),
+        )?;
         assert!(
             range.is_none(),
             "an expired-but-never-written slot yields no expired chunk range"

@@ -414,6 +414,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
         aurora: None,
         borealis: None,
         cascade: None,
+        delta: None,
     };
 
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)

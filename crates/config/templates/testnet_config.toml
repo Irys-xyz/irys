@@ -183,6 +183,12 @@ number_of_ingress_proofs_from_assignees = 0
 # thirty_day_epoch_length = 30      # epochs per ThirtyDay term (default: 30)
 # annual_cost_per_gb = 0.028        # USD/GB/year override (default: 0.028)
 
+# To enable Delta (a ledger a hardfork activates mid-chain gets its first slots
+# in the activating epoch instead of the one after), uncomment:
+# [consensus.Custom.hardforks.delta]
+# activation_timestamp = "2026-09-01T00:00:00+00:00"
+# initial_slots_per_new_ledger = 1   # slots seeded per newly activated ledger (default: 1)
+
 # Reth Prometheus endpoint (port 9001). The default 127.0.0.1 restricts the
 # listener to the host loopback; deployments expose it externally only via
 # an mTLS-terminating reverse proxy. See the ansible repo's

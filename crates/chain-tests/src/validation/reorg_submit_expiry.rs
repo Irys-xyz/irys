@@ -224,7 +224,7 @@ async fn heavy_reorg_across_submit_expiry_epoch_settles_on_winning_branch() -> e
         .config
         .consensus
         .hardforks
-        .is_cascade_active_at(expiry_block.timestamp_secs());
+        .cascade_for_block(expiry_block.timestamp_secs());
     let pipeline_b = calculate_expired_ledger_fees(
         &expiry_parent_snapshot,
         &expiry_parent_block,

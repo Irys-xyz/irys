@@ -12,6 +12,7 @@ use irys_database::{
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
 use irys_testing_utils::utils::TempDirBuilder;
 use irys_types::PartitionChunkRange;
+use irys_types::UnixTimestampMs;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockTransactions, DataLedger, DbSyncMode, H256, IrysBlockHeader, SealedBlock,
@@ -385,6 +386,195 @@ async fn unique_addresses_per_slot_test() {
     assert!(submit_addresses_set.contains(&genesis_signer.address()));
     assert!(submit_addresses_set.contains(&signer1.address()));
     assert!(submit_addresses_set.contains(&signer2.address()));
+}
+
+/// A ledger that a hardfork activates mid-chain must get its first slots in the
+/// epoch that activates it.
+///
+/// The activation epoch block's header carries only the pre-activation ledger
+/// set — the producer derives the header ledger set from the parent epoch
+/// snapshot, which still predates activation — so slot allocation cannot learn
+/// about the new ledgers from the header. Delta seeds them directly; before
+/// Delta the ledgers stay slotless (and therefore unassigned) for a full epoch.
+#[rstest::rstest]
+#[case::delta_active(true, 1, 1)]
+#[case::pre_delta(false, 0, 2)]
+#[tokio::test]
+async fn new_ledger_activation_slots_test(
+    #[case] delta_active: bool,
+    #[case] activation_epoch_slots: usize,
+    #[case] next_epoch_slots: usize,
+) {
+    use irys_types::DataTransactionLedger;
+    use irys_types::UnixTimestamp;
+    use irys_types::hardfork_config::{Cascade, Delta};
+
+    const GENESIS_SECS: u64 = 1_000;
+    const CASCADE_ACTIVATION_SECS: u64 = 2_000;
+    const EPOCH_BLOCK_SECS: u64 = 3_000;
+
+    let tmp_dir = TempDirBuilder::new()
+        .prefix("new_ledger_activation_slots_test")
+        .with_tracing()
+        .build();
+    let consensus_config = ConsensusConfig {
+        chunk_size: 32,
+        num_chunks_in_partition: 10,
+        num_chunks_in_recall_range: 2,
+        num_partitions_per_slot: 1,
+        block_migration_depth: 1,
+        chain_id: 333,
+        epoch: EpochConfig {
+            capacity_scalar: 100,
+            num_blocks_in_epoch: 100,
+            num_capacity_partitions: Some(123),
+            submit_ledger_epoch_length: 5,
+            publish_ledger_epoch_length: None,
+        },
+        hardforks: irys_types::hardfork_config::IrysHardforkConfig {
+            // Cascade activates between genesis and the first epoch block, so
+            // its term ledgers are activated by `perform_epoch_tasks` below.
+            cascade: Some(Cascade {
+                activation_timestamp: UnixTimestamp::from_secs(CASCADE_ACTIVATION_SECS),
+                one_year_epoch_length: 365,
+                thirty_day_epoch_length: 30,
+                annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
+            }),
+            delta: delta_active.then(|| Delta {
+                activation_timestamp: UnixTimestamp::from_secs(0),
+                initial_slots_per_new_ledger: Delta::default_initial_slots_per_new_ledger(),
+            }),
+            ..ConsensusConfig::testing().hardforks
+        },
+        ..ConsensusConfig::testing()
+    };
+    let mut testing_config = NodeConfig::testing();
+    testing_config.base_directory = tmp_dir.path().to_path_buf();
+    testing_config.consensus = ConsensusOptions::Custom(consensus_config);
+    let config = Config::new_with_random_peer_id(testing_config);
+
+    let mut genesis_block = IrysBlockHeader::new_mock_header();
+    genesis_block.height = 0;
+    genesis_block.timestamp = UnixTimestampMs::from_millis(GENESIS_SECS as u128 * 1000);
+    // Enough pledged capacity partitions to fill the genesis ledger slots and
+    // both newly activated ledgers.
+    let (commitments, initial_treasury) = add_test_commitments(&mut genesis_block, 5, &config)
+        .await
+        .unwrap();
+    genesis_block.treasury = initial_treasury;
+
+    let storage_submodules_config = StorageSubmodulesConfig::load(
+        config.node_config.base_directory.clone(),
+        config.node_config.node_mode,
+    )
+    .unwrap();
+
+    let mut epoch_snapshot = EpochSnapshot::new(
+        &storage_submodules_config,
+        genesis_block.clone(),
+        commitments,
+        &config,
+    );
+
+    // Pre-activation the term ledgers do not exist at all.
+    assert_eq!(epoch_snapshot.ledgers.active_ledgers().len(), 2);
+
+    // The activation epoch block: cascade-active by timestamp, but its header
+    // lists only Publish and Submit (what a producer on the parent snapshot emits).
+    let mut new_epoch_block = IrysBlockHeader::new_mock_header();
+    new_epoch_block.height = config.consensus.epoch.num_blocks_in_epoch;
+    new_epoch_block.timestamp = UnixTimestampMs::from_millis(EPOCH_BLOCK_SECS as u128 * 1000);
+    assert_eq!(new_epoch_block.data_ledgers.len(), 2);
+
+    epoch_snapshot
+        .perform_epoch_tasks(&Some(genesis_block), &new_epoch_block, Vec::new())
+        .unwrap();
+
+    assert_eq!(
+        epoch_snapshot.ledgers.active_ledgers().len(),
+        4,
+        "cascade must activate the term ledgers at this epoch boundary"
+    );
+
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        let slots = epoch_snapshot.ledgers.get_slots(ledger);
+        assert_eq!(
+            slots.len(),
+            activation_epoch_slots,
+            "{:?} slot count at the activation epoch (delta_active={})",
+            ledger,
+            delta_active
+        );
+        for (slot_index, slot) in slots.iter().enumerate() {
+            assert_eq!(
+                slot.partitions.len() as u64,
+                config.consensus.num_partitions_per_slot,
+                "{:?} slot {} must have its partitions assigned in the same epoch",
+                ledger,
+                slot_index
+            );
+            assert_eq!(
+                slot.last_height, new_epoch_block.height,
+                "{:?} slot {} must be aged from the activation epoch",
+                ledger, slot_index
+            );
+        }
+    }
+
+    // The NEXT epoch block does carry the term ledgers: its producer reads the
+    // now-cascade-active parent snapshot, and `extract_data_ledgers` rejects a
+    // 2-ledger block from here on. So this is where the un-seeded ledger meets
+    // `calculate_additional_slots` for the first time, and the two cases diverge:
+    //
+    //   delta_active: 1 seeded slot already exists, and with no term data written
+    //     the capacity threshold is not met -> stays at 1. Seeding happens once.
+    //   pre_delta: `num_slots == 0` collapses the threshold to 0, which any
+    //     ledger size meets -> 2 slots, a full epoch after the ledger went live.
+    //
+    // That one-epoch slotless window is what Delta exists to close.
+    let mut later_epoch_block = IrysBlockHeader::new_mock_header();
+    later_epoch_block.height = config.consensus.epoch.num_blocks_in_epoch * 2;
+    later_epoch_block.timestamp = UnixTimestampMs::from_millis(EPOCH_BLOCK_SECS as u128 * 2 * 1000);
+    let cascade = config
+        .consensus
+        .hardforks
+        .cascade
+        .as_ref()
+        .expect("cascade is configured above");
+    for (ledger, expires) in [
+        (DataLedger::OneYear, cascade.one_year_epoch_length),
+        (DataLedger::ThirtyDay, cascade.thirty_day_epoch_length),
+    ] {
+        later_epoch_block.data_ledgers.push(DataTransactionLedger {
+            ledger_id: ledger as u32,
+            tx_root: H256::zero(),
+            tx_ids: H256List::default(),
+            // No term data was written during the activation epoch, so the
+            // seeded slot is nowhere near full.
+            total_chunks: 0,
+            expires: Some(expires),
+            proofs: None,
+            required_proof_count: None,
+        });
+    }
+
+    epoch_snapshot
+        .perform_epoch_tasks(
+            &Some(new_epoch_block.clone()),
+            &later_epoch_block,
+            Vec::new(),
+        )
+        .unwrap();
+
+    for ledger in [DataLedger::OneYear, DataLedger::ThirtyDay] {
+        assert_eq!(
+            epoch_snapshot.ledgers.get_slots(ledger).len(),
+            next_epoch_slots,
+            "{:?} slot count at the epoch after activation (delta_active={})",
+            ledger,
+            delta_active
+        );
+    }
 }
 
 #[tokio::test]

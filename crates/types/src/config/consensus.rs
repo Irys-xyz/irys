@@ -842,6 +842,8 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 30,
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
+                // Delta hardfork - not scheduled yet
+                delta: None,
             },
         }
     }
@@ -978,6 +980,9 @@ impl ConsensusConfig {
                 // Cascade hardfork - not active by default in testing;
                 // tests that need it should override via with_consensus()
                 cascade: None,
+                // Delta hardfork - not active by default in testing;
+                // tests that need it should override via with_consensus()
+                delta: None,
             },
         }
     }
@@ -1113,6 +1118,8 @@ impl ConsensusConfig {
                     thirty_day_epoch_length: 10, // 10 hrs
                     annual_cost_per_gb: Cascade::default_annual_cost_per_gb(),
                 }),
+                // Delta hardfork - not scheduled yet
+                delta: None,
             },
         }
     }
@@ -1288,9 +1295,18 @@ mod tests {
                 .hardforks
                 .is_cascade_active_at(UnixTimestamp::from_secs(1785758400 + 1))
         );
+
+        // Delta — unscheduled. Scheduling it is a protocol change that also moves
+        // the canonical config hash pinned by
+        // `test_mainnet_genesis_constants_are_frozen`.
+        assert!(
+            config.hardforks.delta.is_none(),
+            "mainnet Delta is unscheduled"
+        );
     }
 
-    /// Pins the testnet Borealis activation time (controlled rollout).
+    /// Pins the testnet hardfork schedule: the Borealis activation time
+    /// (controlled rollout) and the forks that must stay unscheduled.
     #[test]
     fn test_testnet_borealis_activation_time() {
         let config = ConsensusConfig::testnet();
@@ -1304,6 +1320,13 @@ mod tests {
                 .expect("testnet Borealis must be configured")
                 .activation_timestamp,
             UnixTimestamp::from_secs(1779436800)
+        );
+
+        // Delta — unscheduled. Scheduling it also moves the canonical config hash
+        // pinned by `test_testnet_genesis_constants_are_frozen`.
+        assert!(
+            config.hardforks.delta.is_none(),
+            "testnet Delta is unscheduled"
         );
     }
 

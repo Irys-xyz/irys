@@ -935,6 +935,7 @@ mod tests {
     use irys_database::Ledgers;
     use irys_domain::PartitionAssignments;
     use irys_types::ConsensusConfig;
+    use irys_types::hardfork_config::ForBlock;
     use rstest::rstest;
 
     fn make_test_ledgers(publish_epoch_length: Option<u64>) -> Ledgers {
@@ -942,7 +943,7 @@ mod tests {
         config.epoch.num_blocks_in_epoch = 10;
         config.epoch.submit_ledger_epoch_length = 5;
         config.epoch.publish_ledger_epoch_length = publish_epoch_length;
-        Ledgers::new(&config, false)
+        Ledgers::new(&config, ForBlock::inactive())
     }
 
     #[test]
@@ -1701,7 +1702,7 @@ mod tests {
 
         // Real protocol expiry math: at epoch_height=60, expiry_height=60-50=10;
         // slot 0 (last_height=1<=10, not last slot) expires.
-        ledgers.expire_partitions(60, false, |_| 0, 1);
+        ledgers.expire_partitions(60, ForBlock::inactive(), |_| 0, 1);
 
         let response =
             build_epoch_ledger_summary_response(&ledgers, DataLedger::Submit, 123, 25, 10).unwrap();

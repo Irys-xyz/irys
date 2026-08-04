@@ -4,6 +4,7 @@ use irys_config::submodules::StorageSubmodulesConfig;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
     BoundedFee, DataLedger, H256, NodeConfig, U256, UnixTimestamp, hardfork_config::Cascade,
+    hardfork_config::ForBlock,
 };
 use reth::rpc::types::TransactionTrait as _;
 
@@ -829,7 +830,7 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
         // cascade_active=true: this scenario runs post-activation (cascade
         // activated at timestamp 0), matching the producer/validator gate.
         parent_snap
-            .get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, true)
+            .get_expiring_partition_info(e, DataLedger::ThirtyDay, e_total, ForBlock::active())
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
@@ -874,7 +875,12 @@ async fn heavy_cascade_expiry_fee_model_matches_actual_recycle() -> eyre::Result
     // contract rather than the post-touch epoch-block total.
     let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
     let blocked: std::collections::BTreeSet<usize> = parent_snap
-        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e, true, parent_total)
+        .get_all_expired_term_slot_indexes(
+            DataLedger::ThirtyDay,
+            e,
+            ForBlock::active(),
+            parent_total,
+        )
         .into_iter()
         .collect();
     let recycled: std::collections::BTreeSet<usize> = actual_set.iter().copied().collect();
@@ -1022,7 +1028,12 @@ async fn heavy_cascade_expiry_blocked_set_surplus_is_previously_expired() -> eyr
     // heavy_cascade_expiry_fee_model_matches_actual_recycle fixture.
     let parent_total = parent_block.ledger_total_chunks(DataLedger::ThirtyDay);
     let blocked: std::collections::BTreeSet<usize> = parent_snap
-        .get_all_expired_term_slot_indexes(DataLedger::ThirtyDay, e2, true, parent_total)
+        .get_all_expired_term_slot_indexes(
+            DataLedger::ThirtyDay,
+            e2,
+            ForBlock::active(),
+            parent_total,
+        )
         .into_iter()
         .collect();
 
@@ -1433,7 +1444,7 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
         let snap = tree
             .get_epoch_snapshot(&parent_block.block_hash)
             .expect("parent epoch snapshot");
-        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, false)
+        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, ForBlock::inactive())
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
@@ -1456,7 +1467,7 @@ async fn heavy_pre_cascade_submit_expiry_fee_model_matches_actual_recycle() -> e
         let snap = tree
             .get_epoch_snapshot(&parent_block.block_hash)
             .expect("parent epoch snapshot");
-        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, true)
+        snap.get_expiring_partition_info(e, DataLedger::Submit, e_total, ForBlock::active())
             .into_iter()
             .map(|p| p.slot_index)
             .collect::<Vec<_>>()
