@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785435606748,
+  "lastUpdate": 1785881008262,
   "repoUrl": "https://github.com/Irys-xyz/irys",
   "entries": {
     "Benchmark": [
@@ -14083,6 +14083,114 @@ window.BENCHMARK_DATA = {
             "name": "apply_reset_seed",
             "value": 0.000115,
             "range": "± 0.000004",
+            "unit": "ms/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "20095347+JesseTheRobot@users.noreply.github.com",
+            "name": "Jesse",
+            "username": "JesseTheRobot"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "149fadf45cd4cd1cf631b76b50f31bd23f5eba23",
+          "message": "feat(consensus): Delta hardfork — seed slots for ledgers activated mid-chain (#1547)\n\n* feat(consensus): Delta hardfork - seed slots for ledgers activated mid-chain\n\nA hardfork that adds a data ledger activates it inside perform_epoch_tasks,\nbut the activating epoch block's header cannot list that ledger: the producer\nderives the header ledger set from the parent epoch snapshot, which still\npredates the activation. Slot allocation skips ledgers absent from the header,\nso a newly activated ledger stayed slotless - no partitions, no miner storing\nit - for a full epoch, while blocks in that epoch already accepted data for it.\n\nDelta seeds initial_slots_per_new_ledger (default 1, matching genesis init)\nfor an active ledger that has no slots and is absent from the epoch block's\nheader, so backfill_missing_partitions assigns partitions in the same epoch.\nThe gate is epoch-aligned on the epoch block's own timestamp, like Cascade's,\nand chains that already activated a ledger replay unchanged.\n\nHardfork activation state now travels as Activation<T> rather than a bool:\nwhich timestamp a fork is resolved against decides its activation boundary, so\nthe resolution happens once where the state is built.\n\n* refactor(consensus): scope-tagged Cascade activation state instead of bools\n\nCascade has two resolutions with different activation boundaries: at a block's\nown timestamp, and at the epoch block governing that block's epoch. They differ\nfor the whole epoch in which Cascade activates. Both were bare `bool`s threaded\nthrough expiry, fee settlement and prevalidation, kept apart only by parameter\nnames and comments - a swap compiled silently and broke the lockstep between\nthe recycle set and the settled set.\n\nThey are now distinct types, `ForBlock<Cascade>` and `ForEpoch<Cascade>`, built\nby `cascade_for_block` / `cascade_for_epoch`. The state is resolved once at\nconstruction, and passing an epoch-aligned state where epoch processing needs\nthe block state no longer compiles. Activeness only, so the scope stays `Copy`\nregardless of the fork's parameter type.\n\nNo behavioral change: every converted call site keeps the value it had, and the\nepoch-scoped consumers that only needed a bool read it back with `is_active()`.\n\n* refactor: drop unused activation API, collapse duplicate derivation\n\nSelf-review follow-ups: `Activation::params`/`is_active` had no production\ncallers, `generate_expected_shadow_transactions` re-derived an identical\n`cascade_for_epoch` that shadowed the outer binding, and `delta_at` is renamed\n`delta_for_block` to name the scope it resolves at, like the Cascade accessors.\n\n* test(consensus): assert new-ledger slots are seeded only once\n\nLater epoch blocks still omit a mid-chain activated ledger from their\nheader, so the seeding branch runs again; the slot_count guard must stop\nit from allocating more slots.\n\n* test(consensus): verify term data reaches disk in the activation epoch's successor\n\nThe seeded slots are only useful if data posted before the next epoch\nboundary can be stored. Post a OneYear tx in the first block that can\ncarry one, then read its chunks back by ledger offset, which resolves\nthrough storage modules only.\n\n* docs(tests): name the activation epoch consistently in the term-data check\n\nAn epoch block opens its epoch, so the block carrying the term tx is in\nthe activation epoch, not the following one.\n\n* test(consensus): assert the real post-activation slot allocation\n\nThe later-epoch half of new_ledger_activation_slots_test built its epoch\nblock from new_mock_header(), which carries only Publish and Submit. Once\nthe parent epoch snapshot is Cascade-active a producer emits four ledgers\nand extract_data_ledgers rejects a two-ledger block, so the fixture\nasserted a shape the validator forbids.\n\nGive that block a real four-ledger header. The un-seeded ledger then meets\ncalculate_additional_slots for the first time, which is where the two\ncases diverge: with Delta the seeded slot already exists and the capacity\nthreshold is unmet, so the count stays at 1; without it num_slots == 0\ncollapses the threshold to 0 and any ledger size allocates 2. The previous\nexpectation of 0 slots forever was an artifact of the mock header.\n\nSplitting the case parameter in two records both epochs, so the test now\nstates what Delta delivers - one slot at activation rather than two an\nepoch late - and covers the post-activation path for the first time.\n\n* test(config): pin Delta as unscheduled on mainnet and testnet\n\nThe hardfork activation guards exist so an accidental edit or merge that\nshifts a boundary fails CI, but they pinned only Aurora, Borealis and\nCascade. Delta was free to appear unreviewed.\n\nAssert it stays absent on both networks. Scheduling it is a protocol change\nthat also moves the canonical config hash the genesis-constants tests pin,\nso this keeps the whole decision visible in one place.\n\n* docs: correct the slot-seeding and activation-scope comments\n\nThe seeding rationale claimed the ledger gets \"partitions from the epoch it\nbecomes active\", and justified itself by analogy to genesis init. Neither\nholds. Seeding creates slots; the partitions come from\nbackfill_missing_partitions, which draws from the already-pledged capacity\npool and leaves a slot empty when that pool is dry, since capacity minting\nruns after it. Genesis init is not equivalent - it mints capacity and\nassigns pledges before the shared backfill, so it really does get\npartitions. Say slots-only, name the best-effort source, and record the\ngenesis contrast, because that analogy hid the gap.\n\nForBlock's doc claimed it is the value governing the epoch a block opens.\nThat holds only on an epoch block; the expiry-policy gates resolve it for\nordinary blocks, where it can flip mid-epoch before epoch processing has\napplied the new rules. Separate the two cases.\n\nDelta's docs asserted epoch-alignment in the \"all blocks in an epoch\" form,\nwhich is vacuous for a fork with no per-block effect at all. State that it\nresolves at the epoch block's own timestamp.\n\nAlso: a doc renamed is_cascade_active_for_epoch out from under itself, a\ntouch_filled_slots sentence stopped parsing once its parameter became a\ntype, and a duplicated word.",
+          "timestamp": "2026-08-04T22:41:00+01:00",
+          "tree_id": "1ddf1e2d623b0a4171be2ccacb31d5d69f0a0c38",
+          "url": "https://github.com/Irys-xyz/irys/commit/149fadf45cd4cd1cf631b76b50f31bd23f5eba23"
+        },
+        "date": 1785881005868,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "get_recall_range/100",
+            "value": 0.012637,
+            "range": "± 0.000319",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/1000",
+            "value": 0.123726,
+            "range": "± 0.004937",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/10000",
+            "value": 1.269328,
+            "range": "± 0.05113",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "get_recall_range/64840",
+            "value": 8.472331,
+            "range": "± 0.333646",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testing",
+            "value": 0.075741,
+            "range": "± 0.001137",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/testnet",
+            "value": 772.702117,
+            "range": "± 22.676756",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha/mainnet",
+            "value": 971.423008,
+            "range": "± 7.2156",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testing",
+            "value": 0.117568,
+            "range": "± 0.002221",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/testnet",
+            "value": 1196.58141,
+            "range": "± 11.19044",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "vdf_sha_verification/mainnet",
+            "value": 1554.240176,
+            "range": "± 12.141907",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testing",
+            "value": 0.030485,
+            "range": "± 0.001714",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/testnet",
+            "value": 210.35825,
+            "range": "± 1.191605",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "parallel_verification/mainnet",
+            "value": 273.599002,
+            "range": "± 1.973782",
+            "unit": "ms/iter"
+          },
+          {
+            "name": "apply_reset_seed",
+            "value": 0.000116,
+            "range": "± 0.000003",
             "unit": "ms/iter"
           }
         ]
