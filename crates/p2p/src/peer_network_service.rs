@@ -1,5 +1,8 @@
 use crate::wire_types::{GossipResponse, RejectionReason};
-use crate::{GossipClient, GossipError, gossip_client::GossipClientError};
+use crate::{
+    GossipClient, GossipError,
+    gossip_client::{GossipClientError, PeerHealth},
+};
 use eyre::{Report, Result as EyreResult};
 use futures::{StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use irys_database::db::IrysDatabaseExt as _;
@@ -442,18 +445,25 @@ impl PeerNetworkService {
                         .check_health(&peer_id, peer.address, peer.protocol_version, &peer_list)
                         .await
                     {
-                        Ok(true) => {
+                        Ok(PeerHealth::Healthy) => {
                             debug!("Peer {:?} is online", peer_id);
                             peer_list.set_is_online_by_peer_id(&peer_id, true);
                             inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                         }
-                        Ok(false) => {
+                        Ok(PeerHealth::HandshakePending) => {
+                            // Alive, so it keeps its online flag, but no credit
+                            // while it declines to serve us. `check_health` has
+                            // already requested the handshake.
+                            debug!("Peer {:?} answered but wants a handshake", peer_id);
+                            peer_list.set_is_online_by_peer_id(&peer_id, true);
+                        }
+                        Ok(PeerHealth::Unhealthy) => {
                             debug!("Peer {:?} is offline", peer_id);
                             peer_list.set_is_online_by_peer_id(&peer_id, false);
                             inner_clone.decrease_peer_score(
                                 &peer_id,
                                 ScoreDecreaseReason::Offline(
-                                    "Health check returned false".to_string(),
+                                    "Health check reported the peer as unhealthy".to_string(),
                                 ),
                             );
                         }

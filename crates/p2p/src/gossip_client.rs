@@ -213,6 +213,19 @@ pub struct GossipClient {
     hydrate_cursor: Arc<AtomicUsize>,
 }
 
+/// What a `/gossip/health` probe learned about a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerHealth {
+    /// Answered and serving gossip.
+    Healthy,
+    /// Answered, but will not serve us until a handshake completes. Alive, so it
+    /// keeps its online flag and we re-handshake it; it earns no reputation
+    /// credit while it is turning our probes away.
+    HandshakePending,
+    /// Answered and will not serve us, or reported itself not healthy.
+    Unhealthy,
+}
+
 fn gossip_error_type(err: &GossipError) -> &'static str {
     match err {
         GossipError::Network(_) => "network",
@@ -894,6 +907,12 @@ impl GossipClient {
         Ok(versions)
     }
 
+    /// Probe a peer's `/gossip/health` endpoint.
+    ///
+    /// The outcome distinguishes "serving us" from "answered but refusing us",
+    /// because the two deserve different reputation treatment: a peer that
+    /// declines until we re-handshake is alive and worth keeping enumerable,
+    /// but it is not earning credit while it turns our probes away.
     #[instrument(level = "trace", skip(self, peer_list), fields(%peer_id))]
     pub async fn check_health(
         &self,
@@ -901,7 +920,7 @@ impl GossipClient {
         peer: PeerAddress,
         protocol_version: ProtocolVersion,
         peer_list: &PeerList,
-    ) -> Result<bool, GossipClientError> {
+    ) -> Result<PeerHealth, GossipClientError> {
         if !self.circuit_breaker.is_available(peer_id) {
             tracing::debug!(?peer_id, "circuit breaker open, skipping health check");
             return Err(GossipClientError::CircuitBreakerOpen(*peer_id));
@@ -957,36 +976,37 @@ impl GossipClient {
         };
 
         match response {
-            GossipResponse::Accepted(val) => {
-                if val {
+            GossipResponse::Accepted(is_gossip_enabled) => {
+                if is_gossip_enabled {
                     self.circuit_breaker.record_success(peer_id);
+                    Ok(PeerHealth::Healthy)
                 } else {
                     self.circuit_breaker.record_failure(peer_id);
+                    Ok(PeerHealth::Unhealthy)
                 }
-                Ok(val)
             }
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
                 self.circuit_breaker.record_failure(peer_id);
+                // Exhaustive on purpose: a new rejection reason must not inherit
+                // a neighbour's answer. Anything that is not "re-handshake me"
+                // means this peer will not serve us, so it is not healthy.
                 match reason {
-                    RejectionReason::HandshakeRequired(reason) => {
-                        warn!("Health check requires handshake: {:?}", reason);
+                    RejectionReason::HandshakeRequired(requirement) => {
+                        warn!("Health check requires handshake: {:?}", requirement);
                         peer_list.initiate_handshake(peer.api, peer.gossip, true);
+                        Ok(PeerHealth::HandshakePending)
                     }
-                    RejectionReason::GossipDisabled => {
-                        return Ok(false);
-                    }
-                    RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
-                        warn!("Health check rejected with reason: {:?}", reason);
-                    }
-                    _ => {
-                        warn!(
-                            "Unexpected rejection reason for the health check: {:?}",
-                            reason
-                        );
-                    }
-                };
-                Ok(true)
+                    RejectionReason::GossipDisabled
+                    | RejectionReason::InvalidData
+                    | RejectionReason::RateLimited
+                    | RejectionReason::UnableToVerifyOrigin
+                    | RejectionReason::InvalidCredentials
+                    | RejectionReason::ProtocolMismatch
+                    | RejectionReason::UnsupportedProtocolVersion(_)
+                    | RejectionReason::UnsupportedFeature
+                    | RejectionReason::ChainIdMismatch => Ok(PeerHealth::Unhealthy),
+                }
             }
         }
     }
@@ -2332,14 +2352,21 @@ impl GossipClient {
         let pass = probes.for_each(|(peer_id, outcome, response_time)| {
             resolved += 1;
             match outcome {
-                Ok(is_healthy) => {
-                    debug!("Peer {} is healthy: {}", peer_id, is_healthy);
-                    peer_list.set_is_online_by_peer_id(&peer_id, is_healthy);
+                Ok(health) => {
+                    debug!("Peer {} health: {:?}", peer_id, health);
+                    // A peer awaiting a handshake answered, so it stays online
+                    // and enumerable — `check_health` has already asked for the
+                    // handshake that repairs it — but it earns no credit while
+                    // it is refusing us.
+                    let is_online =
+                        matches!(health, PeerHealth::Healthy | PeerHealth::HandshakePending);
+                    peer_list.set_is_online_by_peer_id(&peer_id, is_online);
+
                     // Credit a healthy answer, so the pass can move a peer's
                     // score in both directions. Penalties alone would ratchet
                     // any peer we never pull data from down towards the active
                     // threshold, one lost probe at a time.
-                    if is_healthy {
+                    if health == PeerHealth::Healthy {
                         if response_time > NORMAL_RESPONSE_THRESHOLD {
                             // This peer spends the pass budget that the peers
                             // behind it need, the same way a slow data response
@@ -2928,7 +2955,11 @@ mod tests {
                 "V2 health check should succeed: {:?}",
                 result
             );
-            assert!(result.unwrap(), "V2 health check should return true");
+            assert_eq!(
+                result.unwrap(),
+                PeerHealth::Healthy,
+                "V2 health check should report the peer healthy"
+            );
         }
 
         #[tokio::test]
@@ -3795,6 +3826,89 @@ mod tests {
                 healthy_score,
                 PeerScore::INITIAL + 1,
                 "a healthy answer must earn exactly the Online credit"
+            );
+        }
+
+        /// Adds a peer served by `body`, and returns its id.
+        fn peer_answering_with(
+            peer_list: &PeerList,
+            id_byte: u8,
+            body: &str,
+            is_online: bool,
+        ) -> (IrysPeerId, MockHttpServer) {
+            let server = MockHttpServer::new_with_response(200, body, "application/json");
+            let addr = IrysAddress::from([id_byte; 20]);
+            let peer_id = IrysPeerId::from(addr);
+            peer_list.add_or_update_peer(
+                PeerListItem {
+                    peer_id,
+                    mining_address: addr,
+                    address: create_peer_address("127.0.0.1", server.port()),
+                    reputation_score: PeerScore::new(PeerScore::INITIAL),
+                    response_time: 0,
+                    last_seen: 0,
+                    is_online,
+                    protocol_version: ProtocolVersion::V1,
+                },
+                true,
+            );
+            (peer_id, server)
+        }
+
+        /// A peer that answers "handshake first" is alive, so it keeps its online
+        /// flag and stays enumerable — but it earns no credit while it is
+        /// refusing to serve us.
+        #[tokio::test]
+        async fn hydrate_keeps_a_handshake_pending_peer_online_without_crediting_it() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let body = serde_json::to_string(&GossipResponse::<bool>::Rejected(
+                RejectionReason::HandshakeRequired(None),
+            ))
+            .unwrap();
+            let (peer_id, _server) = peer_answering_with(&peer_list, 230, &body, false);
+
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, Duration::from_secs(5))
+                .await;
+
+            let peer = peer_list.get_peer(&peer_id).expect("peer still listed");
+            assert!(peer.is_online, "a peer that answered is still reachable");
+            assert_eq!(
+                peer.reputation_score.get(),
+                PeerScore::INITIAL,
+                "a peer refusing our probe must not earn credit"
+            );
+        }
+
+        /// Any other rejection means the peer will not serve us, so it is not
+        /// online. Before the rejection match was made exhaustive these reasons
+        /// fell through to the `HandshakeRequired` answer and marked the peer
+        /// online — feeding it to block and chunk pull selection.
+        #[tokio::test]
+        async fn hydrate_marks_a_peer_rejecting_us_offline() {
+            let fixture = TestFixture::with_timeout(Duration::from_millis(200));
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+
+            let body = serde_json::to_string(&GossipResponse::<bool>::Rejected(
+                RejectionReason::ChainIdMismatch,
+            ))
+            .unwrap();
+            let (peer_id, _server) = peer_answering_with(&peer_list, 231, &body, true);
+
+            fixture
+                .client
+                .hydrate_peers_online_status_within(&peer_list, Duration::from_secs(5))
+                .await;
+
+            assert!(
+                !peer_list
+                    .get_peer(&peer_id)
+                    .expect("peer still listed")
+                    .is_online,
+                "a peer on another chain must not be left online"
             );
         }
 
