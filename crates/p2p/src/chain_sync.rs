@@ -306,10 +306,14 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             return;
         }
 
+        // Build the guard here, not inside the task body: a task dropped before
+        // its first poll (runtime shutdown right after `spawn`) never runs the
+        // body, so a guard constructed there would leave the flag set forever.
+        let guard = PeriodicCheckGuard(Arc::clone(&self.is_periodic_check_running));
         let inner = self.clone();
         self.runtime_handle.spawn(
             async move {
-                let _guard = PeriodicCheckGuard(Arc::clone(&inner.is_periodic_check_running));
+                let _guard = guard;
                 inner.handle_periodic_sync_check().await;
             }
             .in_current_span(),
@@ -323,7 +327,6 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             .hydrate_peers_online_status(&self.peer_list)
             .await;
         debug!("Starting a periodic sync check routine");
-        // Check if we're behind the network
         match is_local_index_is_behind_trusted_peers(
             &self.config,
             &self.peer_list,
@@ -355,10 +358,18 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
         is_initial_sync: bool,
     ) {
         let is_already_syncing = !is_initial_sync && self.sync_state.is_syncing();
-        let is_task_spawned_but_has_not_started_syncing_yet =
-            self.is_sync_task_spawned.load(Ordering::Relaxed);
 
-        if is_already_syncing || is_task_spawned_but_has_not_started_syncing_yet {
+        // Claim the spawn slot with a CAS, not a load followed by a store: the
+        // periodic check runs on its own task and calls in here, so it races
+        // the service loop's own requests. Two winners would mean two hydrate
+        // passes, two VDF pauses and two concurrent `sync_chain` runs.
+        let has_claimed_spawn_slot = !is_already_syncing
+            && self
+                .is_sync_task_spawned
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+
+        if !has_claimed_spawn_slot {
             debug!("Sync task: Sync already in progress, skipping the new sync request");
             if let Some(response_sender) = response
                 && let Err(e) = response_sender.send(Err(ChainSyncError::Internal(
@@ -372,7 +383,6 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
 
         // Check if we have any new whitelist updates
         self.spawn_stake_and_pledge_update_task();
-        self.is_sync_task_spawned.store(true, Ordering::Relaxed);
 
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
@@ -423,7 +433,9 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 // Restore the pre-sync mining state (compare-and-swap guarded).
                 vdf_sync_pause.restore();
 
-                is_sync_task_spawned.store(false, Ordering::Relaxed);
+                // Release, to pair with the Acquire on the claiming CAS: the
+                // next claimer must see this task's work, not just the flag.
+                is_sync_task_spawned.store(false, Ordering::Release);
 
                 match &res {
                     Ok(()) => info!("Sync task completed successfully"),
@@ -2093,20 +2105,6 @@ mod tests {
         );
     }
 
-    /// Baseline: dropping the guard at the end of a normal scope clears the flag.
-    #[test]
-    fn periodic_check_guard_clears_flag_on_drop() {
-        let flag = Arc::new(AtomicBool::new(true));
-        {
-            let _guard = PeriodicCheckGuard(Arc::clone(&flag));
-            assert!(flag.load(Ordering::Acquire), "flag set while guard is held");
-        }
-        assert!(
-            !flag.load(Ordering::Acquire),
-            "guard drop must clear the flag"
-        );
-    }
-
     /// The invariant that matters: a task holding the guard can be aborted
     /// mid-await (e.g. runtime shutdown, or any future cancellation) and the
     /// flag must still be cleared. A plain store at the end of
@@ -2126,9 +2124,14 @@ mod tests {
         });
 
         // Make sure the guard has actually been constructed before aborting.
-        while !started.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        // Bounded so a task that never runs fails the test instead of hanging.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("spawned task must reach the guard");
 
         handle.abort();
         let result = handle.await;
@@ -2136,6 +2139,32 @@ mod tests {
         assert!(
             !flag.load(Ordering::Acquire),
             "aborting the task must still clear the flag via Drop"
+        );
+    }
+
+    /// The window the abort test cannot reach: a task dropped before its first
+    /// poll. This is why the guard is built at the spawn site — a guard
+    /// constructed in the future body never exists on this path, so the flag
+    /// would stay set and disable every later periodic check.
+    #[test]
+    fn periodic_check_guard_clears_flag_when_task_is_dropped_before_first_poll() {
+        let flag = Arc::new(AtomicBool::new(true));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("to build a test runtime");
+        let guard = PeriodicCheckGuard(Arc::clone(&flag));
+        runtime.handle().spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        // The runtime is never driven, so dropping it drops an unpolled future.
+        drop(runtime);
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "dropping the task before its first poll must still clear the flag"
         );
     }
 
