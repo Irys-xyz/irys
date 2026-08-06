@@ -41,7 +41,7 @@ impl RenderingManager {
                             Self::render_confirmation_dialog(frame, frame.area(), &message);
                         }
                     }
-                    _ => {}
+                    InputMode::Normal => {}
                 }
             }
         }

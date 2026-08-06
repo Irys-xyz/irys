@@ -900,7 +900,16 @@ impl<'a> ShadowTxGenerator<'a> {
                         TransactionPacket::UnstakeRefund(increment) => {
                             self.deduct_from_treasury_for_payout(U256::from(increment.amount))?;
                         }
-                        _ => {
+                        TransactionPacket::UnstakeDebit(_)
+                        | TransactionPacket::BlockReward(_)
+                        | TransactionPacket::Stake(_)
+                        | TransactionPacket::StorageFees(_)
+                        | TransactionPacket::Pledge(_)
+                        | TransactionPacket::Unpledge(_)
+                        | TransactionPacket::TermFeeReward(_)
+                        | TransactionPacket::IngressProofReward(_)
+                        | TransactionPacket::PermFeeRefund(_)
+                        | TransactionPacket::UpdateRewardAddress(_) => {
                             unreachable!("commitment refund iterator contains only refund packets")
                         }
                     },

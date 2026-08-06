@@ -655,7 +655,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 GossipError::Advisory(AdvisoryGossipError::BlockPoolError(_)) => {
                     Some("block_pool_advisory_retain_cache")
                 }
-                _ => None,
+                GossipError::Network(_)
+                | GossipError::CircuitBreakerOpen(_)
+                | GossipError::InvalidPeer(_)
+                | GossipError::Cache(_)
+                | GossipError::Internal(_)
+                | GossipError::InvalidData(_)
+                | GossipError::TransactionIsAlreadyHandled
+                | GossipError::CommitmentValidation(_)
+                | GossipError::PeerNetwork(_)
+                | GossipError::RateLimited
+                | GossipError::Advisory(_) => None,
             };
             if let Some(reason) = rejection_reason {
                 irys_actors::record_chain_sync_block_rejected(reason);

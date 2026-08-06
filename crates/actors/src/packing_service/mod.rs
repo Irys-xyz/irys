@@ -165,7 +165,7 @@ impl PackingService {
             PackingType::CUDA => {
                 panic!("CUDA packing requested but nvidia feature not enabled");
             }
-            _ => unimplemented!("Unsupported packing type"),
+            PackingType::AMD => unimplemented!("Unsupported packing type"),
         };
 
         // Initialize remote packing strategy

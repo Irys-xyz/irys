@@ -255,7 +255,7 @@ impl InputHandler {
                 .node_to_remove
                 .as_ref()
                 .map(|url| format!("Remove node '{url}'? (y/n)")),
-            _ => None,
+            InputMode::Normal | InputMode::AddNode | InputMode::SetAlias => None,
         }
     }
 }

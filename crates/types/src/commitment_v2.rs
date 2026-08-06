@@ -416,7 +416,9 @@ impl Encodable for CommitmentTypeV2 {
         let payload_length = self.alloy_rlp_payload_length();
         match self {
             Self::Stake | Self::Unstake => payload_length,
-            _ => payload_length + alloy_rlp::length_of_length(payload_length), // for the header
+            Self::Pledge { .. } | Self::Unpledge { .. } | Self::UpdateRewardAddress { .. } => {
+                payload_length + alloy_rlp::length_of_length(payload_length) // for the header
+            }
         }
     }
 }

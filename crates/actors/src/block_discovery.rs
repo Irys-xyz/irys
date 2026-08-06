@@ -288,12 +288,24 @@ impl BlockDiscoveryService {
                         // validity — recording "invalid" would inflate the rejection
                         // rate metric and obscure real consensus failures.
                         let result_label = match e {
-                            BlockDiscoveryError::BlockValidationError(pe)
-                                if pe.is_internal_failure() =>
-                            {
-                                "internal_error"
+                            BlockDiscoveryError::BlockValidationError(pe) => {
+                                if pe.is_internal_failure() {
+                                    "internal_error"
+                                } else {
+                                    "invalid"
+                                }
                             }
-                            _ => "invalid",
+                            BlockDiscoveryError::PreviousBlockNotFound { .. }
+                            | BlockDiscoveryError::InternalError(_)
+                            | BlockDiscoveryError::DuplicateTransaction(_)
+                            | BlockDiscoveryError::MissingTransactions(_)
+                            | BlockDiscoveryError::InvalidEpochBlock(_)
+                            | BlockDiscoveryError::InvalidCommitmentTransaction(_)
+                            | BlockDiscoveryError::InvalidDataLedgersLength(_, _)
+                            | BlockDiscoveryError::InvalidBlockHeight { .. }
+                            | BlockDiscoveryError::InvalidAnchor { .. }
+                            | BlockDiscoveryError::InvalidSignature(_)
+                            | BlockDiscoveryError::TransactionIdMismatch { .. } => "invalid",
                         };
                         metrics::record_validation_result("prevalidation", result_label);
                     }

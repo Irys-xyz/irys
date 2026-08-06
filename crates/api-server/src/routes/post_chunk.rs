@@ -85,7 +85,11 @@ pub async fn post_chunk(
                     | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
                         StatusCode::BAD_REQUEST
                     }
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                    irys_actors::CriticalChunkIngressError::DatabaseError
+                    | irys_actors::CriticalChunkIngressError::ServiceUninitialized
+                    | irys_actors::CriticalChunkIngressError::Other(_) => {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
                 },
                 ChunkIngressError::Advisory(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };

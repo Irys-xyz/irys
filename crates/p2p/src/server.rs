@@ -1628,7 +1628,17 @@ where
                     ScoreDecreaseReason::BogusData(format!("Block pool error: {:?}", msg)),
                 );
             }
-            _ => {}
+            GossipError::Network(_)
+            | GossipError::CircuitBreakerOpen(_)
+            | GossipError::InvalidPeer(_)
+            | GossipError::Cache(_)
+            | GossipError::Internal(_)
+            | GossipError::BlockPool(_)
+            | GossipError::TransactionIsAlreadyHandled
+            | GossipError::CommitmentValidation(_)
+            | GossipError::PeerNetwork(_)
+            | GossipError::RateLimited
+            | GossipError::Advisory(_) => {}
         };
     }
 

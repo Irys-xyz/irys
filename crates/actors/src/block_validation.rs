@@ -6115,7 +6115,7 @@ fn validate_term_only_price(
     let epoch_length = match ledger {
         DataLedger::OneYear => cascade.one_year_epoch_length,
         DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-        _ => unreachable!(),
+        DataLedger::Publish | DataLedger::Submit => unreachable!(),
     };
     let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
         block_height,
@@ -6178,13 +6178,18 @@ fn validate_term_ledger_expiry(
         let expected_expires = match ledger {
             DataLedger::Publish => None,
             DataLedger::Submit => Some(consensus.epoch.submit_ledger_epoch_length),
-            DataLedger::OneYear if cascade_for_epoch.is_active() => {
+            DataLedger::OneYear => {
+                if !cascade_for_epoch.is_active() {
+                    continue; // non-active cascade ledgers handled by presence check
+                }
                 Some(cascade_config()?.one_year_epoch_length)
             }
-            DataLedger::ThirtyDay if cascade_for_epoch.is_active() => {
+            DataLedger::ThirtyDay => {
+                if !cascade_for_epoch.is_active() {
+                    continue; // non-active cascade ledgers handled by presence check
+                }
                 Some(cascade_config()?.thirty_day_epoch_length)
             }
-            _ => continue, // non-active cascade ledgers handled by presence check
         };
         if dl.expires != expected_expires {
             return Err(PreValidationError::TermLedgerExpiryMismatch {
@@ -6560,7 +6565,7 @@ pub async fn data_txs_are_valid(
                                     block_hash: *historical_block_hash,
                                 });
                             }
-                            _ => {
+                            DataLedger::OneYear | DataLedger::ThirtyDay => {
                                 // Unexpected historical ledger for Publish
                                 return Err(PreValidationError::InvalidPromotionPath {
                                     tx_id: tx.id,

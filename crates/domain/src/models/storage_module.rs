@@ -837,7 +837,7 @@ impl StorageModule {
                         );
                         ChunkType::Uninitialized
                     }
-                    _ => chunk_type,
+                    ChunkType::Entropy | ChunkType::Data | ChunkType::Uninitialized => chunk_type,
                 };
                 global_intervals
                     .insert_merge_touching_if_values_equal(interval, set_chunk_type)

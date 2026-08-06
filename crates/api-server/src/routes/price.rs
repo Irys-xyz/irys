@@ -190,7 +190,7 @@ pub async fn get_price(
             let epoch_length = match data_ledger {
                 DataLedger::OneYear => cascade.one_year_epoch_length,
                 DataLedger::ThirtyDay => cascade.thirty_day_epoch_length,
-                _ => unreachable!(),
+                DataLedger::Publish | DataLedger::Submit => unreachable!(),
             };
 
             let (canonical, _) = tree.get_canonical_chain();

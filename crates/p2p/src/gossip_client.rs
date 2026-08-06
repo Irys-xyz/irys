@@ -105,7 +105,9 @@ fn pull_failure_reason(err: &GossipError) -> &'static str {
             PeerNetworkError::FailedToRequestData(_) => "failed_to_request_data",
             PeerNetworkError::UnexpectedData(_) => "unexpected_data",
             PeerNetworkError::InvalidBlockBody { .. } => "invalid_block_body",
-            _ => "peer_network_other",
+            PeerNetworkError::Database(_)
+            | PeerNetworkError::InternalSendError(_)
+            | PeerNetworkError::OtherInternalError(_) => "peer_network_other",
         },
         GossipError::RateLimited => "rate_limited",
         GossipError::Advisory(_) => "advisory",
@@ -700,7 +702,13 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
-                _ => Err(GossipClientError::GetRequest(
+                RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled
+                | RejectionReason::InvalidData
+                | RejectionReason::RateLimited
+                | RejectionReason::UnableToVerifyOrigin
+                | RejectionReason::UnsupportedProtocolVersion(_)
+                | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
                     peer.to_string(),
                     format!("Unexpected rejection reason: {:?}", reason),
                 )),
@@ -775,7 +783,13 @@ impl GossipClient {
                         retry_after: None,
                     },
                 )),
-                _ => Err(GossipClientError::GetRequest(
+                RejectionReason::HandshakeRequired(_)
+                | RejectionReason::GossipDisabled
+                | RejectionReason::InvalidData
+                | RejectionReason::RateLimited
+                | RejectionReason::UnableToVerifyOrigin
+                | RejectionReason::UnsupportedProtocolVersion(_)
+                | RejectionReason::UnsupportedFeature => Err(GossipClientError::GetRequest(
                     peer.to_string(),
                     format!("Unexpected rejection reason: {:?}", reason),
                 )),
@@ -1637,7 +1651,12 @@ impl GossipClient {
                         PeerNetworkError::UnexpectedData(format!("Invalid block body: {e:?}"))
                     })
                 }
-                _ => Err(PeerNetworkError::UnexpectedData(format!(
+                GossipDataV2::Chunk(_)
+                | GossipDataV2::Transaction(_)
+                | GossipDataV2::CommitmentTransaction(_)
+                | GossipDataV2::BlockHeader(_)
+                | GossipDataV2::ExecutionPayload(_)
+                | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
                 ))),
@@ -1741,7 +1760,12 @@ impl GossipClient {
     fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::BlockHeader(block) => Ok(block),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1751,7 +1775,12 @@ impl GossipClient {
     fn execution_payload(gossip_data: GossipDataV2) -> Result<Block, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::ExecutionPayload(block) => Ok(block),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected ExecutionPayload, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1762,7 +1791,11 @@ impl GossipClient {
         match gossip_data {
             GossipDataV2::Transaction(tx) => Ok(IrysTransactionResponse::Storage(tx)),
             GossipDataV2::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::BlockBody(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1772,7 +1805,12 @@ impl GossipClient {
     fn block_body(gossip_data: GossipDataV2) -> Result<Arc<BlockBody>, PeerNetworkError> {
         match gossip_data {
             GossipDataV2::BlockBody(body) => Ok(body),
-            _ => Err(PeerNetworkError::UnexpectedData(format!(
+            GossipDataV2::Chunk(_)
+            | GossipDataV2::Transaction(_)
+            | GossipDataV2::CommitmentTransaction(_)
+            | GossipDataV2::BlockHeader(_)
+            | GossipDataV2::ExecutionPayload(_)
+            | GossipDataV2::IngressProof(_) => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected BlockBody, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
@@ -1908,7 +1946,12 @@ impl GossipClient {
                                 peer.0, data_request, reason
                             );
                         }
-                        _ => {}
+                        RejectionReason::InvalidData
+                        | RejectionReason::RateLimited
+                        | RejectionReason::UnableToVerifyOrigin
+                        | RejectionReason::UnsupportedProtocolVersion(_)
+                        | RejectionReason::UnsupportedFeature
+                        | RejectionReason::ChainIdMismatch => {}
                     }
                     PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(format!(
                         "Peer {:?} rejected {:?} request: {:?}",
@@ -1918,7 +1961,17 @@ impl GossipClient {
             },
             Err(err) => match err {
                 GossipError::PeerNetwork(e) => PeerPullOutcome::Err(e),
-                other => {
+                other @ (GossipError::Network(_)
+                | GossipError::CircuitBreakerOpen(_)
+                | GossipError::InvalidPeer(_)
+                | GossipError::Cache(_)
+                | GossipError::Internal(_)
+                | GossipError::InvalidData(_)
+                | GossipError::BlockPool(_)
+                | GossipError::TransactionIsAlreadyHandled
+                | GossipError::CommitmentValidation(_)
+                | GossipError::RateLimited
+                | GossipError::Advisory(_)) => {
                     PeerPullOutcome::Err(PeerNetworkError::FailedToRequestData(other.to_string()))
                 }
             },
